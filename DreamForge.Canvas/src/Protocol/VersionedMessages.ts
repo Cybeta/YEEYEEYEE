@@ -4,16 +4,16 @@ export const CANVAS_VERSION = '0.1.0'
 export type Direction = 'canvasToHost' | 'hostToCanvas'
 export type MessageType =
   | 'canvas/hello' | 'canvas/op.batch' | 'canvas/undo.request' | 'canvas/redo.request'
-  | 'canvas/invoke.request' | 'canvas/job.cancel.request' | 'canvas/selection.changed' | 'canvas/diagnostic'
-  | 'host/init' | 'host/op.batch' | 'host/scene.reset' | 'host/undo.result' | 'host/job.update'
+  | 'canvas/invoke.request' | 'canvas/job.cancel.request' | 'canvas/selection.changed' | 'canvas/resource.replace.request' | 'canvas/diagnostic'
+  | 'host/init' | 'host/op.batch' | 'host/scene.reset' | 'host/undo.result' | 'host/job.update' | 'host/resource.replace.result'
   | 'host/capabilities' | 'host/error'
 
 export const MESSAGE_DIRECTIONS: Record<MessageType, Direction> = {
   'canvas/hello': 'canvasToHost', 'canvas/op.batch': 'canvasToHost', 'canvas/undo.request': 'canvasToHost',
   'canvas/redo.request': 'canvasToHost', 'canvas/invoke.request': 'canvasToHost',
-  'canvas/job.cancel.request': 'canvasToHost', 'canvas/selection.changed': 'canvasToHost', 'canvas/diagnostic': 'canvasToHost',
+  'canvas/job.cancel.request': 'canvasToHost', 'canvas/selection.changed': 'canvasToHost', 'canvas/resource.replace.request': 'canvasToHost', 'canvas/diagnostic': 'canvasToHost',
   'host/init': 'hostToCanvas', 'host/op.batch': 'hostToCanvas', 'host/scene.reset': 'hostToCanvas',
-  'host/undo.result': 'hostToCanvas', 'host/job.update': 'hostToCanvas', 'host/capabilities': 'hostToCanvas', 'host/error': 'hostToCanvas'
+  'host/undo.result': 'hostToCanvas', 'host/job.update': 'hostToCanvas', 'host/resource.replace.result': 'hostToCanvas', 'host/capabilities': 'hostToCanvas', 'host/error': 'hostToCanvas'
 }
 
 export const ERROR_CODES = {
@@ -30,7 +30,42 @@ export type ErrorCode = typeof ERROR_CODES[keyof typeof ERROR_CODES]
 export interface Envelope<T = unknown> { v: number; id: string; replyTo?: string | null; type: MessageType | string; ts: number; payload: T }
 export interface CapabilitySet { serverClaims: string[]; canEditCanvas: boolean; canInvokeSkill: boolean; canCancelJob: boolean; canUndo: boolean; reason?: string | null }
 export interface TypedReference { kind: 'Channel' | 'Tool' | 'Skill' | 'Asset'; targetId: string; versionConstraint: string; dependencies: TypedReference[] }
-export interface OperationRecord { recordId: string; recordType: string; record: Record<string, unknown> }
+export interface OperationRecord { recordId: string; recordType: string; record: Record<string, unknown>; parentId?: string; chapterId?: string }
+
+export type EntityKind = 'Character' | 'Scene' | 'Prop'
+
+export interface NodeReferenceVersion {
+  id: string
+  label: string
+  number: number
+  note?: string
+  createdAt?: string
+}
+
+export interface NodeReferenceThumb {
+  entityId: string
+  name: string
+  kind: EntityKind
+  variantId?: string
+  variantVersionId?: string
+  thumbnailRef?: string
+  variantLabel?: string
+  versions?: NodeReferenceVersion[]
+}
+
+export function layerOf(recordType: string): number {
+  const t = recordType.toLowerCase()
+  if (t.includes('story') && t.includes('plan')) return 1
+  if (t.includes('story') && (t.includes('outline') || t.includes('企划'))) return 2
+  if (t.includes('chapter') || t.includes('章节')) return 3
+  if (t.includes('storyboard') || t.includes('分镜') || t.includes('shot')) return 4
+  if (t.includes('product') || t.includes('成品') || t.includes('video')) return 5
+  return 0
+}
+
+export function isLayerPill(layer: number): boolean {
+  return layer === 1 || layer === 2 || layer === 5
+}
 export interface CanvasOpBatch { batchId: string; baseRevision: number; source: 'user' | 'ai'; ops: OperationRecord[] }
 export interface Scene { revision: number; snapshot: { records: OperationRecord[] } }
 export interface HostSession { sessionId: string; userId: string; clientType: string; role: string; serverClaims: string[] }
@@ -39,6 +74,7 @@ export interface HostOpBatch { batchId: string; revision: number; origin: 'remot
 export type JobState = 'Queued' | 'Running' | 'Cancelling' | 'Succeeded' | 'Failed' | 'Cancelled'
 export interface JobUpdate { jobId: string; invocationId: string; state: JobState; progressPercent: number; errorCode?: string | null; errorMessage?: string | null; externalTaskId?: string | null; outputs: Array<Record<string, unknown>> }
 export interface HostError { code: ErrorCode; message: string; severity: 'warning' | 'fatal'; relatedType?: string | null }
+export interface ResourceReplaceResult { requestId: string; ok: boolean; message: string; revision?: number | null }
 export interface CanvasBridgeTransport { send(message: Envelope): void; subscribe(handler: (message: unknown) => void): () => void }
 
 export function isMessageType(value: unknown): value is MessageType { return typeof value === 'string' && value in MESSAGE_DIRECTIONS }

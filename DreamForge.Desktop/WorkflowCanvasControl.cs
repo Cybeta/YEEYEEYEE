@@ -13,7 +13,14 @@ public enum VersionDecision
 
 public enum NodeCategory
 {
-    General, Character, Scene, Storyboard, Prop, Product }
+    General, Character, Scene, Storyboard, Prop, Product,
+    /// <summary>剧情源文本节点（L1）。新增于末尾，不影响已有数值。</summary>
+    StoryPlan,
+    /// <summary>企划/大纲节点（L2）。</summary>
+    StoryOutline,
+    /// <summary>章节锚节点（L3），通常由工作树章节投影而来。</summary>
+    Chapter
+}
 public enum NodeExecutionStatus { Draft, WaitingForUser, Generating, Completed, Failed, NeedsReview }
 
 /// <summary>节点附件的媒体种类。</summary>
@@ -160,6 +167,35 @@ public sealed class WorkflowCanvasState
     public WorkflowEntityVariant? FindVariant(Guid id) =>
         Entities.SelectMany(entity => entity.Variants).FirstOrDefault(variant => variant.Id == id);
 
+    public bool ReplaceReferenceVersion(
+        Guid recordId,
+        Guid entityId,
+        Guid variantId,
+        Guid? variantVersionId,
+        out string error)
+    {
+        error = string.Empty;
+        var node = Nodes.FirstOrDefault(item => item.Id == recordId);
+        if (node is null) { error = "目标画布节点不存在。"; return false; }
+        if (node.IsLocked) { error = "目标节点已锁定，不能替换资源版本。"; return false; }
+
+        var reference = node.References.FirstOrDefault(item =>
+            item.EntityId == entityId && item.VariantId == variantId);
+        if (reference is null) { error = "目标节点未引用该资源变体。"; return false; }
+
+        var entity = FindEntity(entityId);
+        var variant = entity?.Variants.FirstOrDefault(item => item.Id == variantId);
+        if (entity is null || variant is null) { error = "资源实体或变体不存在。"; return false; }
+        if (variantVersionId is { } versionId && variant.FindVersion(versionId) is null)
+        {
+            error = "资源版本不属于指定变体。";
+            return false;
+        }
+
+        reference.VariantVersionId = variantVersionId;
+        return true;
+    }
+
     /// <summary>
     /// 解析节点引用的全部设定，跳过已失效的引用。
     /// 变体被删除时退回实体的第一个变体，实体也被删除时该条引用被忽略。
@@ -237,6 +273,14 @@ public sealed class WorkflowCanvasControl : Control
     private const int NodeWidth = 190;
     private const int NodeHeight = 100;
     private const int ImageNodeHeight = 176;
+    /// <summary>章节区块内的列数；区块行数随该章节点数增长。</summary>
+    public const int ChapterColumns = 3;
+    public const float ChapterBlockPadding = 24f;
+    public const float ChapterBlockTitleHeight = 30f;
+    /// <summary>区块之间、以及区块换行时的间距。</summary>
+    public const float ChapterBlockGap = 110f;
+    public const float ChapterRowGap = 40f;
+    public const float ChapterColumnGap = 60f;
     private const int ThumbnailHeight = 64;
     private const int PortRadius = 10;
     private const float PortHitRadius = 20f;
@@ -516,96 +560,201 @@ public sealed class WorkflowCanvasControl : Control
     }
 
     /// <summary>
-    /// 按连线层级重新排布全部节点：列号取该节点到起点的最长路径深度，同列按原纵向位置排序。
-    /// 存在环时深度会收敛在上限内，不会进入死循环。
-    /// </summary>
-    /// <summary>
-    /// 自动排版画布。未选中节点时整理全部节点；选中节点时只整理它的多级后代，父节点保持原位。
+    /// 整理画布：按章节分块，每章一个区块；块内节点排成网格（主线在前、资源在后），
+    /// 区块按「第N章」的顺序从左到右、每行最多 <see cref="ChapterColumns"/> 块。
+    /// 区块是整章的概念，所以始终整理整块画布，不区分当前选中。
     /// </summary>
     public void AutoArrange()
     {
-        var root = SelectedNode;
-        var nodes = root is null
-            ? State.Nodes.ToList()
-            : DescendantsOf(root).ToList();
-        if (nodes.Count == 0) return;
+        if (State.Nodes.Count == 0) return;
 
-        const float columnGap = 60;
-        const float rowGap = 40;
-        var depths = ComputeDepths(nodes, root);
-        var baseX = root is null ? 80f : root.X + NodeWidth + columnGap;
-        var baseY = root is null ? 80f : root.Y;
-        var maxDepth = depths.Values.DefaultIfEmpty(0).Max();
-        for (var depth = 0; depth <= maxDepth; depth++)
+        const float baseX = 80f;
+        const float baseY = 80f;
+        const int blocksPerRow = ChapterColumns;
+
+        var rowX = baseX;
+        var rowY = baseY;
+        var rowHeight = 0f;
+        var inRow = 0;
+        foreach (var (_, members) in GroupByChapter(State, State.Nodes))
         {
-            var columnNodes = nodes
-                .Where(node => depths.GetValueOrDefault(node.Id) == depth)
-                .OrderBy(node => node.Y)
-                .ThenBy(node => node.Title, StringComparer.Ordinal)
-                .ToList();
-            var y = baseY;
-            foreach (var node in columnNodes)
+            if (inRow == blocksPerRow)
             {
-                node.X = baseX + depth * (NodeWidth + columnGap);
-                node.Y = y;
-                y += NodeHeightOf(node) + rowGap;
+                rowX = baseX;
+                rowY += rowHeight + ChapterBlockGap;
+                rowHeight = 0f;
+                inRow = 0;
             }
+            var height = LayoutChapterBlock(members, rowX, rowY, State);
+            rowX += ChapterBlockWidth(members.Count) + ChapterBlockGap;
+            rowHeight = Math.Max(rowHeight, height);
+            inRow++;
         }
         NotifyChanged(); Invalidate();
     }
 
-    private IReadOnlyList<WorkflowNode> DescendantsOf(WorkflowNode root)
+    /// <summary>
+    /// 章节归属：优先用节点自带的 Chapter，其次是工作树锚点指向的章节条目，
+    /// 最后沿父链找带章节的祖先。都取不到时返回空串（归入「未分章」组）。
+    /// </summary>
+    public static string ChapterKeyOf(WorkflowCanvasState state, WorkflowNode node)
     {
-        var children = State.Nodes
-            .Where(node => node.ParentNodeId is Guid parentId && parentId == root.Id)
-            .ToDictionary(node => node.Id);
-        foreach (var edge in State.Edges.Where(edge => edge.SourceNodeId == root.Id || State.Nodes.Any(node => node.Id == edge.SourceNodeId && children.ContainsKey(node.Id))))
+        if (!string.IsNullOrWhiteSpace(node.Chapter)) return node.Chapter.Trim();
+        if (node.WorkTreeItemId is { } anchorId)
         {
-            var child = State.Nodes.FirstOrDefault(node => node.Id == edge.TargetNodeId);
-            if (child is not null) children.TryAdd(child.Id, child);
-        }
-        var result = new List<WorkflowNode>();
-        var queue = new Queue<WorkflowNode>(children.Values);
-        var seen = new HashSet<Guid> { root.Id };
-        while (queue.Count > 0)
-        {
-            var node = queue.Dequeue();
-            if (!seen.Add(node.Id)) continue;
-            result.Add(node);
-            foreach (var child in State.Nodes.Where(candidate => candidate.ParentNodeId == node.Id)) queue.Enqueue(child);
-            foreach (var edge in State.Edges.Where(edge => edge.SourceNodeId == node.Id))
+            var item = state.WorkTree.FirstOrDefault(candidate => candidate.Id == anchorId);
+            if (item is not null)
             {
-                var child = State.Nodes.FirstOrDefault(candidate => candidate.Id == edge.TargetNodeId);
-                if (child is not null) queue.Enqueue(child);
+                var key = item.Kind == WorkTreeKind.Chapter ? item.Name : item.Chapter;
+                if (!string.IsNullOrWhiteSpace(key)) return key.Trim();
             }
         }
-        return result;
+        var current = node.ParentNodeId is { } parentId
+            ? state.Nodes.FirstOrDefault(candidate => candidate.Id == parentId)
+            : null;
+        while (current is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(current.Chapter)) return current.Chapter.Trim();
+            if (current.Title.Contains('章', StringComparison.Ordinal) ||
+                current.Title.Contains('集', StringComparison.Ordinal) ||
+                current.Title.Contains('回', StringComparison.Ordinal)) return current.Title.Trim();
+            current = current.ParentNodeId is { } nextId
+                ? state.Nodes.FirstOrDefault(candidate => candidate.Id == nextId)
+                : null;
+        }
+        return string.Empty;
     }
 
-    private Dictionary<Guid, int> ComputeDepths(IReadOnlyList<WorkflowNode> nodes, WorkflowNode? root)
+    /// <summary>
+    /// 按章节分组：章节按「第N章」的数字顺序排列（未分章排最后）；
+    /// 组内先主线后资源（角色/场景/道具），各自保持画布上的阅读顺序（先上后下、先左后右）。
+    /// </summary>
+    public static List<(string Key, List<WorkflowNode> Nodes)> GroupByChapter(
+        WorkflowCanvasState state, IReadOnlyList<WorkflowNode> nodes)
     {
-        var nodeIds = nodes.Select(node => node.Id).ToHashSet();
-        var depths = nodes.ToDictionary(node => node.Id, _ => 0);
-        var incoming = State.Edges
-            .Where(edge => nodeIds.Contains(edge.TargetNodeId))
-            .GroupBy(edge => edge.TargetNodeId)
-            .ToDictionary(group => group.Key, group => group.Select(edge => edge.SourceNodeId).ToArray());
-        var iterations = Math.Min(nodes.Count, 50);
-        for (var pass = 0; pass < iterations; pass++)
+        var groups = new Dictionary<string, List<WorkflowNode>>(StringComparer.Ordinal);
+        foreach (var node in nodes)
         {
-            var changed = false;
-            foreach (var node in State.Nodes)
-            {
-                if (!incoming.TryGetValue(node.Id, out var parents) || parents.Length == 0) continue;
-                var depth = parents.Where(depths.ContainsKey).Select(parent => depths[parent]).DefaultIfEmpty(-1).Max();
-                if (depth < 0 || depths[node.Id] >= depth + 1) continue;
-                depths[node.Id] = depth + 1;
-                changed = true;
-            }
-            if (!changed) break;
+            var key = ChapterKeyOf(state, node);
+            if (!groups.TryGetValue(key, out var members)) groups[key] = members = new List<WorkflowNode>();
+            members.Add(node);
         }
-        return depths;
+
+        var ordered = groups.Keys.ToList();
+        ordered.Sort(CompareChapterKey);
+        return ordered
+            .Select(key => (key, groups[key]
+                .OrderBy(node => IsResourceCategory(node.Category) ? 1 : 0)
+                .ThenBy(node => node.Y)
+                .ThenBy(node => node.X)
+                .ThenBy(node => node.Title, StringComparer.Ordinal)
+                .ToList()))
+            .ToList();
     }
+
+    /// <summary>章节排序：空的排最后，其余先按名称里的数字（「第10章」在「第2章」之后），再按名称。</summary>
+    private static int CompareChapterKey(string left, string right)
+    {
+        if (left.Length == 0 || right.Length == 0)
+            return left.Length == right.Length ? 0 : (left.Length == 0 ? 1 : -1);
+        var leftNumber = ChapterNumber(left);
+        var rightNumber = ChapterNumber(right);
+        return leftNumber != rightNumber ? leftNumber.CompareTo(rightNumber) : string.CompareOrdinal(left, right);
+    }
+
+    /// <summary>章节排序号：取名称里第一段连续数字（「第2集 临河街41号」→ 2），没有数字时排到最后。</summary>
+    private static int ChapterNumber(string key)
+    {
+        var start = -1;
+        for (var i = 0; i <= key.Length; i++)
+        {
+            if (i < key.Length && char.IsDigit(key[i]))
+            {
+                if (start < 0) start = i;
+                continue;
+            }
+            if (start < 0) continue;
+            return int.TryParse(key.AsSpan(start, i - start), out var value) ? value : int.MaxValue - 1;
+        }
+        return int.MaxValue - 1;
+    }
+
+    /// <summary>区块宽度：块内按 <see cref="ChapterColumns"/> 列排布，列数随该章节点数收敛。</summary>
+    public static float ChapterBlockWidth(int nodeCount)
+    {
+        var columns = Math.Min(ChapterColumns, Math.Max(1, nodeCount));
+        return ChapterBlockPadding * 2 + columns * NodeWidth + (columns - 1) * ChapterColumnGap;
+    }
+
+    /// <summary>
+    /// 把一章的节点按网格铺进区块，返回区块高度。区块左上角是 (blockX, blockY)，顶部留给标题条；
+    /// 行高取该行最高节点，所以带缩略图的加高节点不会压到下一行。
+    /// </summary>
+    private static float LayoutChapterBlock(
+        List<WorkflowNode> members, float blockX, float blockY, WorkflowCanvasState state)
+    {
+        var columns = Math.Min(ChapterColumns, Math.Max(1, members.Count));
+        var contentX = blockX + ChapterBlockPadding;
+        var y = blockY + ChapterBlockPadding + ChapterBlockTitleHeight;
+        for (var start = 0; start < members.Count; start += columns)
+        {
+            var take = Math.Min(columns, members.Count - start);
+            var rowHeight = 0f;
+            for (var i = 0; i < take; i++)
+                rowHeight = Math.Max(rowHeight, NodeHeightFor(state, members[start + i]));
+            for (var i = 0; i < take; i++)
+            {
+                members[start + i].X = contentX + i * (NodeWidth + ChapterColumnGap);
+                members[start + i].Y = y;
+            }
+            y += rowHeight + ChapterRowGap;
+        }
+        return y - ChapterRowGap - blockY + ChapterBlockPadding;
+    }
+
+    /// <summary>只重排某一章区块，其它区块不动（Agent 新建节点后调用）。</summary>
+    public static void ArrangeChapter(WorkflowCanvasState state, string key, float blockX, float blockY)
+    {
+        var group = GroupByChapter(state, state.Nodes).FirstOrDefault(item => item.Key == key);
+        if (group.Nodes is null || group.Nodes.Count == 0) return;
+        LayoutChapterBlock(group.Nodes, blockX, blockY, state);
+    }
+
+    /// <summary>
+    /// 按当前节点位置算出每个章节区块的包围框（含标题条与内边距）。绘制块背景和
+    /// Agent 落位共用它，所以只有「已分章」的节点会产生区块。
+    /// </summary>
+    public static Dictionary<string, RectangleF> ChapterBounds(
+        WorkflowCanvasState state, IReadOnlyList<WorkflowNode> nodes)
+    {
+        var bounds = new Dictionary<string, RectangleF>(StringComparer.Ordinal);
+        foreach (var (key, members) in GroupByChapter(state, nodes))
+        {
+            if (key.Length == 0) continue;
+            var minX = float.MaxValue;
+            var minY = float.MaxValue;
+            var maxX = float.MinValue;
+            var maxY = float.MinValue;
+            foreach (var node in members)
+            {
+                minX = Math.Min(minX, node.X);
+                minY = Math.Min(minY, node.Y);
+                maxX = Math.Max(maxX, node.X + NodeWidth);
+                maxY = Math.Max(maxY, node.Y + NodeHeightFor(state, node));
+            }
+            if (minX > maxX) continue;
+            bounds[key] = new RectangleF(
+                minX - ChapterBlockPadding,
+                minY - ChapterBlockPadding - ChapterBlockTitleHeight,
+                maxX - minX + ChapterBlockPadding * 2,
+                maxY - minY + ChapterBlockPadding * 2 + ChapterBlockTitleHeight);
+        }
+        return bounds;
+    }
+
+    /// <summary>节点在世界坐标里占用的矩形（宽度固定，高度按是否带图）。落位算法用它算占位。</summary>
+    public static RectangleF NodeRect(WorkflowCanvasState state, WorkflowNode node) =>
+        new(node.X, node.Y, NodeWidth, NodeHeightFor(state, node));
 
     public void DeleteSelected()
     {
@@ -671,8 +820,27 @@ public sealed class WorkflowCanvasControl : Control
     }
 
     /// <summary>节点高度：只要会绘制预览块（自带附件或引用设定有参考图）就用加高卡片。</summary>
-    private float NodeHeightOf(WorkflowNode node) =>
-        node.Attachments.Count > 0 || ResolveReferenceImage(node) is not null ? ImageNodeHeight : NodeHeight;
+    private float NodeHeightOf(WorkflowNode node) => NodeHeightFor(State, node);
+
+    /// <summary>
+    /// 节点卡片高度。放置逻辑与绘制必须共用这一条规则：带图/引用参考图的节点高 176，
+    /// 若按固定 100 计算，新建节点会叠到这些节点上。
+    /// </summary>
+    public static float NodeHeightFor(WorkflowCanvasState state, WorkflowNode node) =>
+        node.Attachments.Count > 0 || HasReferenceImage(state, node) ? ImageNodeHeight : NodeHeight;
+
+    /// <summary>节点引用的设定里是否有参考图（决定卡片是否加高）。</summary>
+    private static bool HasReferenceImage(WorkflowCanvasState state, WorkflowNode node) =>
+        state.ResolveReferences(node)
+            .SelectMany(reference => reference.Attachments)
+            .Any(attachment => attachment.Kind == AttachmentKind.Image);
+
+    /// <summary>
+    /// 资源类节点（角色/场景/道具）只做锚点，落位时进「资源带」；其余（通用/分镜/成品）
+    /// 属于剧情主线，按父子层级分列。两套规则不要混用，否则资源会挤占主线列。
+    /// </summary>
+    public static bool IsResourceCategory(NodeCategory category) =>
+        category is NodeCategory.Character or NodeCategory.Scene or NodeCategory.Prop;
 
     private void CanvasMouseWheel(object? sender, MouseEventArgs e)
     {
@@ -893,6 +1061,34 @@ public sealed class WorkflowCanvasControl : Control
         MathF.Sqrt(MathF.Pow(point.X - target.X, 2) + MathF.Pow(point.Y - target.Y, 2));
 
     private PointF PortPoint(WorkflowNode node, bool output, int index) => new(node.X + (output ? NodeWidth : 0), node.Y + 34 + index * 20);
+    /// <summary>
+    /// 画章节区块：在节点下方铺一层浅色底 + 虚线边框，左上角写章节名，让同一章的内容视觉上成块。
+    /// 区块范围按当前节点位置实时算出，所以拖动节点后框会跟着变；未分章的节点不画框。
+    /// </summary>
+    private void DrawChapterBlocks(Graphics g)
+    {
+        if (State.Nodes.Count == 0) return;
+        var bounds = ChapterBounds(State, State.Nodes);
+        if (bounds.Count == 0) return;
+
+        using var titleFont = new Font(Font.FontFamily, Font.Size, FontStyle.Bold);
+        using var fill = new SolidBrush(Color.FromArgb(Theme.IsDark ? 96 : 132, Theme.PanelBg));
+        using var border = new Pen(Color.FromArgb(Theme.IsDark ? 132 : 172, Theme.Border)) { DashStyle = DashStyle.Dash };
+        using var titleBrush = new SolidBrush(Theme.TextMuted);
+        foreach (var (key, world) in bounds)
+        {
+            var rect = new RectangleF(
+                world.X * zoom + panOrigin.X,
+                world.Y * zoom + panOrigin.Y,
+                world.Width * zoom,
+                world.Height * zoom);
+            if (rect.Right < 0 || rect.Bottom < 0 || rect.Left > Width || rect.Top > Height) continue;
+            g.FillRectangle(fill, rect);
+            g.DrawRectangle(border, rect.X, rect.Y, rect.Width, rect.Height);
+            g.DrawString(key, titleFont, titleBrush, new PointF(rect.X + 10f, rect.Y + 6f));
+        }
+    }
+
     private PointF ScreenPoint(PointF point) => new(point.X * zoom + panOrigin.X, point.Y * zoom + panOrigin.Y);
 
     protected override void OnPaint(PaintEventArgs e)
@@ -907,6 +1103,7 @@ public sealed class WorkflowCanvasControl : Control
             using var hintFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
             e.Graphics.DrawString(hint, Font, hintBrush, new RectangleF(0, 0, Width, Height), hintFormat);
         }
+        DrawChapterBlocks(e.Graphics);
         nodeBounds.Clear();
         foreach (var edge in State.Edges)
         {

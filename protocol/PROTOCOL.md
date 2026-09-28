@@ -2,7 +2,7 @@
 
 - 协议版本：`1`
 - 状态：实现已落地（`DreamForge.Core\Protocol.cs` 校验 + `DreamForge.Host\HostBridge.cs` 桥接 + TS 侧同构实现 + 控制台用例），但**当前只有部分宿主在用它**，见下方适用范围
-- 适用范围：**任何画布侧实现与其 C# 宿主之间**。当前实际使用方为 `DreamForge.Host`（测试与桥接）、`DreamForge.Web`（作业服务）与 `DreamForge.Canvas`（TS 侧同构实现，尚未接入任何宿主）；**桌面端 `DreamForge.Desktop` 的 WinForms 自绘画布不使用本协议**，它走 Agent JSON 协议
+- 适用范围：**任何画布侧实现与其 C# 宿主之间**。当前实际使用方为 `DreamForge.Host`（测试与桥接）、`DreamForge.Web`（作业服务，并以 WebSocket 承载 `DreamForge.Canvas` 的 TS 画布）与 `DreamForge.Canvas`（TS 侧同构实现）；**桌面端 `DreamForge.Desktop` 的 WinForms 自绘画布不使用本协议**，它走 Agent JSON 协议，只用 HTTP 把投影后的 records 推给 Web（见 `02_Architecture.md` 第 4.4 节）
 - 不适用范围：C# 宿主之间、服务端内部调用、Yjs 房间内部同步（协作未实现）
 
 ## 1. 设计约束
@@ -53,7 +53,8 @@
 | `canvas/redo.request` | `localOnly`(必须为 `true`) | 单人本地重做。 |
 | `canvas/invoke.request` | `invocation`, `idempotencyKey` | 请求执行 Skill/Tool。宿主必须按会话身份重新鉴权。 |
 | `canvas/job.cancel.request` | `jobId` | 请求取消异步任务。 |
-| `canvas/selection.changed` | `recordIds[]` | 选中上下文，供 AI 提示词使用；无权时宿主可忽略。 |
+| `canvas/selection.changed` | `recordIds[]` | 选中上下文，供 AI 提示词使用；无权时宿主可忽略（当前 Web 画布还会带上 `entityId`、`entityKind`、`openResourceLibrary`，表示"选中了节点里的某个引用元素"）。 |
+| `canvas/resource.replace.request` | `recordId`, `entityId`, `variantId`, `variantVersionId`(可空) | 请求替换节点引用所锁定的设定版本；`variantVersionId=null` 表示"跟随最新"。三个 ID 必须是合法 uuid，字段缺失即 `PROTOCOL_MALFORMED`。 |
 | `canvas/diagnostic` | `level`, `code`, `message` | 画布侧诊断上报，只写日志，不触发状态变更。 |
 
 ### 3.2 宿主 → 画布（hostToCanvas）
@@ -67,6 +68,7 @@
 | `host/job.update` | `jobId`, `invocationId`, `state`, `progressPercent`, `errorCode`, `errorMessage`, `outputs[]` | 异步任务状态推送，包含排队/运行/取消中/成功/失败/已取消。 |
 | `host/capabilities` | `serverClaims[]`, `canEditCanvas`, `canInvokeSkill`, `canCancelJob`, `canUndo`, `reason` | 能力位变更（如权限被回收）。能力位仍需被 `serverClaims` 覆盖（见约束 8）。 |
 | `host/error` | `code`, `message`, `severity`(`warning`\|`fatal`), `relatedType` | 协议级错误。`fatal` 表示画布必须停止处理后续业务消息。 |
+| `host/resource.replace.result` | `requestId`, `ok`, `message`, `revision`(可空) | 资源版本替换结果。`requestId` 由请求方（Web 服务）分配并回带；宿主未接入替换处理器时改为回 `host/error` 的 `RESOURCE_REPLACE_UNAVAILABLE`。 |
 
 ## 4. 错误码
 
@@ -81,6 +83,8 @@
 | `SCENE_REVISION_CONFLICT` | `baseRevision` 落后于宿主修订号 | warning，宿主下发 `host/scene.reset` |
 | `JOB_NOT_FOUND` | 取消的任务不存在或不属于当前会话 | warning |
 | `JOB_NOT_CANCELLABLE` | 任务已进入终态 | warning |
+| `RESOURCE_REPLACE_UNAVAILABLE` | 宿主没有接入画布资源替换处理器 | warning，回 `host/error`，不做变更 |
+| `RESOURCE_REPLACE_FAILED` | 资源替换处理器抛错（找不到节点/变体、节点已锁定等） | warning，回 `host/error`，不做变更 |
 | `REFERENCE_UNRESOLVED` | 引用目标不存在（Skill/Tool/Channel/Asset） | fatal，不降级为空节点 |
 | `REFERENCE_UNAUTHORIZED` | 当前会话无引用权限 | fatal |
 | `REFERENCE_VERSION_UNSATISFIED` | 版本约束不满足 | fatal |
@@ -113,3 +117,5 @@
 - 对 `valid: false` 的夹具，两端必须抛出/返回 `manifest` 中声明的 `expectedErrorCode`。
 
 任何新增消息类型必须先加夹具再改两端实现，禁止只改一端。
+
+> **当前偏差（待补）**：`canvas/resource.replace.request` 与 `host/resource.replace.result` 已在 C#（`DreamForge.Core\Protocol.cs`、`DreamForge.Host\HostBridge.cs`）与 TS（`VersionedMessages.ts`、`CanvasMessageCodec.ts`、`CanvasBridge.ts`）两侧落地，并有 C# 控制台用例覆盖，但 `protocol/fixtures/` 里**还没有对应的夹具与 manifest 条目**。下一步应补齐这两条夹具，恢复"先夹具后实现"的规则。

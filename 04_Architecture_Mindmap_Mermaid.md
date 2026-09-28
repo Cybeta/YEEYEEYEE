@@ -1,6 +1,6 @@
 # YEEYEEYEE 架构思维导图（按实际代码校正）
 
-> 版本：v2 · 2026-09-28
+> 版本：v2.1 · 2026-09-28（补记 Web 画布通道、章节分块排版、资源引用的新写法）
 > 两种格式：Mermaid 流程图版（可渲染） + Markdown 列表版（可导入 XMind / 幕布 / 飞书）
 > 上一版按"六层架构 + Avalonia WebView + 房间服务 + Yjs"绘制，与代码不符，已作废。
 
@@ -16,14 +16,14 @@ graph TD
     A1["Core · net10.0<br/>协议 / Job / 枚举 / 权限 / 引用图"]
     A2["Host · net10.0<br/>执行服务 / SQLite Job / ComfyUI / 回调"]
     A3["Desktop · net10.0-windows<br/>WinForms 自绘画布 + Agent"]
-    A4["Web · ASP.NET Core<br/>作业服务 + ComfyUI 回调，无画布"]
+    A4["Web · ASP.NET Core<br/>作业服务 + 回调 + 托管 TS 画布（静态 + WS）"]
     A5["Mcp · stdio 只读 4 工具<br/>未接入 Desktop，不在 slnx"]
-    A6["Canvas · React+Vite<br/>未接入，tldraw 未使用"]
+    A6["Canvas · React+Vite<br/>由 Web 托管；div 卡片，tldraw 未使用，不在 slnx"]
     A7["Core.Tests / Agent.Tests<br/>控制台断言式测试"]
     end
 
     subgraph B[Desktop 表现层]
-    B1["WorkflowCanvasControl<br/>节点/连线/缩放/自动排版/虚影"]
+    B1["WorkflowCanvasControl<br/>节点/连线/缩放/按章节分块/虚影"]
     B2["面板：画布库 / 设定库 / 工作树 / 节点属性 / 任务与出图"]
     B3["AgentPane<br/>对话 + 审批 + 待提交"]
     B4["插件面板 + 插件自定义入口"]
@@ -44,11 +44,11 @@ graph TD
 
     subgraph E[Agent 链路]
     E1["授权模式<br/>Ask / AutoStage / ReadOnly"]
-    E2["协议 actions 12 种 kind<br/>+ ask 反问"]
+    E2["协议 actions 13 种 kind<br/>+ ask 反问"]
     E3["Ask：虚影预览→用户勾选→保存"]
     E4["撤销上次提交<br/>快照回滚，要求期间无其它编辑"]
-    E5["流程约束<br/>先建工作树→再建节点，分两批"]
-    E6["边界<br/>两轴不互抄；资源节点只做锚点"]
+    E5["流程约束<br/>默认先工作树后节点；明确要求生成节点时必须当次给 create_node"]
+    E6["边界<br/>两轴不互抄；角色/场景/道具不进画布，用 entityTargets 引用"]
     end
 
     subgraph F[执行与生成]
@@ -76,8 +76,16 @@ graph TD
     subgraph I[未开始]
     I1["协作：房间 / Yjs / SignalR"]
     I2["账号 / 邀请码 / 审批 / 配额 / 审计"]
-    I3["Web 端画布"]
-    I4["TS 画布接入"]
+    I3["Web 端独立创作（当前仅镜像展示 + 换引用版本）"]
+    I4["视频生成"]
+    end
+
+    subgraph J[Web 画布通道]
+    J1["NodeProjection<br/>节点 → 协议 records（含 references 缩略图）"]
+    J2["POST /api/canvas/scene<br/>桌面端推送全量投影"]
+    J3["GET /api/canvas/resource-replace/next<br/>桌面端每 500ms 轮询"]
+    J4["WebSocket /ws/canvas<br/>HostBridge 广播 host/scene.reset"]
+    J5["canvas/resource.replace.request → host/resource.replace.result<br/>浏览器换/锁引用版本"]
     end
 
     ROOT --> A
@@ -88,6 +96,7 @@ graph TD
     ROOT --> G
     ROOT --> H
     ROOT --> I
+    ROOT --> J
 
     A2 -.进程内引用.-> A3
     A1 --> A2
@@ -117,6 +126,16 @@ graph TD
     G1 --> F4
     G3 --> C4
     G2 --> E2
+
+    B1 --> J1
+    A3 -.HTTP 推送/轮询.-> A4
+    J1 --> J2
+    J2 --> A4
+    A4 --> J4
+    J4 --> J5
+    J3 --> A3
+    A4 --> A6
+    A6 -.WS /api.-> A4
 ```
 
 ---
@@ -129,12 +148,12 @@ YEEYEEYEE · DreamForge
 │  ├─ Core · 协议 / Job 状态机 / 能力枚举 / 权限 / 引用图（无第三方依赖）
 │  ├─ Host · 单机执行服务 / SQLite Job / ComfyUI（HTTP+WS）/ 轮询与回调签名
 │  ├─ Desktop · WinForms 自绘画布 + 各面板 + Agent（唯一交付端）
-│  ├─ Web · ASP.NET Core 作业服务 + ComfyUI 回调，无画布
+│  ├─ Web · ASP.NET Core 作业服务 + ComfyUI 回调 + 托管 TS 画布（静态 dist / WS / API）
 │  ├─ Mcp · stdio 只读 4 工具，未接入 Desktop，不在 slnx
-│  ├─ Canvas · React+Vite，未接入任何宿主，tldraw 实际未使用
-│  └─ Core.Tests / Agent.Tests · 控制台断言式测试
+│  ├─ Canvas · React+Vite，由 Web 托管；div 卡片，tldraw 未使用，不在 slnx
+│  └─ Core.Tests / Agent.Tests · 控制台断言式测试（Core.Tests 已引用 Desktop）
 ├─ Desktop 表现层
-│  ├─ WorkflowCanvasControl · 节点 / 连线 / 缩放平移 / 自动排版 / 预览虚影
+│  ├─ WorkflowCanvasControl · 节点 / 连线 / 缩放平移 / 按章节分块排版 / 预览虚影
 │  ├─ 面板 · 画布库 / 设定库 / 工作树 / 节点属性 / 任务与出图 / 插件
 │  └─ AgentPane · 右侧抽屉，对话 + 审批列表 + 待提交列表
 ├─ 数据模型（画布 JSON = Nodes + Edges + Entities + WorkTree）
@@ -148,11 +167,17 @@ YEEYEEYEE · DreamForge
 │  └─ References[] · 引用设定库实体/变体/版本，出图时合成提示词与参考图
 ├─ Agent 链路
 │  ├─ 授权模式 · Ask（默认）/ AutoStage / ReadOnly
-│  ├─ 协议 · actions 12 种 kind + ask 反问；坏块自动重试一次
+│  ├─ 协议 · actions 13 种 kind + ask 反问；坏块自动重试一次
 │  ├─ 预览与确认 · 虚影只改预览层；勾选后保存才落盘
 │  ├─ 回滚 · 撤销上次提交（快照），要求其间无其它画布编辑
-│  ├─ 流程约束 · 先建工作树再建节点、分两批提议、等你确认
-│  └─ 边界 · 工作树只写剧情；外观进设定库；资源节点只做锚点
+│  ├─ 流程约束 · 默认先工作树再节点；用户明确要求生成节点时必须当次给出 create_node 批次
+│  └─ 边界 · 工作树只写剧情；角色/场景/道具不进画布，用 entityTargets 引用设定库
+├─ Web 画布通道（桌面端为权威数据源）
+│  ├─ NodeProjection · 节点 → records（recordType 分层 + references 缩略图 + 工作树章节投影）
+│  ├─ POST /api/canvas/scene · 桌面端推送全量投影 → HostBridge.SendScene
+│  ├─ WebSocket /ws/canvas · 广播 host/scene.reset 给浏览器画布
+│  ├─ GET /api/canvas/resource-replace/next · 桌面端每 500ms 轮询
+│  └─ canvas/resource.replace.request → host/resource.replace.result · 换/锁引用版本
 ├─ 执行与生成
 │  ├─ Job 状态机 · Queued→Running→Succeeded/Failed/Cancelled（6 条合法转换）
 │  ├─ SingleMachineExecutionService · 鉴权 / 幂等 / 进度 / 取消
@@ -173,12 +198,15 @@ YEEYEEYEE · DreamForge
 ├─ 未开始
 │  ├─ 协作 · 房间 / Yjs / SignalR
 │  ├─ 账号 · 邀请码 / 审批 / 配额 / 审计
-│  ├─ Web 端画布
-│  └─ TS 画布接入
+│  ├─ Web 端独立创作（当前仅镜像展示 + 换/锁引用版本）
+│  └─ 视频生成
 └─ 待处理的不一致
    ├─ 根目录 05_Core_Contracts.cs · 未编译、与 Core 重名不兼容
    ├─ AutoStage · 同一批 actions 被应用两次
    ├─ MarkVersionAdopted · 未解析，模型无法设置
+   ├─ 资源替换两条新消息 · 缺 protocol/fixtures 夹具
+   ├─ Web 画布 · 缩略图仍是 asset://（无资产端点）、/api/canvas/nodes 无调用方、selection.changed 未处理
+   ├─ DreamForge.Canvas · 由 Web 托管但仍是 div 卡片、不在 slnx，走向未定
    ├─ 品牌口径 · 产品名 YEEYEEYEE 与工程标识 DreamForge 并存（已写明，代码结构不动）
    └─ 缺少"节点 ↔ 工作树"的自动同步引擎
 ```
