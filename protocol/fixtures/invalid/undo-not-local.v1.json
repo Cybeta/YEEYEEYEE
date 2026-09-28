@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "id": "18293a4b-5c6d-4e7f-8091-a2b3c4d5e6f7",
+  "type": "canvas/undo.request",
+  "ts": 1790295375000,
+  "payload": {
+    "localOnly": false,
+    "reason": "room-wide-undo"
+  }
+}

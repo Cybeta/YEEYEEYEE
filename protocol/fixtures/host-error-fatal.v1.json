@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "id": "c3d4e5f6-0718-492a-8b4c-5d6e7f8091a2",
+  "type": "host/error",
+  "ts": 1790295345000,
+  "payload": {
+    "code": "PROTOCOL_VERSION_MISMATCH",
+    "message": "画布协议版本 2 与宿主支持的版本 1 不匹配，已拒绝初始化。",
+    "severity": "fatal",
+    "relatedType": "canvas/hello"
+  }
+}

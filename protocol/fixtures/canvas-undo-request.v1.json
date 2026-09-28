@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "id": "9a1b2c3d-4e5f-4061-8273-849506172839",
+  "type": "canvas/undo.request",
+  "ts": 1790295315000,
+  "payload": {
+    "localOnly": true,
+    "reason": "keyboard-shortcut"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "type": "canvas/op.batch",
+  "ts": 1790295365000,
+  "payload": {
+    "batchId": "5d2f7a10-9b3c-4d5e-8f01-2a3b4c5d6e7f",
+    "baseRevision": 12,
+    "source": "user",
+    "ops": []
+  }
+}

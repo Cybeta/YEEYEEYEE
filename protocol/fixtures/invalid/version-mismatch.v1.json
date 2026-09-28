@@ -1,0 +1,12 @@
+{
+  "v": 2,
+  "id": "e5f60718-293a-4b4c-8d6e-7f8091a2b3c4",
+  "type": "canvas/hello",
+  "ts": 1790295355000,
+  "payload": {
+    "canvasVersion": "0.2.0",
+    "protocolVersion": 2,
+    "minHostProtocol": 2,
+    "features": ["op.batch"]
+  }
+}

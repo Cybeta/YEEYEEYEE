@@ -1,0 +1,29 @@
+# ── 构建产物 ──
+bin/
+obj/
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# ── 前端依赖与产物 ──
+DreamForge.Canvas/node_modules/
+DreamForge.Canvas/dist/
+
+# ── 本机运行时数据（含 DPAPI 密文密钥、最近项目、日志）──
+**/ai-config.json
+recent-projects.json
+startup-media.txt
+agent-diagnostics.log
+
+# ── 用户创作产物（项目数据不入库）──
+/Projects/
+/canvases/
+/skills/
+/plugins/
+/assets/
+/jobs.db
+last-canvas.json
+canvas-tabs.json
+workspace.json

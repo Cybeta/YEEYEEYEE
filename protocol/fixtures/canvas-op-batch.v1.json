@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "id": "3c7d9e11-2a4b-4c5d-8e6f-7a8b9c0d1e2f",
+  "type": "canvas/op.batch",
+  "ts": 1790295311000,
+  "payload": {
+    "batchId": "5d2f7a10-9b3c-4d5e-8f01-2a3b4c5d6e7f",
+    "baseRevision": 12,
+    "source": "user",
+    "ops": [
+      {
+        "recordId": "shape:frame-001",
+        "recordType": "shape",
+        "record": { "type": "frame", "x": 120, "y": 80, "props": { "w": 640, "h": 360 } }
+      },
+      {
+        "recordId": "shape:image-002",
+        "recordType": "shape",
+        "record": { "type": "drm-image", "assetId": "a1b2c3d4-0000-4000-8000-000000000001" }
+      }
+    ]
+  }
+}

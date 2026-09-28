@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "id": "3a4b5c6d-7e8f-4091-a2b3-c4d5e6f70819",
+  "type": "host/init",
+  "ts": 1790295385000,
+  "payload": {
+    "protocolVersion": 2,
+    "hostVersion": "0.2.0",
+    "locale": "zh-CN",
+    "session": {
+      "sessionId": "11223344-5566-4778-899a-bbccddeeff00",
+      "userId": "99887766-5544-4332-8211-00ffeeddccbb",
+      "clientType": "Desktop",
+      "role": "Owner",
+      "serverClaims": ["canvas.edit"]
+    },
+    "capabilities": {
+      "canEditCanvas": true,
+      "canInvokeSkill": false,
+      "canCancelJob": false,
+      "canUndo": false,
+      "reason": null
+    },
+    "scene": { "revision": 0, "snapshot": { "records": [] } }
+  }
+}

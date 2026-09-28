@@ -1,0 +1,19 @@
+{
+  "v": 1,
+  "id": "4d5e6f70-8192-4a3b-8c5d-6e7f8091a2b3",
+  "type": "host/op.batch",
+  "ts": 1790295330000,
+  "payload": {
+    "batchId": "6e7f8091-a2b3-4c4d-8e5f-6071829304a5",
+    "revision": 13,
+    "origin": "remote",
+    "actorSessionId": "22334455-6677-4889-9aab-bccddeeff001",
+    "ops": [
+      {
+        "recordId": "shape:frame-001",
+        "recordType": "shape",
+        "record": { "type": "frame", "x": 160, "y": 96 }
+      }
+    ]
+  }
+}

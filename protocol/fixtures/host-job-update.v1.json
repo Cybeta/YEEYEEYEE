@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "id": "7a8b9c0d-1e2f-4304-8516-2738495061a2",
+  "type": "host/job.update",
+  "ts": 1790295335000,
+  "payload": {
+    "jobId": "b1c2d3e4-f506-4718-892a-3b4c5d6e7f80",
+    "invocationId": "7b6c5d4e-3f2a-4190-8b7c-6d5e4f3a2b1c",
+    "state": "Running",
+    "progressPercent": 42,
+    "errorCode": null,
+    "errorMessage": null,
+    "outputs": []
+  }
+}

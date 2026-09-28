@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="DreamForge.Agent.Tests/DreamForge.Agent.Tests.csproj" />
+  <Project Path="DreamForge.Core.Tests/DreamForge.Core.Tests.csproj" />
+  <Project Path="DreamForge.Core/DreamForge.Core.csproj" />
+  <Project Path="DreamForge.Desktop/DreamForge.Desktop.csproj" />
+  <Project Path="DreamForge.Host/DreamForge.Host.csproj" />
+  <Project Path="DreamForge.Web/DreamForge.Web.csproj" />
+</Solution>
