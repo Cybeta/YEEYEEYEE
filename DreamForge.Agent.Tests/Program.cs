@@ -11,6 +11,8 @@ using DreamForge.Desktop;
 var tests = new (string Name, Action Run)[]
 {
     ("提议解析：剥离操作块并读出 source", ParseReplyAndSource),
+    ("自动保存：同一批只执行一次并保留提交前状态", AutoStageAppliesOnce),
+    ("版本采纳：只接受JSON布尔true并传递到执行器", ParseVersionAdopted),
     ("同一批里建节点后用标题建立连线", CreateNodesThenConnectInOneBatch),
     ("拒绝重复连线与自环", RejectDuplicateAndSelfLoop),
     ("预检提示找不到的连线端点", PrecheckMissingEndpoint),
@@ -90,6 +92,67 @@ static void ParseReplyAndSource()
         $"展示文本里残留了操作块：{reply.Text}");
     Expect(reply.Actions[2].Source == "第一章 剧情" && reply.Actions[2].Target == "第一章 分镜",
         "create_edge 的 source/target 没有被正确读出");
+}
+
+static void AutoStageAppliesOnce()
+{
+    var canvas = new WorkflowCanvasState();
+    IReadOnlyList<AgentAction> pending = Array.Empty<AgentAction>();
+    var applications = 0;
+    var saves = 0;
+    var beforeCount = -1;
+    void Apply(IReadOnlyList<AgentAction> actions)
+    {
+        beforeCount = canvas.Nodes.Count;
+        applications++;
+        var result = AgentActionExecutor.Apply(actions, canvas, null);
+        Expect(result.Errors.Count == 0, string.Join("；", result.Errors));
+        pending = actions;
+    }
+    var host = new AgentPaneHost(
+        Provider: () => null, ProviderLabel: () => "test", Context: () => new AgentContext("", "", "", "", "", "", ""),
+        WorkspacePath: () => null, RequestWorkspaceSelection: () => { },
+        PrecheckActions: _ => Array.Empty<string?>(), ApplyActions: Apply,
+        PreviewActions: actions => { pending = actions; },
+        PrepareActions: (actions, autoApprove) =>
+        {
+            Expect(autoApprove, "自动模式应自动批准");
+            return actions;
+        },
+        PendingActions: () => pending, RemovePending: _ => { },
+        SaveApplied: () =>
+        {
+            if (pending.Count == 0) return;
+            Apply(pending.ToArray());
+            saves++;
+            pending = Array.Empty<AgentAction>();
+        },
+        UndoApplied: () => { }, FocusAction: _ => { }, ContextCharacterBudget: () => 1000,
+        ImageInputEnabled: () => false, RequestModelSettings: () => { },
+        ApplyModel: _ => { }, AcceptToNode: null);
+    var actions = AgentActionParser.Parse(SampleReply()).Actions;
+    host.AutoStage(actions);
+    Expect(applications == 1 && saves == 1, $"应执行并保存一次，实际执行 {applications} / 保存 {saves}");
+    Expect(canvas.Nodes.Count == 2 && canvas.Edges.Count == 1, "自动保存重复创建了节点或连线");
+    Expect(beforeCount == 0 && pending.Count == 0, "提交前状态被覆盖或保存后仍有待处理动作");
+}
+
+static void ParseVersionAdopted()
+{
+    foreach (var value in new[] { "true", "false", "null", "\"true\"", "1", "{}", "[]", "" })
+    {
+        var field = value.Length == 0 ? "" : ",\"markVersionAdopted\":" + value;
+        var reply = AgentActionParser.Parse("{\"actions\":[{\"kind\":\"update_node\",\"target\":\"镜头\",\"entityTarget\":\"角色\"" + field + "}]}");
+        Expect(!reply.ProtocolBroken && reply.Actions.Count == 1, $"字段 {value} 导致整个动作解析失败");
+        Expect(reply.Actions[0].MarkVersionAdopted == (value == "true"), $"字段 {value} 解析错误");
+        var canvas = new WorkflowCanvasState();
+        AgentActionExecutor.Apply(new[] { new AgentAction { Kind = "create_entity", Title = "角色", EntityKind = "角色" } }, canvas, null);
+        canvas.Nodes.Add(new WorkflowNode { Title = "镜头" });
+        var result = AgentActionExecutor.Apply(reply.Actions, canvas, null);
+        Expect(result.Applied == 1 && result.Errors.Count == 0, "解析后的更新执行失败");
+        Expect(canvas.Nodes.Single().VersionDecision == (value == "true" ? VersionDecision.Adopted : VersionDecision.None),
+            "采纳标记未传递到节点版本决策");
+    }
 }
 
 static void CreateNodesThenConnectInOneBatch()
