@@ -9,6 +9,13 @@ public interface ICanvasTransport
     void Subscribe(Action<JsonElement> handler);
 }
 
+public sealed record ResourceReplaceRequest(
+    Guid RecordId,
+    Guid EntityId,
+    Guid VariantId,
+    Guid? VariantVersionId
+);
+
 public sealed record HostBridgeOptions
 {
     public string HostVersion { get; init; } = "0.1.0";
@@ -36,6 +43,8 @@ public sealed class HostBridge
     }
 
     public bool IsReady => ready;
+
+    public event Action<ResourceReplaceRequest>? ResourceReplaceRequested;
 
     public void Initialize(SessionContext context)
     {
@@ -69,7 +78,38 @@ public sealed class HostBridge
         {
             revision,
             reason,
-            scene = new { records = Array.Empty<object>() }
+            scene = new { snapshot = new { records = Array.Empty<object>() } }
+        });
+    }
+
+    /// <summary>
+    /// 把完整画布 records 推送给前端。调用方负责用 NodeProjection 投影节点，
+    /// 这里只做传输。用于初始化或章节切换。
+    /// </summary>
+    public void SendScene(List<object> records, int revision, string reason = "scene-update")
+    {
+        EnsureSession();
+        Send("host/scene.reset", new
+        {
+            revision,
+            reason,
+            scene = new { snapshot = new { records } }
+        });
+    }
+
+    /// <summary>
+    /// 增量推送节点变更。调用方负责投影，这里只做传输。
+    /// </summary>
+    public void SendNodeUpdates(List<object> records, int revision)
+    {
+        EnsureSession();
+        Send("host/op.batch", new
+        {
+            batchId = Guid.NewGuid().ToString(),
+            revision,
+            origin = "host",
+            actorSessionId = session!.SessionId,
+            ops = records
         });
     }
 
@@ -92,6 +132,9 @@ public sealed class HostBridge
     public void SendError(string code, string message, string severity = "warning", string? relatedType = null)
         => Send("host/error", new { code, message, severity, relatedType });
 
+    public void SendResourceReplaceResult(Guid requestId, bool ok, string message, int? revision = null)
+        => Send("host/resource.replace.result", new { requestId, ok, message, revision });
+
     private void Receive(JsonElement message)
     {
         try
@@ -101,6 +144,7 @@ public sealed class HostBridge
             var payload = decoded.RootElement.GetProperty("payload");
             if (type == "canvas/hello") ready = true;
             else if (type == "canvas/invoke.request") _ = HandleInvocationAsync(payload);
+            else if (type == "canvas/resource.replace.request") HandleResourceReplace(payload);
             else if (type == "canvas/job.cancel.request") HandleCancel(payload);
         }
         catch (ProtocolViolationException error)
@@ -108,6 +152,28 @@ public sealed class HostBridge
             ready = false;
             SendError(error.Code, error.Message, error.Severity);
         }
+    }
+
+    private void HandleResourceReplace(JsonElement payload)
+    {
+        try
+        {
+            EnsureReady();
+            var request = new ResourceReplaceRequest(
+                payload.GetProperty("recordId").GetGuid(),
+                payload.GetProperty("entityId").GetGuid(),
+                payload.GetProperty("variantId").GetGuid(),
+                payload.GetProperty("variantVersionId").ValueKind == JsonValueKind.Null
+                    ? null
+                    : payload.GetProperty("variantVersionId").GetGuid());
+
+            if (ResourceReplaceRequested is null)
+                throw new ProtocolViolationException("RESOURCE_REPLACE_UNAVAILABLE", "当前宿主未接入画布资源替换处理器", "warning");
+
+            ResourceReplaceRequested.Invoke(request);
+        }
+        catch (ProtocolViolationException error) { SendError(error.Code, error.Message, error.Severity, "canvas/resource.replace.request"); }
+        catch (Exception error) { SendError("RESOURCE_REPLACE_FAILED", error.Message, "warning", "canvas/resource.replace.request"); }
     }
 
     private async Task HandleInvocationAsync(JsonElement payload)

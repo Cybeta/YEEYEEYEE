@@ -1,6 +1,6 @@
 # YEEYEEYEE 架构文档（工程标识 DreamForge）
 
-> 版本：v2（按实际代码校正） · 2026-09-28
+> 版本：v2.1（按实际代码校正；追加第七十八轮的 Web 画布通道、章节分块排版、资源引用新写法） · 2026-09-28
 > 本文只描述**代码里真实存在**的结构、接口与边界；未实现的东西在第十节明确列出。
 > 上一版（v1，2026-09-25）描述的是"六层架构 + Avalonia WebView + 房间服务 + Yjs"的设想，与实现不一致，已作废。
 
@@ -17,8 +17,8 @@
 | `DreamForge.Core` | net10.0 | 纯契约与领域模型：协议常量、Job 状态机、Token/Capability 枚举、权限判定、引用图判定。**无第三方依赖** |
 | `DreamForge.Host` | net10.0 | 执行与任务编排：Job 存储（SQLite）、单机执行服务、ComfyUI Provider、外部任务轮询与进度监听、画布桥接抽象、回调签名 |
 | `DreamForge.Desktop` | net10.0-windows | 唯一交付给用户的客户端：WinForms 主程序 + 自绘画布 + Agent 面板 + 设定库 + 工作树 + 技能/插件 |
-| `DreamForge.Web` | net10.0 (Web SDK) | 作业服务宿主：DI 组装 Core/Host 的执行链路，暴露 ComfyUI 回调端点与 `/health`，**不承担画布渲染** |
-| `DreamForge.Core.Tests` | net10.0 | 控制台断言式测试：协议、权限、Job、持久化、ComfyUI、回调签名 |
+| `DreamForge.Web` | net10.0 (Web SDK) | 作业服务宿主：DI 组装 Core/Host 的执行链路，暴露 ComfyUI 回调端点与 `/health`；**并托管 `DreamForge.Canvas` 的 `dist`（静态文件 + `/ws/canvas` WebSocket + `/api/canvas/*` 推送端点）**，自身不产生画布数据，只做转发与广播 |
+| `DreamForge.Core.Tests` | net10.0-windows | 控制台断言式测试：协议、权限、Job、持久化、ComfyUI、回调签名、资源版本替换（19 项）。**因校验桌面端 `WorkflowCanvasState`，已同时引用 Core + Host + Desktop**（`EnableWindowsTargeting`） |
 | `DreamForge.Agent.Tests` | net10.0-windows | 控制台断言式测试：Agent 协议解析、批量试算、引用/版本/工作树、附件、DPAPI、流式解析 |
 
 **不在解决方案里**：`DreamForge.Mcp`（能独立编译运行，但未被任何项目引用，见第十节第 6 项）、`DreamForge.Canvas`（TypeScript/Vite 工程，见 4.3）。
@@ -30,7 +30,7 @@ Core        ← 无引用
 Host        → Core
 Web         → Host（传递 Core）
 Desktop     → Host（传递 Core）
-Core.Tests  → Core + Host
+Core.Tests  → Core + Host + Desktop
 Agent.Tests → Desktop
 Mcp         → 无引用（自包含）
 ```
@@ -38,7 +38,8 @@ Mcp         → 无引用（自包含）
 关键结论：
 
 - **Desktop 引用 Host，是在同进程内使用**（`DesktopExecutionHost.cs`），不是"客户端 + 服务端"两个进程。
-- **Desktop 不引用 Web、不引用 Mcp**：在 `DreamForge.Desktop\*.cs` 中检索 `DreamForge.Web`、`WebCanvasTransport`、`DreamForge.Mcp` 等标识符为 0 命中。
+- **Desktop 不引用 Web、不引用 Mcp**：在 `DreamForge.Desktop\*.cs` 中检索 `DreamForge.Web`、`WebCanvasTransport`、`DreamForge.Mcp` 等标识符为 0 命中。两者的联动只走 HTTP（见 4.4）。
+- **Core.Tests 现在引用 Desktop**：新增的 `ResourceReplaceState` 用例直接构造 `WorkflowCanvasState` / `WorkflowNode` / `NodeReference`，因此该项目改为 `net10.0-windows` 并打开 `EnableWindowsTargeting`。
 
 ### 1.3 分层（按代码实际形态）
 
@@ -48,6 +49,7 @@ Mcp         → 无引用（自包含）
 ├─ 应用/编排层（Desktop）────────────────────────────────┤
 │ AgentActions（提议→审批→应用）· PendingChanges（虚影/快照）  │
 │ Skills（技能执行）· Plugins（插件宿主）· CanvasCommandService │
+│ NodeProjection（画布 → 协议 records 投影）· Web 推送/轮询     │
 │ DesktopExecutionHost（把 Host 拉进本进程）                 │
 ├─ 领域层（Core）────────────────────────────────────────┤
 │ Job 状态机 · Capability/Token 枚举 · AccessPolicy · 协议校验 │
@@ -70,46 +72,53 @@ Mcp         → 无引用（自包含）
 
 | 方向 | 消息 |
 |---|---|
-| canvas → host（8） | `canvas/hello`、`canvas/op.batch`、`canvas/undo.request`、`canvas/redo.request`、`canvas/invoke.request`、`canvas/job.cancel.request`、`canvas/selection.changed`、`canvas/diagnostic` |
-| host → canvas（7） | `host/init`、`host/op.batch`、`host/scene.reset`、`host/undo.result`、`host/job.update`、`host/capabilities`、`host/error` |
+| canvas → host（9） | `canvas/hello`、`canvas/op.batch`、`canvas/undo.request`、`canvas/redo.request`、`canvas/invoke.request`、`canvas/job.cancel.request`、`canvas/selection.changed`、`canvas/resource.replace.request`、`canvas/diagnostic` |
+| host → canvas（8） | `host/init`、`host/op.batch`、`host/scene.reset`、`host/undo.result`、`host/job.update`、`host/capabilities`、`host/resource.replace.result`、`host/error` |
 
-真实校验规则（不是注释）：方向不符抛 `PROTOCOL_DIRECTION_MISMATCH`，版本不符抛 `PROTOCOL_VERSION_MISMATCH`，字段缺失/非法 GUID/非整数时间戳抛 `PROTOCOL_MALFORMED`；`canvas/undo.request` 与 `canvas/redo.request` 必须 `localOnly=true`；`canvas/invoke.request` 必须有非空幂等键；`host/capabilities` 不得超出服务端声明集（否则 `PROTOCOL_UNAUTHORIZED`）。
+真实校验规则（不是注释）：方向不符抛 `PROTOCOL_DIRECTION_MISMATCH`，版本不符抛 `PROTOCOL_VERSION_MISMATCH`，字段缺失/非法 GUID/非整数时间戳抛 `PROTOCOL_MALFORMED`；`canvas/undo.request` 与 `canvas/redo.request` 必须 `localOnly=true`；`canvas/invoke.request` 必须有非空幂等键；`canvas/resource.replace.request` 的 `recordId`/`entityId`/`variantId` 必须是合法 uuid，`variantVersionId` 允许 `null` 或合法 uuid；`host/capabilities` 不得超出服务端声明集（否则 `PROTOCOL_UNAUTHORIZED`）。
 
-**谁在用**：`DreamForge.Host\HostBridge.cs`、`DreamForge.Web\WebCanvasTransport.cs`、`DreamForge.Canvas\src\Protocol\*`（TS 侧同构实现）与控制台测试。**Desktop 不使用它**（WinForms 端没有 WebView2，也没有任何 postMessage 通道）。
+**谁在用**：`DreamForge.Host\HostBridge.cs`、`DreamForge.Web\WebCanvasTransport.cs`（浏览器 WebSocket 双向传输）、`DreamForge.Canvas\src\Protocol\*`（TS 侧同构实现，浏览器里走 `/ws/canvas`，WebView 里仍保留 postMessage 分支）与控制台测试。**Desktop 不使用它**（WinForms 端没有 WebView2，也没有任何 postMessage 通道）。
 
 ### 2.2 Agent 协议（Desktop 定义）
 
-Agent 与模型之间用 JSON 代码块交换"改动提议"，见 [03_Skill_System.md](03_Skill_System.md) 与 `AgentActions.cs` / `AgentPane.cs`。这是**当前唯一真正驱动画布改动**的协议。
+Agent 与模型之间用 JSON 代码块交换"改动提议"（`{"actions":[…]} / {"ask":{…}}`，13 种 kind），见 [03_Skill_System.md](03_Skill_System.md) 与 `AgentActions.cs` / `AgentPane.cs`。这是**当前唯一真正驱动画布改动**的协议。本轮新增 `entityTargets`（一组设定名，落到节点引用，用来表达"这一镜出现谁、在哪、用什么"），并在提示词里明确**角色/场景/道具不再建画布节点**。
 
 ---
 
 ## 三、进程与宿主拓扑（现状）
 
 ```
-┌──────────────────────────────┐        ┌──────────────────────────┐
-│ DreamForge.Desktop.exe       │        │ DreamForge.Web（可选）    │
-│ WinForms / STAThread         │        │ ASP.NET Core 作业服务      │
-│ ├ 自绘画布 WorkflowCanvasControl │      │ ├ SingleMachineExecutionService │
-│ ├ AgentPane（模型对话+审批）  │        │ ├ SqliteJobStore          │
-│ ├ DesktopExecutionHost       │        │ ├ ExternalTaskPoller      │
-│ │  └ 进程内拉起 Host 的执行链路 │        │ └ POST /callbacks/comfyui/{userId} │
-│ └ jobs.db（项目根）           │        │   GET /health             │
-└──────────┬───────────────────┘        └──────────┬───────────────┘
-           │ HTTP + WebSocket                        │ HTTP + WebSocket
-           ▼                                         ▼
-  本地 ComfyUI（默认 127.0.0.1:8188）        本地/远端 ComfyUI
-           ▲
-           │ HTTP（OpenAI 兼容 / Anthropic Messages）
-   外部模型 API（桌面端自填 Key 直连）
+┌──────────────────────────────────────┐
+│ DreamForge.Desktop.exe（唯一交付端）    │
+│ WinForms / STAThread                  │
+│ ├ WorkflowCanvasControl（自绘画布）      │
+│ ├ AgentPane（模型对话 + 审批）           │
+│ ├ DesktopExecutionHost（进程内执行链路）  │
+│ └ jobs.db / project.json / assets …    │
+└───────┬──────────────┬───────────────┘
+        │ HTTP + WS    │ HTTP（推送投影 + 每 500ms 轮询替换请求）
+        ▼              ▼
+ 本地 ComfyUI      DreamForge.Web（:5000，可选）
+ 127.0.0.1:8188    ├ SingleMachineExecutionService / SqliteJobStore
+        ▲          ├ ExternalTaskPoller
+        │          ├ 静态托管 DreamForge.Canvas/dist
+ 外部模型 API       ├ GET /ws/canvas（HostBridge 广播）
+（OpenAI 兼容 /     ├ POST /api/canvas/scene | nodes
+  Anthropic）      ├ GET|POST /api/canvas/resource-replace*
+                   └ POST /callbacks/comfyui/{userId} · GET /health
+                            ▲
+                            │ WebSocket /ws/canvas
+                      浏览器打开 http://localhost:5000（TS 画布）
 
 另有：DreamForge.Mcp.exe（stdio 只读工具服务，独立运行，未与 Desktop 连接）
-      DreamForge.Canvas（TS/Vite 工程，未接入任何宿主）
+      DreamForge.Canvas 既能被 Web 托管为浏览器画布，也能被 WebView 承载（main.tsx 两种传输分支）
 ```
 
 ### 3.1 关键边界（代码事实）
 
 - 桌面端与 Host 执行链路**同进程**：`DesktopExecutionHost` 直接构造 `SqliteJobStore` 与执行服务；配置了 ComfyUI 时会启动 `ExternalTaskPoller` 后台轮询（间隔 2 秒）。
-- Web 宿主只做作业与回调，**没有画布**：`WebCanvasTransport.Send` 仅 `Console.WriteLine`。
+- 桌面端与 Web **没有程序集引用**，只有 HTTP 联动：Desktop 每 500ms 轮询 `GET /api/canvas/resource-replace/next` 取画布改动请求，并把节点投影推给 `POST /api/canvas/scene`；Web 收到后用 `HostBridge` 广播给 WS 上的浏览器画布，并把执行结果回投 `POST /api/canvas/resource-replace/result`（见 4.4）。
+- Web 宿主**不产生画布数据**：它只托管前端静态文件、转发/广播消息与跑作业链路；数据来源始终是桌面端推送的 records。
 - 桌面端**没有**房间服务、SignalR、Yjs、Blazor、邀请码/审批、配额与审计（第十节列出）。
 - 视频生成链路**不存在**（第十节）。
 
@@ -121,8 +130,8 @@ Agent 与模型之间用 JSON 代码块交换"改动提议"，见 [03_Skill_Syst
 
 - 入口 `Program.cs`：显式 `Main` + `[STAThread]`（不能用顶层语句，否则主线程跑在 MTA，剪贴板/文件对话框/拖放会抛 `ThreadStateException`）。
 - 顺序：`ApplicationConfiguration.Initialize()` → `ProjectStartupForm.ShowStartup()`（模态选项目）→ `AppPaths.UseProject` → `new MainForm()` → `Application.Run`。`MainForm.RestartForProjectSelection` 为真时回到选项目循环。
-- 主窗口构造：建执行宿主 → 建 `SessionContext(ClientType.Desktop)` → 应用主题 → `SkillLibrary.EnsureDefaultSkills` → 注册内置插件 / 加载外部插件 → 建布局 → 加载初始画布 → 订阅执行事件 → 启动 500ms 刷新计时器（WinForms Timer，回调在 UI 线程）。
-- 后台线程：`ExternalTaskPoller`（ComfyUI 轮询）与插件 `AssemblyLoadContext`；执行更新经 `BeginInvoke` 回 UI 线程。
+- 主窗口构造：建执行宿主 → 建 `SessionContext(ClientType.Desktop)` → 应用主题 → `SkillLibrary.EnsureDefaultSkills` → 注册内置插件 / 加载外部插件 → 建布局 → 加载初始画布 → 订阅执行事件 → 启动 500ms 刷新计时器（WinForms Timer，回调在 UI 线程；每个 tick 同时 `RefreshJobList` 与 `PollResourceReplaceRequests`）。
+- 后台线程：`ExternalTaskPoller`（ComfyUI 轮询）与插件 `AssemblyLoadContext`；执行更新经 `BeginInvoke` 回 UI 线程；Web 轮询用独立的 `HttpClient`（3 秒超时），`BeginInvoke` 回 UI 线程执行替换。
 
 ### 4.2 主窗口骨架与面板
 
@@ -141,9 +150,32 @@ Agent 与模型之间用 JSON 代码块交换"改动提议"，见 [03_Skill_Syst
 
 ### 4.3 画布的两种实现与现状
 
-- **桌面端画布 = `WorkflowCanvasControl`（WinForms 自绘）**：节点卡片、端口、连线、缩放平移、自动排版、预览虚影全部自绘，不依赖任何前端。
-- **`DreamForge.Canvas`（React + Vite）是独立的、未接入的工程**：`src/CanvasApp.tsx` 渲染的是普通 div 卡片，`tldraw` 依赖存在但代码里没有使用（只有 `tldraw.d.ts` 的 CSS 声明）；`main.tsx` 仍假设运行在 `chrome.webview` / 父窗口里。桌面端已彻底移除 WebView2（`DreamForge.Desktop\*.cs` 检索 `WebView2|postMessage` 为 0 命中）。
-- 结论：**"双端共用 tldraw 画布"目前不成立**；桌面端也没有启动本地服务托管 `dist` 的逻辑。
+- **桌面端画布 = `WorkflowCanvasControl`（WinForms 自绘）**：节点卡片、端口、连线、缩放平移、预览虚影全部自绘，不依赖任何前端。**自动排版已改为按章节分块**（每章一个区块，块内网格排布、主线在前资源在后，区块按"第N章"从左到右、每行 3 块并绘制半透明块底与虚线框）；Agent 新建节点时用同一套 `ChapterKeyOf` / `ChapterBounds` / `ArrangeChapter` 落位，只重排所属章节区块。
+- **`DreamForge.Canvas`（React + Vite）现在由 `DreamForge.Web` 托管**：`main.tsx` 有两条传输分支——在 WebView（`chrome.webview` 存在）里走 postMessage，否则连 `ws://<host>/ws/canvas`；Web 在 `dist` 存在时用 `UseStaticFiles` 托管，并把消息接到 `HostBridge`。
+- 画布 UI 已改成**五层竖排 + 引用条**：`layerOf()` 把 recordType 归到 L1 剧情 / L2 企划 / L3 章节 / L4 分镜头 / L5 成品，支持"章节视图 / 概览视图"与章节下拉过滤；带引用的节点在卡片下方显示引用缩略图（可折叠），选中引用后可切换/锁定版本，通过 `canvas/resource.replace.request` 提交。
+- `tldraw` 依赖仍在 `package.json` 里但**代码未使用**（只有 `tldraw.d.ts` 的 CSS 声明）；`DreamForge.Canvas` 仍**不在 `DreamForge.slnx` 内**，`dist` 需在本地构建。
+- 结论：**"双端共用 tldraw 画布"仍不成立**（桌面端是自绘、Web 端是 div 卡片），但两端现在通过 Web + HTTP/WS 有了真实的数据通路。
+
+### 4.4 桌面端与 Web 画布的数据通路（本轮新增）
+
+```
+Desktop（权威数据）                         Web（只转发，不落盘）
+WorkflowCanvasControl 变更
+  └─ NodeProjection.ProjectRecords ──► POST /api/canvas/scene ──► HostBridge.SendScene
+                                                                   └─► WS 广播 host/scene.reset
+浏览器画布选中引用 / 换版本
+  └─ canvas/resource.replace.request ──► WS ──► HostBridge ──► 队列
+Desktop 每 500ms 轮询 GET /api/canvas/resource-replace/next ──► 取到请求
+  └─ WorkflowCanvasState.ReplaceReferenceVersion（锁定节点/版本不属于变体一律拒绝）
+     └─ 成功：canvasRevision++、保存最近画布与标签、再推一次 scene
+        └─ POST /api/canvas/resource-replace/result ──► HostBridge.SendResourceReplaceResult
+                                                        └─► WS 广播 host/resource.replace.result
+```
+
+- 投影字段（`NodeProjection`）：`recordId` / `recordType`（`NodeCategory` → `story-plan|story-outline|chapter|storyboard|character|scene-description|prop|product|general`）/ `record{title,content,x,y,chapter,status,parentId,references[]}`；`references[]` 带 `entityId/name/kind/variantId/variantVersionId/thumbnailRef/variantLabel/versions[]`。
+- 工作树里的 `Chapter` 条目若没有对应画布节点，也会被投影成 `wt-<id>` 的 L3 record。
+- 待补：`thumbnailRef` 仍是 `asset://文件名`，Web 没有资产 HTTP 端点，浏览器里这张图加载不出来（`<img src="asset://…">` 会失败）；`POST /api/canvas/nodes`（`HostBridge.SendNodeUpdates`）目前没有调用方，桌面端一律走全量 `scene` 推送。
+- 地址是**硬编码**的：Desktop 用常量 `http://localhost:5000`，Web 用 `appsettings.json` 的 Kestrel 端点 `http://localhost:5000`；Web 未启动时推送与轮询都静默失败（桌面端功能不受影响）。
 
 ---
 
@@ -182,7 +214,7 @@ Cancelling → Cancelled
 
 ### 6.1 画布 JSON
 
-落盘的状态就是 4 个集合（`WorkflowCanvasState`，`WorkflowCanvasControl.cs:148-233`）：`Nodes`、`Edges`、`Entities`、`WorkTree`。
+落盘的状态就是 4 个集合（`WorkflowCanvasState`）：`Nodes`、`Edges`、`Entities`、`WorkTree`。该类还提供引用解析与改写：`ResolveReferences`（跳过失效引用）、`ResolveReferencePairs`（保留"哪条引用解析失败"的对应关系）、`FindEntity`，以及本轮的 `ReplaceReferenceVersion(recordId, entityId, variantId, variantVersionId, out error)`——它要求节点存在且未锁定、节点确实引用了该"实体+变体"，且新版本属于该变体，成功后只改写 `NodeReference.VariantVersionId`（`null` = 跟随最新）。
 
 **节点 `WorkflowNode`**（`WorkflowCanvasControl.cs:78-137`）字段：`Id`、`Title`、`Category`、`ContentSource`、`ExecutionStatus`、`Content`、`Chapter`、`Question`、`Answer`、`ParentNodeId`、`WorkTreeItemId`、`GenerationId`、`IsCollapsed`、`References`、`IsLocked`、`VersionDecision`、`Attachments`、`Parameters`、`GenerationHistory`、`X`、`Y`、`InputCount`、`OutputCount`。
 
@@ -206,7 +238,7 @@ Cancelling → Cancelled
 
 | 枚举 | 顺序 |
 |---|---|
-| `NodeCategory` | General=0, Character=1, Scene=2, Storyboard=3, Prop=4, Product=5 |
+| `NodeCategory` | General=0, Character=1, Scene=2, Storyboard=3, Prop=4, Product=5, **StoryPlan=6, StoryOutline=7, Chapter=8（追加在末尾，不影响旧数据）** |
 | `ContentSource` | User=0, Ai=1, Api=2 |
 | `NodeExecutionStatus` | Draft=0, WaitingForUser=1, Generating=2, Completed=3, Failed=4, NeedsReview=5 |
 | `AttachmentKind` | Image=0, Video=1, Audio=2, Other=3 |
@@ -285,19 +317,25 @@ Cancelling → Cancelled
 | 1 | 根目录 `05_Core_Contracts.cs` | 未包含进任何 csproj、未被任何代码引用、不参与编译；命名空间 `DreamForge.Core.Contracts` 与 Core 实际类型重复且不兼容（`ExecutionResult` 字段更少，还定义了 Core 里不存在的 `IChannelService`/`ISkillMigration`） | 极易被误当成"真实契约" |
 | 2 | 视频生成 | 全链路未实现（只有枚举、提示词条目、诊断探测、附件挂载） | 产品说明需标注"计划中" |
 | 3 | 协作（房间/Yjs/SignalR/Blazor） | 完全未实现 | 01/04 已按现状改写 |
-| 4 | Web 端画布 | Web 只做作业与回调，无画布 | 同上 |
-| 5 | `DreamForge.Canvas` | TS 工程未接入任何宿主，tldraw 未被使用 | 同上 |
+| 4 | Web 端画布 | Web 现在托管 TS 画布并转发消息，但**画布数据全部来自桌面端推送**；桌面端未启动时不显示任何内容，Web 端唯一能回写的操作是替换/锁定节点引用版本 | 产品说明里不能写成"Web 端可以独立创作" |
+| 5 | `DreamForge.Canvas` | 已能被 Web 托管（静态文件 + WS），但仍是 div 卡片、`tldraw` 未被使用、不在 slnx、`dist` 需本地构建 | 与"tldraw 画布"的历史描述不一致 |
 | 6 | `DreamForge.Mcp` | 独立只读 stdio 服务，未与 Desktop 连接，也不在 slnx | 需明确它的定位 |
 | 7 | `MarkVersionAdopted` | `AgentAction` 有这个字段，但 `ReadActions` 不解析，模型无法设置，恒为 false | 该能力实际不可用 |
 | 8 | AutoStage 路径 | 先 `ApplyActions`，随后 `SaveApplied` 因 pending 非空**再次**应用同一批 actions | 同一批被执行两次，需修 |
 | 9 | 配额 / 审计 / 审批 / 邀请码 | 未实现 | 产品计划需降级为"未开始" |
+| 10 | 资源替换协议缺夹具 | `canvas/resource.replace.request` / `host/resource.replace.result` 已两端落地并有 C# 用例，但 `protocol/fixtures/manifest.json` 没有对应条目 | 违反"先夹具后实现"的自定规则，TS 侧缺跨语言回放 |
+| 11 | Web 画布的两处断点 | `thumbnailRef` 是 `asset://文件名`，Web 没有资产 HTTP 端点（浏览器加载不出这张图）；`POST /api/canvas/nodes` 与 `HostBridge.SendNodeUpdates` 没有调用方 | 引用缩略图在 Web 端不可见；增量推送只有声明没有使用 |
+| 12 | 画布交互回传范围 | 浏览器画布的 `canvas/selection.changed`（含 `entityId`/`openResourceLibrary`）在 `HostBridge.Receive` 中没有分支处理 | 桌面端"定位资源库"等联动尚未生效 |
+| 13 | 品牌口径 | 界面字符串与资源文件名仍用大小写变体 `YeeYeeYee`，产品名已定为 `YEEYEEYEE` | 可选统一 |
 
 ## 附录：协议与外部接口清单（实际）
 
 | 协议/接口 | 用途 | 实现位置 |
 |---|---|---|
-| `DreamForgeProtocol v1`（15 条消息） | 宿主 ↔ 画布（Host/Web/TS 前端与测试） | `DreamForge.Core\Protocol.cs` |
-| Agent JSON 协议（12 种 action） | 模型 ↔ Desktop（当前唯一驱动画布的通道） | `DreamForge.Desktop\AgentActions.cs`、`AgentPane.cs` |
+| `DreamForgeProtocol v1`（17 条消息） | 宿主 ↔ 画布（Host/Web/TS 前端与测试） | `DreamForge.Core\Protocol.cs` |
+| Agent JSON 协议（13 种 action） | 模型 ↔ Desktop（当前唯一驱动画布的通道） | `DreamForge.Desktop\AgentActions.cs`、`AgentPane.cs` |
+| HTTP 画布推送（`/api/canvas/scene`、`/api/canvas/nodes`、`/api/canvas/resource-replace[/next|/result]`） | Desktop ↔ Web（投影推送、资源替换往返） | `DreamForge.Web\Program.cs`、`DreamForge.Desktop\MainForm.cs` |
+| WebSocket `/ws/canvas` | Web ↔ 浏览器画布（协议信封双向） | `DreamForge.Web\WebCanvasTransport.cs`、`DreamForge.Canvas\src\main.tsx` |
 | OpenAI 兼容 / Anthropic Messages | 文本与多模态调用、图像生成 | `OpenAiCompatibleProvider.cs`、`ImageGeneration.cs` |
 | ComfyUI HTTP + WebSocket | 提交、进度、取消、产物下载 | `DreamForge.Host\ComfyUiProvider.cs` |
 | HMAC 回调 | 外部任务状态回传 | `DreamForge.Host\HttpCallbackSecurity.cs` + `DreamForge.Web\Program.cs` |

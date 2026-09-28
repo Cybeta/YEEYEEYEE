@@ -1,12 +1,13 @@
 import { validateCapabilities, validateHostInit } from './Protocol/Capabilities'
 import { decode, encode, ProtocolViolationError } from './Protocol/CanvasMessageCodec'
-import { CANVAS_VERSION, PROTOCOL_VERSION, type CanvasBridgeTransport, type Envelope, type HostInit, type HostError, type HostOpBatch, type CapabilitySet, type MessageType } from './Protocol/VersionedMessages'
+import { CANVAS_VERSION, PROTOCOL_VERSION, type CanvasBridgeTransport, type Envelope, type HostInit, type HostError, type HostOpBatch, type CapabilitySet, type MessageType, type ResourceReplaceResult } from './Protocol/VersionedMessages'
 
 type BridgeState = 'created' | 'handshaking' | 'ready' | 'fatal'
 export type CanvasBridgeEvents = {
   onInit?: (init: HostInit) => void
   onSceneReset?: (scene: HostInit['scene']) => void
   onHostOps?: (batch: HostOpBatch) => void
+  onResourceReplaceResult?: (result: ResourceReplaceResult) => void
 }
 
 export class CanvasBridge {
@@ -28,6 +29,7 @@ export class CanvasBridge {
       if (message.type === 'host/init') { const init = validateHostInit(message.payload as HostInit); this.capabilities = init.capabilities; this.state = 'ready'; this.events.onInit?.(init) }
       else if (message.type === 'host/op.batch') this.events.onHostOps?.(message.payload as HostOpBatch)
       else if (message.type === 'host/scene.reset') this.events.onSceneReset?.((message.payload as { scene: HostInit['scene'] }).scene)
+      else if (message.type === 'host/resource.replace.result') this.events.onResourceReplaceResult?.(message.payload as ResourceReplaceResult)
       else if (message.type === 'host/capabilities') this.capabilities = validateCapabilities(message.payload as CapabilitySet)
       else if (message.type === 'host/error' && (message.payload as HostError).severity === 'fatal') this.state = 'fatal'
     } catch (error) {

@@ -15,6 +15,8 @@ var tests = new (string Name, Action Run)[]
     ("Canvas invoke 到 Job 回传", HostInvokeEndToEnd),
     ("Job 取消和失败终态", JobCancellationAndFailure),
     ("协议字段严格校验", StrictProtocolFields),
+    ("资源版本替换协议", ResourceReplaceProtocol),
+    ("资源版本替换状态", ResourceReplaceState),
     ("SQLite Job 持久化和恢复", SqliteJobPersistence),
     ("任务快照的调用信息与输入参数持久化", JobSnapshotPersistence),
     ("外部任务 ID 持久化", ExternalTaskIdPersistence),
@@ -129,6 +131,80 @@ static void StrictProtocolFields()
     var valid = "{\"v\":1,\"id\":\"11111111-1111-4111-8111-111111111111\",\"type\":\"canvas/hello\",\"ts\":1,\"payload\":{\"canvasVersion\":\"0.1.0\",\"protocolVersion\":1,\"minHostProtocol\":1,\"features\":[]}}";
     ExpectThrows<ProtocolViolationException>(() => DreamForgeProtocol.Decode(valid.Replace("11111111-1111-4111-8111-111111111111", "bad"), "canvasToHost"), "PROTOCOL_MALFORMED");
     ExpectThrows<ProtocolViolationException>(() => DreamForgeProtocol.Decode(valid.Replace("\"ts\":1", "\"ts\":1.5"), "canvasToHost"), "PROTOCOL_MALFORMED");
+}
+
+static void ResourceReplaceProtocol()
+{
+    var recordId = Guid.NewGuid();
+    var entityId = Guid.NewGuid();
+    var variantId = Guid.NewGuid();
+    var valid = JsonSerializer.Serialize(new
+    {
+        v = 1,
+        id = Guid.NewGuid(),
+        type = "canvas/resource.replace.request",
+        ts = 1L,
+        payload = new
+        {
+            recordId,
+            entityId,
+            variantId,
+            variantVersionId = (Guid?)null
+        }
+    });
+    using var decoded = DreamForgeProtocol.Decode(valid, "canvasToHost");
+    Expect(decoded.RootElement.GetProperty("type").GetString() == "canvas/resource.replace.request", "资源替换请求未通过协议校验");
+
+    var invalid = valid.Replace(recordId.ToString(), "bad-record-id", StringComparison.Ordinal);
+    ExpectThrows<ProtocolViolationException>(() => DreamForgeProtocol.Decode(invalid, "canvasToHost"), "PROTOCOL_MALFORMED");
+
+    var missingVersion = valid.Replace(",\"variantVersionId\":null", string.Empty, StringComparison.Ordinal);
+    ExpectThrows<ProtocolViolationException>(() => DreamForgeProtocol.Decode(missingVersion, "canvasToHost"), "PROTOCOL_MALFORMED");
+
+    var result = JsonSerializer.Serialize(new
+    {
+        v = 1,
+        id = Guid.NewGuid(),
+        type = "host/resource.replace.result",
+        ts = 1L,
+        payload = new
+        {
+            requestId = Guid.NewGuid(),
+            ok = true,
+            message = "资源版本替换成功。",
+            revision = 3
+        }
+    });
+    using var resultDocument = DreamForgeProtocol.Decode(result, "hostToCanvas");
+    Expect(resultDocument.RootElement.GetProperty("type").GetString() == "host/resource.replace.result", "资源替换结果未通过协议校验");
+    ExpectThrows<ProtocolViolationException>(() => DreamForgeProtocol.Decode(result, "canvasToHost"), "PROTOCOL_DIRECTION_MISMATCH");
+}
+
+static void ResourceReplaceState()
+{
+    var entity = new DreamForge.Desktop.WorkflowEntity { Name = "主角" };
+    var variant = entity.CreateVariant("战斗服");
+    var version = variant.EnsureInitialVersion();
+    var node = new DreamForge.Desktop.WorkflowNode();
+    node.References.Add(new DreamForge.Desktop.NodeReference
+    {
+        EntityId = entity.Id,
+        VariantId = variant.Id,
+        VariantVersionId = version.Id
+    });
+    var state = new DreamForge.Desktop.WorkflowCanvasState
+    {
+        Nodes = [node],
+        Entities = [entity]
+    };
+
+    Expect(state.ReplaceReferenceVersion(node.Id, entity.Id, variant.Id, null, out _), "解除版本锁定失败");
+    Expect(node.References[0].VariantVersionId is null, "空版本未解除锁定");
+    Expect(!state.ReplaceReferenceVersion(node.Id, entity.Id, variant.Id, Guid.NewGuid(), out var versionError)
+        && versionError.Contains("不属于", StringComparison.Ordinal), "非法版本未拒绝");
+    node.IsLocked = true;
+    Expect(!state.ReplaceReferenceVersion(node.Id, entity.Id, variant.Id, version.Id, out var lockError)
+        && lockError.Contains("锁定", StringComparison.Ordinal), "锁定节点仍可替换");
 }
 
 static void SqliteJobPersistence()

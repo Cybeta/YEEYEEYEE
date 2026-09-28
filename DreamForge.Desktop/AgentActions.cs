@@ -49,6 +49,12 @@ public sealed class AgentAction
     public string EntityTarget { get; set; } = string.Empty;
     public string VariantTarget { get; set; } = string.Empty;
     public string VariantVersion { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 要引用的一组设定库实体名（这一镜出现谁、在哪、用什么）。
+    /// 角色/场景/道具只存在设定库里，靠这个字段挂到剧情/分镜节点上，不再各占一个画布节点。
+    /// </summary>
+    public IReadOnlyList<string> EntityTargets { get; set; } = Array.Empty<string>();
     public string VersionNote { get; set; } = string.Empty;
     public bool MarkVersionAdopted { get; set; }
 
@@ -189,10 +195,22 @@ public static class AgentActionParser
                 EntityTarget = Read(item, "entityTarget"),
                 VariantTarget = Read(item, "variantTarget"),
                 VariantVersion = Read(item, "variantVersion"),
+                EntityTargets = ReadStringArray(item, "entityTargets"),
                 VersionNote = Read(item, "versionNote"),
                 Reason = Read(item, "reason")
             });
         }
+    }
+
+    private static IReadOnlyList<string> ReadStringArray(JsonElement item, string name)
+    {
+        if (!item.TryGetProperty(name, out var element) || element.ValueKind != JsonValueKind.Array)
+            return Array.Empty<string>();
+        var values = new List<string>();
+        foreach (var entry in element.EnumerateArray())
+            if (entry.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(entry.GetString()))
+                values.Add(entry.GetString()!.Trim());
+        return values;
     }
 
     /// <summary>反问单独解析：有 question 才算，光有 ask 键不算。</summary>
@@ -456,21 +474,7 @@ public static class AgentActionExecutor
                     Category = ParseNodeCategory(action.NodeCategory),
                     ContentSource = ContentSource.Ai
                 };
-                if (!string.IsNullOrWhiteSpace(action.EntityTarget))
-                {
-                    var entity = FindEntity(canvas, action.EntityTarget);
-                    if (entity is null) return "找不到引用实体";
-                    var variant = FindVariant(entity, action.VariantTarget);
-                    if (variant is null) return "找不到引用变体";
-                    var version = FindVersion(variant, action.VariantVersion);
-                    if (!string.IsNullOrWhiteSpace(action.VariantVersion) && version is null) return "找不到引用版本";
-                    node.References.Add(new NodeReference
-                    {
-                        EntityId = entity.Id,
-                        VariantId = variant.Id,
-                        VariantVersionId = version?.Id
-                    });
-                }
+                if (ApplyReferences(canvas, action, node, replace: false) is { } referenceError) return referenceError;
                 if (string.IsNullOrWhiteSpace(node.Chapter))
                     node.Chapter = FindInheritedChapter(canvas, action.ParentTarget);
                 if (AttachWorkTreeAnchor(canvas, action.WorkTreeTarget, node) is { } anchorError) return anchorError;
@@ -486,23 +490,7 @@ public static class AgentActionExecutor
                 if (!string.IsNullOrWhiteSpace(action.NodeCategory)) node.Category = ParseNodeCategory(action.NodeCategory);
                 if (!string.IsNullOrWhiteSpace(action.Content)) node.Content = action.Content;
                 if (!string.IsNullOrWhiteSpace(action.Chapter)) node.Chapter = action.Chapter.Trim();
-                if (!string.IsNullOrWhiteSpace(action.EntityTarget))
-                {
-                    var entity = FindEntity(canvas, action.EntityTarget);
-                    if (entity is null) return "找不到引用实体";
-                    var variant = FindVariant(entity, action.VariantTarget);
-                    if (variant is null) return "找不到引用变体";
-                    var version = FindVersion(variant, action.VariantVersion);
-                    if (!string.IsNullOrWhiteSpace(action.VariantVersion) && version is null)
-                        return "找不到引用版本";
-                    node.References.Clear();
-                    node.References.Add(new NodeReference
-                    {
-                        EntityId = entity.Id,
-                        VariantId = variant.Id,
-                        VariantVersionId = version?.Id
-                    });
-                }
+                if (ApplyReferences(canvas, action, node, replace: true) is { } referenceError) return referenceError;
                 if (!string.IsNullOrWhiteSpace(action.EntityTarget))
                     node.VersionDecision = action.MarkVersionAdopted
                         ? VersionDecision.Adopted
@@ -850,33 +838,49 @@ public static class AgentActionExecutor
         node.Title.Contains("章", StringComparison.Ordinal) ||
         Regex.IsMatch(node.Title, @"第\\s*\\d+\\s*章", RegexOptions.CultureInvariant);
 
-    /// <summary>新节点优先放到父节点右侧，并在同层节点之间纵向排列。</summary>
+    /// <summary>
+    /// 新节点落位：按章节分块。节点归到它所属章节的区块里，区块存在就把整块重排成网格
+    /// （新节点排在末尾）；章节还没有区块时，在所有内容右侧另起一块。
+    /// 这样节点一多也是「每章一个方块」，而不是一条来回折的蛇。
+    /// </summary>
     private static void PlaceNewNode(WorkflowCanvasState canvas, WorkflowNode node, string parentTarget)
     {
-        const float width = 190f;
-        const float height = 100f;
-        const float horizontalGap = 60f;
-        const float rowGap = 40f;
         var parent = FindNode(canvas, parentTarget);
-        var x = parent is null ? 80f : parent.X + width + horizontalGap;
-        var y = parent?.Y ?? 80f;
-        if (parent is not null)
+        if (parent is not null) node.ParentNodeId = parent.Id;
+
+        var key = WorkflowCanvasControl.ChapterKeyOf(canvas, node);
+        var blocks = WorkflowCanvasControl.ChapterBounds(canvas, canvas.Nodes);
+
+        float blockX, blockY;
+        if (key.Length > 0 && blocks.TryGetValue(key, out var block))
         {
-            node.ParentNodeId = parent.Id;
-            var siblings = canvas.Nodes.Where(item => item.ParentNodeId == parent.Id).ToList();
-            y += siblings.Count * (height + rowGap);
+            blockX = block.X;
+            blockY = block.Y;
         }
-        for (var attempt = 0; attempt < 400; attempt++)
+        else
         {
-            var rect = new RectangleF(x, y, width, height);
-            var clash = canvas.Nodes.Any(existing => new RectangleF(existing.X, existing.Y, width, height).IntersectsWith(rect));
-            if (!clash) break;
-            y += rowGap + height;
-            if (y > 3000f) { x += width + 60f; y = 80f; }
+            // 新章节（或未分章）：排到所有已有内容的右边；纵向对齐已有区块的顶边。
+            var occupied = canvas.Nodes.Select(existing => WorkflowCanvasControl.NodeRect(canvas, existing)).ToList();
+            blockX = occupied.Count == 0 ? 80f : occupied.Max(rect => rect.Right) + WorkflowCanvasControl.ChapterBlockGap;
+            blockY = blocks.Count > 0
+                ? blocks.Values.Min(rect => rect.Top)
+                : occupied.Count == 0
+                    ? 80f
+                    : occupied.Min(rect => rect.Top) - WorkflowCanvasControl.ChapterBlockPadding - WorkflowCanvasControl.ChapterBlockTitleHeight;
         }
-        node.X = x;
-        node.Y = y;
+
+        // 临时位置放在同章已有节点的下方，重排时就排在末尾。
+        var sameChapter = canvas.Nodes
+            .Where(existing => WorkflowCanvasControl.ChapterKeyOf(canvas, existing) == key)
+            .ToList();
+        node.X = blockX + WorkflowCanvasControl.ChapterBlockPadding;
+        node.Y = sameChapter.Count == 0
+            ? blockY + WorkflowCanvasControl.ChapterBlockPadding + WorkflowCanvasControl.ChapterBlockTitleHeight
+            : sameChapter.Max(existing => existing.Y + WorkflowCanvasControl.NodeHeightFor(canvas, existing))
+                + WorkflowCanvasControl.ChapterRowGap;
+
         canvas.Nodes.Add(node);
+        WorkflowCanvasControl.ArrangeChapter(canvas, key, blockX, blockY);
     }
 
     /// <summary>按短 id（Guid 前 8 位）或标题精确匹配节点；同名时视为歧义并拒绝。</summary>
@@ -908,6 +912,49 @@ public static class AgentActionExecutor
     /// <see cref="WorkTreeKind.Ability"/>；本程序的生成技能不在工作树里。
     /// </summary>
     private static WorkTreeKind ParseWorkTreeKind(string? value) => WorkTreeItem.ParseKind(value);
+
+    /// <summary>
+    /// 把动作里的引用写进节点。<c>entityTarget</c> 是单条、可指定变体与版本；
+    /// <c>entityTargets</c> 是一组名称，各自跟随实体的第一个变体与当前版本——
+    /// 用来表达「这一镜出现谁、在哪、用什么」，角色/场景/道具因此不必再各占一个画布节点。
+    /// </summary>
+    private static string? ApplyReferences(WorkflowCanvasState canvas, AgentAction action, WorkflowNode node, bool replace)
+    {
+        var many = action.EntityTargets.Where(name => !string.IsNullOrWhiteSpace(name)).ToList();
+        var hasSingle = !string.IsNullOrWhiteSpace(action.EntityTarget);
+        if (!hasSingle && many.Count == 0) return null;
+        if (replace) node.References.Clear();
+
+        if (hasSingle)
+        {
+            var entity = FindEntity(canvas, action.EntityTarget);
+            if (entity is null) return "找不到引用实体";
+            var variant = FindVariant(entity, action.VariantTarget);
+            if (variant is null) return "找不到引用变体";
+            var version = FindVersion(variant, action.VariantVersion);
+            if (!string.IsNullOrWhiteSpace(action.VariantVersion) && version is null) return "找不到引用版本";
+            AddReference(node, entity.Id, variant.Id, version?.Id);
+        }
+
+        foreach (var name in many)
+        {
+            var entity = FindEntity(canvas, name);
+            if (entity is null) return $"找不到要引用的设定「{name}」";
+            var variant = entity.Variants.FirstOrDefault();
+            if (variant is null) continue;
+            AddReference(node, entity.Id, variant.Id, null);
+        }
+        return null;
+    }
+
+    /// <summary>同一「实体 + 变体 + 版本」只挂一次，避免重复提议把引用堆起来。</summary>
+    private static void AddReference(WorkflowNode node, Guid entityId, Guid variantId, Guid? versionId)
+    {
+        if (node.References.Any(existing =>
+                existing.EntityId == entityId && existing.VariantId == variantId && existing.VariantVersionId == versionId))
+            return;
+        node.References.Add(new NodeReference { EntityId = entityId, VariantId = variantId, VariantVersionId = versionId });
+    }
 
     private static WorkflowEntity? FindEntity(WorkflowCanvasState canvas, string target)
     {
@@ -947,15 +994,26 @@ public static class AgentActionExecutor
         return items.FirstOrDefault(item => idSelector(item).ToString("N").StartsWith(wanted, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static NodeCategory ParseNodeCategory(string? value) => (value ?? string.Empty).Trim() switch
+    /// <summary>
+    /// 解析模型给的节点分类。模型不会严格照用「角色/场景/分镜/道具/成品」这几个词，
+    /// 常写「人物」「主角」「场景设定」「镜头」之类，所以按关键词包含判定，认不出才退回通用。
+    /// 分类仍有用：章节区块内先排主线节点、后排资源节点（角色/场景/道具），
+    /// 见 <see cref="WorkflowCanvasControl.IsResourceCategory"/>。
+    /// </summary>
+    private static NodeCategory ParseNodeCategory(string? value)
     {
-        "角色" or "Character" => NodeCategory.Character,
-        "场景" or "Scene" => NodeCategory.Scene,
-        "分镜" or "Storyboard" => NodeCategory.Storyboard,
-        "道具" or "Prop" => NodeCategory.Prop,
-        "成品" or "Product" => NodeCategory.Product,
-        _ => NodeCategory.General
-    };
+        var text = (value ?? string.Empty).Trim();
+        if (text.Length == 0) return NodeCategory.General;
+        if (Hits(text, "角色", "人物", "主角", "Character")) return NodeCategory.Character;
+        if (Hits(text, "场景", "Scene")) return NodeCategory.Scene;
+        if (Hits(text, "分镜", "镜头", "Storyboard")) return NodeCategory.Storyboard;
+        if (Hits(text, "道具", "Prop")) return NodeCategory.Prop;
+        if (Hits(text, "成品", "成片", "终稿", "Product")) return NodeCategory.Product;
+        return NodeCategory.General;
+    }
+
+    private static bool Hits(string text, params string[] keywords) =>
+        keywords.Any(keyword => text.Contains(keyword, StringComparison.OrdinalIgnoreCase));
 
     private static EntityKind ParseEntityKind(string? value) => (value ?? string.Empty).Trim() switch
     {
