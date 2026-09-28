@@ -7,8 +7,8 @@ public static class DreamForgeProtocol
     public const int Version = 1;
     private static readonly IReadOnlyDictionary<string, string> Directions = new Dictionary<string, string>(StringComparer.Ordinal)
     {
-        ["canvas/hello"] = "canvasToHost", ["canvas/op.batch"] = "canvasToHost", ["canvas/undo.request"] = "canvasToHost", ["canvas/redo.request"] = "canvasToHost", ["canvas/invoke.request"] = "canvasToHost", ["canvas/job.cancel.request"] = "canvasToHost", ["canvas/selection.changed"] = "canvasToHost", ["canvas/diagnostic"] = "canvasToHost",
-        ["host/init"] = "hostToCanvas", ["host/op.batch"] = "hostToCanvas", ["host/scene.reset"] = "hostToCanvas", ["host/undo.result"] = "hostToCanvas", ["host/job.update"] = "hostToCanvas", ["host/capabilities"] = "hostToCanvas", ["host/error"] = "hostToCanvas"
+        ["canvas/hello"] = "canvasToHost", ["canvas/op.batch"] = "canvasToHost", ["canvas/undo.request"] = "canvasToHost", ["canvas/redo.request"] = "canvasToHost", ["canvas/invoke.request"] = "canvasToHost", ["canvas/job.cancel.request"] = "canvasToHost", ["canvas/selection.changed"] = "canvasToHost", ["canvas/resource.replace.request"] = "canvasToHost", ["canvas/diagnostic"] = "canvasToHost",
+        ["host/init"] = "hostToCanvas", ["host/op.batch"] = "hostToCanvas", ["host/scene.reset"] = "hostToCanvas", ["host/undo.result"] = "hostToCanvas", ["host/job.update"] = "hostToCanvas", ["host/capabilities"] = "hostToCanvas", ["host/error"] = "hostToCanvas", ["host/resource.replace.result"] = "hostToCanvas"
     };
 
     public static JsonDocument Decode(string json, string direction)
@@ -32,9 +32,25 @@ public static class DreamForgeProtocol
         if ((type is "canvas/undo.request" or "canvas/redo.request") && (!payload.TryGetProperty("localOnly", out var local) || local.ValueKind != JsonValueKind.True)) throw new ProtocolViolationException("PROTOCOL_UNAUTHORIZED", "只能执行单人本地撤销", "warning");
         if (type == "host/undo.result" && payload.TryGetProperty("localOnly", out var resultLocal) && resultLocal.ValueKind != JsonValueKind.True) throw new ProtocolViolationException("PROTOCOL_FAIL_CLOSED", "禁止协作快照撤销");
         if (type == "canvas/invoke.request" && (!payload.TryGetProperty("idempotencyKey", out var key) || key.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(key.GetString()))) throw new ProtocolViolationException("PROTOCOL_MALFORMED", "执行请求缺少幂等键");
+        if (type == "canvas/resource.replace.request") ValidateResourceReplace(payload);
         if (type == "host/init") ValidateHostInit(payload);
         if (type == "host/capabilities") ValidateCapabilities(payload);
         if (type == "host/job.update") ValidateJobUpdate(payload);
+    }
+
+    private static void ValidateResourceReplace(JsonElement payload)
+    {
+        foreach (var field in new[] { "recordId", "entityId", "variantId" })
+            if (!Guid.TryParse(payload.GetProperty(field).GetString(), out _))
+                throw new ProtocolViolationException("PROTOCOL_MALFORMED", $"资源替换请求的 {field} 无效");
+
+        if (payload.TryGetProperty("variantVersionId", out var version)
+            && version.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+            throw new ProtocolViolationException("PROTOCOL_MALFORMED", "资源替换请求的 variantVersionId 无效");
+
+        if (version.ValueKind == JsonValueKind.String
+            && !Guid.TryParse(version.GetString(), out _))
+            throw new ProtocolViolationException("PROTOCOL_MALFORMED", "资源替换请求的 variantVersionId 无效");
     }
 
     private static void ValidateHostInit(JsonElement payload)
@@ -71,6 +87,7 @@ public static class DreamForgeProtocol
         "canvas/op.batch" => ["batchId", "baseRevision", "source", "ops"],
         "canvas/undo.request" or "canvas/redo.request" => ["localOnly"],
         "canvas/invoke.request" => ["invocation", "idempotencyKey"],
+        "canvas/resource.replace.request" => ["recordId", "entityId", "variantId", "variantVersionId"],
         "canvas/job.cancel.request" => ["jobId"],
         "host/init" => ["protocolVersion", "hostVersion", "session", "capabilities", "scene", "locale"],
         "host/op.batch" => ["batchId", "revision", "origin", "actorSessionId", "ops"],
@@ -78,6 +95,7 @@ public static class DreamForgeProtocol
         "host/undo.result" => ["ok", "localOnly", "revision", "reason"],
         "host/job.update" => ["jobId", "invocationId", "state", "progressPercent", "outputs"],
         "host/capabilities" => ["serverClaims", "canEditCanvas", "canInvokeSkill", "canCancelJob", "canUndo"],
+        "host/resource.replace.result" => ["requestId", "ok", "message"],
         "host/error" => ["code", "message", "severity"],
         _ => Array.Empty<string>()
     };

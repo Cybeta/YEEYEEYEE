@@ -2,11 +2,11 @@
 
 - 基准版本：`0.1.0-dev`
 - 建立日期：2026-09-25
-- 最近校正：**2026-09-28（按实际代码复核并改写 01–04 设计文档）**
-- 当前阶段：单机端到端可用；桌面端是唯一交付端（WinForms 自绘画布）
-- 架构基线：C# 承担全部实现——`Core`（协议/Job/枚举/权限/引用图）、`Host`（执行服务/SQLite Job/ComfyUI/回调）、`Desktop`（自绘画布 + Agent + 设定库 + 工作树 + 技能/插件）、`Web`（作业服务，无画布）。
-  **TypeScript/React/tldraw 画布（`DreamForge.Canvas`）未接入任何宿主**，桌面端已移除 WebView2。
-  两套协议并用：宿主协议 `DreamForgeProtocol v1`（Host/Web/TS/测试）与 Agent JSON 协议（Desktop 唯一驱动画布的通道）。
+- 最近校正：**2026-09-28（按实际代码复核并改写 01–04 设计文档；同日追加第七十八轮：Web 画布通道 + 章节分块排版 + 资源引用新写法）**
+- 当前阶段：单机端到端可用；桌面端是唯一交付端（WinForms 自绘画布），Web 托管一份只读画布镜像
+- 架构基线：C# 承担全部实现——`Core`（协议/Job/枚举/权限/引用图）、`Host`（执行服务/SQLite Job/ComfyUI/回调）、`Desktop`（自绘画布 + Agent + 设定库 + 工作树 + 技能/插件）、`Web`（作业服务 + 托管 TS 画布，转发桌面端推送的画布投影）。
+  **TypeScript/React 画布（`DreamForge.Canvas`）由 Web 托管（静态 dist + `/ws/canvas`），浏览器走 WebSocket；仍是 div 卡片，tldraw 未被使用，也不在 slnx**，桌面端已移除 WebView2。
+  两套协议并用：宿主协议 `DreamForgeProtocol v1`（Host/Web/TS/测试，17 条消息）与 Agent JSON 协议（Desktop 唯一驱动画布的通道，13 种 action）。
 
 ## 更新规则
 
@@ -24,13 +24,26 @@
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | 阶段 0 | 设定、产品计划、架构和核心契约 | 初稿完成；2026-09-28 按代码重新校正 |
-| 阶段 1 | 版本化宿主协议、跨语言夹具、TS 画布基础 | 协议与 TS 侧实现完成；**TS 画布未接入宿主** |
+| 阶段 1 | 版本化宿主协议、跨语言夹具、TS 画布基础 | 协议与 TS 侧实现完成；**TS 画布已由 Web 托管（浏览器 WebSocket），仍不在 slnx、未用 tldraw** |
 | 阶段 2 | C# Core、权限、TypedReference、Job 模型 | 完成（有用例覆盖） |
-| 阶段 3 | 桌面宿主与 Web 宿主壳 | 完成：桌面为 WinForms 自绘画布，Web 为作业服务（无画布） |
+| 阶段 3 | 桌面宿主与 Web 宿主壳 | 完成：桌面为 WinForms 自绘画布，Web 为作业服务 + 托管 TS 画布（只读镜像） |
 | 阶段 4 | 单机端到端闭环 | 完成（节点→出图→资产→任务库）；**视频未实现** |
 | 阶段 5 | 设定库（视觉轴）+ 工作树（叙事轴） | 字段与界面完成；节点↔工作树关联 2026-09-28 补上 |
 | 阶段 6 | Yjs 协作、房间、审批与审计 | **未开始** |
 | 阶段 7 | 完整解决方案构建、回归测试与发布门槛 | **未开始**（安装包、品牌统一、回归均未做） |
+
+## 进度目标（2026-09-28 设定）
+
+三个目标按依赖顺序推进：先把单机 AI 全流程跑顺，再把 Web 端做成可用端，最后做多端协同。每个目标给可判定的验收条件，完成情况在下方《实现现状基准》与逐轮记录里跟踪。
+
+| # | 目标 | 验收条件（达到即可判定完成） | 现状 |
+| --- | --- | --- | --- |
+| **目标 1** | **AI 自动全套流程跑通** | 给定一句创意/剧情，Agent 能自动跑完：确认剧情 → 建工作树（章节/角色/能力/版本）→ 建设定库（角色/场景/道具实体与变体）→ 建画布节点（`parentTarget` + `workTreeTarget` + `entityTargets`，含连线与章节分块）→ 按引用逐节点出图 → 产物落 `assets/` 与任务库；中途不需要用户手动补数据（审批/自动模式由用户选择），并有端到端跑通用例 | **部分**：四步流水线、引用、技能与出图链路均已就绪；仍缺"节点↔工作树"自动同步引擎，也没有端到端自动跑通的自动化用例 |
+| **目标 2** | **Web 端完成** | 浏览器打开 `http://localhost:5000` 就能完成桌面端的主要创作动作（看画布、按章节过滤、换/锁引用版本、编辑节点、触发技能/出图、查看任务），并补齐资产 HTTP 端点（引用缩略图可见）、浏览器交互回传（`selection.changed`）与前端构建产物（`dist` 纳入构建流程） | **起步**：已能托管 TS 画布并回写引用版本；节点编辑、资产端点、技能/任务入口、`dist` 构建流程均未做 |
+| **目标 3** | **Web / Desktop 多端协同** | 同一项目在 Web 与桌面端同时打开时，画布改动双向实时同步（不再只是桌面端单向推送 + 轮询回写），两端互不覆盖，撤销与冲突有明确语义；配套会话身份、权限位与多端在线状态 | **未开始**：当前只有桌面端单向推送；协作（房间 / CRDT）与账号/权限均未实现 |
+
+> 与阶段表的对应：目标 1 落在阶段 4–5，目标 2 落在阶段 1 / 3，目标 3 落在阶段 6。
+
 
 ## 实现现状基准（2026-09-28 校正）
 
@@ -39,16 +52,17 @@
 | 主题 | 事实 |
 | --- | --- |
 | 解决方案 | `DreamForge.slnx` 含 6 个项目；`DreamForge.Mcp` 与 `DreamForge.Canvas` 都不在其中 |
-| 引用关系 | Core←Host←{Desktop,Web}；Desktop 不引用 Web/Mcp |
-| 桌面画布 | `WorkflowCanvasControl`（GDI+ 自绘）；WebView2 与 postMessage 已移除 |
-| 前端画布 | `DreamForge.Canvas` 独立存在，tldraw 未被使用，未接入宿主 |
-| 数据模型 | 画布 JSON = `Nodes` + `Edges` + `Entities`（视觉轴）+ `WorkTree`（叙事轴） |
-| 三套锚点 | `ParentNodeId`（排版）/ `WorkTreeItemId`（叙事轴）/ `References[]`（视觉轴） |
-| Agent | Ask / AutoStage / ReadOnly 三种授权；虚影预览→勾选→保存；撤销依赖提交前快照 |
+| 引用关系 | Core←Host←{Desktop,Web}；Desktop 不引用 Web/Mcp，两者只走 HTTP；`Core.Tests` 因校验桌面状态已引用 **Desktop**（`net10.0-windows`） |
+| 桌面画布 | `WorkflowCanvasControl`（GDI+ 自绘）；WebView2 与 postMessage 已移除；自动排版为**按章节分块**（`ChapterKeyOf` / `ChapterBounds` / `ArrangeChapter`） |
+| 前端画布 | `DreamForge.Canvas` 由 `DreamForge.Web` 托管（静态 dist + `/ws/canvas` + `/api/canvas/*`），浏览器走 WebSocket；仍是 div 卡片，tldraw 未被使用，不在 slnx |
+| 桌面 ↔ Web | 桌面端 `POST /api/canvas/scene` 推全量投影 + 每 500ms 轮询 `GET /api/canvas/resource-replace/next`；Web 广播 `host/scene.reset`，并回投 `host/resource.replace.result` |
+| 数据模型 | 画布 JSON = `Nodes` + `Edges` + `Entities`（视觉轴）+ `WorkTree`（叙事轴）；`NodeCategory` 追加 `StoryPlan=6 / StoryOutline=7 / Chapter=8` |
+| 三套锚点 | `ParentNodeId`（排版）/ `WorkTreeItemId`（叙事轴）/ `References[]`（视觉轴，可被 `entityTarget`/`entityTargets` 写入） |
+| Agent | Ask / AutoStage / ReadOnly 三种授权；13 种 action（新增 `entityTargets`）；虚影预览→勾选→保存；撤销依赖提交前快照；**角色/场景/道具不建画布节点** |
 | 生成能力 | 文本与图像已实现（OpenAI 兼容 / Anthropic / ComfyUI）；**视频未实现** |
 | 密钥 | DPAPI（当前用户）+ 密文前缀 `dpapi:`；配置文件在程序目录 |
-| 未实现 | 协作、账号/审批/配额/审计、Web 画布、TS 画布接入、视频 |
-| 待处理不一致 | `05_Core_Contracts.cs` 未编译；AutoStage 重复应用；`MarkVersionAdopted` 未解析；界面文案大小写变体（`YeeYeeYee` vs 产品名 `YEEYEEYEE`） |
+| 未实现 | 协作、账号/审批/配额/审计、Web 端独立创作、视频 |
+| 待处理不一致 | `05_Core_Contracts.cs` 未编译；AutoStage 重复应用；`MarkVersionAdopted` 未解析；资源替换两条消息缺协议夹具；Web 画布缩略图无资产端点、`/api/canvas/nodes` 无调用方、`selection.changed` 未处理；界面文案大小写变体（`YeeYeeYee` vs 产品名 `YEEYEEYEE`） |
 
 ## 2026-09-25 第一轮基准
 
@@ -3722,6 +3736,7 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 
 - 文档中每条事实都能在代码里找到依据（文件与行号见 `02_Architecture.md` 各节）；未使用任何"注释里的设想"作为事实。
 - 关键校正结论：桌面端已移除 WebView2 且未接入 TS 画布；`DreamForge.Web` 无画布；**视频生成未实现**；`DreamForge.Mcp` 未接入 Desktop 且不在 slnx；根目录 `05_Core_Contracts.cs` 未参与编译且与 Core 不兼容；协作/账号/审批/配额/审计均未开始。
+  > 其中"未接入 TS 画布 / Web 无画布"已被**第七十八轮**推翻：Web 现在托管 TS 画布并转发桌面端推送的投影；本行保留为该轮的历史结论。
 
 ### 遗留问题
 
@@ -3730,6 +3745,56 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 ### 下一步
 
 实现"节点↔工作树"的自动同步引擎；`PlaceNewNode` 按 `Category` 分层排版。
+
+
+## 2026-09-28 第七十八轮更新：Web 画布通道 · 章节分块排版 · 资源引用新写法
+
+> 本轮为**事后核对补记**：这批代码改动先于文档落地，本轮把 01–04、README、`protocol/PROTOCOL.md` 与本节一起补齐。
+
+### 已完成
+
+1. **桌面 ↔ Web 画布通道**（新增 `DreamForge.Desktop\Canvas\NodeProjection.cs`；改 `MainForm.cs`、`DreamForge.Web\Program.cs`、`WebCanvasTransport.cs`、`HostBridge.cs`）
+   - `NodeProjection.ProjectRecords`：`WorkflowNode` → 协议 records（`recordType` 按 `NodeCategory` 分层映射，`record` 带 `title/content/x/y/chapter/status/parentId/references[]`）；工作树里没有对应节点的 `Chapter` 条目投影成 `wt-<id>` 的 L3 record。
+   - Desktop：新增 `PushCanvasToWebAsync`（画布变更 / 载入 / 切章 / 替换版本时 `POST /api/canvas/scene`）与 500ms 计时器里的 `PollResourceReplaceRequests`（`GET /api/canvas/resource-replace/next`）；地址是常量 `http://localhost:5000`，失败静默。
+   - Web：`UseStaticFiles` 托管 `..\DreamForge.Canvas\dist`、`MapGet("/")`、`/ws/canvas` 与 `/api/canvas/scene|nodes|resource-replace[/next|/result]`；`WebCanvasTransport` 从 `Console.WriteLine` 改为 **WebSocket 广播**（新连接补发最近一帧 `host/scene.reset`）；新增 `appsettings.json`（Kestrel `http://localhost:5000`）。
+2. **协议新增两条消息**（`Core\Protocol.cs`、`Host\HostBridge.cs` + TS 侧同构）
+   - `canvas/resource.replace.request`（`recordId`/`entityId`/`variantId`/可空 `variantVersionId`，uuid 与字段严格校验）与 `host/resource.replace.result`（`requestId`/`ok`/`message`/`revision`）；消息总数 15 → **17**。
+   - `HostBridge` 新增 `ResourceReplaceRequested` 事件、`SendScene`、`SendNodeUpdates`、`SendResourceReplaceResult`，以及 `RESOURCE_REPLACE_UNAVAILABLE`/`RESOURCE_REPLACE_FAILED` 两条错误回传。
+   - `WorkflowCanvasState.ReplaceReferenceVersion`：节点不存在/已锁定、引用不存在、版本不属于变体一律拒绝；成功只改 `NodeReference.VariantVersionId`（`null` = 跟随最新）。
+3. **画布自动排版改按章节分块**（`WorkflowCanvasControl.cs`）
+   - 新增 `ChapterKeyOf` / `GroupByChapter` / `ChapterBounds` / `ArrangeChapter` / `ChapterBlockWidth` / `NodeHeightFor` / `IsResourceCategory` / `DrawChapterBlocks`。
+   - `AutoArrange` 由"按连线深度分列"改为"每章一个区块、块内 3 列网格、主线在前资源在后、区块每行 3 块"，并绘制块底与虚线框；右键菜单改为"整理画布（按章节分块）"。
+   - Agent `PlaceNewNode` 复用同一套函数：新节点落进所属章节区块并整块重排，不再用固定 190×100 硬避让（这替代了原待办里的"按 Category 分层排版"）。
+4. **节点分类与引用写法**（`WorkflowCanvasControl.cs`、`AgentActions.cs`、`MainForm.cs`、`AgentPane.cs`）
+   - `NodeCategory` 追加 `StoryPlan=6 / StoryOutline=7 / Chapter=8`（旧数据不受影响）；`ParseNodeCategory` 改为关键词包含判定（人物/主角/镜头/成片…），界面下拉加"剧情/企划/章节"。
+   - `AgentAction.EntityTargets` + `ReadStringArray` + `ApplyReferences`：`entityTargets` 一组设定名各跟随首个变体与当前版本（重复去重），需要锁变体/版本时才用单条 `entityTarget`；action 种类 12 → **13**。
+   - **提示词改写**：角色/场景/道具**不再建画布节点**（只存在于设定库，节点用 `entityTargets` 引用）；分批规则改为"默认先树后节点，但用户明确要求生成节点时，当次回复必须给出 `create_node` 批次"。
+5. **Web 画布 UI**（`CanvasApp.tsx`、`VersionedMessages.ts`、`main.tsx`、`workflow.css`）
+   - 五层分带（L1 剧情 / L2 企划 / L3 章节 / L4 分镜头 / L5 成品）+ 章节过滤 + 概览视图 + 视口状态存 `localStorage`。
+   - 节点卡片内引用条：缩略图、种类标签、折叠、版本下拉（跟随最新 / 锁定某版）→ 发 `canvas/resource.replace.request`；右侧检查器显示引用详情与"定位资源库"。
+   - `main.tsx` 增加 WebSocket 传输（非 WebView 环境），WebView 分支保留。
+6. **设定三个进度目标**：目标 1「AI 自动全套流程跑通」、目标 2「Web 端完成」、目标 3「Web / Desktop 多端协同」，含验收条件与现状（见本文件《进度目标》与 README 同名小节）。
+
+### 本轮验证
+
+- `dotnet build DreamForge.slnx` → **成功，0 警告 0 错误**（6 个项目）。
+- `dotnet run --project DreamForge.Core.Tests` → **19 项全部通过**（含新增"资源版本替换协议""资源版本替换状态"）。
+- `dotnet run --project DreamForge.Agent.Tests` → **46 项全部通过**。
+- TS 侧未跑 `npm run build` / `npm test`（本轮只核对代码，未构建前端）；`dist` 未生成，Web 端静态托管需先本地构建。
+- 文档侧：01（v6.2）、02、03、04（v2.1）、README、`protocol/PROTOCOL.md`、本文件已按上述改动同步。
+
+### 遗留问题
+
+- 新增两条协议消息**没有 `protocol/fixtures` 夹具**，违反本文件更新规则第 4 条，需补夹具与 manifest 条目。
+- Web 画布的 `thumbnailRef` 仍是 `asset://文件名`，Web 没有资产 HTTP 端点，浏览器加载不出引用缩略图。
+- `POST /api/canvas/nodes`（`HostBridge.SendNodeUpdates`）没有调用方；浏览器回传的 `canvas/selection.changed`（含 `entityId`/`openResourceLibrary`）在 `HostBridge.Receive` 里没有分支，"定位资源库"未生效。
+- 仍然存在：`05_Core_Contracts.cs` 未参与编译、`AutoStage` 重复应用同一批 actions、`MarkVersionAdopted` 未解析。
+- Web 画布的数据全部来自桌面端推送（桌面端未启动时浏览器画布为空）；Web 端唯一能回写的操作是替换/锁定引用版本，节点编辑仍在桌面端。
+- 仍缺"节点↔工作树"的自动同步引擎。
+
+### 下一步
+
+按《进度目标》推进：目标 1 先做"节点↔工作树"自动同步引擎与端到端跑通用例；目标 2 补 Web 画布的资产 HTTP 端点、`selection.changed` 回传与 `dist` 构建流程；同时给资源替换两条消息补协议夹具。
 
 
 

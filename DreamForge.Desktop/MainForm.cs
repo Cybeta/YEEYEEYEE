@@ -141,6 +141,10 @@ public sealed class MainForm : ScaledForm, IPluginHost
     private string? executionStoreWarning;
     private bool restartForProjectSelection;
     public bool RestartForProjectSelection => restartForProjectSelection;
+    private static readonly HttpClient canvasPushClient = new() { Timeout = TimeSpan.FromSeconds(3) };
+    private const string CanvasWebBaseUrl = "http://localhost:5000";
+    private bool resourceReplacePollInFlight;
+    private readonly Dictionary<Guid, ResourceReplaceOutcome> resourceReplaceOutcomes = new();
 
     public MainForm(SingleMachineExecutionService? execution = null)
     {
@@ -162,7 +166,7 @@ public sealed class MainForm : ScaledForm, IPluginHost
         SkillLibrary.EnsureDefaultSkills();
         RegisterBuiltInPlugins();
         LoadExternalPlugins();
-        BuildLayout(); LoadInitialCanvas(); this.execution.Updated += OnExecutionUpdated; refreshTimer.Interval = 500; refreshTimer.Tick += (_, _) => RefreshJobList(); refreshTimer.Start();
+        BuildLayout(); LoadInitialCanvas(); this.execution.Updated += OnExecutionUpdated; refreshTimer.Interval = 500; refreshTimer.Tick += (_, _) => { RefreshJobList(); PollResourceReplaceRequests(); }; refreshTimer.Start();
         // 骨架建完立刻套一次主题：各面板里的列表、输入框、按钮由这一遍统一成同一套配色。
         ApplyTheme();
         // 进入画布后默认展开 Agent 面板；用户仍可通过面板右上角关闭按钮收起。
@@ -2719,6 +2723,7 @@ public sealed class MainForm : ScaledForm, IPluginHost
             canvasRevisionLabel.Text = $"修订 {canvasRevision}";
             RefreshNodeInspector();
             canvas.Invalidate();
+            _ = PushCanvasToWebAsync("state-changed");
         };
         canvas.SelectionChanged += (_, _) => RefreshNodeInspector();
         canvas.NodeDoubleClicked += (_, _) => ShowNodePropertiesDialog();
@@ -2739,11 +2744,12 @@ public sealed class MainForm : ScaledForm, IPluginHost
                 menu.Items.Add(suggest);
                 menu.Items.Add(new ToolStripSeparator());
             }
-            menu.Items.Add(new ToolStripMenuItem(node is null ? "自动排版全部节点" : "自动排版此节点的子节点")
+            var arrange = new ToolStripMenuItem("整理画布（按章节分块）")
             {
                 Image = SystemIcons.Application.ToBitmap()
-            });
-            menu.Items[0].Click += (_, _) => canvas.AutoArrange();
+            };
+            arrange.Click += (_, _) => canvas.AutoArrange();
+            menu.Items.Add(arrange);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.AddRange(BuildPluginMenuItems(target,
                 new ContextInfo { Target = target, Canvas = canvas.State, Node = node }).ToArray());
@@ -2880,6 +2886,8 @@ public sealed class MainForm : ScaledForm, IPluginHost
             var item = e.Node?.Tag as WorkTreeItem;
             RefreshWorkTreeDetails(item);
             HighlightWorkTreeItem(item);
+            if (item is { Kind: WorkTreeKind.Chapter })
+                _ = PushCanvasToWebAsync($"chapter-switched:{item.Name}");
         };
         workTreeMetaLabel = new Label { Dock = DockStyle.Top, Height = 44, AutoEllipsis = true, Padding = new Padding(8, 8, 8, 4), ForeColor = Theme.TextMuted };
         workTreePromptBox = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Theme.EditorBg, ForeColor = Theme.Text, BorderStyle = BorderStyle.None };
@@ -3187,8 +3195,131 @@ public sealed class MainForm : ScaledForm, IPluginHost
         }
     }
 
+    private sealed record CanvasResourceReplaceRequest(
+        Guid RequestId,
+        Guid RecordId,
+        Guid EntityId,
+        Guid VariantId,
+        Guid? VariantVersionId);
+
+    private sealed record ResourceReplaceOutcome(bool Ok, string Message, int? Revision);
+
+    private void PollResourceReplaceRequests()
+    {
+        if (resourceReplacePollInFlight || IsDisposed) return;
+        resourceReplacePollInFlight = true;
+        _ = PollResourceReplaceRequestsAsync();
+    }
+
+    private async Task PollResourceReplaceRequestsAsync()
+    {
+        try
+        {
+            using var response = await canvasPushClient.GetAsync(
+                $"{CanvasWebBaseUrl}/api/canvas/resource-replace/next");
+            if (response.StatusCode == System.Net.HttpStatusCode.NoContent) return;
+            if (!response.IsSuccessStatusCode) return;
+
+            var request = await JsonSerializer.DeserializeAsync<CanvasResourceReplaceRequest>(
+                await response.Content.ReadAsStreamAsync(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (request is not null)
+            {
+                BeginInvoke(() =>
+                {
+                    try
+                    {
+                        ApplyResourceReplace(request);
+                    }
+                    catch (InvalidOperationException error)
+                    {
+                        var outcome = new ResourceReplaceOutcome(false, error.Message, null);
+                        resourceReplaceOutcomes[request.RequestId] = outcome;
+                        TrimResourceReplaceOutcomes();
+                        _ = PushResourceReplaceResultAsync(request.RequestId, outcome.Ok, outcome.Message, outcome.Revision);
+                    }
+                });
+            }
+        }
+        catch (HttpRequestException)
+        {
+            // Web 服务未启动或暂时不可达，下一次定时器周期继续尝试。
+        }
+        catch (TaskCanceledException)
+        {
+            // 网络请求超时不影响桌面画布操作。
+        }
+        finally
+        {
+            resourceReplacePollInFlight = false;
+        }
+    }
+
+    private void ApplyResourceReplace(CanvasResourceReplaceRequest request)
+    {
+        if (resourceReplaceOutcomes.TryGetValue(request.RequestId, out var previous))
+        {
+            _ = PushResourceReplaceResultAsync(request.RequestId, previous.Ok, previous.Message, previous.Revision);
+            return;
+        }
+
+        if (!canvas.State.ReplaceReferenceVersion(
+                request.RecordId,
+                request.EntityId,
+                request.VariantId,
+                request.VariantVersionId,
+                out var error))
+            throw new InvalidOperationException(error);
+
+        canvasRevision++;
+        canvasRevisionLabel.Text = $"修订 {canvasRevision}";
+        RefreshNodeInspector();
+        canvas.Invalidate();
+        SaveRecentCanvas();
+        SaveCurrentCanvasTab();
+        _ = PushCanvasToWebAsync("resource-version-replaced");
+        var outcome = new ResourceReplaceOutcome(true, "资源版本替换成功。", canvasRevision);
+        resourceReplaceOutcomes[request.RequestId] = outcome;
+        TrimResourceReplaceOutcomes();
+        _ = PushResourceReplaceResultAsync(request.RequestId, outcome.Ok, outcome.Message, outcome.Revision);
+    }
+
+    private void TrimResourceReplaceOutcomes()
+    {
+        const int maxEntries = 256;
+        if (resourceReplaceOutcomes.Count <= maxEntries) return;
+        foreach (var key in resourceReplaceOutcomes.Keys.Take(resourceReplaceOutcomes.Count - maxEntries).ToArray())
+            resourceReplaceOutcomes.Remove(key);
+    }
+
+    private async Task PushResourceReplaceResultAsync(Guid requestId, bool ok, string message, int? revision)
+    {
+        try
+        {
+            var payload = JsonSerializer.Serialize(new { requestId, ok, message, revision });
+            using var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            await canvasPushClient.PostAsync($"{CanvasWebBaseUrl}/api/canvas/resource-replace/result", content);
+        }
+        catch { /* Web 服务未启动或不可达，下一次用户操作仍可重试。 */ }
+    }
+
     private RecentCanvasState BuildCanvasState() =>
         new(canvasTitle, canvasRevision, promptBox.Text, negativePromptBox.Text, (int)widthBox.Value, (int)heightBox.Value, (int)stepsBox.Value, (double)cfgBox.Value, seedBox.Text, canvas.State);
+
+    /// <summary>把当前画布状态投影为 records 并推送给 Web 画布前端。火灾安全：失败只记日志。</summary>
+    private async Task PushCanvasToWebAsync(string reason = "scene-update")
+    {
+        try
+        {
+            var state = canvas.State;
+            if (state is null) return;
+            var records = NodeProjection.ProjectRecords(state.Nodes, state);
+            var payload = JsonSerializer.Serialize(new { records, Revision = canvasRevision, Reason = reason });
+            var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            await canvasPushClient.PostAsync($"{CanvasWebBaseUrl}/api/canvas/scene", content);
+        }
+        catch { /* Web 服务未启动或不可达，静默忽略 */ }
+    }
 
     private void ApplyCanvasState(RecentCanvasState state, bool advanceRevision)
     {
@@ -3208,6 +3339,7 @@ public sealed class MainForm : ScaledForm, IPluginHost
         RefreshNodeInspector();
         RefreshEntityList();
         RefreshWorkTreeView();
+        _ = PushCanvasToWebAsync("canvas-loaded");
     }
 
     private void ShowNodePropertiesDialog()
@@ -3294,7 +3426,7 @@ public sealed class MainForm : ScaledForm, IPluginHost
         panel.Controls.Add(attachmentButtons, 0, 13);
         panel.Controls.Add(FieldLabel("节点分类 / 内容来源"), 0, 14);
         nodeCategoryBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        nodeCategoryBox.Items.AddRange(new object[] { "通用", "角色", "场景", "分镜", "道具", "成品" });
+        nodeCategoryBox.Items.AddRange(new object[] { "通用", "角色", "场景", "分镜", "道具", "成品", "剧情", "企划", "章节" });
         nodeCategoryBox.Width = 142;
         contentSourceBox.DropDownStyle = ComboBoxStyle.DropDownList;
         contentSourceBox.Items.AddRange(Enum.GetNames<ContentSource>());
@@ -3557,6 +3689,9 @@ public sealed class MainForm : ScaledForm, IPluginHost
         NodeCategory.Storyboard => "分镜",
         NodeCategory.Prop => "道具",
         NodeCategory.Product => "成品",
+        NodeCategory.StoryPlan => "剧情",
+        NodeCategory.StoryOutline => "企划",
+        NodeCategory.Chapter => "章节",
         _ => "通用"
     };
 
@@ -3567,6 +3702,9 @@ public sealed class MainForm : ScaledForm, IPluginHost
         "分镜" => NodeCategory.Storyboard,
         "道具" => NodeCategory.Prop,
         "成品" => NodeCategory.Product,
+        "剧情" => NodeCategory.StoryPlan,
+        "企划" => NodeCategory.StoryOutline,
+        "章节" => NodeCategory.Chapter,
         _ => NodeCategory.General
     };
 

@@ -16,6 +16,8 @@ DreamForge.Canvas/dist/
 recent-projects.json
 startup-media.txt
 agent-diagnostics.log
+# 运行期任务库（各宿主各留一份，不入库）
+*.jobs.db
 
 # ── 用户创作产物（项目数据不入库）──
 /Projects/

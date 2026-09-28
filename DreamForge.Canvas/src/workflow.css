@@ -36,7 +36,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .capability-list span { padding: 7px 9px; border: 1px solid var(--border); color: var(--dim); font-size: 11px; }
 .capability-list span.available { border-color: #426c5d; color: var(--green); }
 .workflow-canvas { position: relative; min-width: 0; overflow: auto; background: #15171d; isolation: isolate; }
+.canvas-toolbar { position: sticky; top: 12px; z-index: 4; display: flex; align-items: center; gap: 12px; width: fit-content; margin: 12px 16px 0 auto; padding: 7px 9px; border: 1px solid var(--border); background: #1a1c23e8; box-shadow: 0 8px 20px #08090d55; }
+.view-switch { display: flex; gap: 2px; }
+.view-switch button, .resource-action { border: 1px solid var(--border); color: var(--muted); background: var(--field); cursor: pointer; }
+.view-switch button { padding: 6px 9px; font-size: 11px; }
+.view-switch button.active { border-color: var(--accent); color: var(--text); background: #2a3150; }
+.chapter-picker { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
+.chapter-picker select { min-width: 120px; padding: 6px 8px; border: 1px solid var(--border); color: var(--text); background: var(--field); }
+.toolbar-count { color: var(--dim); font-size: 10px; white-space: nowrap; }
 .canvas-grid { position: absolute; inset: 0; min-width: 1800px; min-height: 1100px; background-image: radial-gradient(#363a47 1px, transparent 1px); background-size: 24px 24px; opacity: .42; }
+.canvas-edges { position: absolute; top: 0; left: 0; z-index: 0; overflow: visible; pointer-events: none; }
+.canvas-edge { fill: none; stroke: #63739c; stroke-width: 2; stroke-opacity: .72; }
 .workflow-node { position: absolute; z-index: 1; width: 230px; min-height: 130px; padding: 13px 14px 15px; border: 1px solid var(--border-strong); border-radius: 8px; background: #20232c; box-shadow: 0 12px 28px #08090d40; cursor: pointer; transition: border-color .16s ease, box-shadow .16s ease; }
 .workflow-node:hover { border-color: #64709a; }
 .workflow-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px #7894ff24, 0 14px 30px #08090d55; }
@@ -57,4 +67,68 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .inspector textarea { min-height: 140px; line-height: 1.55; }
 .inspector-foot { margin: 18px 6px 0; }
 .inspector-empty { margin: 28px 6px; }
+
+/* 层级标签栏（左侧画布内） */
+.layer-rail { position: absolute; left: 8px; z-index: 0; pointer-events: none; }
+.layer-rail-label { font-size: 10px; color: var(--dim); letter-spacing: .04em; white-space: nowrap; opacity: .6; }
+
+/* 左侧面板层级统计 */
+.layer-legend { margin: 18px 6px; display: grid; gap: 5px; }
+.layer-legend-row { display: flex; align-items: baseline; justify-content: space-between; padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; }
+.layer-legend-label { color: var(--muted); font-size: 10px; }
+.layer-legend-count { color: var(--accent); font-size: 13px; font-weight: 500; }
+
+/* Pill 节点（L1/L2/L5 单节点居中） */
+.workflow-node.pill-node { width: 180px; min-height: 50px; padding: 10px 16px; border-radius: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.workflow-node.pill-node h3 { margin: 0; font-size: 13px; }
+.workflow-node.pill-node p { display: none; }
+.workflow-node.pill-node .node-top { display: none; }
+.workflow-node.pill-node .node-port { top: 20px; }
+
+/* 引用缩略图条 */
+.workflow-node.has-refs { padding-bottom: 6px; }
+.ref-strip { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+.ref-strip-header { display: flex; align-items: center; justify-content: space-between; font-size: 10px; color: var(--dim); cursor: pointer; padding: 2px 0; user-select: none; }
+.ref-strip-header:hover { color: var(--muted); }
+.ref-toggle { font-size: 9px; }
+
+/* 展开态：缩略图卡片排 */
+.ref-cards { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.ref-card { width: 72px; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px; border: 1px solid var(--border); border-radius: 6px; background: #1a1c24; cursor: pointer; transition: border-color .12s ease; }
+.ref-card:hover, .ref-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px #7894ff55; }
+.ref-thumb { width: 64px; height: 48px; border-radius: 4px; overflow: hidden; background: #16181f; display: grid; place-items: center; }
+.ref-thumb-img { width: 100%; height: 100%; object-fit: cover; }
+.ref-thumb-placeholder { font-size: 11px; color: var(--dim); }
+.ref-kind-tag { font-size: 8px; padding: 1px 5px; border-radius: 8px; background: #2a2d3a; color: var(--muted); margin-top: 2px; }
+.ref-kind-tag.character { background: #2a3040; color: #9ab0e8; }
+.ref-kind-tag.scene { background: #2d2a38; color: #c4a0d8; }
+.ref-kind-tag.prop { background: #2d2a30; color: #d4b080; }
+.ref-name { font-size: 9px; color: var(--text); text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 64px; }
+.ref-variant { font-size: 8px; color: var(--dim); text-align: center; }
+
+/* 折叠态：只显示标签条 */
+.ref-collapsed-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.ref-tag { font-size: 9px; padding: 2px 7px; border-radius: 8px; background: #1e212c; color: var(--muted); border: 1px solid var(--border); }
+.ref-tag.character { color: #9ab0e8; border-color: #2a3a55; }
+.ref-tag.scene { color: #c4a0d8; border-color: #3a2a48; }
+.ref-tag.prop { color: #d4b080; border-color: #3a3022; }
+.ref-tag.more { color: var(--dim); }
+
+/* Inspector 引用列表 */
+.inspector-refs { margin: 18px 6px 0; }
+.inspector-refs > strong { display: block; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+.inspector-ref-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 0; border: 0; border-bottom: 1px solid var(--border); color: var(--text); background: transparent; text-align: left; cursor: pointer; }
+.inspector-ref-item:hover, .inspector-ref-item.selected { background: #252a3a; }
+.resource-detail { margin: 18px 6px 0; padding-top: 12px; border-top: 1px solid var(--border); }
+.resource-detail-heading { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+.resource-detail-heading span { color: var(--dim); }
+.resource-detail-name { margin: 10px 0 14px; color: var(--text); font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.version-picker-label { display: block; margin: 12px 0 0; color: var(--muted); font-size: 11px; }
+.version-picker { display: block; width: 100%; margin-top: 7px; padding: 8px 9px; border: 1px solid var(--border); color: var(--text); background: var(--field); font-size: 11px; }
+.version-picker:disabled { cursor: not-allowed; opacity: .45; }
+.resource-owner { margin: 8px 0; color: var(--dim); font-size: 10px; overflow-wrap: anywhere; }
+.resource-action { width: 100%; margin-top: 8px; padding: 8px 9px; font-size: 11px; text-align: left; }
+.resource-action:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.resource-action:disabled { cursor: not-allowed; opacity: .45; }
+
 @media (max-width: 1120px) { body { min-width: 820px; } .workflow-shell { grid-template-columns: 180px minmax(0, 1fr) 250px; } }

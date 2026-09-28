@@ -6,11 +6,10 @@ export class ProtocolViolationError extends Error {
 
 const requiredPayload: Partial<Record<MessageType, string[]>> = {
   'canvas/hello': ['canvasVersion', 'protocolVersion', 'minHostProtocol', 'features'],
-  'canvas/op.batch': ['batchId', 'baseRevision', 'source', 'ops'], 'canvas/undo.request': ['localOnly'],
-  'canvas/redo.request': ['localOnly'], 'canvas/invoke.request': ['invocation', 'idempotencyKey'],
+  'canvas/op.batch': ['batchId', 'baseRevision', 'source', 'ops'], 'canvas/undo.request': ['localOnly'], 'canvas/redo.request': ['localOnly'], 'canvas/invoke.request': ['invocation', 'idempotencyKey'], 'canvas/resource.replace.request': ['recordId', 'entityId', 'variantId', 'variantVersionId'],
   'canvas/job.cancel.request': ['jobId'], 'host/init': ['protocolVersion', 'hostVersion', 'session', 'capabilities', 'scene', 'locale'],
   'host/op.batch': ['batchId', 'revision', 'origin', 'actorSessionId', 'ops'], 'host/scene.reset': ['revision', 'reason', 'scene'],
-  'host/undo.result': ['ok', 'localOnly', 'revision', 'reason'], 'host/job.update': ['jobId', 'invocationId', 'state', 'progressPercent', 'outputs'],
+  'host/undo.result': ['ok', 'localOnly', 'revision', 'reason'], 'host/job.update': ['jobId', 'invocationId', 'state', 'progressPercent', 'outputs'], 'host/resource.replace.result': ['requestId', 'ok', 'message'],
   'host/capabilities': ['serverClaims', 'canEditCanvas', 'canInvokeSkill', 'canCancelJob', 'canUndo'], 'host/error': ['code', 'message', 'severity']
 }
 
