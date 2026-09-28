@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "DreamForge tldraw canvas package. Communicates with the C# host exclusively through the versioned Canvas<->Host protocol.",
+  "description": "DreamForge React canvas package. Communicates with the C# host exclusively through the versioned Canvas<->Host protocol.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -13,8 +13,7 @@
   },
   "dependencies": {
     "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "tldraw": "^5.4.2"
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",

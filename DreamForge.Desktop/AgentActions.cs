@@ -197,6 +197,8 @@ public static class AgentActionParser
                 VariantVersion = Read(item, "variantVersion"),
                 EntityTargets = ReadStringArray(item, "entityTargets"),
                 VersionNote = Read(item, "versionNote"),
+                MarkVersionAdopted = item.TryGetProperty("markVersionAdopted", out var adopted)
+                    && adopted.ValueKind == JsonValueKind.True,
                 Reason = Read(item, "reason")
             });
         }

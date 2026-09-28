@@ -128,7 +128,7 @@ public sealed record AgentContext(
 
 /// <summary>
 /// Agent 面板与外部的交互契约，由主窗体实现。
-/// 动作先应用到真实画布；自动模式随后保存，审批模式由用户选择保存或撤销。
+/// 动作先暂存为预览；保存入口统一执行并保存，自动模式立即提交，审批模式等待用户确认。
 /// </summary>
 public sealed record AgentPaneHost(
     Func<IAiChatProvider?> Provider,
@@ -149,7 +149,17 @@ public sealed record AgentPaneHost(
     Func<bool> ImageInputEnabled,
     Action RequestModelSettings,
     Action<string> ApplyModel,
-    Action<string>? AcceptToNode);
+    Action<string>? AcceptToNode)
+{
+    public IReadOnlyList<AgentAction> AutoStage(IReadOnlyList<AgentAction> actions)
+    {
+        var prepared = PrepareActions(actions, true);
+        // 保存入口负责执行待处理批次；这里仅暂存，避免执行两次。
+        PreviewActions(prepared);
+        SaveApplied();
+        return prepared;
+    }
+}
 
 /// <summary>操作列表当前展示的是哪个阶段。</summary>
 internal enum PaneMode { Approve, Pending }
@@ -1108,9 +1118,7 @@ public sealed class AgentPane : Panel
             }
             else if (proposedActions.Count > 0 && authMode == AgentAuthMode.AutoStage)
             {
-                var applied = host.PrepareActions(proposedActions, true);
-                host.ApplyActions(applied);
-                host.SaveApplied();
+                var applied = host.AutoStage(proposedActions);
                 Append("系统", $"已将 {applied.Count} 条改动直接应用到画布并保存。", Color.FromArgb(75, 63, 227));
                 actionsToShow = Array.Empty<AgentAction>();
             }
