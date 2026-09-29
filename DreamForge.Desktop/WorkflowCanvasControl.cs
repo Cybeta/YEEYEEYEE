@@ -136,6 +136,13 @@ public sealed class WorkflowNode
     public int OutputCount { get; set; } = 1;
 
     /// <summary>
+    /// 用户手动拖过位置：默认 false 表示坐标可由自动布局（章节泳道）决定。
+    /// 为 true 时自动布局会保留该坐标，除非显式选择「自动布局覆盖」（返工批次 C / C-2）。
+    /// 追加字段，旧画布读入为 false，幂等。
+    /// </summary>
+    public bool ManualPosition { get; set; }
+
+    /// <summary>
     /// 旧画布里的图片路径字段。仅用于加载时迁移为 <see cref="Attachments"/>，
     /// 迁移后会清空，不再写入新数据。
     /// </summary>
@@ -224,6 +231,12 @@ public sealed class WorkflowCanvasState
         if (entity is null && reference.VariantId != Guid.Empty)
             entity = Entities.FirstOrDefault(candidate => candidate.Variants.Any(variant => variant.Id == reference.VariantId));
         if (entity is null) return null;
+
+        // 目标 6 / G6-R3：托管资源在项目库里已找不到时，画布里的快照只是「留着恢复用」的旧内容，
+        // **不得**当有效资源继续解析——否则预检与出图会拿旧版本照跑，用户以为跑的是项目库里的那份。
+        // 这里返回 null（解析不出可用内容），并由 CanvasReferenceVersions 把它算成明确的阻断引用。
+        if (entity.IsProjectMissing) return null;
+
         var variant = reference.VariantId != Guid.Empty
             ? entity.Variants.FirstOrDefault(candidate => candidate.Id == reference.VariantId)
             : null;
@@ -233,6 +246,10 @@ public sealed class WorkflowCanvasState
         var version = reference.VariantVersionId is { } versionId ? variant.FindVersion(versionId) : null;
         return version is null
             ? new ReferenceContent(entity, variant, null, variant.Description, variant.Layout, variant.Attachments)
+            {
+                // 锁定了版本却找不到：退回当前内容只为能显示，标记出来后由使用方按阻断处理（目标 4 / 4.2）。
+                VersionMissing = reference.VariantVersionId is not null
+            }
             : new ReferenceContent(entity, variant, version, version.Description, version.Layout, version.Attachments);
     }
 
@@ -259,6 +276,9 @@ public sealed class WorkflowCanvasState
         var lines = new List<string>();
         foreach (var reference in references)
         {
+            // 锁定版本缺失时不静默按当前内容出图：先把阻断原因写进提示，让人看到问题（目标 4 / 4.2）。
+            if (reference.VersionMissing)
+                lines.Add($"[阻断] 「{reference.Entity.Name}」引用的版本已缺失，当前内容不是锁定的那一版，请先改回跟随最新或重新锁定版本。");
             lines.Add($"{WorkflowEntity.KindName(reference.Entity.Kind)}「{reference.Label}」");
             if (!string.IsNullOrWhiteSpace(reference.Entity.Core)) lines.Add($"核心设定：{reference.Entity.Core.Trim()}");
             if (!string.IsNullOrWhiteSpace(reference.Description)) lines.Add($"当前表现：{reference.Description.Trim()}");
@@ -273,6 +293,9 @@ public sealed class WorkflowCanvasControl : Control
     private const int NodeWidth = 190;
     private const int NodeHeight = 100;
     private const int ImageNodeHeight = 176;
+
+    /// <summary>节点卡片在世界坐标里的固定宽度（布局引擎与绘制共用同一数值）。</summary>
+    public const float NodeBoxWidth = NodeWidth;
     /// <summary>章节区块内的列数；区块行数随该章节点数增长。</summary>
     public const int ChapterColumns = 3;
     public const float ChapterBlockPadding = 24f;
@@ -318,6 +341,14 @@ public sealed class WorkflowCanvasControl : Control
     }
     private readonly Dictionary<string, Image?> thumbnailCache = new();
     private readonly HashSet<Guid> highlightedNodeIds = new();
+
+    /// <summary>
+    /// 临时展开引用的节点（C-3）：只影响绘制，不写入 <see cref="State"/>，
+    /// 不生成常驻画布节点，也不改动引用关系或工作树锚点；关闭对话框后即失效。
+    /// </summary>
+    private readonly CanvasReferenceExpansionState referenceExpansion = new();
+    private WorkflowNode? draggingOriginNode;
+    private PointF draggingOriginPosition;
     private Point lastMouse;
     private WorkflowNode? draggingNode;
     private PointF dragOffset;
@@ -389,6 +420,40 @@ public sealed class WorkflowCanvasControl : Control
         Invalidate();
     }
 
+    /// <summary>某节点的引用是否处于临时展开状态（C-3）。</summary>
+    public bool IsReferenceExpanded(Guid nodeId) => referenceExpansion.IsExpanded(nodeId);
+
+    /// <summary>
+    /// 临时展开/收起该节点分镜下方的引用卡（C-3）。只改绘制状态：不写入 <see cref="State"/>、
+    /// 不生成常驻节点、不改动引用与工作树锚点。
+    /// </summary>
+    public void ToggleReferenceExpansion(WorkflowNode node)
+    {
+        if (node is null) return;
+        referenceExpansion.Toggle(node.Id);
+        Invalidate();
+    }
+
+    /// <summary>收起全部临时展开的引用卡（C-3）。</summary>
+    public void CollapseAllReferenceExpansions()
+    {
+        if (referenceExpansion.Count == 0) return;
+        referenceExpansion.CollapseAll();
+        Invalidate();
+    }
+
+    /// <summary>反向定位：哪些节点引用了该资源实体（C-3）。按画布顺序返回。</summary>
+    public IReadOnlyList<WorkflowNode> NodesReferencing(Guid entityId) => CanvasReferences.NodesReferencing(State, entityId);
+
+    /// <summary>锁定版本缺失的引用（C-3）：显式锁定了版本号，但该版本已不在变体里。这些引用在界面显示为阻断状态。</summary>
+    public IReadOnlyList<(WorkflowNode Node, NodeReference Reference)> MissingLockedVersions() => CanvasReferences.MissingLockedVersions(State);
+
+    /// <summary>该节点上锁定版本缺失的引用条数（C-3）。</summary>
+    public int MissingLockedVersionCount(WorkflowNode node) => CanvasReferences.MissingLockedVersionCount(State, node);
+
+    /// <summary>某个引用条对应的可读标签（版本号或「最新」/「版本缺失」）。</summary>
+    public static string ReferenceVersionLabel(NodeReference reference, ReferenceContent? content) => CanvasReferences.VersionLabel(reference, content);
+
     public void SelectNode(WorkflowNode node)
     {
         if (!State.Nodes.Any(item => item.Id == node.Id)) return;
@@ -400,6 +465,12 @@ public sealed class WorkflowCanvasControl : Control
 
     public void LoadState(WorkflowCanvasState state)
     {
+        ArgumentNullException.ThrowIfNull(state);
+        // 返工 R16-1：把**自己**当来源加载会先把 State 清空、再从刚清空的集合里 AddRange，
+        // 结果画布被清成空。标签快照一旦与「当前画布」是同一个对象（切标签、关标签时都发生过），
+        // 就会走到这条路径；这里直接拒绝自身别名，避免静默丢数据。
+        if (ReferenceEquals(state, State)) return;
+
         State.Nodes.Clear(); State.Nodes.AddRange(state.Nodes ?? new());
         State.Edges.Clear(); State.Edges.AddRange(state.Edges ?? new());
         State.Entities.Clear(); State.Entities.AddRange(state.Entities ?? new());
@@ -560,37 +631,26 @@ public sealed class WorkflowCanvasControl : Control
     }
 
     /// <summary>
-    /// 整理画布：按章节分块，每章一个区块；块内节点排成网格（主线在前、资源在后），
-    /// 区块按「第N章」的顺序从左到右、每行最多 <see cref="ChapterColumns"/> 块。
-    /// 区块是整章的概念，所以始终整理整块画布，不区分当前选中。
+    /// 整理画布（C-1/C-2）：走章节泳道布局——企划在泳道外、每章一条独立泳道、分镜横排、成品挂在分镜下方。
+    /// 与「章节布局」对话框共用同一套语义：<see cref="WorkflowNode.ManualPosition"/> 的手动摆放节点默认保留原位，
+    /// 有阻断冲突（两个手动节点重叠）时整批不整理。返回计划供调用方提示。
     /// </summary>
-    public void AutoArrange()
+    public CanvasLayoutPlan AutoArrange()
     {
-        if (State.Nodes.Count == 0) return;
+        var plan = CanvasSwimlaneLayout.PlanAll(State);
+        if (State.Nodes.Count == 0 || plan.HasBlockingConflicts) return plan;
 
-        const float baseX = 80f;
-        const float baseY = 80f;
-        const int blocksPerRow = ChapterColumns;
-
-        var rowX = baseX;
-        var rowY = baseY;
-        var rowHeight = 0f;
-        var inRow = 0;
-        foreach (var (_, members) in GroupByChapter(State, State.Nodes))
+        foreach (var change in plan.Changes)
         {
-            if (inRow == blocksPerRow)
-            {
-                rowX = baseX;
-                rowY += rowHeight + ChapterBlockGap;
-                rowHeight = 0f;
-                inRow = 0;
-            }
-            var height = LayoutChapterBlock(members, rowX, rowY, State);
-            rowX += ChapterBlockWidth(members.Count) + ChapterBlockGap;
-            rowHeight = Math.Max(rowHeight, height);
-            inRow++;
+            if (State.Nodes.FirstOrDefault(node => node.Id == change.NodeId) is not { } node) continue;
+            node.X = change.ToX;
+            node.Y = change.ToY;
+            // 自动布局写回后，这个坐标不再是用户手动摆放的。
+            node.ManualPosition = false;
         }
-        NotifyChanged(); Invalidate();
+
+        if (plan.Changes.Count > 0) { NotifyChanged(); Invalidate(); }
+        return plan;
     }
 
     /// <summary>
@@ -808,7 +868,11 @@ public sealed class WorkflowCanvasControl : Control
     }
 
     private bool IsCollapseButtonHit(WorkflowNode node, PointF point) =>
-        new RectangleF(node.X + NodeWidth - 30, node.Y + 6, 24, 24).Contains(point);
+        new RectangleF(node.X + NodeBoxWidth - 30, node.Y + 6, 24, 24).Contains(point);
+
+    /// <summary>节点右下角的「临时展开/收起引用」按钮矩形（世界坐标，C-3）。只有带引用的节点才绘制与命中。</summary>
+    private RectangleF ReferenceToggleRect(WorkflowNode node) =>
+        new(node.X + NodeBoxWidth - 28, node.Y + NodeHeightOf(node) - 28, 22, 22);
 
     private bool ToggleCollapsed(WorkflowNode node)
     {
@@ -916,10 +980,16 @@ public sealed class WorkflowCanvasControl : Control
             var bounds = new RectangleF(node.X, node.Y, NodeWidth, NodeHeightOf(node));
             if (!bounds.Contains(point)) continue;
             if (IsCollapseButtonHit(node, point) && ToggleCollapsed(node)) return;
+            if (node.References.Count > 0 && ReferenceToggleRect(node).Contains(point))
+            {
+                SelectedNode = node; SelectedEdge = null; SelectionChanged?.Invoke(this, EventArgs.Empty);
+                ToggleReferenceExpansion(node);
+                return;
+            }
             SelectedNode = node; SelectedEdge = null; SelectionChanged?.Invoke(this, EventArgs.Empty);
             if (TryPort(node, point, true, out var outputPort)) { linkSourceNode = node; linkSourcePort = outputPort; }
             else if (TryPort(node, point, false, out var inputPort)) { linkSourceNode = node; linkSourcePort = -1 - inputPort; }
-            else { draggingNode = node; dragOffset = new PointF(point.X - node.X, point.Y - node.Y); }
+            else { draggingNode = node; dragOffset = new PointF(point.X - node.X, point.Y - node.Y); draggingOriginNode = node; draggingOriginPosition = new PointF(node.X, node.Y); }
             Invalidate(); return;
         }
         // 空白处按下：清除选择并开始平移画布，左键与中键都可以拖动。
@@ -973,7 +1043,21 @@ public sealed class WorkflowCanvasControl : Control
                     }
                     NotifyChanged(); break; }
         }
-        draggingNode = null; linkSourceNode = null; Invalidate();
+        MarkManualPositionIfMoved();
+        draggingNode = null; linkSourceNode = null; draggingOriginNode = null; Invalidate();
+    }
+
+    /// <summary>
+    /// 拖动结束后把节点标记为「手动摆放」（C-2）：位置真的变了才标记，
+    /// 这样自动布局会保留它，除非用户显式选择「自动布局覆盖」。
+    /// </summary>
+    private void MarkManualPositionIfMoved()
+    {
+        if (draggingOriginNode is not { } node) return;
+        if (Math.Abs(node.X - draggingOriginPosition.X) < 0.5f && Math.Abs(node.Y - draggingOriginPosition.Y) < 0.5f) return;
+        if (node.ManualPosition) return;
+        node.ManualPosition = true;
+        NotifyChanged();
     }
 
     private void CanvasKeyDown(object? sender, KeyEventArgs e) { if (e.KeyCode == Keys.Delete && (SelectedEdge is not null || SelectedNode is not null)) { DeleteSelected(); e.Handled = true; } }
@@ -1062,20 +1146,19 @@ public sealed class WorkflowCanvasControl : Control
 
     private PointF PortPoint(WorkflowNode node, bool output, int index) => new(node.X + (output ? NodeWidth : 0), node.Y + 34 + index * 20);
     /// <summary>
-    /// 画章节区块：在节点下方铺一层浅色底 + 虚线边框，左上角写章节名，让同一章的内容视觉上成块。
-    /// 区块范围按当前节点位置实时算出，所以拖动节点后框会跟着变；未分章的节点不画框。
+    /// 画章节泳道（C-1）：企划区在泳道外单列一条，每个章节一条独立泳道，未分章/资源锚点一条。
+    /// 泳道范围按当前节点位置实时算出，所以拖动节点后框会跟着变；泳道带在节点下层，不影响命中测试。
     /// </summary>
-    private void DrawChapterBlocks(Graphics g)
+    private void DrawSwimlanes(Graphics g)
     {
         if (State.Nodes.Count == 0) return;
-        var bounds = ChapterBounds(State, State.Nodes);
+        var bounds = CanvasSwimlaneLayout.LaneBounds(State, CanvasSwimlaneLayout.Lanes(State));
         if (bounds.Count == 0) return;
 
         using var titleFont = new Font(Font.FontFamily, Font.Size, FontStyle.Bold);
-        using var fill = new SolidBrush(Color.FromArgb(Theme.IsDark ? 96 : 132, Theme.PanelBg));
-        using var border = new Pen(Color.FromArgb(Theme.IsDark ? 132 : 172, Theme.Border)) { DashStyle = DashStyle.Dash };
         using var titleBrush = new SolidBrush(Theme.TextMuted);
-        foreach (var (key, world) in bounds)
+        using var hintFont = new Font(Font.FontFamily, Math.Max(7f, Font.Size - 1f));
+        foreach (var (lane, world) in bounds)
         {
             var rect = new RectangleF(
                 world.X * zoom + panOrigin.X,
@@ -1083,9 +1166,95 @@ public sealed class WorkflowCanvasControl : Control
                 world.Width * zoom,
                 world.Height * zoom);
             if (rect.Right < 0 || rect.Bottom < 0 || rect.Left > Width || rect.Top > Height) continue;
+
+            var accent = LaneAccent(lane.Kind);
+            using var fill = new SolidBrush(Color.FromArgb(Theme.IsDark ? 60 : 26, accent));
+            using var border = new Pen(Color.FromArgb(Theme.IsDark ? 150 : 190, accent)) { DashStyle = DashStyle.Dash };
             g.FillRectangle(fill, rect);
             g.DrawRectangle(border, rect.X, rect.Y, rect.Width, rect.Height);
-            g.DrawString(key, titleFont, titleBrush, new PointF(rect.X + 10f, rect.Y + 6f));
+            // 左侧色条 + 标题，明确「这是泳道」而不是普通分组框。
+            using var bar = new SolidBrush(Color.FromArgb(Theme.IsDark ? 210 : 235, accent));
+            g.FillRectangle(bar, rect.X, rect.Y, Math.Max(3f, 5f * zoom), rect.Height);
+            g.DrawString(CanvasLayoutPlan.LaneLabel(lane), titleFont, titleBrush, new PointF(rect.X + 12f, rect.Y + 7f));
+            if (lane.Kind == CanvasLaneKind.Planning)
+                g.DrawString("（泳道之外）", hintFont, titleBrush, new PointF(rect.X + 12f + g.MeasureString("企划区", titleFont).Width + 8f, rect.Y + 10f));
+        }
+    }
+
+    private static Color LaneAccent(CanvasLaneKind kind) => kind switch
+    {
+        CanvasLaneKind.Planning => Theme.Success,
+        CanvasLaneKind.Unassigned => Theme.TextDim,
+        _ => Theme.Accent
+    };
+
+    /// <summary>当前画布上手动摆放（不会被自动布局移动）的节点数，供状态提示显示（C-2）。</summary>
+    public int ManualPositionCount() => State.Nodes.Count(node => node.ManualPosition);
+
+    /// <summary>
+    /// 引用叠加层（C-3）：在每个带引用的分镜右下角画临时展开按钮；展开后在其下方画引用卡；
+    /// 锁定版本缺失时无论是否展开都显示阻断徽标。全部是临时绘制，不写入 State，也不生成常驻节点。
+    /// </summary>
+    private void DrawReferenceOverlays(Graphics g)
+    {
+        using var badgeFont = new Font(Font.FontFamily, Math.Max(7f, Font.Size - 1f));
+        using var cardFont = new Font(Font.FontFamily, Math.Max(7f, Font.Size - 1f), FontStyle.Regular);
+        using var cardBrush = new SolidBrush(Theme.NodeBody);
+        using var okBrush = new SolidBrush(Theme.TextMuted);
+        using var dangerBrush = new SolidBrush(Theme.Danger);
+
+        foreach (var node in State.Nodes)
+        {
+            if (!IsNodeVisible(node)) continue;
+            var missing = MissingLockedVersionCount(node);
+            if (node.References.Count == 0) continue;
+            var rect = NodeBounds(node);
+
+            // 展开/收起按钮
+            var toggle = ReferenceToggleRect(node);
+            var toggleScreen = new RectangleF(toggle.X * zoom + panOrigin.X, toggle.Y * zoom + panOrigin.Y, toggle.Width * zoom, toggle.Height * zoom);
+            using var toggleFill = new SolidBrush(Theme.AccentSoft);
+            using var togglePen = new Pen(Theme.Accent, 1f);
+            using var toggleGlyph = new SolidBrush(Theme.Accent);
+            g.FillRectangle(toggleFill, toggleScreen);
+            g.DrawRectangle(togglePen, toggleScreen.X, toggleScreen.Y, toggleScreen.Width, toggleScreen.Height);
+            g.DrawString(IsReferenceExpanded(node.Id) ? "−" : "+", badgeFont, toggleGlyph, new PointF(toggleScreen.X + 5f * zoom, toggleScreen.Y + 3f * zoom));
+
+            if (missing > 0)
+            {
+                using var dangerPen = new Pen(Theme.Danger, 2f);
+                g.DrawRectangle(dangerPen, rect.X, rect.Y, rect.Width, rect.Height);
+                var label = $"锁定版本缺失 {missing}";
+                var size = g.MeasureString(label, badgeFont);
+                using var dangerFill = new SolidBrush(Color.FromArgb(230, Theme.Danger));
+                g.FillRectangle(dangerFill, rect.X + 6, rect.Bottom - size.Height - 6, size.Width + 8, size.Height + 2);
+                using var whiteBrush = new SolidBrush(Color.White);
+                g.DrawString(label, badgeFont, whiteBrush, new PointF(rect.X + 10, rect.Bottom - size.Height - 5));
+            }
+
+            if (!IsReferenceExpanded(node.Id)) continue;
+
+            // 展开的引用卡：临时叠加在节点下方，不占画布节点位置。
+            var pairs = State.ResolveReferencePairs(node);
+            const float cardWidth = 260f;
+            var cardHeight = 26f + pairs.Count * 22f;
+            var panel = new RectangleF(rect.X, rect.Bottom + 6f, cardWidth * zoom, cardHeight * zoom);
+            using var panelFill = new SolidBrush(Color.FromArgb(Theme.IsDark ? 240 : 245, Theme.PanelBg));
+            using var panelPen = new Pen(Theme.Border, 1f);
+            g.FillRectangle(panelFill, panel);
+            g.DrawRectangle(panelPen, panel.X, panel.Y, panel.Width, panel.Height);
+            g.DrawString($"引用 {pairs.Count} 条（临时展开，未写入画布）", cardFont, okBrush, new PointF(panel.X + 8, panel.Y + 5));
+            var lineY = panel.Y + 24 * zoom;
+            foreach (var (reference, content) in pairs)
+            {
+                var versionLabel = ReferenceVersionLabel(reference, content);
+                var missingVersion = reference.VariantVersionId is not null && content?.Version is null;
+                var text = content is null
+                    ? "· 引用已失效（实体或变体不存在）"
+                    : $"· {content.Entity.Name} · {versionLabel}";
+                g.DrawString(text, cardFont, missingVersion || content is null ? dangerBrush : cardBrush, new PointF(panel.X + 8, lineY));
+                lineY += 22 * zoom;
+            }
         }
     }
 
@@ -1103,7 +1272,7 @@ public sealed class WorkflowCanvasControl : Control
             using var hintFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
             e.Graphics.DrawString(hint, Font, hintBrush, new RectangleF(0, 0, Width, Height), hintFormat);
         }
-        DrawChapterBlocks(e.Graphics);
+        DrawSwimlanes(e.Graphics);
         nodeBounds.Clear();
         foreach (var edge in State.Edges)
         {
@@ -1138,6 +1307,7 @@ public sealed class WorkflowCanvasControl : Control
             DrawThumbnail(e.Graphics, rect, node);
             for (var i = 0; i < node.InputCount; i++) DrawPort(e.Graphics, ScreenPoint(PortPoint(node, false, i)), Theme.Port); for (var i = 0; i < node.OutputCount; i++) DrawPort(e.Graphics, ScreenPoint(PortPoint(node, true, i)), Theme.Success);
         }
+        DrawReferenceOverlays(e.Graphics);
         if (Preview is { IsEmpty: false }) DrawPreview(e.Graphics);
     }
 

@@ -21,6 +21,14 @@ function validatePayload(type: MessageType, payload: unknown): void {
   if (type === 'host/undo.result' && data.localOnly !== true) throw new ProtocolViolationError(ERROR_CODES.PROTOCOL_FAIL_CLOSED, '宿主不得返回协作撤销结果')
   if (type === 'canvas/invoke.request' && typeof data.idempotencyKey !== 'string' || type === 'canvas/invoke.request' && (data.idempotencyKey as string).length === 0) throw new ProtocolViolationError(ERROR_CODES.PROTOCOL_MALFORMED, '执行请求缺少幂等键')
   if (type === 'host/job.update' && (typeof data.progressPercent !== 'number' || data.progressPercent < 0 || data.progressPercent > 100 || (data.externalTaskId !== undefined && data.externalTaskId !== null && typeof data.externalTaskId !== 'string'))) throw new ProtocolViolationError(ERROR_CODES.PROTOCOL_MALFORMED, 'Job 进度或外部任务 ID 无效')
+  // 尝试次数与重试血缘（目标 5）：要么不出现，要么必须是 >= 1 的整数 ID/数值，避免两端看到不同的尝试语义。
+  if (type === 'host/job.update') {
+    if (data.attempt !== undefined && data.attempt !== null && (typeof data.attempt !== 'number' || !Number.isInteger(data.attempt) || data.attempt < 1)) throw new ProtocolViolationError(ERROR_CODES.PROTOCOL_MALFORMED, 'Job 尝试次数无效')
+    for (const field of ['retryOfJobId', 'rootJobId']) {
+      const value = data[field]
+      if (value !== undefined && value !== null && typeof value !== 'string') throw new ProtocolViolationError(ERROR_CODES.PROTOCOL_MALFORMED, `Job ${field} 无效`)
+    }
+  }
   if (type === 'host/init') {
     if (data.protocolVersion !== PROTOCOL_VERSION) throw new ProtocolViolationError(ERROR_CODES.PROTOCOL_VERSION_MISMATCH, '宿主协议版本不匹配')
     const session = object(data.session)

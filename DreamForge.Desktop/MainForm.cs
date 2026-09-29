@@ -81,6 +81,13 @@ public sealed class MainForm : ScaledForm, IPluginHost
     private sealed class CanvasTabState
     {
         public Guid Id { get; init; } = Guid.NewGuid();
+
+        /// <summary>
+        /// 这个标签当前承载的是「第几份文档」（返工 R16-2）。同一个标签被从画布库打开或导入替换成
+        /// 另一份画布时递增——标签 Id 只说明「哪一格标签」，不能说明「现在装的是哪份文档」。
+        /// </summary>
+        public int DocumentGeneration { get; set; }
+
         public string Title { get; set; } = "未命名画布";
         public string? Path { get; set; }
         public RecentCanvasState Snapshot { get; set; } = EmptyCanvasState();
@@ -108,8 +115,28 @@ public sealed class MainForm : ScaledForm, IPluginHost
     private static RecentCanvasState EmptyCanvasState() =>
         new("未命名画布", 0, string.Empty, string.Empty, 1024, 1024, 28, 7, "随机", new WorkflowCanvasState());
 
+    /// <summary>
+    /// 标签快照用的画布状态：**必须是独立副本**（返工 R16-1）。
+    ///
+    /// 为什么不能直接引用 <c>canvas.State</c>：那样「标签快照」与「当前画布」就是同一个对象，
+    /// 切到别的标签时 <c>LoadState</c> 会**原地**改这份对象，于是刚被切走的标签的快照被写成了
+    /// 新标签的内容；切回来时又把自身当来源加载（先清空、再从自己这个空集合里取）→ 节点清零。
+    /// </summary>
+    private RecentCanvasState BuildCanvasSnapshot() =>
+        CloneCanvasSnapshot(BuildCanvasState());
+
+    /// <summary>把一份画布状态连同它的节点等集合一起复制成独立副本（标签快照与标签间传递都用它）。</summary>
+    private static RecentCanvasState CloneCanvasSnapshot(RecentCanvasState state) =>
+        state with { Canvas = CloneCanvasState(state.Canvas ?? new WorkflowCanvasState()) };
+
+    private static WorkflowCanvasState CloneCanvasState(WorkflowCanvasState state) =>
+        JsonSerializer.Deserialize<WorkflowCanvasState>(JsonSerializer.Serialize(state)) ?? new WorkflowCanvasState();
+
     /// <summary>待提交的 Agent 改动：画布数据在用户保存前不受影响。</summary>
     private readonly PendingChanges pendingChanges = new();
+
+    /// <summary>批次提交账本：保证同一批 Agent 动作只提交一次（审批与自动模式共用）。</summary>
+    private readonly AgentBatchCommitter agentBatchCommitter = new();
 
     /// <summary>最近一次 Agent 提交的快照，用于「撤销上次提交」。</summary>
     private AgentCommitRecord? lastAgentCommit;
@@ -138,6 +165,14 @@ public sealed class MainForm : ScaledForm, IPluginHost
     private int canvasRevision;
     private string canvasTitle = "未命名画布";
     private string? currentCanvasPath;
+
+    /// <summary>
+    /// 当前画布的来源格式版本高于当前支持版本时记录该版本号，此时只读查看、拒绝覆盖保存（返工 R11）；0 表示可写。
+    /// </summary>
+    private int currentCanvasUnsupportedFormat;
+
+    /// <summary>章节同步的预览/应用/撤销会话（大目标 B）；切换画布时重置，避免跨画布撤销。</summary>
+    private CanvasSyncSession? chapterSyncSession;
     private string? executionStoreWarning;
     private bool restartForProjectSelection;
     public bool RestartForProjectSelection => restartForProjectSelection;
@@ -177,16 +212,10 @@ public sealed class MainForm : ScaledForm, IPluginHost
             RunStartupOnboarding();
         };
         // 有已应用但未保存的 Agent 改动时不能悄悄关掉：让用户明确选择保存还是撤销。
+        // 返工 V2：关窗也走统一守卫——待恢复的批次必须先把恢复做完（原先只看待处理清单会放行）。
         FormClosing += (_, e) =>
         {
-            if (pendingChanges.IsEmpty) return;
-            var choice = MessageBox.Show(
-                $"有 {pendingChanges.Count} 条 Agent 改动已应用但尚未保存。\n\n" +
-                "「是」保存　「否」撤销这些改动　「取消」返回继续编辑",
-                "Agent 改动", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-            if (choice == DialogResult.Cancel) { e.Cancel = true; return; }
-            if (choice == DialogResult.Yes) SaveAppliedAgentChanges();
-            else UndoLastAgentCommit();
+            if (!ConfirmPendingBeforeLeaving()) e.Cancel = true;
         };
         FormClosed += (_, _) => { refreshTimer.Stop(); refreshTimer.Dispose(); this.execution.Updated -= OnExecutionUpdated; autoExpandCancellation?.Cancel(); SaveAllCanvasTabs(); if (executionHost is not null) _ = executionHost.DisposeAsync(); }; RefreshJobList();
     }
@@ -937,14 +966,14 @@ public sealed class MainForm : ScaledForm, IPluginHost
         Context: BuildAgentContext,
         WorkspacePath: () => AiProviderSettings.Load().AgentWorkspace,
         RequestWorkspaceSelection: SelectAgentWorkspace,
-        PrecheckActions: actions => AgentActionExecutor.PrecheckBatch(actions, canvas.State, AiProviderSettings.Load().AgentWorkspace),
-        ApplyActions: ApplyAgentBatch,
+        PrecheckActions: actions => AgentActionExecutor.PrecheckBatch(actions, canvas.State, AiProviderSettings.Load().AgentWorkspace, currentCanvasPath),
+        ApplyActions: actions => ApplyAgentBatch(actions),
         PreviewActions: PreviewAgentBatch,
         PrepareActions: PrepareAgentActions,
         PendingActions: () => pendingChanges.Actions,
         RemovePending: RemovePendingAction,
-        SaveApplied: SaveAppliedAgentChanges,
-        UndoApplied: DiscardPendingChanges,
+        SaveApplied: SavePendingForPane,
+        UndoApplied: UndoPendingForPane,
         FocusAction: FocusAgentAction,
         ContextCharacterBudget: () => AiProviderSettings.Load().ContextCharacterBudget,
         ImageInputEnabled: () => AiProviderSettings.Load().SupportsImageInput,
@@ -971,8 +1000,16 @@ public sealed class MainForm : ScaledForm, IPluginHost
     private void PreviewAgentBatch(IReadOnlyList<AgentAction> actions)
     {
         if (actions.Count == 0) return;
-        pendingChanges.Clear();
-        pendingChanges.AddRange(actions);
+        // 返工 R17-2：还有批次等待恢复时**不开始新批**。换批号会让旧批的恢复记录失去入口
+        // （新批一旦落画就会覆盖 lastAgentCommit），而账本里旧批仍停在待恢复——
+        // 结果是恢复记录不可达、离开入口又全被拦住。这里连同后面的统一提交入口一起挡住。
+        if (agentBatchCommitter.Ledger.HasPendingRecovery(out var recovering))
+        {
+            WriteAgentCommitDiagnostic($"preview-blocked pending-recovery batch={recovering:N}");
+            return;
+        }
+
+        pendingChanges.BeginBatch(actions);
         canvas.SetPreview(CanvasPreviewBuilder.Build(actions, canvas.State));
         RefreshPendingLabel();
         agentPaneControl?.RefreshState();
@@ -980,56 +1017,110 @@ public sealed class MainForm : ScaledForm, IPluginHost
     }
 
     /// <summary>
-    /// 将 Agent 批次立即应用到真实画布。自动模式使用此入口并随后保存。
+    /// 将 Agent 批次应用到真实画布并保存（审批与自动模式都走这一条入口）。
+    ///
+    /// 阶段与结论由 <see cref="AgentBatchCommitter"/> 裁决（返工 R2/R3）：只有「动作全部应用成功 **且** 保存成功」
+    /// 才算提交完成；部分应用、保存失败都如实返回、弹窗说明，并且：
+    /// · 画布一旦被改动就登记撤销记录（含文件快照），「撤销本批 / 撤销上次提交」都能真的回退；
+    /// · 失败时**不动**待处理清单，用户可以直接「重试保存」（只重存，不重复应用动作）。
     /// </summary>
-    private void ApplyAgentBatch(IReadOnlyList<AgentAction> actions)
+    private AgentCommitResult ApplyAgentBatch(IReadOnlyList<AgentAction> actions, Guid? batchId = null, bool saveOnly = false)
     {
-        if (actions.Count == 0) return;
-        var selected = canvas.SelectedNode;
-        foreach (var action in actions)
+        var effectiveBatch = batchId ?? pendingChanges.BatchId;
+
+        // 返工 R17-2：统一提交入口再挡一次（手动、自动、直接提交都从这里进）——
+        // 只要还有批次在等待恢复，就先让它恢复完；新批会覆盖 lastAgentCommit，
+        // 把旧批的恢复记录变成不可达的死记录。
+        if (agentBatchCommitter.Ledger.HasPendingRecovery(out var waiting))
+            return new AgentCommitResult(AgentCommitStage.Rejected, effectiveBatch, 0, Array.Empty<string>(),
+                "还有一批改动的撤销没做完（待恢复批次 " + ShortKey(waiting.ToString())
+                + "）：请先点「撤销上次提交」把画布与文件恢复好（可重试），再提交新的改动。");
+        var snapshots = new List<FileSnapshot>();
+        var snapshotBefore = JsonSerializer.Serialize(BuildCanvasState());
+        var revisionAtCommit = canvasRevision;
+        var removed = new List<string>();
+        var appliedThisCall = false;
+
+        var result = agentBatchCommitter.Commit(
+            effectiveBatch,
+            actions,
+            apply: () =>
+            {
+                appliedThisCall = true;
+                var selected = canvas.SelectedNode;
+                foreach (var action in actions)
+                {
+                    if (string.Equals(action.Kind, "create_node", StringComparison.OrdinalIgnoreCase)
+                        && string.IsNullOrWhiteSpace(action.ParentTarget)
+                        && selected is not null)
+                        action.ParentTarget = selected.Title;
+                }
+
+                var applied = AgentActionExecutor.Apply(
+                    actions, canvas.State, AiProviderSettings.Load().AgentWorkspace,
+                    FileWriteMode.Apply, snapshots, currentCanvasPath);
+                removed = applied.RemovedReferences.ToList();
+                return applied;
+            },
+            save: () => SaveCanvasToLibrary(showResult: false),
+            saveOnly: saveOnly,
+            canvasKey: CurrentCanvasKey());
+
+        // 只有「这次真的应用了动作」才登记新的撤销记录（返工 S2）：只重存的那一次不再重拍快照、
+        // 也不覆盖原记录（否则 AppliedCount 会变成 0，撤销会退到错误状态或干脆不回退）。
+        if (appliedThisCall && (result.ActionsApplied || result.Partial))
         {
-            if (string.Equals(action.Kind, "create_node", StringComparison.OrdinalIgnoreCase)
-                && string.IsNullOrWhiteSpace(action.ParentTarget)
-                && selected is not null)
-                action.ParentTarget = selected.Title;
+            // 画布已被改动：登记撤销记录，之后「撤销本批」与「撤销上次提交」都按它回退。
+            lastAgentCommit = new AgentCommitRecord
+            {
+                BatchId = result.BatchId,
+                CanvasKey = CurrentCanvasKey(),
+                AppliedCount = result.AppliedCount,
+                Summary = string.Join("；", actions.Select(action => action.Describe())),
+                SnapshotBefore = snapshotBefore,
+                RevisionAtCommit = revisionAtCommit,
+                FileSnapshots = snapshots
+            };
+
+            canvas.NotifyContentChanged();
+            canvas.InvalidateThumbnails();
+            RefreshNodeInspector();
+            RefreshEntityList();
+            RefreshCanvasLibrary();
+            RefreshWorkTreeView();
+            canvas.Invalidate();
+
+            var latest = actions.LastOrDefault(action =>
+                string.Equals(action.Kind, "create_node", StringComparison.OrdinalIgnoreCase));
+            if (latest is not null)
+            {
+                var node = canvas.State.Nodes.LastOrDefault(item =>
+                    string.Equals(item.Title, latest.Title, StringComparison.OrdinalIgnoreCase));
+                if (node is not null) canvas.FocusNode(node.Id);
+            }
         }
 
-        var record = new AgentCommitRecord
+        if (result.Succeeded)
         {
-            AppliedCount = actions.Count,
-            Summary = string.Join("；", actions.Select(action => action.Describe())),
-            SnapshotBefore = JsonSerializer.Serialize(BuildCanvasState()),
-            RevisionAtCommit = canvasRevision
-        };
-        var result = AgentActionExecutor.Apply(
-            actions, canvas.State, AiProviderSettings.Load().AgentWorkspace,
-            FileWriteMode.Apply, record.FileSnapshots);
+            // 提交完成：待处理清单收口（撤销走撤销记录），同一批次号再提交会被账本拒绝。
+            pendingChanges.Clear();
+            canvas.SetPreview(null);
+        }
 
-        pendingChanges.Clear();
-        pendingChanges.AddRange(actions);
-        lastAgentCommit = record;
-        canvas.NotifyContentChanged();
-        canvas.InvalidateThumbnails();
-        RefreshNodeInspector();
-        RefreshEntityList();
-        RefreshCanvasLibrary();
+        if (removed.Count > 0) RecordAssetMoves(OfferRecycleOrphanedAssets(removed));
+        WriteAgentCommitDiagnostic(
+            $"commit stage={result.Stage} batch={result.BatchId:N} applied={result.AppliedCount} "
+            + $"errors={result.ActionErrors.Count} pendingCount={pendingChanges.Count}");
+        if (!result.Succeeded)
+        {
+            var detail = result.ActionErrors.Count == 0
+                ? string.Empty
+                : "\n\n未能完成的条目：\n" + string.Join("\n", result.ActionErrors.Select(item => "· " + item));
+            MessageBox.Show(result.Message + detail, "Agent 提交未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
         RefreshPendingState();
-        RefreshWorkTreeView();
-        canvas.Invalidate();
-
-        var latest = actions.LastOrDefault(action =>
-            string.Equals(action.Kind, "create_node", StringComparison.OrdinalIgnoreCase));
-        if (latest is not null)
-        {
-            var node = canvas.State.Nodes.LastOrDefault(item =>
-                string.Equals(item.Title, latest.Title, StringComparison.OrdinalIgnoreCase));
-            if (node is not null) canvas.FocusNode(node.Id);
-        }
-        if (result.RemovedReferences.Count > 0) OfferRecycleOrphanedAssets(result.RemovedReferences);
-        WriteAgentCommitDiagnostic($"apply count={actions.Count} applied={result.Applied} errors={result.Errors.Count} pending={pendingChanges.Count}");
-        if (result.Errors.Count > 0)
-            MessageBox.Show($"有 {result.Errors.Count} 条改动未能应用：\n\n{string.Join("\n", result.Errors)}",
-                "Agent 应用", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return result;
     }
 
     private IReadOnlyList<AgentAction> PrepareAgentActions(IReadOnlyList<AgentAction> actions, bool autoApprove)
@@ -1131,22 +1222,169 @@ public sealed class MainForm : ScaledForm, IPluginHost
         agentPaneControl?.RefreshState();
     }
 
-    private void SaveAppliedAgentChanges()
+    /// <summary>
+    /// 「保存」入口：应用本批动作并落盘。**结果照实返回**（返工 R3）——
+    /// 保存失败时不报成功、不清掉待处理清单、不把已应用的改动说成已保存；
+    /// 调用方（面板按钮、关窗、切标签）必须按返回结果决定后续动作。
+    /// </summary>
+    private AgentCommitResult SaveAppliedAgentChanges(bool saveOnly = false)
     {
-        if (pendingChanges.IsEmpty) return;
-        var actions = pendingChanges.Actions.ToArray();
-        ApplyAgentBatch(actions);
-        SaveCanvasToLibrary(showResult: false);
+        if (pendingChanges.IsEmpty)
+            return new AgentCommitResult(AgentCommitStage.Rejected, pendingChanges.BatchId, 0,
+                Array.Empty<string>(), "没有待提交的 Agent 改动。");
+        return ApplyAgentBatch(pendingChanges.Actions.ToArray(), pendingChanges.BatchId, saveOnly);
     }
 
-    private void DiscardPendingChanges()
+    /// <summary>
+    /// 撤销本批（返工 R3/S3）：如果这批动作**已经落到画布上**，必须真的回退画布与文件副作用，
+    /// 而不是只清掉列表——否则界面说「已撤销」、画布却还留着改动，之后保存会把「已撤销」的内容写回文件。
+    /// 还没应用（只是虚影）时才只清虚影。
+    /// 返回未能恢复的说明；**恢复失败时不清待处理内容、也不声称撤销完成**，调用方须据此中止后续切换。
+    /// </summary>
+    private IReadOnlyList<string> DiscardPendingChanges()
     {
-        pendingChanges.Clear();
-        canvas.SetPreview(null);
+        var applied = lastAgentCommit is not null
+            && pendingChanges.Count > 0
+            && lastAgentCommit.BatchId == pendingChanges.BatchId
+            && lastAgentCommit.AppliedCount > 0;
+
+        if (!applied)
+        {
+            pendingChanges.Clear();
+            canvas.SetPreview(null);
+            RefreshPendingState();
+            RefreshWorkTreeView();
+            canvas.Invalidate();
+            return Array.Empty<string>();
+        }
+
+        var failures = RollbackLastCommit();
+        if (failures.Count == 0)
+        {
+            pendingChanges.Clear();
+            canvas.SetPreview(null);
+            RefreshPendingState();
+            RefreshWorkTreeView();
+            canvas.Invalidate();
+            MessageBox.Show("已撤销本批 Agent 改动：画布恢复到本批动作执行前的状态。", "撤销本批",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return Array.Empty<string>();
+        }
+
+        // 恢复失败：保留待处理内容与恢复记录，如实报出未恢复的项目（不再谎报「已撤销」）。
         RefreshPendingState();
         RefreshWorkTreeView();
         canvas.Invalidate();
+        MessageBox.Show("撤销没有完全成功，画布与文件可能停在中途状态：\n\n"
+            + string.Join("\n", failures.Select(item => "· " + item))
+            + "\n\n已保留待处理内容与恢复记录，可稍后重试撤销。",
+            "撤销未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return failures;
     }
+
+    /// <summary>把资产移出登记进本次撤销记录（返工 U1）。</summary>
+    private void RecordAssetMoves(IReadOnlyList<AssetMove> moved)
+    {
+        if (moved.Count == 0 || lastAgentCommit is null) return;
+        lastAgentCommit.AssetMoves.AddRange(moved);
+        WriteAgentCommitDiagnostic($"asset-moves batch={lastAgentCommit.BatchId:N} count={moved.Count}");
+    }
+
+    /// <summary>
+    /// 用撤销记录回退画布与文件副作用，返回未恢复成功的文件说明。
+    /// 撤销本批与「撤销上次提交」共用它，保证两条路径的语义完全一致。
+    /// 返工 S3：**只有全部恢复成功才清掉记录**；失败时保留记录（用户可以重试撤销），
+    /// 并把被移入系统回收站的资产列进说明——那些文件不会自动回来。
+    /// </summary>
+    private List<string> RollbackLastCommit()
+    {
+        var failures = new List<string>();
+        if (lastAgentCommit is null) return failures;
+        var record = lastAgentCommit;
+
+        // 返工 U3：撤销只能作用在提交它的那个画布上——在 A 提交、切到 B 再撤销，
+        // 会把 A 的快照套到 B 上（画布被覆盖成另一个文档的内容）。
+        // 返工 R16-3：这只是「现在不能撤销」，**不是**「恢复做了一半」，因此**不能**把批次标成
+        // 待恢复——那会让「离开入口守卫」把用户锁死（连切回原画布都被拦住）。
+        // 记录原样保留，用户切回原画布后仍可正常撤销。
+        var currentKey = CurrentCanvasKey();
+        if (record.CanvasKey.Length > 0 && !string.Equals(record.CanvasKey, currentKey, StringComparison.OrdinalIgnoreCase))
+        {
+            failures.Add($"这批改动是在另一份画布上提交的（记录 {ShortKey(record.CanvasKey)}，当前 {ShortKey(currentKey)}）：已拒绝跨画布撤销。请切回原画布再撤销。");
+            return failures;
+        }
+
+        // 返工 R16-3：画布回退只做一次。重试恢复时若再套一次提交前快照，会把用户在两次尝试之间
+        // 做的编辑一起回退掉；已经回退过就只继续恢复剩余的副作用（文件与资产）。
+        if (!record.CanvasRestored)
+        {
+            try
+            {
+                if (JsonSerializer.Deserialize<RecentCanvasState>(record.SnapshotBefore) is { } state)
+                {
+                    ApplyCanvasState(state, advanceRevision: false);
+                    record.CanvasRestored = true;
+                }
+                else
+                {
+                    failures.Add("提交快照无法解析：画布未能回退。");
+                }
+            }
+            catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
+            {
+                failures.Add(error.Message);
+            }
+        }
+
+        failures.AddRange(FileSnapshot.RestoreAll(record.FileSnapshots));
+        // 返工 U1：资产移出也纳入恢复条件——它和文件一样是真实副作用，不还原就不算撤销成功。
+        // 返工 R16-4：已经成功移回的资产会被标记为已完成，重试时不再重复处理（否则会把
+        // 「已经恢复好」报成「回收目录里已找不到该文件」，永远收敛不了）。
+        failures.AddRange(AssetRecycle.RestoreAll(record.AssetMoves));
+
+        if (failures.Count == 0)
+        {
+            lastAgentCommit = null;
+            agentBatchCommitter.Ledger.MarkRolledBack(record.BatchId);
+        }
+        else
+        {
+            // 返工 U2：回滚只完成了一部分 → 记账为「待恢复」，禁止按原来的 SaveFailed 继续只重存，
+            // 否则会把「已经回退过的画布」当成这批动作的结果存下来。
+            agentBatchCommitter.Ledger.MarkNeedsRecovery(record.BatchId);
+        }
+        return failures;
+    }
+
+    /// <summary>
+    /// 当前画布的身份（返工 V3/R16-2）：**标签 Id + 该标签当前的文档世代**，不用文件路径——
+    /// 未命名画布的路径是 null（两个未命名画布会看起来像同一个），另存为之后路径又会变
+    /// （同一个画布会看起来像两个）。而只取标签 Id 也不够：同一个标签可以从画布库打开或导入
+    /// 换成**另一份文档**（R16-2），那时标签没变，装的内容却换了——世代号让新旧文档不共用身份。
+    /// </summary>
+    private string CurrentCanvasKey() =>
+        activeCanvasTab is null ? string.Empty : $"{activeCanvasTab.Id:N}:{activeCanvasTab.DocumentGeneration}";
+
+    /// <summary>
+    /// 同一个标签改成承载**另一份画布**（从画布库打开、导入替换）时调用（返工 R16-2）：
+    /// 换掉画布身份并作废旧的提交/恢复上下文。
+    ///
+    /// 为什么必须作废：旧记录里的「提交前快照」属于上一份文档，而修订号很可能与新文档对得上
+    /// （不同画布的修订号相同是常态），于是「撤销上次提交」会把上一份文档的状态套到新文档上，
+    /// 随后的保存还会顺着新文档的路径把它写下去。
+    /// </summary>
+    private void BeginNewDocumentOnCurrentTab()
+    {
+        if (activeCanvasTab is not null) activeCanvasTab.DocumentGeneration++;
+        lastAgentCommit = null;
+        pendingChanges.Clear();
+        canvas.SetPreview(null);
+        WriteAgentCommitDiagnostic($"new-document key={ShortKey(CurrentCanvasKey())}");
+    }
+
+    /// <summary>画布身份在提示文案里的短写（身份本身是标签 Id，全量太长且对用户没意义）。</summary>
+    private static string ShortKey(string key) =>
+        key.Length == 0 ? "（无）" : (key.Length <= 8 ? key : key[..8]);
 
     private static void WriteAgentCommitDiagnostic(string message)
     {
@@ -1163,75 +1401,91 @@ public sealed class MainForm : ScaledForm, IPluginHost
         }
     }
 
-    /// <summary>窗口或标签切换时确认当前 Agent 虚影，并保存到画布文件。</summary>
-    private AgentApplyResult? CommitPendingChanges()
+    /// <summary>
+    /// 面板「保存」：返回 null 表示成功，否则返回要显示在面板上的失败说明（返工 R3）。
+    /// 保存失败时给一次「就地重试保存」的机会——动作已经应用过，重试只重存，不会重复副作用。
+    /// </summary>
+    private string? SavePendingForPane()
+    {
+        // 返工 R17-2：面板「保存」与自动模式都走这里。待恢复时要说清「先做什么」，
+        // 而不是让用户看到「没有待提交的 Agent 改动」这种与现场不符的提示。
+        if (agentBatchCommitter.Ledger.HasPendingRecovery(out var waiting))
+            return "还有一批改动的撤销没做完（待恢复批次 " + ShortKey(waiting.ToString())
+                + "）：请先点「撤销上次提交」把画布与文件恢复好，再提交新的改动。";
+
+        var result = SaveAppliedAgentChanges();
+        if (result.Succeeded) return null;
+        if (!result.CanRetrySave) return result.Message;
+
+        var retry = MessageBox.Show(
+            result.Message + "\n\n是否现在重试保存？（只重新保存一次，不会重复应用动作）",
+            "保存未完成", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+        if (retry != DialogResult.Yes) return result.Message;
+
+        var second = SaveAppliedAgentChanges(saveOnly: true);
+        return second.Succeeded ? null : second.Message;
+    }
+
+    /// <summary>面板「撤销本批」：撤销会真的回退画布与文件；未完全恢复时返回失败说明（返工 S3）。</summary>
+    private string? UndoPendingForPane()
+    {
+        var failures = DiscardPendingChanges();
+        return failures.Count == 0 ? null : string.Join("；", failures);
+    }
+
+    /// <summary>
+    /// 窗口或标签切换前确认当前 Agent 改动：**返回真实结果**，调用方在未保存成功时必须中止切换
+    /// （返工 R3：不能一边报失败一边把用户切走，把改动留在内存里丢掉）。
+    /// </summary>
+    private AgentCommitResult? CommitPendingChanges()
     {
         if (pendingChanges.IsEmpty) return null;
-        SaveAppliedAgentChanges();
-        return null;
+        return SaveAppliedAgentChanges();
     }
 
     /// <summary>
     /// 撤销可用性：提交之后画布若又被改动过，回滚会连带回退用户自己的编辑，因此停用。
+    /// 返工 R16-3 的两个例外：
+    /// · 批次**还在等待恢复**时放行——否则「先重试撤销把画布与文件恢复好」这句提示没有入口可走，
+    ///   而所有离开入口又被守卫拦着，用户被卡死（此时画布已回退到提交前，继续恢复剩余的副作用是对的）；
+    /// · 记录属于**另一份画布**时停用并说明原因——撤销不可能在这里完成。
     /// </summary>
     private (bool Available, string Reason) UndoAvailability()
     {
         if (lastAgentCommit is null) return (false, "还没有可撤销的 Agent 提交。");
+
+        var key = CurrentCanvasKey();
+        if (lastAgentCommit.CanvasKey.Length > 0 && !string.Equals(lastAgentCommit.CanvasKey, key, StringComparison.OrdinalIgnoreCase))
+            return (false, "这批改动属于另一份画布：请切回原画布再撤销。");
+
+        if (agentBatchCommitter.Ledger.StateOf(lastAgentCommit.BatchId) == AgentBatchState.NeedsRecovery)
+            return (true, string.Empty);
+
         if (canvasRevision != lastAgentCommit.RevisionAtCommit + 1)
             return (false, "提交之后画布又有其它改动，撤销会连带回退这些编辑，因此已停用。");
         return (true, string.Empty);
     }
 
-    /// <summary>撤销上一次 Agent 提交：用提交前的整体快照恢复画布与画布参数。</summary>
+    /// <summary>
+    /// 撤销上一次 Agent 提交：用提交前的整体快照恢复画布与画布参数。
+    /// 返工 R16-3：画布已经回退过（上一次撤销没做完）时，这一次只继续恢复剩余的文件与资产，
+    /// 不再重复回退画布，也不谎称「画布恢复到提交前」。
+    /// </summary>
     private void UndoLastAgentCommit()
     {
         var (available, reason) = UndoAvailability();
         if (!available) { MessageBox.Show(reason, "撤销上次提交", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
-        var record = lastAgentCommit!;
-        try
-        {
-            if (JsonSerializer.Deserialize<RecentCanvasState>(record.SnapshotBefore) is not { } state)
-            {
-                MessageBox.Show("提交快照无法解析，撤销失败。", "撤销上次提交", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            ApplyCanvasState(state, advanceRevision: false);
-
-            var failures = new List<string>();
-            foreach (var snapshot in record.FileSnapshots)
-                if (RestoreFile(snapshot) is { } failure) failures.Add(failure);
-
-            lastAgentCommit = null;
-            RefreshPendingState();
-            canvas.Invalidate();
-            var message = "已撤销上一次 Agent 提交，画布恢复到提交前的状态。";
-            if (failures.Count > 0) message += "\n\n以下文件未能恢复：\n" + string.Join("\n", failures.Select(item => "· " + item));
-            MessageBox.Show(message, "撤销上次提交", MessageBoxButtons.OK,
-                failures.Count == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-        }
-        catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
-        {
-            MessageBox.Show(error.Message, "撤销失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-    }
-
-    /// <summary>恢复一个被 Agent 覆盖或新建的文件：原本不存在就删除，原本有内容就写回。</summary>
-    private static string? RestoreFile(FileSnapshot snapshot)
-    {
-        try
-        {
-            if (snapshot.OriginalContent is null)
-            {
-                if (File.Exists(snapshot.Path)) File.Delete(snapshot.Path);
-                return null;
-            }
-            File.WriteAllText(snapshot.Path, snapshot.OriginalContent);
-            return null;
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        {
-            return $"{snapshot.Path}：{error.Message}";
-        }
+        var continuing = lastAgentCommit is { CanvasRestored: true };
+        var failures = RollbackLastCommit();
+        RefreshPendingState();
+        RefreshWorkTreeView();
+        canvas.Invalidate();
+        var message = continuing
+            ? "已把上一次没做完的恢复完成（画布早已回退，这次只把剩余的文件与资产恢复好）。"
+            : "已撤销上一次 Agent 提交，画布恢复到提交前的状态。";
+        if (failures.Count > 0) message += "\n\n以下项目未能恢复：\n" + string.Join("\n", failures.Select(item => "· " + item));
+        MessageBox.Show(message, "撤销上次提交", MessageBoxButtons.OK,
+            failures.Count == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
     }
 
     /// <summary>选择 Agent 的工作文件夹。Agent 只能把文件写在这个目录内。</summary>
@@ -1339,7 +1593,7 @@ public sealed class MainForm : ScaledForm, IPluginHost
         canvasLibraryHint.BackColor = Color.Transparent; canvasLibraryHint.Visible = false;
         content.Controls.Add(canvasLibraryHint);
 
-        var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 108, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Padding = new Padding(0, 8, 0, 0) };
+        var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 144, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Padding = new Padding(0, 8, 0, 0) };
         footer.Controls.Add(CreatePaneButton("新建", 68, NewCanvasButton_Click));
         footer.Controls.Add(CreatePaneButton("保存", 68, (_, _) => SaveCanvasToLibrary()));
         footer.Controls.Add(CreatePaneButton("打开", 68, (_, _) => OpenSelectedLibraryCanvas()));
@@ -1347,6 +1601,8 @@ public sealed class MainForm : ScaledForm, IPluginHost
         footer.Controls.Add(CreatePaneButton("删除", 68, (_, _) => DeleteSelectedLibraryCanvas()));
         footer.Controls.Add(CreatePaneButton("导入包", 74, (_, _) => ImportCanvasPackage()));
         footer.Controls.Add(CreatePaneButton("导出包", 74, (_, _) => ExportCanvasPackage()));
+        footer.Controls.Add(CreatePaneButton("复制画布", 84, (_, _) => DuplicateCurrentCanvas()));
+        footer.Controls.Add(CreatePaneButton("检查画布", 84, (_, _) => ShowCanvasDiagnostics()));
         footer.Controls.Add(CreatePaneButton("存储与清理", 96, (_, _) => OpenStorageDialog()));
         content.Controls.Add(footer);
         canvasLibraryHint.BringToFront();
@@ -1393,7 +1649,8 @@ public sealed class MainForm : ScaledForm, IPluginHost
         layout.Controls.Add(SectionTitle("实体"), 0, 0);
         entityList.View = View.Details; entityList.FullRowSelect = true; entityList.MultiSelect = false;
         entityList.GridLines = true; entityList.HideSelection = false; entityList.Dock = DockStyle.Fill;
-        entityList.Columns.Add("种类", 58); entityList.Columns.Add("名称", 166); entityList.Columns.Add("变体", 52);
+        entityList.Columns.Add("种类", 58); entityList.Columns.Add("名称", 150); entityList.Columns.Add("变体", 46);
+        entityList.Columns.Add("来源", 66);
         entityList.SelectedIndexChanged += (_, _) => RefreshVariantList();
         entityList.DoubleClick += (_, _) => EditSelectedEntity();
         entityList.ContextMenuStrip = new ContextMenuStrip();
@@ -1413,6 +1670,9 @@ public sealed class MainForm : ScaledForm, IPluginHost
         entityButtons.Controls.Add(CreatePaneButton("新建道具", 84, (_, _) => CreateEntity(EntityKind.Prop)));
         entityButtons.Controls.Add(CreatePaneButton("编辑", 68, (_, _) => EditSelectedEntity()));
         entityButtons.Controls.Add(CreatePaneButton("删除", 68, (_, _) => DeleteSelectedEntity()));
+        entityButtons.Controls.Add(CreatePaneButton("引用与回收站", 108, (_, _) => ShowReferenceDialog()));
+        entityButtons.Controls.Add(CreatePaneButton("迁移到项目库", 116, (_, _) => MigrateEntitiesToProjectLibrary()));
+        entityButtons.Controls.Add(CreatePaneButton("恢复项目库", 104, (_, _) => RetryProjectCompensation()));
         layout.Controls.Add(entityButtons, 0, 2);
 
         layout.Controls.Add(SectionTitle("变体"), 0, 3);
@@ -1592,6 +1852,7 @@ public sealed class MainForm : ScaledForm, IPluginHost
             var item = new ListViewItem(WorkflowEntity.KindName(entity.Kind));
             item.SubItems.Add(entity.Name);
             item.SubItems.Add(entity.Variants.Count.ToString());
+            item.SubItems.Add(entity.ManagedByProject ? "项目级" : "本画布");
             item.Tag = entity;
             entityList.Items.Add(item);
         }
@@ -1644,24 +1905,137 @@ public sealed class MainForm : ScaledForm, IPluginHost
     private void EditSelectedEntity()
     {
         if (SelectedEntity is not { } entity) { MessageBox.Show("请先选择一个实体。", "设定库"); return; }
-        if (!OpenEntityEditor(entity)) return;
+        if (!EnsureNoProjectCompensation("编辑设定")) return;
+        // 目标 6 / G6-R1：托管资源的内容归项目库所有——编辑前留一份原样，编辑后写回库；
+        // 取消或写库失败都把内存整体还原，避免「界面改了、磁盘/库没改」。
+        var before = ProjectEntityScope.CloneEntity(entity);
+        if (!OpenEntityEditor(entity) || !PublishSharedEntity(entity, before, "编辑"))
+        {
+            if (!ReferenceEquals(before, entity)) ProjectEntityScope.RestoreInto(entity, before);
+            RefreshEntityList();
+            RefreshVariantList();
+            canvas.Invalidate();
+            return;
+        }
+
         canvas.NotifyContentChanged();
         RefreshEntityList();
+        RefreshVariantList();
         SelectInList(entityList, entity);
+    }
+
+    /// <summary>
+    /// 托管实体的改动落地（目标 6 / G6-R1）：项目库是权威，改动必须写回库；
+    /// 写库失败时把内存内容整体还原并如实报错，绝不出现「误报成功」或「丢旧数据」。
+    /// </summary>
+    private bool PublishSharedEntity(WorkflowEntity entity, WorkflowEntity before, string action)
+    {
+        if (ProjectEntityScope.TryPublish(entity, out var error)) return true;
+        ProjectEntityScope.RestoreInto(entity, before);
+        MessageBox.Show(
+            $"「{before.Name}」的{action}没能写入项目库：{error}\n\n本次改动已整体撤回，画布与项目库保持原样。",
+            "项目级资源写入失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return false;
     }
 
     private void DeleteSelectedEntity()
     {
         if (SelectedEntity is not { } entity) { MessageBox.Show("请先选择一个实体。", "设定库"); return; }
-        var referencing = canvas.State.Nodes.Count(node => node.References.Any(reference => reference.EntityId == entity.Id));
-        var extra = referencing == 0 ? string.Empty : $"\n画布上有 {referencing} 个节点正在引用它，删除后这些引用会失效（节点本身与文本保留）。";
-        if (MessageBox.Show($"删除「{entity.Name}」及其 {entity.Variants.Count} 个变体？参考图不会立即删除。{extra}",
-                "删除实体", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-        canvas.State.Entities.Remove(entity);
+        if (!EnsureCurrentCanvasWritable()) return;
+
+        // 目标 6 / G6-3：项目级共享资源从**项目库**里删除（先备份库文件 + 进回收站，可还原）；
+        // 其它画布/草稿还在引用时硬阻断——删除共享资源比删除画布本地副本影响大得多。
+        if (entity.ManagedByProject)
+        {
+            if (!EnsureNoProjectCompensation("删除项目资源")) return;
+            var libraryCheck = ProjectEntityDeletion.Check(ScanReferences(), entity.Id);
+            if (libraryCheck.Blocked)
+            {
+                MessageBox.Show(libraryCheck.Message, "删除项目资源", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (MessageBox.Show(
+                    libraryCheck.Message + $"\n\n确定把「{entity.Name}」从项目库移除吗？",
+                    "删除项目资源", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            if (!ProjectEntityDeletion.TryDeleteFromLibrary(entity, libraryCheck.Local, out var deleteError, out _))
+            {
+                MessageBox.Show($"未能删除「{entity.Name}」：{deleteError}\n（项目库未改动）",
+                    "删除项目资源", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // 本画布同步：解除引用并移除（其它来源已在上面的检查里挡掉）。
+            foreach (var node in canvas.State.Nodes)
+                node.References.RemoveAll(reference => reference.EntityId == entity.Id);
+            canvas.State.Entities.Remove(entity);
+            canvas.NotifyContentChanged();
+            RefreshEntityList();
+            RefreshNodeInspector();
+            canvas.Invalidate();
+            return;
+        }
+
+        // 删除保护（目标 4）：先跨画布/草稿扫引用；其它来源还在用就硬阻断。
+        var guard = CanvasDeletionGuard.CheckEntity(ScanReferences(), entity);
+        if (guard.HardBlocked) { MessageBox.Show(guard.Message, "删除实体", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+
+        var prompt = guard.HasReferences
+            ? guard.Message + $"\n\n是否解除本画布引用，并把「{entity.Name}」及其 {entity.Variants.Count} 个变体移入回收站？"
+            : $"把「{entity.Name}」及其 {entity.Variants.Count} 个变体移入回收站？参考图不会立即删除，可在「引用与回收站」里还原。";
+        if (MessageBox.Show(prompt, "删除实体", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+        // 先写回收站快照，成功后才解除引用并移除：写不进去就整体取消，内存与磁盘都保持原样。
+        if (!CanvasDeletionGuard.TryDeleteEntity(canvas.State, entity, guard.Hits, out var error))
+        {
+            MessageBox.Show($"未能删除「{entity.Name}」：{error}\n（画布未改动）", "删除实体", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         canvas.NotifyContentChanged();
         RefreshEntityList();
         RefreshNodeInspector();
         canvas.Invalidate();
+    }
+
+    /// <summary>跨画布/草稿扫描引用，供删除保护与「引用与回收站」使用（目标 4 / 4.1、4.3）。</summary>
+    private ReferenceScanReport ScanReferences() => CanvasReferenceScanner.Scan(canvas.State, currentCanvasPath);
+
+    /// <summary>
+    /// 把本画布（以及其它画布/草稿）里的**本地资源**迁移进项目库（目标 6 / G6-2）：
+    /// 先给预览、用户确认后才落盘；过程中会备份项目库与受影响的画布文件，失败整批回滚；
+    /// 已共享的实体直接跳过（幂等），同名不同实体绝不自动合并。
+    /// </summary>
+    /// <param name="quiet">自动化（回归/冒烟）用：不弹预览与确认框，直接按目标执行并返回结果。</param>
+    private ProjectMigrationOutcome? MigrateEntitiesToProjectLibrary(bool quiet = false)
+    {
+        if (!EnsureNoProjectCompensation("迁移资源", quiet)) return null;
+        var preview = ProjectEntityMigration.Preview(canvas.State, currentCanvasPath);
+        if (!preview.HasWork)
+        {
+            if (!quiet) MessageBox.Show(preview.ToText(), "迁移到项目库", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return null;
+        }
+
+        if (!quiet && MessageBox.Show(
+                preview.ToText() + "\n\n现在执行迁移吗？（会先备份项目库与受影响的画布文件）",
+                "迁移到项目库", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return null;
+
+        var outcome = ProjectEntityMigration.Apply(canvas.State, currentCanvasPath);
+        canvas.NotifyContentChanged();
+        RefreshEntityList();
+        RefreshCanvasLibrary();
+        WriteAgentCommitDiagnostic(
+            $"project-migration ok={outcome.Succeeded} migrated={outcome.Migrated} canvases={outcome.WrittenCanvases.Count} errors={outcome.Errors.Count}");
+        if (quiet) return outcome;
+
+        var detail = outcome.Message;
+        if (outcome.Errors.Count > 0) detail += "\n\n" + string.Join("\n", outcome.Errors);
+        MessageBox.Show(detail, "迁移到项目库", MessageBoxButtons.OK,
+            outcome.Succeeded ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        return outcome;
     }
 
     /// <summary>把当前选中的变体作为新节点放到画布上，节点创建时即引用该设定并锁定最新版本。</summary>
@@ -1723,8 +2097,9 @@ public sealed class MainForm : ScaledForm, IPluginHost
     /// </summary>
     private async Task<SkillRunResult> ExecuteSkillWithProgressAsync(SkillDefinition skill, SkillTarget target)
     {
-        var provider = ImageProviderFactory.Create(execution);
-        if (!provider.IsConfigured)
+        // 按技能选执行方（返工 S4）：导入的 API 技能走它自己的接口配置，不会被 ComfyUI 抢走。
+        var provider = ImageProviderFactory.CreateFor(skill, execution);
+        if (skill.NeedsImageProvider && !provider.IsConfigured)
         {
             var notConfigured = new SkillRunResult { Succeeded = false, Message = "尚未配置图像模型。请在“设置”中填写 ComfyUI 地址与 checkpoint，或填写图像模型名称。" };
             MessageBox.Show(notConfigured.Message, "运行技能");
@@ -1753,7 +2128,7 @@ public sealed class MainForm : ScaledForm, IPluginHost
             {
                 if (progressForm.IsDisposed) return;
                 progressForm.BeginInvoke(() => { if (!progressForm.IsDisposed) progressLabel.Text = message; });
-            });
+            }, cancellationToken: default, videoProvider: VideoProviderFactory.Create(AiProviderSettings.Load()));
         }
         finally
         {
@@ -1829,15 +2204,23 @@ public sealed class MainForm : ScaledForm, IPluginHost
     private void CreateVariant()
     {
         if (SelectedEntity is not { } entity) { MessageBox.Show("请先选择一个实体。", "设定库"); return; }
-        var variant = entity.CreateVariant($"变体 {entity.Variants.Count + 1}");
-        if (!OpenVariantEditor(entity, variant))
+        if (!EnsureNoProjectCompensation("修改变体")) return;
+        var before = ProjectEntityScope.CloneEntity(entity);
+        var created = entity.CreateVariant($"变体 {entity.Variants.Count + 1}");
+        var persisted = false;
+        var accepted = OpenVariantEditor(entity, created, out persisted);
+        if (!accepted && persisted) { KeepPersistedCommits(entity); return; }
+        if (!accepted || !PublishSharedEntity(entity, before, "新建变体"))
         {
-            entity.Variants.Remove(variant);
+            ProjectEntityScope.RestoreInto(entity, before);
+            RefreshVariantList();
+            RefreshEntityList();
+            canvas.Invalidate();
             return;
         }
         canvas.NotifyContentChanged();
         RefreshVariantList();
-        SelectInList(variantList, variant);
+        SelectInList(variantList, created);
     }
 
     private void EditSelectedVariant()
@@ -1847,11 +2230,95 @@ public sealed class MainForm : ScaledForm, IPluginHost
             MessageBox.Show("请先选择一个变体。", "设定库");
             return;
         }
-        if (!OpenVariantEditor(entity, variant)) return;
+        if (!EnsureNoProjectCompensation("修改变体")) return;
+        var before = ProjectEntityScope.CloneEntity(entity);
+        var persisted = false;
+        var accepted = OpenVariantEditor(entity, variant, out persisted);
+        if (!accepted && persisted) { KeepPersistedCommits(entity); return; }
+        if (!accepted || !PublishSharedEntity(entity, before, "变体编辑"))
+        {
+            ProjectEntityScope.RestoreInto(entity, before);
+            RefreshVariantList();
+            RefreshEntityList();
+            canvas.InvalidateThumbnails();
+            canvas.Invalidate();
+            return;
+        }
         canvas.InvalidateThumbnails();
         canvas.NotifyContentChanged();
         RefreshVariantList();
         SelectInList(variantList, variant);
+    }
+
+    /// <summary>
+    /// 外层取消、但对话框里已有"确认并落库"的提交（目标 6 / G6-S2）：只丢掉未持久化的编辑，
+    /// 用项目库内容对齐内存，绝不撤销已经提示成功的提交。
+    /// </summary>
+    private void KeepPersistedCommits(WorkflowEntity entity)
+    {
+        if (ProjectLibrary.Find(entity.Id) is { } authoritative)
+            ProjectEntityScope.RestoreInto(entity, authoritative);
+        canvas.InvalidateThumbnails();
+        canvas.Invalidate();
+        canvas.NotifyContentChanged();
+        RefreshEntityList();
+        RefreshVariantList();
+    }
+
+    /// <summary>项目库补偿失败留下的待恢复记录（复核 G6-T3）：重试成功之前不再向项目库写入。</summary>
+    private ProjectCompensation? pendingProjectCompensation;
+
+    /// <summary>
+    /// 有待恢复的项目库补偿时，阻止继续写库（复核 G6-T3）：先重试恢复，别让不一致的写入互相叠加。
+    /// </summary>
+    private bool EnsureNoProjectCompensation(string action, bool quiet = false)
+    {
+        if (pendingProjectCompensation is not { } pending) return true;
+        if (!quiet)
+            MessageBox.Show(
+                $"还有一次项目库恢复没做完（{pending.Reason}）。\n\n请先点「恢复项目库」把它重试成功，再做{action}。",
+                "有待恢复的项目库改动", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return false;
+    }
+
+    /// <summary>
+    /// 重试上次失败的项目库补偿（复核 G6-T3）：成功即清除待恢复记录，并用库内容把内存对齐；
+    /// 再次失败就保留记录、如实报告原因，等故障解除后再试。
+    /// </summary>
+    private bool RetryProjectCompensation(bool quiet = false)
+    {
+        if (pendingProjectCompensation is not { } pending)
+        {
+            if (!quiet) MessageBox.Show("没有待恢复的项目库改动。", "恢复项目库", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
+
+        if (!ProjectEntityScope.TryPublish(pending.Content, out var error))
+        {
+            pendingProjectCompensation = pending with { Reason = error };
+            WriteAgentCommitDiagnostic($"project-compensation retry-failed entity={pending.EntityId:N}");
+            if (!quiet)
+                MessageBox.Show($"仍未恢复成功：{error}\n（记录保留，故障解除后可再试）", "恢复项目库", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+
+        var restoredName = pending.Content.Name;
+        pendingProjectCompensation = null;
+        // 库恢复了，内存也要跟着回到同一份内容，否则会出现"库是删除前、内存是删除后"的分裂。
+        var canvasEntity = canvas.State.Entities.FirstOrDefault(item => item.Id == pending.EntityId);
+        if (canvasEntity is not null && ProjectLibrary.Find(pending.EntityId) is { } authoritative)
+        {
+            ProjectEntityScope.RestoreInto(canvasEntity, authoritative);
+            RefreshEntityList();
+            RefreshVariantList();
+            canvas.Invalidate();
+        }
+
+        canvas.NotifyContentChanged();
+        WriteAgentCommitDiagnostic($"project-compensation recovered entity={pending.EntityId:N}");
+        if (!quiet)
+            MessageBox.Show($"已把「{restoredName}」恢复到项目库，画布与项目库重新一致。", "恢复项目库", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return true;
     }
 
     private void DeleteSelectedVariant()
@@ -1862,10 +2329,61 @@ public sealed class MainForm : ScaledForm, IPluginHost
             return;
         }
         if (entity.Variants.Count <= 1) { MessageBox.Show("每个实体至少保留一个变体。", "设定库"); return; }
-        if (MessageBox.Show($"删除变体「{variant.Name}」？", "删除变体", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-        entity.Variants.Remove(variant);
+        if (!EnsureNoProjectCompensation("删除变体")) return;
+        if (!EnsureCurrentCanvasWritable()) return;
+
+        // 删除保护（目标 4）：其它画布/草稿仍在引用这个变体时硬阻断。
+        var guard = CanvasDeletionGuard.CheckVariant(ScanReferences(), entity, variant);
+        if (guard.HardBlocked) { MessageBox.Show(guard.Message, "删除变体", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+
+        var prompt = guard.HasReferences
+            ? guard.Message + $"\n\n是否解除本画布引用，并把变体「{variant.Name}」移入回收站？"
+            : $"把变体「{variant.Name}」移入回收站？可在「引用与回收站」里还原。";
+        if (MessageBox.Show(prompt, "删除变体", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+        // 目标 6 / G6-S3：**先**把"删掉这个变体之后"的实体落进项目库，成功之后才动本画布
+        // （解除引用 + 写回收站 + 移除变体）。若反过来先解除引用再发布，发布失败时就会出现
+        // "实体恢复了、节点引用却已经没了"的半成品。
+        var beforeDelete = ProjectEntityScope.CloneEntity(entity);
+        if (entity.ManagedByProject)
+        {
+            var planned = ProjectEntityScope.CloneEntity(entity);
+            planned.Variants.RemoveAll(candidate => candidate.Id == variant.Id);
+            if (!ProjectEntityScope.TryPublish(planned, out var publishError))
+            {
+                MessageBox.Show(
+                    $"未能删除变体「{variant.Name}」：写回项目库失败（{publishError}）。\n（画布与项目库均未改动）",
+                    "删除变体", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+        }
+
+        if (!CanvasDeletionGuard.TryDeleteVariant(canvas.State, entity, variant, guard.Hits, out var error))
+        {
+            // 本地删除失败：把项目库补偿回删除前的实体（目标 6 / G6-S3）。
+            // 补偿本身也可能失败——那时**绝不能**谎报"均未改动"（复核 G6-T3）：要如实报告、
+            // 留下可重试的恢复记录，并在恢复成功前拒绝继续写库，免得一批不一致的写入互相叠加。
+            if (entity.ManagedByProject && !ProjectEntityScope.TryPublish(beforeDelete, out var compensationError))
+            {
+                pendingProjectCompensation = new ProjectCompensation(entity.Id, beforeDelete, CurrentCanvasKey(), compensationError);
+                MessageBox.Show(
+                    $"未能删除变体「{variant.Name}」：{error}\n"
+                    + $"此外，把项目库恢复成删除前也失败了：{compensationError}\n\n"
+                    + "已记为待恢复：请点「恢复项目库」重试；在它成功之前不会再向项目库写入任何改动。",
+                    "删除变体", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                RefreshVariantList();
+                RefreshEntityList();
+                canvas.Invalidate();
+                return;
+            }
+
+            MessageBox.Show($"未能删除变体「{variant.Name}」：{error}\n（画布与项目库均未改动）", "删除变体", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         canvas.NotifyContentChanged();
         RefreshVariantList();
+        RefreshEntityList();
     }
 
     /// <summary>编辑实体本身：种类、名称、别名与跨章节不变的核心设定。</summary>
@@ -1919,8 +2437,11 @@ public sealed class MainForm : ScaledForm, IPluginHost
     /// 编辑变体分成两页：「内容」管理名称、差异描述与场景空间布局；「版本」提交新版本并查看历史。
     /// 提交版本是独立动作，会立即生效；「保存」只写回内容页的编辑。
     /// </summary>
-    private bool OpenVariantEditor(WorkflowEntity entity, WorkflowEntityVariant variant)
+    private bool OpenVariantEditor(WorkflowEntity entity, WorkflowEntityVariant variant, out bool persisted)
     {
+        persisted = false;
+        // 对话框内已确认并写进项目库的提交（目标 6 / G6-S2）：外层取消不能把它回滚掉。
+        var committedInDialog = false;
         var isScene = entity.Kind == EntityKind.Scene;
         if (isScene) variant.Layout ??= new SceneLayout();
         variant.EnsureInitialVersion();
@@ -2071,10 +2592,39 @@ public sealed class MainForm : ScaledForm, IPluginHost
             variant.Name = nameBox.Text.Trim().Length == 0 ? variant.Name : nameBox.Text.Trim();
             variant.Description = descriptionBox.Text.Trim();
             if (variant.Layout is not null) variant.Layout.Overview = overviewBox.Text.Trim();
+
+            // 目标 6 / G6-S2：这是**用户已确认的提交**，提示成功就必须立即持久化到项目库；
+            // 不能被外层「取消」回滚掉——否则界面说"已提交"，重开会话却发现提交不见了。
+            var beforeCommit = ProjectEntityScope.CloneEntity(entity);
             var version = variant.Commit(note);
+            var outcome = ProjectEntityScope.Publish(entity);
+            if (!outcome.Succeeded)
+            {
+                ProjectEntityScope.RestoreInto(entity, beforeCommit);
+                variant = entity.Variants.FirstOrDefault(candidate => candidate.Id == variant.Id) ?? entity.Variants[0];
+                RefreshVersionTab();
+                RefreshPreview();
+                MessageBox.Show(
+                    $"版本提交没能写入项目库：{outcome.Error}\n\n本次提交已撤回，实体与项目库保持原样。",
+                    "提交版本", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             RefreshVersionTab();
             RefreshPreview();
-            MessageBox.Show($"已提交 {version.Label}。锁定了旧版本的引用不受影响，需要时可在节点上用「升级到最新」。", "提交版本");
+            if (outcome.Persisted)
+            {
+                // 已真落库：外层取消不得撤销这次提交（目标 6 / G6-S2）。
+                committedInDialog = true;
+                MessageBox.Show($"已提交并保存 {version.Label}。锁定了旧版本的引用不受影响，需要时可在节点上用「升级到最新」。", "提交版本");
+                return;
+            }
+
+            // 本地（未迁移）实体：内容跟着画布走，这一步**没有**落盘（复核 G6-T2）——
+            // 所以不能说"已保存"，也不把这次提交算作已持久化（取消关闭会把它撤回）。
+            MessageBox.Show(
+                $"已提交 {version.Label}（本画布本地版本）。它还没写进文件：保存画布后才落盘，现在取消关闭会撤回这次提交。",
+                "提交版本");
         }
 
         void MoveItem(int offset)
@@ -2293,7 +2843,11 @@ public sealed class MainForm : ScaledForm, IPluginHost
         RefreshItems();
         RefreshImages();
         RefreshVersionTab();
-        return dialog.ShowDialog(this) == DialogResult.OK;
+        var accepted = dialog.ShowDialog(this) == DialogResult.OK;
+        // 目标 6 / G6-S2：把"对话框内是否已确认并落库的提交"告诉外层，
+        // 让取消分支只丢弃未持久化的编辑，不撤销已经提示成功的提交。
+        persisted = committedInDialog;
+        return accepted;
     }
 
     /// <summary>编辑一条布局元素：方位、方位细化、元素与补充说明。</summary>
@@ -2369,7 +2923,8 @@ public sealed class MainForm : ScaledForm, IPluginHost
         {
             activeCanvasTab.Title = canvasTitle;
             activeCanvasTab.Path = currentCanvasPath;
-            activeCanvasTab.Snapshot = BuildCanvasState();
+            // 返工 R16-1：快照必须是独立副本，不能与当前画布共享同一个状态对象。
+            activeCanvasTab.Snapshot = BuildCanvasSnapshot();
             if (activeCanvasTab.TitleControl is not null)
                 activeCanvasTab.TitleControl.Text = string.IsNullOrWhiteSpace(currentCanvasPath) ? $"{canvasTitle} *" : canvasTitle;
         }
@@ -2390,34 +2945,75 @@ public sealed class MainForm : ScaledForm, IPluginHost
     private void SaveCanvasToLibraryFile()
     {
         if (string.IsNullOrWhiteSpace(currentCanvasPath)) return;
+        if (IsCurrentCanvasReadOnly()) return;
         try { CanvasLibrary.Save(BuildCanvasState(), currentCanvasPath); }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        catch (CanvasSaveAbortedException aborted) { ShowSaveAborted(aborted.Message); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show("关闭时写回画布失败：" + error.Message, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
-    private void SaveCanvasToLibrary(bool showResult = true)
+    /// <summary>
+    /// 当前画布是否处于「只读查看」状态：来源格式版本高于当前支持版本时不允许覆盖保存，
+    /// 否则会把未知格式的数据降级写回（返工 R11）。
+    /// </summary>
+    private bool IsCurrentCanvasReadOnly() => currentCanvasUnsupportedFormat > 0;
+
+    private bool EnsureCurrentCanvasWritable()
     {
+        if (!IsCurrentCanvasReadOnly()) return true;
+        MessageBox.Show(
+            $"该画布的格式版本是 {currentCanvasUnsupportedFormat}，高于当前支持的 {CanvasFormat.Current}。\n"
+            + "当前版本只做只读查看，不会覆盖保存，以免丢失未知数据；请用更高版本的程序打开。",
+            "只读查看", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return false;
+    }
+
+    private void ShowSaveAborted(string message) =>
+        MessageBox.Show(message, "已中止保存（原文件未被覆盖）", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+    /// <summary>
+    /// 统一保存入口：返回真实结果（返工 B-UI-02）。只要出现只读拒绝、同名冲突取消、备份失败、
+    /// 权限/写入失败或原子替换失败，一律返回 <c>false</c>，调用方不得据此显示成功。
+    /// </summary>
+    private bool SaveCanvasToLibrary(bool showResult = true)
+    {
+        if (!EnsureCurrentCanvasWritable()) return false;
         try
         {
             if (string.IsNullOrWhiteSpace(currentCanvasPath))
             {
                 var conflict = CanvasLibrary.FindByTitle(canvasTitle);
                 if (conflict is not null && MessageBox.Show(
-                        $"画布库中已存在“{canvasTitle}”，继续会覆盖该画布。是否覆盖？",
-                        "同名画布", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                        $"画布库中已存在“{canvasTitle}”，继续会覆盖该画布（覆盖前会自动留一份备份，备份失败则中止保存）。是否覆盖？",
+                        "同名画布", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return false;
             }
+
             var applied = pendingChanges.Count;
-            SetCurrentCanvasPath(CanvasLibrary.Save(BuildCanvasState(), currentCanvasPath));
+            var target = string.IsNullOrWhiteSpace(currentCanvasPath) ? CanvasLibrary.PathForTitle(canvasTitle) : currentCanvasPath;
+            var saved = CanvasSaveService.Save(BuildCanvasState(), target);
+            SetCurrentCanvasPath(saved.Path);
             pendingChanges.Clear();
             canvas.SetPreview(null);
             RefreshPendingState();
             RefreshCanvasLibrary();
-            var saved = $"已保存到 {currentCanvasPath}";
-            if (applied > 0) saved += $"\n（含 {applied} 条 Agent 改动，可用工具栏的「撤销上次 Agent 提交」回退）";
-            if (showResult) MessageBox.Show(saved, "保存画布");
+
+            var detail = $"已保存到 {saved.Path}";
+            detail += saved.BackupPath is not null ? $"\n覆盖前备份：{saved.BackupPath}" : "\n（首次保存，无需备份）";
+            if (applied > 0) detail += $"\n（含 {applied} 条 Agent 改动，可用工具栏的「撤销上次 Agent 提交」回退）";
+            ReportCanvasHealth("保存画布", saved.Migration, saved.Validation, detail, quiet: !showResult);
+            return true;
+        }
+        catch (CanvasSaveAbortedException aborted)
+        {
+            ShowSaveAborted(aborted.Message);
+            return false;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             MessageBox.Show(error.Message, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
         }
     }
 
@@ -2425,11 +3021,670 @@ public sealed class MainForm : ScaledForm, IPluginHost
     {
         var path = SelectedLibraryPath;
         if (path is null) { MessageBox.Show("请先在画布库中选择一个画布。", "打开画布"); return; }
-        if (!CanvasLibrary.TryLoad(path, out var state) || state is null) { MessageBox.Show("画布文件无法读取。", "打开失败", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-        ApplyCanvasState(state, advanceRevision: false);
+        // 返工 V3：从画布库打开会整体替换当前画布，必须先过统一守卫——
+        // 否则 A 保存失败后打开 B，B 上的提交会按 A 的失败记录只重存，把 A 记成成功。
+        if (!ConfirmPendingBeforeLeaving()) return;
+        if (!CanvasOpenService.TryOpen(path, out var outcome, out var error))
+        {
+            MessageBox.Show(error, "打开失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        // 旧数据先能打开查看：迁移只作用于内存副本，校验问题只做提示，不阻断访问。
+        // 返工 R16-2：这是**同一标签换成另一份文档**——先换画布身份并作废旧的提交/恢复上下文，
+        // 再装载内容；否则旧提交的快照可能在修订号上恰好对得上，撤销会把上一份文档套到这一份上。
+        BeginNewDocumentOnCurrentTab();
+        ApplyCanvasState(outcome.State, advanceRevision: false);
         SetCurrentCanvasPath(path);
         SaveRecentCanvas();
         RefreshCanvasLibrary();
+        if (outcome.UnsupportedFormat)
+        {
+            MessageBox.Show(
+                $"该画布的格式版本是 {outcome.State.FormatVersion}，高于当前支持的 {CanvasFormat.Current}。\n"
+                + "已按只读方式打开：可以查看和检查，但覆盖保存与导入会被拒绝，以免丢失未知数据。",
+                "只读查看", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        ReportCanvasHealth("打开画布", outcome.Migration, outcome.Validation,
+            outcome.Migrated ? "打开时已按当前格式补齐可确定的缺失标识；保存后才会写入文件。" : null,
+            quiet: !outcome.NeedsAttention);
+    }
+
+    /// <summary>
+    /// 把打开/保存/导入后的迁移与校验结果汇总成一次提示。画布已经可用，这里只做提示并给出查看详情的入口，
+    /// 不因为校验错误而拒绝访问。
+    /// </summary>
+    private void ReportCanvasHealth(
+        string action,
+        MigrationReport migration,
+        CanvasIdentityReport validation,
+        string? extra = null,
+        bool quiet = false)
+    {
+        var problems = validation.Issues.Count + migration.Ambiguities.Count;
+        if (problems == 0)
+        {
+            if (!quiet && !string.IsNullOrWhiteSpace(extra)) MessageBox.Show(extra, action);
+            return;
+        }
+
+        var lines = new List<string>();
+        if (!string.IsNullOrWhiteSpace(extra)) lines.Add(extra);
+        lines.Add($"校验问题 {validation.Issues.Count} 项（错误 {validation.ErrorCount}，警告 {validation.WarningCount}），待处理歧义 {migration.Ambiguities.Count} 项。");
+        if (validation.HasErrors)
+        {
+            var samples = validation.Issues.Where(issue => issue.Severity == CanvasIdentitySeverity.Error).Take(3).Select(issue => "· " + issue);
+            lines.AddRange(samples);
+        }
+
+        lines.Add(string.Empty);
+        lines.Add("是否现在查看详情？（可查看完整报告、执行显式修复或恢复备份）");
+        var choice = MessageBox.Show(string.Join("\n", lines), action + " — 数据检查", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+        if (choice == DialogResult.Yes) ShowCanvasDiagnostics(migration, validation);
+    }
+
+    /// <summary>检查画布：只读校验 + 迁移歧义，并提供显式处理入口（丢弃无法解析的旧引用、空锁定版本改为跟随当前、恢复备份）。</summary>
+    private void ShowCanvasDiagnostics(MigrationReport? migration = null, CanvasIdentityReport? validation = null)
+    {
+        var report = validation ?? CanvasIdentityValidator.Validate(canvas.State, AssetStore.Exists);
+        var text = new TextBox
+        {
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            Dock = DockStyle.Fill,
+            BackColor = Color.White,
+            Font = new Font("Consolas", 9f)
+        };
+        var notes = new List<string>();
+        void Refresh()
+        {
+            var body = new List<string>();
+            if (notes.Count > 0)
+            {
+                body.Add("== 本次结果 ==");
+                body.AddRange(notes);
+                body.Add(string.Empty);
+            }
+            if (migration is not null)
+            {
+                body.Add("== 打开时的迁移报告 ==");
+                body.Add(migration.ToText());
+                body.Add(string.Empty);
+            }
+            body.Add("== 只读 ID 与引用校验 ==");
+            body.Add(report.ToText());
+            body.Add(string.Empty);
+            body.Add("== 章节与工作树诊断（大目标 B）==");
+            body.Add($"章节：{CanvasChapters.ChapterItems(canvas.State).Count} 个");
+            var chapterIssues = CanvasChapters.Diagnose(canvas.State);
+            body.Add(chapterIssues.Count == 0
+                ? "章节诊断：没有问题。"
+                : $"章节诊断：{chapterIssues.Count} 项" + Environment.NewLine
+                    + string.Join(Environment.NewLine, chapterIssues.Select(issue => "· " + issue)));
+            var syncPlan = CanvasWorkTreeSync.Plan(canvas.State, SyncDirection.Both);
+            body.Add($"同步计划：改动 {syncPlan.Changes.Count} 项，冲突 {syncPlan.Conflicts.Count} 项"
+                + (syncPlan.HasBlockingConflicts ? "（含阻断项）" : string.Empty));
+            body.Add("（可用工具栏「章节同步」预览并应用）");
+            body.Add(string.Empty);
+            if (IsCurrentCanvasReadOnly())
+            {
+                body.Add("== 只读查看 ==");
+                body.Add($"该画布格式版本 {currentCanvasUnsupportedFormat} 高于当前支持的 {CanvasFormat.Current}："
+                    + "可以查看与检查，但覆盖保存与导入会被拒绝，两个修复操作也已禁用。");
+                body.Add(string.Empty);
+            }
+            body.Add("== 备份 ==");
+            var backups = string.IsNullOrWhiteSpace(currentCanvasPath) ? Array.Empty<string>() : CanvasBackup.ListFor(currentCanvasPath);
+            body.Add(backups.Count == 0 ? "当前画布还没有备份（保存前会自动创建）。" : string.Join(Environment.NewLine, backups.Select(path => "· " + path)));
+            text.Text = string.Join(Environment.NewLine, body);
+        }
+
+        using var dialog = new ScaledForm
+        {
+            Text = $"检查画布 — {canvasTitle}",
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(900, 620),
+            Font = Theme.UiFont,
+            BackColor = Theme.PanelBg
+        };
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 84, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Padding = new Padding(8) };
+
+        var dropReferences = new Button { Text = "丢弃无法解析的旧引用", Width = 172, Height = 30 };
+        dropReferences.Click += (_, _) =>
+        {
+            if (!EnsureCurrentCanvasWritable()) return;
+            if (MessageBox.Show("会把节点上既没有实体也没有变体、或目标已不存在的引用删除，此操作不可撤销。继续？",
+                    "丢弃无法解析的引用", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            var outcome = CanvasMigration.DropUnresolvableReferences(canvas.State);
+            canvas.NotifyContentChanged();
+            notes.Add(outcome.Summary);
+            report = CanvasIdentityValidator.Validate(canvas.State, AssetStore.Exists);
+            Refresh();
+        };
+        buttons.Controls.Add(dropReferences);
+
+        var followCurrent = new Button { Text = "空锁定版本改为跟随当前", Width = 184, Height = 30 };
+        followCurrent.Click += (_, _) =>
+        {
+            if (!EnsureCurrentCanvasWritable()) return;
+            if (MessageBox.Show("会把锁定版本是空 GUID 的引用改成「跟随当前版本」。只有确认这些引用本意是跟随当前时才使用。继续？",
+                    "空锁定版本", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            var outcome = CanvasMigration.TreatEmptyLockedVersionAsFollowCurrent(canvas.State);
+            canvas.NotifyContentChanged();
+            notes.Add(outcome.Summary);
+            report = CanvasIdentityValidator.Validate(canvas.State, AssetStore.Exists);
+            Refresh();
+        };
+        buttons.Controls.Add(followCurrent);
+
+        var restore = new Button { Text = "恢复备份…", Width = 96, Height = 30 };
+        restore.Click += (_, _) =>
+        {
+            if (RestoreCanvasBackup()) { notes.Add("已从备份恢复画布文件；重新打开该画布即可看到恢复结果。"); Refresh(); }
+        };
+        buttons.Controls.Add(restore);
+
+        var revalidate = new Button { Text = "重新检查", Width = 84, Height = 30 };
+        revalidate.Click += (_, _) =>
+        {
+            report = CanvasIdentityValidator.Validate(canvas.State, AssetStore.Exists);
+            notes.Add("已按当前画布内容重新检查。");
+            Refresh();
+        };
+        buttons.Controls.Add(revalidate);
+
+        var close = new Button { Text = "关闭", Width = 68, Height = 30 };
+        close.Click += (_, _) => dialog.Close();
+        buttons.Controls.Add(close);
+
+        Refresh();
+        dialog.Controls.Add(text);
+        dialog.Controls.Add(buttons);
+        dialog.ShowDialog(this);
+    }
+
+    /// <summary>从备份恢复画布文件；返回是否真的恢复。</summary>
+    private bool RestoreCanvasBackup()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Filter = "画布备份 (*.json)|*.json",
+            Title = "选择要恢复的备份",
+            InitialDirectory = Directory.Exists(CanvasBackup.Directory) ? CanvasBackup.Directory : CanvasLibrary.Directory
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return false;
+
+        var target = string.IsNullOrWhiteSpace(currentCanvasPath)
+            ? DialogTarget()
+            : currentCanvasPath;
+        if (string.IsNullOrWhiteSpace(target)) return false;
+
+        try
+        {
+            CanvasBackup.Restore(dialog.FileName, target);
+            MessageBox.Show($"已恢复 {target}。当前内容在恢复前也留了一份备份。", "恢复备份");
+            return true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or FileNotFoundException)
+        {
+            MessageBox.Show(error.Message, "恢复失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+
+        string? DialogTarget()
+        {
+            using var save = new SaveFileDialog
+            {
+                Filter = "画布文件 (*.json)|*.json",
+                FileName = CanvasLibrary.SanitizeFileName(canvasTitle) + ".json",
+                InitialDirectory = CanvasLibrary.Directory
+            };
+            return save.ShowDialog(this) == DialogResult.OK ? save.FileName : null;
+        }
+    }
+
+    /// <summary>复制当前画布为一份新的独立画布：所有 ID 重发，集合内关系按映射改写，集合外引用保持共享。</summary>
+    /// <param name="quiet">自动化（冒烟/回归）用：不弹守卫与结果对话框，判定与副作用完全一致。</param>
+    private void DuplicateCurrentCanvas(bool quiet = false)
+    {
+        // 返工 R17-1：复制画布会**落盘一份新文件并切到新标签**，等于离开当前画布——
+        // 必须走统一离开守卫：还有批次等待恢复时不放行（否则复制会先落盘再切走，
+        // 而撤销被身份检查拒绝、切回来又被守卫拦住，用户被卡在中间），有未提交改动则先问一次。
+        if (!ConfirmPendingBeforeLeaving(quiet)) return;
+        try
+        {
+            var copy = CanvasDuplication.DuplicateCanvas(canvas.State);
+            var title = CopyTitle(canvasTitle);
+            var state = BuildCanvasState() with
+            {
+                Title = title,
+                Revision = 0,
+                Canvas = copy.Canvas,
+                FormatVersion = CanvasFormat.Current
+            };
+
+            var path = CanvasLibrary.PathForTitle(title);
+            var saved = CanvasSaveService.Save(state, path);
+            AddCanvasTab(state, path);
+            RefreshCanvasLibrary();
+            var detail = copy.Report.ToText();
+            if (copy.Report.NeedsAttention)
+                detail += "\n\n注意：复制中有无法唯一重映射的引用，已在报告中列出并保留原引用，请人工处理后再保存。";
+            ReportCanvasHealth("复制画布", saved.Migration, saved.Validation, detail, quiet: quiet);
+        }
+        catch (CanvasSaveAbortedException aborted)
+        {
+            ShowSaveAborted(aborted.Message);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(error.Message, "复制画布失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>复制选中的节点：新 ID、带偏移，父节点与连线按集合内部映射处理，引用保持共享。</summary>
+    private void DuplicateSelectedNode(WorkflowNode? node)
+    {
+        if (node is null) { MessageBox.Show("请先选中一个节点。", "复制节点"); return; }
+
+        var copy = CanvasDuplication.DuplicateNodes(canvas.State, new[] { node.Id });
+        if (copy.Nodes.Count == 0)
+        {
+            var reason = copy.Report.Ambiguities.Count > 0
+                ? "无法唯一确定要复制哪一个节点：\n" + string.Join("\n", copy.Report.Ambiguities)
+                : "没有复制到节点。";
+            MessageBox.Show(reason, "复制节点", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var added = CanvasDuplication.Append(canvas.State, copy.Nodes, copy.Edges);
+        canvas.SelectNode(copy.Nodes[0]);
+        canvas.NotifyContentChanged();
+        canvas.Invalidate();
+        RefreshNodeInspector();
+        var detail = $"已复制 {added} 个节点。\n{copy.Report.ToText()}";
+        if (copy.Report.NeedsAttention)
+            detail += "\n\n注意：存在无法唯一重映射的引用，已保留原引用，请人工处理。";
+        ReportCanvasHealth("复制节点", MigrationReport.NotMigrated,
+            CanvasIdentityValidator.Validate(canvas.State, AssetStore.Exists), detail);
+    }
+
+    /// <summary>
+    /// 章节同步（大目标 B）：预览工作树与章节画布的双向差异，按 ID 与上下文同步，
+    /// 有阻断冲突时整批拒绝；应用后可选立即保存（走统一的备份与原子写入入口），并支持撤销。
+    /// </summary>
+    private void ShowChapterSyncDialog()
+    {
+        if (!EnsureCurrentCanvasWritable()) return;
+        var session = chapterSyncSession ??= new CanvasSyncSession();
+
+        using var dialog = new ScaledForm
+        {
+            Text = $"章节同步 — {canvasTitle}",
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(1040, 700),
+            Font = Theme.UiFont,
+            BackColor = Theme.PanelBg
+        };
+
+        var direction = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 190, Margin = new Padding(8, 4, 4, 4) };
+        direction.Items.AddRange(new object[] { "双向", "画布 → 工作树", "工作树 → 画布" });
+        direction.SelectedIndex = 0;
+
+        var header = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 44, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(8, 4, 8, 4) };
+        header.Controls.Add(new Label { Text = "同步方向", AutoSize = true, ForeColor = Theme.TextMuted, Margin = new Padding(8, 8, 0, 0) });
+        header.Controls.Add(direction);
+        var statusLabel = new Label { AutoSize = true, ForeColor = Theme.TextMuted, Margin = new Padding(16, 8, 0, 0) };
+        header.Controls.Add(statusLabel);
+
+        var chapterList = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, GridLines = false, BackColor = Theme.PanelBg, ForeColor = Theme.Text, HeaderStyle = ColumnHeaderStyle.Nonclickable };
+        chapterList.Columns.Add("顺序", 70);
+        chapterList.Columns.Add("章节", 220);
+        chapterList.Columns.Add("父章节", 160);
+        chapterList.Columns.Add("节点", 60);
+        chapterList.Columns.Add("待处理", 80);
+
+        var planBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            BackColor = Color.White,
+            Font = new Font("Consolas", 9f)
+        };
+
+        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterDistance = 520, BackColor = Theme.Border };
+        split.Panel1.Controls.Add(chapterList);
+        split.Panel2.Controls.Add(planBox);
+
+        SyncDirection SelectedDirection() => direction.SelectedIndex switch
+        {
+            1 => SyncDirection.CanvasToWorkTree,
+            2 => SyncDirection.WorkTreeToCanvas,
+            _ => SyncDirection.Both
+        };
+
+        void RefreshPlan()
+        {
+            var plan = session.Plan(canvas.State, SelectedDirection());
+            var issues = CanvasChapters.Diagnose(canvas.State);
+
+            chapterList.BeginUpdate();
+            chapterList.Items.Clear();
+            foreach (var chapter in CanvasChapters.List(canvas.State))
+            {
+                var row = new ListViewItem(chapter.Order == 0 ? "（未指定）" : chapter.Order.ToString());
+                row.SubItems.Add((chapter.ParentChapterId is null ? string.Empty : "    └ ") + chapter.Name);
+                row.SubItems.Add(ChapterParentName(chapter) ?? "（顶层）");
+                row.SubItems.Add((chapter.NodeCount + chapter.UnanchoredNodeCount).ToString());
+                var pending = plan.Changes.Count(change => string.Equals(change.ObjectId, chapter.Id.ToString(), StringComparison.Ordinal));
+                row.SubItems.Add(pending == 0 ? "—" : pending.ToString());
+                row.Tag = chapter;
+                chapterList.Items.Add(row);
+            }
+
+            chapterList.EndUpdate();
+
+            var body = new List<string>
+            {
+                plan.ToText(),
+                string.Empty,
+                $"章节诊断：{issues.Count} 项（{CanvasChapters.ChapterItems(canvas.State).Count} 个章节）",
+                string.Join(Environment.NewLine, issues.Select(issue => "· " + issue)),
+                string.Empty,
+                "说明：同步按稳定 ID 与上下文判定；同名多条目、悬空锚点、重复章节 ID 会报冲突。",
+                "有阻断冲突时整批拒绝，画布不会留下半同步状态；待确认项需要显式选择才会应用。"
+            };
+            planBox.Text = string.Join(Environment.NewLine, body);
+            statusLabel.Text = plan.HasBlockingConflicts
+                ? $"阻断冲突 {plan.Conflicts.Count(conflict => conflict.Blocking)} 项：不能应用"
+                : $"可直接应用 {plan.Automatic.Count} 项，待确认 {plan.PendingConfirmation.Count} 项";
+        }
+
+        void ApplySync(bool includeUnconfirmed)
+        {
+            var result = session.Apply(canvas.State, includeUnconfirmed);
+            if (result.Refused)
+            {
+                MessageBox.Show(result.ToText(), "同步被拒绝", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                RefreshPlan();
+                return;
+            }
+
+            if (result.Applied.Count > 0)
+            {
+                canvas.LoadState(result.Canvas);
+                canvas.NotifyContentChanged();
+                canvas.Invalidate();
+                RefreshWorkTreeView();
+                RefreshNodeInspector();
+            }
+
+            var summary = result.ToText();
+            if (result.Applied.Count > 0
+                && MessageBox.Show(summary + "\n\n是否立即保存？（使用带备份与原子写入的统一保存入口）", "章节同步",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+            {
+                SaveCanvasToLibrary(showResult: false);
+            }
+            else if (result.Applied.Count == 0)
+            {
+                MessageBox.Show(summary, "章节同步");
+            }
+
+            RefreshPlan();
+        }
+
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 88, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Padding = new Padding(8) };
+
+        var replan = new Button { Text = "重新计划", Width = 96, Height = 30 };
+        replan.Click += (_, _) => RefreshPlan();
+        buttons.Controls.Add(replan);
+
+        var applyAutomatic = new Button { Text = "应用可直接项", Width = 128, Height = 30 };
+        applyAutomatic.Click += (_, _) =>
+        {
+            if (session.LastPlan?.HasBlockingConflicts == true)
+            {
+                MessageBox.Show("存在阻断冲突，无法应用。请先按报告处理冲突。", "章节同步", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            ApplySync(includeUnconfirmed: false);
+        };
+        buttons.Controls.Add(applyAutomatic);
+
+        var applyAll = new Button { Text = "应用（含待确认）", Width = 138, Height = 30 };
+        applyAll.Click += (_, _) => ApplySync(includeUnconfirmed: true);
+        buttons.Controls.Add(applyAll);
+
+        var undo = new Button { Text = "撤销上次同步", Width = 116, Height = 30 };
+        undo.Click += (_, _) =>
+        {
+            var restored = session.Undo();
+            if (restored is null)
+            {
+                MessageBox.Show("没有可撤销的同步。", "章节同步");
+                return;
+            }
+
+            canvas.LoadState(restored);
+            canvas.NotifyContentChanged();
+            canvas.Invalidate();
+            RefreshWorkTreeView();
+            RefreshNodeInspector();
+            MessageBox.Show("已撤销最近一次同步，画布回到同步前的状态（磁盘文件未变，保存后才会写入）。", "章节同步");
+            RefreshPlan();
+        };
+        buttons.Controls.Add(undo);
+
+        var locate = new Button { Text = "定位选中章节", Width = 116, Height = 30 };
+        locate.Click += (_, _) =>
+        {
+            if (chapterList.SelectedItems.Count == 0 || chapterList.SelectedItems[0].Tag is not ChapterInfo chapter)
+            {
+                MessageBox.Show("请先在左侧选择一个章节。", "章节同步");
+                return;
+            }
+
+            var node = canvas.State.Nodes.FirstOrDefault(candidate => CanvasChapters.ResolveChapterId(canvas.State, candidate) == chapter.Id);
+            if (node is null)
+            {
+                statusLabel.Text = $"章节「{chapter.Name}」还没有节点。";
+                return;
+            }
+
+            canvas.SelectNode(node);
+            canvas.Invalidate();
+            statusLabel.Text = $"已定位到章节「{chapter.Name}」的节点「{node.Title}」。";
+        };
+        buttons.Controls.Add(locate);
+
+        var save = new Button { Text = "保存画布", Width = 96, Height = 30 };
+        save.Click += (_, _) => SaveCanvasToLibrary();
+        buttons.Controls.Add(save);
+
+        var close = new Button { Text = "关闭", Width = 68, Height = 30 };
+        close.Click += (_, _) => dialog.Close();
+        buttons.Controls.Add(close);
+
+        direction.SelectedIndexChanged += (_, _) => RefreshPlan();
+        RefreshPlan();
+
+        var host = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8) };
+        host.Controls.Add(split);
+        dialog.Controls.Add(host);
+        dialog.Controls.Add(header);
+        dialog.Controls.Add(buttons);
+        dialog.ShowDialog(this);
+    }
+
+    /// <summary>
+    /// 章节结构入口（返工 B-UI-01）：把 <see cref="CanvasChapterOperations"/> 的建立/改名/排序/移动/拆分/合并/删除
+    /// 接到桌面端。只读画布进入后按钮禁用；成功应用后回写画布，保存走统一保存入口。
+    /// </summary>
+    private void ShowChapterStructureDialog()
+    {
+        var readOnly = IsCurrentCanvasReadOnly();
+        using var dialog = new ChapterStructureDialog(
+            canvas.State,
+            readOnly,
+            apply: state =>
+            {
+                canvas.LoadState(state);
+                canvas.NotifyContentChanged();
+                canvas.Invalidate();
+                RefreshWorkTreeView();
+                RefreshNodeInspector();
+                chapterSyncSession?.Reset();
+            },
+            saveHandler: _ => SaveCanvasToLibrary(showResult: false));
+        dialog.ShowDialog(this);
+    }
+
+    /// <summary>
+    /// 整理画布（C-1/C-2）：与「章节布局」共用同一套泳道语义与手动坐标保护，
+    /// 结果如实提示（保留了几个手动节点 / 因重叠阻断而未改动）。
+    /// </summary>
+    private void ArrangeCanvasBySwimlanes()
+    {
+        if (canvas.State.Nodes.Count == 0)
+        {
+            MessageBox.Show("画布还没有节点。", "整理画布", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var plan = canvas.AutoArrange();
+        if (plan.HasBlockingConflicts)
+        {
+            MessageBox.Show("有手动摆放的节点互相重叠，已取消整理（画布未改动）。\n\n" + plan.ToText(canvas.State),
+                "整理画布", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        if (plan.Changes.Count == 0)
+        {
+            MessageBox.Show(
+                plan.ProtectedNodeIds.Count > 0
+                    ? $"位置已符合章节泳道布局；保留了 {plan.ProtectedNodeIds.Count} 个手动摆放的节点。"
+                    : "位置已符合章节泳道布局，无需改动。",
+                "整理画布", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var detail = $"已按章节泳道整理 {plan.Changes.Count} 个节点。"
+            + (plan.ProtectedNodeIds.Count > 0
+                ? $"\n保留了 {plan.ProtectedNodeIds.Count} 个手动摆放的节点（要一并重排请在「章节布局」里勾选自动布局覆盖）。"
+                : string.Empty)
+            + "\n（磁盘未变，保存后写入）";
+        MessageBox.Show(detail, "整理画布", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    /// <summary>
+    /// 章节泳道布局入口（批次 C：C-1 泳道布局、C-2 局部重排与手动坐标保护、C-3 引用检查）。
+    /// 预览只算不改；应用在副本上写入并可撤销；保存走统一保存入口。
+    /// </summary>
+    private void ShowChapterLayoutDialog()
+    {
+        var readOnly = IsCurrentCanvasReadOnly();
+        using var dialog = new ChapterLayoutDialog(
+            canvas.State,
+            readOnly,
+            saveHandler: _ => SaveCanvasToLibrary(showResult: false),
+            apply: state =>
+            {
+                canvas.LoadState(state);
+                canvas.NotifyContentChanged();
+                canvas.Invalidate();
+                RefreshWorkTreeView();
+                RefreshNodeInspector();
+                chapterSyncSession?.Reset();
+            },
+            describeReferences: entityId =>
+            {
+                var owners = canvas.NodesReferencing(entityId);
+                if (owners.Count == 0) return "没有节点引用该资源。";
+                return $"引用该资源的节点 {owners.Count} 个（按稳定实体 ID 匹配）：" + Environment.NewLine
+                    + string.Join(Environment.NewLine, owners.Select(node => $"· {node.Title}"));
+            },
+            focusNode: entityId =>
+            {
+                if (canvas.NodesReferencing(entityId).FirstOrDefault() is { } owner)
+                {
+                    canvas.FocusNode(owner.Id);
+                    return true;
+                }
+                return false;
+            });
+        dialog.ShowDialog(this);
+    }
+
+    /// <summary>
+    /// 引用与回收站入口（目标 4 / 4.1~4.4）：跨画布与草稿列出引用、改写版本策略、
+    /// 解除本画布引用、带删除保护的删除，以及从回收站还原。
+    /// </summary>
+    private void ShowReferenceDialog()
+    {
+        var readOnly = IsCurrentCanvasReadOnly();
+        using var dialog = new ReferenceDialog(
+            canvas.State,
+            currentCanvasPath,
+            readOnly,
+            apply: state =>
+            {
+                canvas.LoadState(state);
+                canvas.NotifyContentChanged();
+                canvas.Invalidate();
+                RefreshEntityList();
+                RefreshNodeInspector();
+            },
+            focusNode: nodeId =>
+            {
+                if (canvas.State.Nodes.All(node => node.Id != nodeId)) return false;
+                canvas.FocusNode(nodeId);
+                return true;
+            });
+        dialog.ShowDialog(this);
+    }
+
+    /// <summary>临时展开/收起选中节点的引用卡（C-3）：只改绘制，不写入画布。</summary>
+    private void ToggleSelectedNodeReferences()
+    {
+        if (canvas.SelectedNode is not { } node)
+        {
+            MessageBox.Show("请先在画布上选择一个节点。", "展开引用", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        if (node.References.Count == 0)
+        {
+            MessageBox.Show($"节点「{node.Title}」没有引用。", "展开引用", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        canvas.ToggleReferenceExpansion(node);
+    }
+
+    /// <summary>章节所属父章节的名称，用于章节同步列表显示。</summary>
+    private string? ChapterParentName(ChapterInfo chapter)
+    {
+        if (chapter.ParentChapterId is not { } parentId) return null;
+        return canvas.State.WorkTree.FirstOrDefault(item => item.Id == parentId)?.Name;
+    }
+
+    /// <summary>副本标题：优先「原标题 副本」，已存在时追加时间戳，避免覆盖同名画布。</summary>
+    private string CopyTitle(string sourceTitle)
+    {
+        var baseTitle = string.IsNullOrWhiteSpace(sourceTitle) ? "未命名画布" : sourceTitle.Trim();
+        var candidate = $"{baseTitle} 副本";
+        if (CanvasLibrary.FindByTitle(candidate) is null) return candidate;
+        return $"{baseTitle} 副本 {DateTime.Now:yyyyMMdd-HHmmss}";
     }
 
     private void DeleteSelectedLibraryCanvas()
@@ -2467,24 +3722,57 @@ public sealed class MainForm : ScaledForm, IPluginHost
 
     /// <summary>
     /// 节点被删除后检查其图片资产：仍被其它节点、生成历史或其它画布引用时不动文件；
-    /// 只有最后一个引用消失时才询问是否移入回收站。
+    /// <summary>
+    /// 询问是否把不再被引用的资产移入系统回收站，返回**实际移动**的引用（返工 S3：要登记进撤销记录）。
     /// </summary>
-    private void OfferRecycleOrphanedAssets(IReadOnlyList<string> removedReferences)
+    private IReadOnlyList<AssetMove> OfferRecycleOrphanedAssets(IReadOnlyList<string> removedReferences)
     {
-        if (removedReferences.Count == 0) return;
+        if (removedReferences.Count == 0) return Array.Empty<AssetMove>();
         var known = CollectKnownCanvases().Append(canvas.State).ToArray();
         var orphaned = StorageMaintenance.FindUnreferenced(removedReferences, known);
-        if (orphaned.Count == 0) return;
+        if (orphaned.Count == 0) return Array.Empty<AssetMove>();
 
         var names = string.Join("、", orphaned.Take(5).Select(reference => Path.GetFileName(reference)));
         var more = orphaned.Count > 5 ? $" 等 {orphaned.Count} 个文件" : string.Empty;
         if (MessageBox.Show(
-                $"以下文件已不再被任何画布引用：\n{names}{more}\n\n是否移入回收站？（可在回收站中手动清空）",
-                "清理文件", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                $"以下文件已不再被任何画布引用：\n{names}{more}\n\n是否移入本应用的回收目录？（撤销本批会原样移回）",
+                "清理文件", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return Array.Empty<AssetMove>();
 
-        var moved = orphaned.Count(AssetStore.MoveToRecycleBin);
+        // 返工 U1：移出改成应用管理的可逆移动（记录原路径），撤销时能真的移回来；
+        // 旧的系统回收站移动既拿不到目标路径、也无法还原，却让撤销报成功。
+        var (moved, failed) = RecycleOrphanedAssets(orphaned);
         canvas.InvalidateThumbnails();
-        MessageBox.Show(moved > 0 ? $"已移入回收站 {moved} 个文件。" : "没有文件被移动。", "清理文件");
+        var message = moved.Count > 0
+            ? $"已移入本应用回收目录 {moved.Count} 个文件；撤销本批会把它们移回原位。"
+            : "没有文件被移动。";
+        if (failed.Count > 0)
+            message += "\n\n以下文件没能移动（引用已解析不到实际文件，可能已被改名或不在资产目录里）：\n"
+                + string.Join("\n", failed.Select(name => "· " + name));
+        MessageBox.Show(message, "清理文件");
+        return moved;
+    }
+
+    /// <summary>
+    /// 真正的移出动作（不含询问，便于在真实入口上反复验证；返工 V1）。
+    /// 扫描与节点删除给出的是**可移植引用**（<c>asset://文件名</c>），不是文件路径——
+    /// 必须先经 <see cref="AssetStore.Resolve"/> 解析成本机路径，否则一个文件都移不动却照样报「已清理」。
+    /// 返回实际移动的记录与没能移动的说明，未移动的不计入撤销记录（没有可恢复的东西）。
+    /// </summary>
+    private (IReadOnlyList<AssetMove> Moved, IReadOnlyList<string> Failed) RecycleOrphanedAssets(
+        IReadOnlyList<string> orphanedReferences)
+    {
+        var moved = new List<AssetMove>();
+        var failed = new List<string>();
+        foreach (var reference in orphanedReferences)
+        {
+            if (AssetRecycle.MoveReference(reference) is { } move) moved.Add(move);
+            else failed.Add(Path.GetFileName(reference));
+        }
+
+        if (failed.Count > 0)
+            WriteAgentCommitDiagnostic($"asset-recycle move-failed count={failed.Count} first={failed[0]}");
+        return (moved, failed);
     }
 
     /// <summary>已知画布及其显示名，用于资产引用统计。</summary>
@@ -2673,8 +3961,21 @@ public sealed class MainForm : ScaledForm, IPluginHost
             SaveRecentCanvas();
             return;
         }
-        var saved = CanvasLibrary.Save(BuildCanvasState(), currentCanvasPath);
-        SetCurrentCanvasPath(CanvasLibrary.Rename(saved, newTitle, overwrite) ?? saved);
+
+        if (!EnsureCurrentCanvasWritable()) return;
+        try
+        {
+            var saved = CanvasLibrary.Save(BuildCanvasState(), currentCanvasPath);
+            SetCurrentCanvasPath(CanvasLibrary.Rename(saved, newTitle, overwrite) ?? saved);
+        }
+        catch (CanvasSaveAbortedException aborted)
+        {
+            ShowSaveAborted(aborted.Message);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(error.Message, "重命名失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     /// <summary>简易文本输入对话框，取消或留空返回 null。</summary>
@@ -2742,13 +4043,17 @@ public sealed class MainForm : ScaledForm, IPluginHost
                 var suggest = new ToolStripMenuItem("AI 结合整条节点树生成下游候选…");
                 suggest.Click += async (_, _) => await GenerateNextNodeCandidatesAsync(node);
                 menu.Items.Add(suggest);
+
+                var duplicate = new ToolStripMenuItem("复制节点（新 ID，引用保持共享）");
+                duplicate.Click += (_, _) => DuplicateSelectedNode(node);
+                menu.Items.Add(duplicate);
                 menu.Items.Add(new ToolStripSeparator());
             }
-            var arrange = new ToolStripMenuItem("整理画布（按章节分块）")
+            var arrange = new ToolStripMenuItem("整理画布（按章节泳道）")
             {
                 Image = SystemIcons.Application.ToBitmap()
             };
-            arrange.Click += (_, _) => canvas.AutoArrange();
+            arrange.Click += (_, _) => ArrangeCanvasBySwimlanes();
             menu.Items.Add(arrange);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.AddRange(BuildPluginMenuItems(target,
@@ -2837,7 +4142,13 @@ public sealed class MainForm : ScaledForm, IPluginHost
         flow.Controls.Add(CreatePaneButton("添加附件", 84, (_, _) => AddAttachmentsToSelectedNode()));
         flow.Controls.Add(CreatePaneButton("示例模板", 84, (_, _) => canvas.ApplyTemplate()));
         flow.Controls.Add(CreatePaneButton("删除节点", 84, (_, _) => canvas.DeleteSelected()));
-        flow.Controls.Add(CreatePaneButton("整理画布", 84, (_, _) => canvas.AutoArrange()));
+        flow.Controls.Add(CreatePaneButton("复制节点", 84, (_, _) => DuplicateSelectedNode(canvas.SelectedNode)));
+        flow.Controls.Add(CreatePaneButton("整理画布", 84, (_, _) => ArrangeCanvasBySwimlanes()));
+        flow.Controls.Add(CreatePaneButton("章节同步", 84, (_, _) => ShowChapterSyncDialog()));
+        flow.Controls.Add(CreatePaneButton("章节结构", 84, (_, _) => ShowChapterStructureDialog()));
+        flow.Controls.Add(CreatePaneButton("章节布局", 84, (_, _) => ShowChapterLayoutDialog()));
+        flow.Controls.Add(CreatePaneButton("展开引用", 84, (_, _) => ToggleSelectedNodeReferences()));
+        flow.Controls.Add(CreatePaneButton("引用回收站", 96, (_, _) => ShowReferenceDialog()));
         var zoom = new Label { Text = "100%", AutoSize = true, ForeColor = Theme.TextDim, Font = Theme.SmallFont, Margin = new Padding(12, 7, 0, 0) };
         canvas.ZoomChanged += (_, _) => zoom.Text = $"{canvas.Zoom:P0}";
         flow.Controls.Add(zoom);
@@ -3178,21 +4489,42 @@ public sealed class MainForm : ScaledForm, IPluginHost
     {
         using var dialog = new OpenFileDialog { Filter = "画布文件 (canvas.json)|canvas.json|JSON 文件 (*.json)|*.json", Title = "选择画布文件" };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        if (MessageBox.Show("导入会替换当前画布编辑内容，但不会删除任务历史。是否继续？", "导入画布", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-        try
+
+        if (!EnsureCurrentCanvasWritable()) return;
+
+        // 返工 V2/V3：导入会替换或合并进当前画布内容，与此前画布同等风险，先过统一守卫。
+        if (!ConfirmPendingBeforeLeaving()) return;
+
+        // 明确选择导入方式：是＝替换当前画布内容；否＝按 ID 合并进当前画布（同名不合并，重复导入不增量）。
+        var choice = MessageBox.Show(
+            "是：替换当前画布编辑内容（不删除任务历史）\n"
+            + "否：合并进当前画布（按 ID 去重：已存在的对象跳过，同 ID 不同内容只报告不覆盖）\n"
+            + "取消：放弃本次导入",
+            "导入画布方式", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (choice == DialogResult.Cancel) return;
+        var mode = choice == DialogResult.Yes ? CanvasImportMode.Replace : CanvasImportMode.Merge;
+
+        if (!CanvasImportService.TryImport(dialog.FileName, BuildCanvasState(), mode, out var outcome, out var error))
         {
-            var (state, imported, missing) = CanvasPackage.Import(dialog.FileName);
-            ApplyCanvasState(state, advanceRevision: true);
-            SetCurrentCanvasPath(null);
-            SaveRecentCanvas();
-            RefreshCanvasLibrary();
-            var detail = missing == 0 ? $"已导入画布与 {imported} 个资产。" : $"已导入画布与 {imported} 个资产，另有 {missing} 个资产在包内缺失，相关节点会显示图片不可用。";
-            MessageBox.Show(detail, "导入画布", MessageBoxButtons.OK, missing == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+            MessageBox.Show(error, "导入失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
-        {
-            MessageBox.Show(error.Message, "导入失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
+
+        // 返工 R16-2：导入会替换/合并成另一份内容，同样是「同一标签换文档」，先换身份并作废旧上下文。
+        BeginNewDocumentOnCurrentTab();
+        ApplyCanvasState(outcome.State, advanceRevision: mode == CanvasImportMode.Replace);
+        SetCurrentCanvasPath(null);
+        SaveRecentCanvas();
+        RefreshCanvasLibrary();
+
+        var detail = mode == CanvasImportMode.Replace
+            ? $"已替换当前画布，导入 {outcome.ImportedAssets} 个资产。"
+            : $"已合并进当前画布：\n{outcome.Merge!.ToText()}";
+        if (outcome.MissingAssets > 0) detail += $"\n另有 {outcome.MissingAssets} 个资产在包内缺失。";
+        detail += $"\n资产：新增 {outcome.ImportedAssets} 个（已存在的会跳过）。";
+        if (outcome.Chapters.ChapterCount > 0 || outcome.Chapters.ChapterIssues > 0 || outcome.Chapters.SyncConflicts > 0)
+            detail += "\n" + outcome.Chapters.Text;
+        ReportCanvasHealth("导入画布", outcome.Migration, outcome.Validation, detail);
     }
 
     private sealed record CanvasResourceReplaceRequest(
@@ -3304,7 +4636,10 @@ public sealed class MainForm : ScaledForm, IPluginHost
     }
 
     private RecentCanvasState BuildCanvasState() =>
-        new(canvasTitle, canvasRevision, promptBox.Text, negativePromptBox.Text, (int)widthBox.Value, (int)heightBox.Value, (int)stepsBox.Value, (double)cfgBox.Value, seedBox.Text, canvas.State);
+        new(canvasTitle, canvasRevision, promptBox.Text, negativePromptBox.Text, (int)widthBox.Value, (int)heightBox.Value, (int)stepsBox.Value, (double)cfgBox.Value, seedBox.Text, canvas.State)
+        {
+            FormatVersion = CanvasFormat.Current
+        };
 
     /// <summary>把当前画布状态投影为 records 并推送给 Web 画布前端。火灾安全：失败只记日志。</summary>
     private async Task PushCanvasToWebAsync(string reason = "scene-update")
@@ -3323,6 +4658,12 @@ public sealed class MainForm : ScaledForm, IPluginHost
 
     private void ApplyCanvasState(RecentCanvasState state, bool advanceRevision)
     {
+        // 高于当前支持的格式版本只做只读查看，保存入口据此拒绝覆盖（返工 R11）。
+        currentCanvasUnsupportedFormat = state.FormatVersion > CanvasFormat.Current ? state.FormatVersion : 0;
+
+        // 换画布就丢掉上一份同步会话，避免把别的画布的快照撤回来。
+        chapterSyncSession?.Reset();
+        chapterSyncSession = null;
         if (advanceRevision) canvasRevision++;
         else canvasRevision = Math.Max(0, state.Revision);
         canvasTitle = string.IsNullOrWhiteSpace(state.Title) ? "未命名画布" : state.Title;
@@ -3335,6 +4676,12 @@ public sealed class MainForm : ScaledForm, IPluginHost
         cfgBox.Value = (decimal)Math.Clamp(state.Cfg, (double)cfgBox.Minimum, (double)cfgBox.Maximum);
         seedBox.Text = string.IsNullOrWhiteSpace(state.Seed) ? "随机" : state.Seed;
         canvas.LoadState(state.Canvas ?? new WorkflowCanvasState());
+        // 目标 6 / G6-1：项目级资源以**项目库为权威**——托管实体按库刷新，被引用而快照缺失的补进来；
+        // 库里已不存在的托管实体如实记入缺失（交给引用与锁定版本的既有缺失提示）。
+        var projectMerge = ProjectEntityScope.MergeInto(canvas.State);
+        if (projectMerge.Changed || projectMerge.Missing.Count > 0)
+            WriteAgentCommitDiagnostic(
+                $"project-entities merged={projectMerge.Refreshed} injected={projectMerge.Injected} missing={projectMerge.Missing.Count}");
         AssetStore.Normalize(canvas.State);
         RefreshNodeInspector();
         RefreshEntityList();
@@ -4441,7 +5788,9 @@ public sealed class MainForm : ScaledForm, IPluginHost
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         if (composed.Count > 0) return composed;
-        return canvas.State.ResolveReferences(node)
+        // 锁定版本缺失的引用不能拿「变体当前内容」的参考图顶上（目标 4 / 4.2）：
+        // 宁可这一条不给图，也不静默用错版本，问题由提示词里的 [阻断] 行与界面徽标暴露。
+        return CanvasReferenceVersions.UsableContents(canvas.State, node)
             .SelectMany(reference => reference.Attachments)
             .Where(item => item.Kind == AttachmentKind.Image)
             .Select(item => AssetStore.Resolve(item.Reference))
@@ -4791,10 +6140,13 @@ public sealed class MainForm : ScaledForm, IPluginHost
         var summary = new Label
         {
             Dock = DockStyle.Top,
-            Height = 116,
+            Height = 146,
             Padding = new Padding(12),
             Text = $"状态：{job.State}\n进度：{job.ProgressPercent}%\n"
                 + $"工具：{(string.IsNullOrWhiteSpace(job.Tool) ? "-" : job.Tool)} · 能力：{job.Capability} · 通道：{(string.IsNullOrWhiteSpace(job.Channel) ? "-" : job.Channel)}\n"
+                + $"尝试：{JobRetryPolicy.DescribeAttempt(job, JobRetryPolicy.DefaultMaxAttempts)}"
+                + $" · 根任务：{(job.RootJobId == job.JobId ? "自身" : job.RootJobId.ToString()[..8])}"
+                + $" · 重试自：{(job.RetryOfJobId is { } retryOf ? retryOf.ToString()[..8] : "-")}\n"
                 + $"外部任务：{job.ExternalTaskId ?? "-"} · 幂等键：{job.IdempotencyKey}\n"
                 + $"错误码：{job.ErrorCode ?? "-"}\n错误信息：{job.ErrorMessage ?? "-"}"
         };
@@ -4846,11 +6198,48 @@ public sealed class MainForm : ScaledForm, IPluginHost
                 MessageBox.Show(error.Message, "取消失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         };
+        var retry = new Button
+        {
+            Text = "重试任务",
+            Width = 96,
+            Height = 32,
+            Enabled = execution.CanRetryJob(jobId, session.UserId, JobRetryPolicy.DefaultMaxAttempts, out _)
+        };
+        retry.Click += async (_, _) => await RetryJobAsync(job);
         var resubmit = new Button { Text = "按相同参数重新发起", Width = 140, Height = 32, Enabled = !string.IsNullOrWhiteSpace(job.Tool) };
         resubmit.Click += async (_, _) => await ResubmitJobAsync(job);
-        buttons.Controls.Add(openAsset); buttons.Controls.Add(resubmit); buttons.Controls.Add(cancelJob);
+        buttons.Controls.Add(openAsset); buttons.Controls.Add(retry); buttons.Controls.Add(resubmit); buttons.Controls.Add(cancelJob);
         dialog.Controls.Add(summary); dialog.Controls.Add(buttons); dialog.Controls.Add(inputList); dialog.Controls.Add(outputList);
         dialog.ShowDialog(this);
+    }
+
+    /// <summary>
+    /// 重试失败或已取消的任务（目标 5）：沿用首次的调用信息与输入参数，用新的幂等键发起新一次尝试，
+    /// 并受尝试次数上限约束（默认共 3 次）；超限后提示改用「按相同参数重新发起」。
+    /// 判定按**整条尝试链**做（同根已成功、已有进行中的尝试、已用满上限都会在这里被拦下），
+    /// 所以反复重试同一个历史源不会一直停在第 2 次。
+    /// </summary>
+    private async Task RetryJobAsync(Job job)
+    {
+        if (!execution.CanRetryJob(job.JobId, session.UserId, JobRetryPolicy.DefaultMaxAttempts, out var reason))
+        {
+            MessageBox.Show(reason, "重试任务", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var prompt = $"将重试任务 {job.JobId.ToString()[..8]}（{JobRetryPolicy.DescribeAttempt(job, JobRetryPolicy.DefaultMaxAttempts)}，工具 {job.Tool}）。是否继续？";
+        if (MessageBox.Show(prompt, "重试任务", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+        try
+        {
+            var result = await execution.RetryAsync(session, job.JobId, $"desktop-retry-{Guid.NewGuid():N}");
+            SetCurrent(result);
+            MessageBox.Show($"已发起第 {result.Attempt} 次尝试，新任务 {result.JobId.ToString()[..8]}（{result.State}）。", "重试任务");
+        }
+        catch (Exception error) when (error is ProtocolViolationException or InvalidOperationException)
+        {
+            MessageBox.Show(error.Message, "重试失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     /// <summary>
@@ -4905,21 +6294,44 @@ public sealed class MainForm : ScaledForm, IPluginHost
         var image = config.IsComfyUiConfigured ? $"ComfyUI：{config.ComfyUiCheckpoint}"
             : config.IsImageConfigured ? $"图像：{config.ImageModel}"
             : "图像：未配置";
-        providerLabel.Text = $"{text} · {image}";
+        var video = config.IsVideoConfigured ? $"视频：{config.VideoModel}" : "视频：未配置";
+        providerLabel.Text = $"{text} · {image} · {video}";
     }
 
-    private async Task GenerateSelectedImageAsync()
+    private async Task GenerateSelectedImageAsync(bool quiet = false)
     {
-        if (canvas.SelectedNode is not { } node) { MessageBox.Show("请先选择一个节点。", "YeeYeeYee"); return; }
+        if (canvas.SelectedNode is not { } node) { if (!quiet) MessageBox.Show("请先选择一个节点。", "YeeYeeYee"); return; }
         if (RefuseWhenLocked(node, "生成参考图")) return;
-        if (autoExpanding) { MessageBox.Show("自动生成进行中，请先停止再试。", "YeeYeeYee"); return; }
+
+        // 目标 6 / G6-T1：标记是"打开时"算出来的，库可能在之后被删除或漏拷——执行前必须**现场重新核验**，
+        // 不能只信旧标记，否则缺库的引用会一路走到提供方那里（复核复现：探测计数 1）。
+        var authorityMissing = ProjectEntityScope.RefreshAuthority(canvas.State);
+        if (authorityMissing.Count > 0)
+            WriteAgentCommitDiagnostic($"authority-recheck missing={authorityMissing.Count}");
+
+        // 目标 6 / G6-S1：节点上存在不可用引用（锁定版本缺失，或项目级资源已不在项目库）时，
+        // 必须在**发请求之前**明确拒绝——否则会拿旧快照或残缺引用去消耗额度，还让人以为用的是项目库那份。
+        var referenceBlock = CanvasReferenceVersions.DescribeBlock(canvas.State, node);
+        if (referenceBlock.Length > 0)
+        {
+            WriteAgentCommitDiagnostic(
+                $"generation-blocked node={node.Id:N} references={node.References.Count}");
+            if (!quiet)
+                MessageBox.Show(
+                    referenceBlock + "\n\n生成参考图已取消：没有发出任何请求。",
+                    "引用不可用", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        if (autoExpanding) { if (!quiet) MessageBox.Show("自动生成进行中，请先停止再试。", "YeeYeeYee"); return; }
         var prompt = ComposeNodePrompt(node);
-        if (string.IsNullOrWhiteSpace(prompt)) { MessageBox.Show("请先填写节点内容作为图像提示词。", "YeeYeeYee"); return; }
+        if (string.IsNullOrWhiteSpace(prompt)) { if (!quiet) MessageBox.Show("请先填写节点内容作为图像提示词。", "YeeYeeYee"); return; }
 
         var provider = ImageProviderFactory.Create(execution);
         if (!provider.IsConfigured)
         {
-            MessageBox.Show("尚未配置图像模型。请先在“设置”中填写 ComfyUI 地址与 checkpoint，或填写图像模型名称。", "图像生成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (!quiet)
+                MessageBox.Show("尚未配置图像模型。请先在“设置”中填写 ComfyUI 地址与 checkpoint，或填写图像模型名称。", "图像生成", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -5402,6 +6814,9 @@ public sealed class MainForm : ScaledForm, IPluginHost
         lines.Add($"· ComfyUI：{comfy.Name}｜上限 {comfy.ReferenceCapacity.MaxImages} 张参考图｜{comfy.Kind}｜{comfy.Description}");
         lines.Add($"· OpenAI 兼容图像接口：声明上限 {config.ImageMaxReferenceImages} 张参考图（0 表示不限）｜同步返回｜" +
                   (config.ImageMaxReferenceImages >= 2 || config.ImageMaxReferenceImages == 0 ? "可做分步合成" : "只支持单张底图"));
+        lines.Add(config.IsVideoConfigured
+            ? $"· 画视频接口：{config.VideoModel}｜地址 {(string.IsNullOrWhiteSpace(config.VideoEndpoint) ? "复用主接口地址" : config.VideoEndpoint)}｜参考帧上限 {config.VideoMaxReferenceImages}（0 表示不限）｜默认 {config.VideoDefaultSeconds} 秒（0 表示服务端默认）｜异步任务：提交后轮询取结果"
+            : "· 画视频接口：未配置（视频技能只生成任务规格，不伪造视频结果）");
         lines.Add(string.Empty);
         lines.Add("下一步：按上面探测到的节点名与必填输入名，在 ComfyUiWorkflowFactory 里加对应分支，并在 ComfyUiSubmissionProfiles 里声明上限与同步/异步。");
         detail.Text = string.Join("\n", lines);
@@ -5432,7 +6847,7 @@ public sealed class MainForm : ScaledForm, IPluginHost
     private void OpenAiSettingsDialog()
     {
         var config = AiProviderSettings.Load();
-        using var dialog = new ScaledForm { Text = "AI Provider 设置", StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false, ClientSize = new Size(480, 700), Font = Font };
+        using var dialog = new ScaledForm { Text = "AI Provider 设置", StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false, ClientSize = new Size(480, 840), Font = Font };
         var endpoint = new TextBox { Text = config.Endpoint, Dock = DockStyle.Fill, PlaceholderText = "https://api.example.com/v1" };
         var model = new TextBox { Text = config.Model, Dock = DockStyle.Fill, PlaceholderText = "模型名称" };
         var apiKey = new TextBox { Text = config.ApiKey, Dock = DockStyle.Fill, UseSystemPasswordChar = true };
@@ -5440,18 +6855,22 @@ public sealed class MainForm : ScaledForm, IPluginHost
         var imageEndpoint = new TextBox { Text = config.ImageEndpoint, Dock = DockStyle.Fill, PlaceholderText = "留空则复用上方接口地址" };
         var imageSize = new TextBox { Text = config.ImageSize, Dock = DockStyle.Fill, PlaceholderText = "1024x1024" };
         var maxReferencesLabel = new Label { Text = "图像接口最多能同时使用几张参考图（0 表示不限制；1 表示只支持单张底图）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
+        var videoModel = new TextBox { Text = config.VideoModel, Dock = DockStyle.Fill, PlaceholderText = "视频模型名称，留空表示不启用画视频" };
+        var videoEndpoint = new TextBox { Text = config.VideoEndpoint, Dock = DockStyle.Fill, PlaceholderText = "留空则复用上方接口地址" };
+        var videoMaxRefs = new NumericUpDown { Minimum = 0, Maximum = 64, Value = Math.Clamp(config.VideoMaxReferenceImages, 0, 64), Dock = DockStyle.Fill };
+        var videoSeconds = new NumericUpDown { Minimum = 0, Maximum = 600, Value = Math.Clamp(config.VideoDefaultSeconds, 0, 600), Dock = DockStyle.Fill };
         var comfyUrl = new TextBox { Text = config.ComfyUiBaseUrl, Dock = DockStyle.Fill, PlaceholderText = "http://127.0.0.1:8188" };
         var comfyCheckpoint = new TextBox { Text = config.ComfyUiCheckpoint, Dock = DockStyle.Fill, PlaceholderText = "checkpoint 文件名，填写后优先走 ComfyUI" };
         var assetDirectory = new TextBox { Text = config.AssetDirectory, Dock = DockStyle.Fill, PlaceholderText = $"留空使用默认的 {Path.Combine(AppPaths.Root, "assets")}" };
         var autoRounds = new NumericUpDown { Minimum = 0, Maximum = 20, Value = Math.Clamp(config.AutoGenerationRounds, 0, 20), Dock = DockStyle.Fill };
         var maxReferences = new NumericUpDown { Minimum = 0, Maximum = 64, Value = Math.Clamp(config.ImageMaxReferenceImages, 0, 64), Dock = DockStyle.Fill };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 27, Padding = new Padding(16) };
-        for (var row = 0; row < 26; row++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 32, Padding = new Padding(16) };
+        for (var row = 0; row < 32; row++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.Controls.Add(new Label { Text = "接口地址（OpenAI 兼容 /chat/completions）", AutoSize = true }, 0, 0);
         layout.Controls.Add(endpoint, 0, 1);
         layout.Controls.Add(new Label { Text = "文本模型名称", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 2);
         layout.Controls.Add(model, 0, 3);
-        layout.Controls.Add(new Label { Text = "API 密钥（仅保存在本机配置文件）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 4);
+        layout.Controls.Add(new Label { Text = "API 密钥（仅保存在本机配置文件，落盘加密）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 4);
         layout.Controls.Add(apiKey, 0, 5);
         layout.Controls.Add(new Label { Text = "图像模型名称（用于 /images/generations）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 6);
         layout.Controls.Add(imageModel, 0, 7);
@@ -5461,40 +6880,53 @@ public sealed class MainForm : ScaledForm, IPluginHost
         layout.Controls.Add(imageSize, 0, 11);
         layout.Controls.Add(maxReferencesLabel, 0, 12);
         layout.Controls.Add(maxReferences, 0, 13);
-        layout.Controls.Add(new Label { Text = "ComfyUI 地址（填写后优先使用本地 ComfyUI 出图）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 14);
-        layout.Controls.Add(comfyUrl, 0, 15);
-        layout.Controls.Add(new Label { Text = "ComfyUI checkpoint", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 16);
-        layout.Controls.Add(comfyCheckpoint, 0, 17);
-        layout.Controls.Add(new Label { Text = "资产目录（图片存放位置，留空使用默认）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 18);
-        layout.Controls.Add(assetDirectory, 0, 19);
-        layout.Controls.Add(new Label { Text = "AI 自动生成轮数（0 表示不限制）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 20);
-        layout.Controls.Add(autoRounds, 0, 21);
-        layout.Controls.Add(new Label { Text = $"配置文件：{AiProviderSettings.ConfigFilePath}", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(0, 8, 0, 0) }, 0, 22);
+        layout.Controls.Add(new Label { Text = "视频模型名称（画视频接口，留空表示不启用）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 14);
+        layout.Controls.Add(videoModel, 0, 15);
+        layout.Controls.Add(new Label { Text = "画视频接口地址（选填，留空则复用上方接口地址）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 16);
+        layout.Controls.Add(videoEndpoint, 0, 17);
+        layout.Controls.Add(new Label { Text = "视频接口最多可用参考帧数（0 表示不限制）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 18);
+        layout.Controls.Add(videoMaxRefs, 0, 19);
+        layout.Controls.Add(new Label { Text = "视频默认时长（秒，0 表示由服务端默认）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 20);
+        layout.Controls.Add(videoSeconds, 0, 21);
+        layout.Controls.Add(new Label { Text = "ComfyUI 地址（填写后优先使用本地 ComfyUI 出图）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 22);
+        layout.Controls.Add(comfyUrl, 0, 23);
+        layout.Controls.Add(new Label { Text = "ComfyUI checkpoint", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 24);
+        layout.Controls.Add(comfyCheckpoint, 0, 25);
+        layout.Controls.Add(new Label { Text = "资产目录（图片与视频存放位置，留空使用默认）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 26);
+        layout.Controls.Add(assetDirectory, 0, 27);
+        layout.Controls.Add(new Label { Text = "AI 自动生成轮数（0 表示不限制）", AutoSize = true, Padding = new Padding(0, 8, 0, 0) }, 0, 28);
+        layout.Controls.Add(autoRounds, 0, 29);
+        layout.Controls.Add(new Label { Text = $"配置文件：{AiProviderSettings.ConfigFilePath}", AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(0, 8, 0, 0) }, 0, 30);
         var save = new Button { Text = "保存", Width = 96, Height = 32, FlatStyle = FlatStyle.Flat };
         save.Click += (_, _) =>
         {
-            AiProviderSettings.Save(new AiProviderConfig
+            // 就地修改已加载的配置，只覆盖本对话框负责的字段：
+            // 之前这里 new 了一个新对象，主题、上下文窗口、Agent 工作目录、采样开关等未列出的项会被静默重置。
+            config.Endpoint = endpoint.Text.Trim();
+            config.Model = model.Text.Trim();
+            config.ApiKey = apiKey.Text.Trim();
+            config.ImageEndpoint = imageEndpoint.Text.Trim();
+            config.ImageModel = imageModel.Text.Trim();
+            config.ImageSize = string.IsNullOrWhiteSpace(imageSize.Text) ? "1024x1024" : imageSize.Text.Trim();
+            config.VideoEndpoint = videoEndpoint.Text.Trim();
+            config.VideoModel = videoModel.Text.Trim();
+            config.VideoMaxReferenceImages = (int)videoMaxRefs.Value;
+            config.VideoDefaultSeconds = (int)videoSeconds.Value;
+            config.ComfyUiBaseUrl = comfyUrl.Text.Trim();
+            config.ComfyUiCheckpoint = comfyCheckpoint.Text.Trim();
+            config.AssetDirectory = assetDirectory.Text.Trim();
+            config.AutoGenerationRounds = (int)autoRounds.Value;
+            config.ImageMaxReferenceImages = (int)maxReferences.Value;
+            config.ProviderChoiceMade = true;
+            // 在这个对话框里填了地址与模型就说明要接真实模型；留空则明确是本地模拟。
+            config.UseLocalProvider = string.IsNullOrWhiteSpace(config.Endpoint) || string.IsNullOrWhiteSpace(config.Model);
+
+            if (!AiProviderSettings.Save(config))
             {
-                Endpoint = endpoint.Text.Trim(),
-                Model = model.Text.Trim(),
-                ApiKey = apiKey.Text.Trim(),
-                Temperature = config.Temperature,
-                ImageEndpoint = imageEndpoint.Text.Trim(),
-                ImageModel = imageModel.Text.Trim(),
-                ImageSize = string.IsNullOrWhiteSpace(imageSize.Text) ? "1024x1024" : imageSize.Text.Trim(),
-                ComfyUiBaseUrl = comfyUrl.Text.Trim(),
-                ComfyUiCheckpoint = comfyCheckpoint.Text.Trim(),
-                ComfyUiClientId = config.ComfyUiClientId,
-                AssetDirectory = assetDirectory.Text.Trim(),
-                AutoGenerationRounds = (int)autoRounds.Value,
-                ImageMaxReferenceImages = (int)maxReferences.Value,
-                ProviderChoiceMade = true,
-                // 在这个对话框里填了地址与模型就说明要接真实模型；留空则明确是本地模拟。
-                UseLocalProvider = string.IsNullOrWhiteSpace(endpoint.Text) || string.IsNullOrWhiteSpace(model.Text),
-                DefaultNegativePrompt = config.DefaultNegativePrompt,
-                DefaultImageSteps = config.DefaultImageSteps,
-                DefaultImageCfg = config.DefaultImageCfg
-            });
+                MessageBox.Show("配置写入失败（配置文件可能不可写或磁盘只读），本次设置未生效。", "AI Provider 设置", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             dialog.DialogResult = DialogResult.OK;
         };
         var probe = new Button { Text = "链路自检（探测提交方式）", Width = 190, Height = 32, FlatStyle = FlatStyle.Flat };
@@ -5506,9 +6938,24 @@ public sealed class MainForm : ScaledForm, IPluginHost
             ApplyProviderChange();
             MessageBox.Show("已更新接入配置。", "接入引导");
         };
+        // 智能导入：把 ComfyUI / 画图 / 画视频接口的信息从一段文本里识别出来并写入设置。
+        var import = new Button { Text = "智能导入", Width = 96, Height = 32, FlatStyle = FlatStyle.Flat };
+        import.Click += (_, _) =>
+        {
+            using var importer = new ProviderImportDialog(AiProviderSettings.Load(), onApplied: ApplyProviderChange);
+            importer.ShowDialog(dialog);
+        };
+        // 接口向导：给一个接口说明网页就自动建出 api 生图 / api 生视频技能（含池子子技能），
+        // 再让用户输密钥（加密落盘），最后问一次是否做最小测试并返图。
+        var guide = new Button { Text = "接口向导", Width = 96, Height = 32, FlatStyle = FlatStyle.Flat };
+        guide.Click += (_, _) =>
+        {
+            using var wizard = new ApiImportWizardDialog(AiProviderSettings.Load(), onApplied: ApplyProviderChange);
+            wizard.ShowDialog(dialog);
+        };
         var settingsButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Padding = Padding.Empty, Margin = Padding.Empty };
-        settingsButtons.Controls.Add(save); settingsButtons.Controls.Add(probe); settingsButtons.Controls.Add(setup);
-        layout.Controls.Add(settingsButtons, 0, 23);
+        settingsButtons.Controls.Add(save); settingsButtons.Controls.Add(probe); settingsButtons.Controls.Add(setup); settingsButtons.Controls.Add(import); settingsButtons.Controls.Add(guide);
+        layout.Controls.Add(settingsButtons, 0, 31);
         dialog.Controls.Add(layout);
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
@@ -5543,15 +6990,8 @@ public sealed class MainForm : ScaledForm, IPluginHost
     /// </summary>
     private void SwitchProject()
     {
-        if (!pendingChanges.IsEmpty)
-        {
-            var choice = MessageBox.Show(
-                $"有 {pendingChanges.Count} 条 Agent 待提交改动。\n\n是：提交并切换\n否：丢弃并切换\n取消：留在当前项目",
-                "切换项目", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-            if (choice == DialogResult.Cancel) return;
-            if (choice == DialogResult.Yes) CommitPendingChanges();
-            else DiscardPendingChanges();
-        }
+        // 返工 V2：切项目也走统一守卫（原先只看待处理清单，待恢复的批次会被绕过）。
+        if (!ConfirmPendingBeforeLeaving()) return;
 
         SaveAllCanvasTabs();
         restartForProjectSelection = true;
@@ -5583,7 +7023,13 @@ public sealed class MainForm : ScaledForm, IPluginHost
 
     private void AddCanvasTab(RecentCanvasState state, string? path)
     {
-        var tab = new CanvasTabState { Path = path, Title = string.IsNullOrWhiteSpace(state.Title) ? "未命名画布" : state.Title, Snapshot = state };
+        // 返工 R16-1：标签持有的是**独立副本**，与接下来传给 LoadState 的那份状态分开。
+        var tab = new CanvasTabState
+        {
+            Path = path,
+            Title = string.IsNullOrWhiteSpace(state.Title) ? "未命名画布" : state.Title,
+            Snapshot = CloneCanvasSnapshot(state)
+        };
         canvasTabs.Add(tab);
         activeCanvasTab = tab;
         currentCanvasPath = path;
@@ -5597,10 +7043,23 @@ public sealed class MainForm : ScaledForm, IPluginHost
         if (activeCanvasTab is null) return;
         activeCanvasTab.Title = canvasTitle;
         activeCanvasTab.Path = currentCanvasPath;
-        activeCanvasTab.Snapshot = BuildCanvasState();
-        if (!string.IsNullOrWhiteSpace(currentCanvasPath))
+        // 返工 R16-1：快照必须是独立副本（切走之后这份状态还会被别的标签加载改写）。
+        activeCanvasTab.Snapshot = BuildCanvasSnapshot();
+        // 只读查看的画布不回写；备份失败会中止保存并把原因显示出来（返工 R7）。
+        if (!string.IsNullOrWhiteSpace(currentCanvasPath) && !IsCurrentCanvasReadOnly())
         {
-            try { CanvasLibrary.Save(activeCanvasTab.Snapshot, currentCanvasPath); } catch (IOException) { }
+            try
+            {
+                CanvasLibrary.Save(activeCanvasTab.Snapshot, currentCanvasPath);
+            }
+            catch (CanvasSaveAbortedException aborted)
+            {
+                ShowSaveAborted(aborted.Message);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                MessageBox.Show("切换画布时写回失败：" + error.Message, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
     }
 
@@ -5641,20 +7100,22 @@ public sealed class MainForm : ScaledForm, IPluginHost
         catch (Exception error) when (error is IOException or JsonException) { return false; }
     }
 
+    /// <summary>
+    /// 把当前画布写入“最近画布草稿”槽位，供启动时恢复未保存的工作状态。
+    /// 这是滚动自动保存槽而不是画布库保存：不做备份（画布库文件才是权威副本），
+    /// 但同样走原子写入，避免中途失败留下半截草稿；失败保持静默，不影响用户操作。
+    /// </summary>
     private void SaveRecentCanvas()
     {
-        try { var directory = Path.GetDirectoryName(StorageMaintenance.DraftCanvasPath); if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory); File.WriteAllText(StorageMaintenance.DraftCanvasPath, JsonSerializer.Serialize(BuildCanvasState(), new JsonSerializerOptions { WriteIndented = true })); } catch (IOException) { }
+        try { CanvasFileWriter.Write(StorageMaintenance.DraftCanvasPath, BuildCanvasState()); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 
     private void ActivateCanvasTab(CanvasTabState target)
     {
         if (switchingCanvasTab || target == activeCanvasTab) return;
-        if (!pendingChanges.IsEmpty)
-        {
-            var choice = MessageBox.Show($"有 {pendingChanges.Count} 条 Agent 待提交改动。\n\n是：提交后切换\n否：丢弃后切换\n取消：留在当前标签", "切换画布", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-            if (choice == DialogResult.Cancel) return;
-            if (choice == DialogResult.Yes) CommitPendingChanges(); else DiscardPendingChanges();
-        }
+        // 返工 V2：切标签也要走统一守卫（原先只看待处理清单，待恢复的批次会被绕过）。
+        if (!ConfirmPendingBeforeLeaving()) return;
         switchingCanvasTab = true;
         try
         {
@@ -5669,21 +7130,66 @@ public sealed class MainForm : ScaledForm, IPluginHost
         finally { switchingCanvasTab = false; }
     }
 
+    /// <summary>
+    /// 离开当前画布前的统一守卫（返工 U3/V2）：关闭标签、新建画布、切换标签、切换项目、
+    /// 从画布库打开、关闭窗口**都走它**。
+    /// 返回 false 表示必须中止——有未提交的 Agent 改动且保存失败/撤销未完成，或**还有任意一批在等待恢复**。
+    ///
+    /// 为什么不能只看待处理清单：提交成功的批次已经把清单清空，此时若撤销只做了一半（画布回退了、
+    /// 文件或资产没恢复），清单是空的却仍有恢复记录挂着——只看清单就会放行离开，把恢复记录丢在半路。
+    /// </summary>
+    /// <param name="quiet">
+    /// 自动化（回归/冒烟）用：只做判定、不弹模态框，也**不替用户做选择**——
+    /// 有待提交改动或待恢复批次时一律返回 false。真实点击路径仍用默认值（会弹窗、会询问）。
+    /// </param>
+    private bool ConfirmPendingBeforeLeaving(bool quiet = false)
+    {
+        // 返工 V2：不依赖任何清单，直接问账本「还有没有待恢复的批次」。
+        if (agentBatchCommitter.Ledger.HasPendingRecovery(out var recovering))
+        {
+            if (!quiet)
+                MessageBox.Show(
+                    "上一批 Agent 改动的撤销只完成了一部分：请先重试撤销，把画布与文件恢复好，再离开当前画布。\n\n"
+                    + $"（待恢复的批次：{ShortKey(recovering.ToString())}）",
+                    "有未完成的恢复", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+
+        if (pendingChanges.IsEmpty) return true;
+        if (quiet) return false;
+
+        var choice = MessageBox.Show(
+            "当前有尚未提交的 Agent 改动，是否先应用到画布并保存？\n\n是：应用并保存　否：撤销这批改动",
+            "Agent 改动", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (choice == DialogResult.Cancel) return false;
+        return choice == DialogResult.Yes
+            ? CommitPendingChanges() is not { Succeeded: false }
+            : DiscardPendingChanges().Count == 0;
+    }
+
     private void CloseCanvasTab(CanvasTabState tab)
     {
         if (canvasTabs.Count == 1) return;
-        if (tab == activeCanvasTab) SaveCurrentCanvasTab();
+        if (!ConfirmPendingBeforeLeaving()) return;
+        var closingActive = ReferenceEquals(tab, activeCanvasTab);
+        if (closingActive) SaveCurrentCanvasTab();
         var index = canvasTabs.IndexOf(tab);
         canvasTabs.Remove(tab);
-        if (tab == activeCanvasTab) activeCanvasTab = canvasTabs[Math.Clamp(index - 1, 0, canvasTabs.Count - 1)];
-        currentCanvasPath = activeCanvasTab?.Path;
-        if (activeCanvasTab is not null) ApplyCanvasState(activeCanvasTab.Snapshot, advanceRevision: false);
+        if (closingActive)
+        {
+            activeCanvasTab = canvasTabs[Math.Clamp(index - 1, 0, canvasTabs.Count - 1)];
+            currentCanvasPath = activeCanvasTab?.Path;
+            // 返工 R16-1：只有真的换成了另一个标签才装载快照。关闭**别的**标签时重装当前快照，
+            // 会把用户在这之后的未保存编辑一起丢掉（而且旧实现里那份快照还是与活动状态同一对象）。
+            if (activeCanvasTab is not null) ApplyCanvasState(activeCanvasTab.Snapshot, advanceRevision: false);
+        }
         RebuildCanvasTabsUi();
         SetCurrentCanvasPath(currentCanvasPath);
     }
 
     private void NewCanvasButton_Click(object? sender, EventArgs e)
     {
+        if (!ConfirmPendingBeforeLeaving()) return;
         if (activeCanvasTab is not null) SaveCurrentCanvasTab();
         AddCanvasTab(EmptyCanvasState() with { Title = $"画布 {DateTime.Now:yyyyMMdd-HHmmss}" }, null);
         RefreshCanvasLibrary();

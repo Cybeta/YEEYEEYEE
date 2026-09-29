@@ -39,6 +39,18 @@ public sealed record AiUsage(long PromptTokens, long CompletionTokens, long Cach
 public sealed record AiStreamSink(Action<string> OnText, Action<string>? OnThinking = null, Action<AiUsage>? OnUsage = null);
 
 /// <summary>
+/// 结构化补全：按调用方给定的系统提示要一份 JSON 输出。
+///
+/// 与 <see cref="IAiChatProvider"/> 分开是有原因的：对话模式**故意不要求 JSON**（聊创作时 JSON 会碍事），
+/// 而这里的场景（把一份人写的接口文档整理成结构化 JSON）**必须**约束输出格式。
+/// 混用那个接口会让模型的系统提示与本次要求互相矛盾。
+/// </summary>
+public interface IAiJsonCompleter
+{
+    Task<string> CompleteJsonAsync(string systemPrompt, string userPrompt, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// 多轮对话能力。与 <see cref="IAiProvider.GenerateAsync"/> 的区别：
 /// 对话**不强制 JSON 输出**，允许模型用自然语言回答，用于「和助手讨论企划 / 剧情 / 设定」这类场景；
 /// 结构化生成仍然走 GenerateAsync。

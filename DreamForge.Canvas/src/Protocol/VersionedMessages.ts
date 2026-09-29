@@ -72,7 +72,7 @@ export interface HostSession { sessionId: string; userId: string; clientType: st
 export interface HostInit { protocolVersion: number; hostVersion: string; session: HostSession; capabilities: CapabilitySet; scene: Scene; locale: string }
 export interface HostOpBatch { batchId: string; revision: number; origin: 'remote' | 'host'; actorSessionId: string; ops: OperationRecord[] }
 export type JobState = 'Queued' | 'Running' | 'Cancelling' | 'Succeeded' | 'Failed' | 'Cancelled'
-export interface JobUpdate { jobId: string; invocationId: string; state: JobState; progressPercent: number; errorCode?: string | null; errorMessage?: string | null; externalTaskId?: string | null; outputs: Array<Record<string, unknown>> }
+export interface JobUpdate { jobId: string; invocationId: string; state: JobState; progressPercent: number; errorCode?: string | null; errorMessage?: string | null; externalTaskId?: string | null; outputs: Array<Record<string, unknown>>; attempt?: number; retryOfJobId?: string | null; rootJobId?: string | null }
 export interface HostError { code: ErrorCode; message: string; severity: 'warning' | 'fatal'; relatedType?: string | null }
 export interface ResourceReplaceResult { requestId: string; ok: boolean; message: string; revision?: number | null }
 export interface CanvasBridgeTransport { send(message: Envelope): void; subscribe(handler: (message: unknown) => void): () => void }

@@ -127,6 +127,12 @@ public sealed record AgentContext(
 }
 
 /// <summary>
+/// 自动模式落地结果（返工 S1）：动作清单 + 失败说明。
+/// <see cref="Failure"/> 为 null 才代表**真的已应用并保存**；有值时必须如实显示，不能报成功。
+/// </summary>
+public sealed record AgentAutoStageResult(IReadOnlyList<AgentAction> Actions, string? Failure);
+
+/// <summary>
 /// Agent 面板与外部的交互契约，由主窗体实现。
 /// 动作先暂存为预览；保存入口统一执行并保存，自动模式立即提交，审批模式等待用户确认。
 /// </summary>
@@ -142,8 +148,8 @@ public sealed record AgentPaneHost(
     Func<IReadOnlyList<AgentAction>, bool, IReadOnlyList<AgentAction>> PrepareActions,
     Func<IReadOnlyList<AgentAction>> PendingActions,
     Action<AgentAction> RemovePending,
-    Action SaveApplied,
-    Action UndoApplied,
+    Func<string?> SaveApplied,
+    Func<string?> UndoApplied,
     Action<AgentAction> FocusAction,
     Func<int> ContextCharacterBudget,
     Func<bool> ImageInputEnabled,
@@ -151,13 +157,13 @@ public sealed record AgentPaneHost(
     Action<string> ApplyModel,
     Action<string>? AcceptToNode)
 {
-    public IReadOnlyList<AgentAction> AutoStage(IReadOnlyList<AgentAction> actions)
+    public AgentAutoStageResult AutoStage(IReadOnlyList<AgentAction> actions)
     {
         var prepared = PrepareActions(actions, true);
         // 保存入口负责执行待处理批次；这里仅暂存，避免执行两次。
         PreviewActions(prepared);
-        SaveApplied();
-        return prepared;
+        // 返工 S1：保存结果必须传出去。旧实现丢弃返回值，上层于是无条件报「已应用并保存」。
+        return new AgentAutoStageResult(prepared, SaveApplied());
     }
 }
 
@@ -1118,8 +1124,11 @@ public sealed class AgentPane : Panel
             }
             else if (proposedActions.Count > 0 && authMode == AgentAuthMode.AutoStage)
             {
-                var applied = host.AutoStage(proposedActions);
-                Append("系统", $"已将 {applied.Count} 条改动直接应用到画布并保存。", Color.FromArgb(75, 63, 227));
+                var staged = host.AutoStage(proposedActions);
+                if (string.IsNullOrEmpty(staged.Failure))
+                    Append("系统", $"已将 {staged.Actions.Count} 条改动直接应用到画布并保存。", Color.FromArgb(75, 63, 227));
+                else
+                    Append("自动应用未完成", $"自动模式没能完成这批改动：{staged.Failure}", Color.FromArgb(176, 66, 66));
                 actionsToShow = Array.Empty<AgentAction>();
             }
 
@@ -1385,8 +1394,12 @@ public sealed class AgentPane : Panel
     private void OnPrimary()
     {
         if (host.PendingActions().Count == 0) return;
-        host.SaveApplied();
-        Append("已保存", "Agent 虚影改动已写入画布文件。", Color.FromArgb(75, 63, 227));
+        // 保存可能失败（配置文件/画布不可写）：必须照实显示，不能一律报「已保存」（返工 R3）。
+        var failure = host.SaveApplied();
+        if (string.IsNullOrEmpty(failure))
+            Append("已保存", "Agent 改动已写入画布文件。", Color.FromArgb(75, 63, 227));
+        else
+            Append("保存未完成", failure, Color.FromArgb(176, 66, 66));
         SyncPending();
     }
 
@@ -1396,8 +1409,11 @@ public sealed class AgentPane : Panel
         if (count == 0) return;
         if (MessageBox.Show($"确定撤销这 {count} 条已应用的 Agent 改动？\n\n画布将恢复到本批动作执行前的状态。",
                 "撤销 Agent 改动", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-        host.UndoApplied();
-        Append("已撤销", $"{count} 条 Agent 改动已撤销。", Color.FromArgb(150, 110, 40));
+        var failure = host.UndoApplied();
+        if (string.IsNullOrEmpty(failure))
+            Append("已撤销", $"{count} 条 Agent 改动已撤销。", Color.FromArgb(150, 110, 40));
+        else
+            Append("撤销未完成", failure, Color.FromArgb(176, 66, 66));
         SyncPending();
     }
 

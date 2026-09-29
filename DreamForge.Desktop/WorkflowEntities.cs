@@ -125,6 +125,24 @@ public sealed class WorkflowEntity
 {
     public Guid Id { get; set; } = Guid.NewGuid();
 
+    /// <summary>
+    /// 是否由**项目级资源库**托管（目标 6）：托管实体的权威内容在 <c>project/entities.json</c>，
+    /// 画布文件里只是快照；未迁移的旧数据保持 false，语义与从前一致（画布本地资源）。
+    /// </summary>
+    public bool ManagedByProject { get; set; }
+
+    /// <summary>
+    /// 权威资源缺失的原因（目标 6 / G6-R3，**运行时状态、不落盘**）：托管实体在项目库里已找不到
+    /// （库文件被漏拷、被删除等）时由打开流程写入。此时画布里的旧快照**只供恢复参考**，
+    /// 不能当有效资源参与解析、预检与出图——否则会拿旧版本照跑。
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? ProjectMissingReason { get; set; }
+
+    /// <summary>该实体当前是否属于「权威资源缺失」状态。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsProjectMissing => ProjectMissingReason is not null;
+
     public EntityKind Kind { get; set; } = EntityKind.Character;
 
     public string Name { get; set; } = "新设定";
@@ -187,8 +205,15 @@ public sealed record ReferenceContent(
     /// <summary>是否锁定在某个已提交版本上。</summary>
     public bool IsLocked => Version is not null;
 
-    /// <summary>版本标签，例如「v3」或「最新」。</summary>
-    public string VersionLabel => Version is null ? "最新" : Version.Label;
+    /// <summary>
+    /// 引用了版本但该版本已不存在（目标 4 / 4.2）。此时 <see cref="Version"/> 为 null、内容退回变体当前内容，
+    /// 这**只是为了让画面还能显示**，绝不能当成「正常跟随最新」——调用方必须按阻断处理，
+    /// 判定请用 <see cref="CanvasReferenceVersions.IsNodeBlocked"/>。
+    /// </summary>
+    public bool VersionMissing { get; init; }
+
+    /// <summary>版本标签，例如「v3」或「最新」；版本缺失时明确标出。</summary>
+    public string VersionLabel => VersionMissing ? "版本缺失" : Version is null ? "最新" : Version.Label;
 
     /// <summary>整体的引用标签，例如「小明 · 少年黑衣 · v3」。</summary>
     public string Label => $"{Entity.Name} · {Variant.Name} · {VersionLabel}";

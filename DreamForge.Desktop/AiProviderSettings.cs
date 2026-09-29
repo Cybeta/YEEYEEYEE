@@ -46,6 +46,21 @@ public sealed class AiProviderConfig
     public string ComfyUiClientId { get; set; } = "dreamforge-desktop";
     public string AssetDirectory { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 画视频接口地址（选填）。留空则复用 <see cref="Endpoint"/>，与图像接口的写法一致。
+    /// 视频接口通常是异步任务：提交后轮询取结果，因此未配置时只生成任务规格，不伪造视频结果。
+    /// </summary>
+    public string VideoEndpoint { get; set; } = string.Empty;
+
+    /// <summary>视频模型名称；留空表示未启用视频链路。</summary>
+    public string VideoModel { get; set; } = string.Empty;
+
+    /// <summary>视频接口一次最多能同时使用几张参考帧（0 表示不限制）。</summary>
+    public int VideoMaxReferenceImages { get; set; } = 1;
+
+    /// <summary>视频默认时长（秒）；0 表示由服务端默认。</summary>
+    public int VideoDefaultSeconds { get; set; }
+
     /// <summary>AI 自动展开下游节点的轮数；0 表示不限制。</summary>
     public int AutoGenerationRounds { get; set; } = 2;
 
@@ -129,6 +144,13 @@ public sealed class AiProviderConfig
 
     public string EffectiveImageEndpoint =>
         string.IsNullOrWhiteSpace(ImageEndpoint) ? Endpoint : ImageEndpoint;
+
+    /// <summary>画视频接口是否已配置：要有模型名，并且能解析出地址（自填的视频地址或复用的文本地址）。</summary>
+    public bool IsVideoConfigured =>
+        !string.IsNullOrWhiteSpace(VideoModel) && !string.IsNullOrWhiteSpace(EffectiveVideoEndpoint);
+
+    public string EffectiveVideoEndpoint =>
+        string.IsNullOrWhiteSpace(VideoEndpoint) ? Endpoint : VideoEndpoint;
 }
 
 public static class AiProviderSettings
@@ -184,6 +206,8 @@ public static class AiProviderSettings
         config.ApiKey = FirstNonEmpty(Environment.GetEnvironmentVariable("DREAMFORGE_AI_KEY"), config.ApiKey);
         config.ImageEndpoint = FirstNonEmpty(Environment.GetEnvironmentVariable("DREAMFORGE_IMAGE_ENDPOINT"), config.ImageEndpoint);
         config.ImageModel = FirstNonEmpty(Environment.GetEnvironmentVariable("DREAMFORGE_IMAGE_MODEL"), config.ImageModel);
+        config.VideoEndpoint = FirstNonEmpty(Environment.GetEnvironmentVariable("DREAMFORGE_VIDEO_ENDPOINT"), config.VideoEndpoint);
+        config.VideoModel = FirstNonEmpty(Environment.GetEnvironmentVariable("DREAMFORGE_VIDEO_MODEL"), config.VideoModel);
         config.ComfyUiBaseUrl = FirstNonEmpty(Environment.GetEnvironmentVariable("DREAMFORGE_COMFYUI_BASEURL"), config.ComfyUiBaseUrl);
         config.ComfyUiCheckpoint = FirstNonEmpty(Environment.GetEnvironmentVariable("DREAMFORGE_COMFYUI_CHECKPOINT"), config.ComfyUiCheckpoint);
         config.AssetDirectory = FirstNonEmpty(Environment.GetEnvironmentVariable("DREAMFORGE_ASSET_DIR"), config.AssetDirectory);
@@ -191,6 +215,10 @@ public static class AiProviderSettings
             config.AutoGenerationRounds = rounds;
         if (int.TryParse(Environment.GetEnvironmentVariable("DREAMFORGE_IMAGE_MAX_REFS"), out var maxRefs) && maxRefs >= 0)
             config.ImageMaxReferenceImages = maxRefs;
+        if (int.TryParse(Environment.GetEnvironmentVariable("DREAMFORGE_VIDEO_MAX_REFS"), out var maxVideoRefs) && maxVideoRefs >= 0)
+            config.VideoMaxReferenceImages = maxVideoRefs;
+        if (int.TryParse(Environment.GetEnvironmentVariable("DREAMFORGE_VIDEO_SECONDS"), out var videoSeconds) && videoSeconds >= 0)
+            config.VideoDefaultSeconds = videoSeconds;
 
         MigratePlaintextSecret(config);
         return config;

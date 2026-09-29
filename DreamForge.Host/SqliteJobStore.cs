@@ -48,6 +48,9 @@ public sealed class SqliteJobStore : IJobStore
                     tool TEXT NOT NULL DEFAULT '',
                     capability INTEGER NOT NULL DEFAULT 0,
                     channel TEXT NOT NULL DEFAULT '',
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    retry_of_job_id TEXT NULL,
+                    root_job_id TEXT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(user_id, idempotency_key)
                 );
@@ -59,6 +62,9 @@ public sealed class SqliteJobStore : IJobStore
             AddColumnIfMissing(connection, "tool", "TEXT NOT NULL DEFAULT ''");
             AddColumnIfMissing(connection, "capability", "INTEGER NOT NULL DEFAULT 0");
             AddColumnIfMissing(connection, "channel", "TEXT NOT NULL DEFAULT ''");
+            AddColumnIfMissing(connection, "attempt", "INTEGER NOT NULL DEFAULT 1");
+            AddColumnIfMissing(connection, "retry_of_job_id", "TEXT NULL");
+            AddColumnIfMissing(connection, "root_job_id", "TEXT NULL");
         }
     }
 
@@ -72,8 +78,8 @@ public sealed class SqliteJobStore : IJobStore
             using var connection = Open();
             using var command = connection.CreateCommand();
             command.CommandText = """
-                INSERT INTO jobs(job_id,user_id,invocation_id,idempotency_key,state,progress_percent,error_code,error_message,external_task_id,outputs_json,inputs_json,tool,capability,channel,updated_at)
-                VALUES($jobId,$userId,$invocationId,$key,$state,$progress,$errorCode,$errorMessage,$externalTaskId,$outputs,$inputs,$tool,$capability,$channel,$updatedAt)
+                INSERT INTO jobs(job_id,user_id,invocation_id,idempotency_key,state,progress_percent,error_code,error_message,external_task_id,outputs_json,inputs_json,tool,capability,channel,attempt,retry_of_job_id,root_job_id,updated_at)
+                VALUES($jobId,$userId,$invocationId,$key,$state,$progress,$errorCode,$errorMessage,$externalTaskId,$outputs,$inputs,$tool,$capability,$channel,$attempt,$retryOf,$rootJobId,$updatedAt)
                 ON CONFLICT(job_id) DO UPDATE SET
                     state=excluded.state,
                     progress_percent=excluded.progress_percent,
@@ -85,6 +91,9 @@ public sealed class SqliteJobStore : IJobStore
                     tool=excluded.tool,
                     capability=excluded.capability,
                     channel=excluded.channel,
+                    attempt=excluded.attempt,
+                    retry_of_job_id=excluded.retry_of_job_id,
+                    root_job_id=excluded.root_job_id,
                     updated_at=excluded.updated_at;
                 """;
             command.Parameters.AddWithValue("$jobId", result.JobId.ToString("D"));
@@ -101,6 +110,9 @@ public sealed class SqliteJobStore : IJobStore
             command.Parameters.AddWithValue("$tool", result.Tool);
             command.Parameters.AddWithValue("$capability", (int)result.Capability);
             command.Parameters.AddWithValue("$channel", result.Channel);
+            command.Parameters.AddWithValue("$attempt", result.Attempt < 1 ? 1 : result.Attempt);
+            command.Parameters.AddWithValue("$retryOf", (object?)result.RetryOfJobId?.ToString("D") ?? DBNull.Value);
+            command.Parameters.AddWithValue("$rootJobId", result.RootJobId == Guid.Empty ? result.JobId.ToString("D") : result.RootJobId.ToString("D"));
             command.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O"));
             command.ExecuteNonQuery();
         }
@@ -113,7 +125,7 @@ public sealed class SqliteJobStore : IJobStore
             ThrowIfDisposed();
             using var connection = Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "SELECT job_id,user_id,invocation_id,idempotency_key,state,progress_percent,error_code,error_message,external_task_id,outputs_json,inputs_json,tool,capability,channel FROM jobs ORDER BY updated_at ASC";
+            command.CommandText = "SELECT job_id,user_id,invocation_id,idempotency_key,state,progress_percent,error_code,error_message,external_task_id,outputs_json,inputs_json,tool,capability,channel,attempt,retry_of_job_id,root_job_id FROM jobs ORDER BY updated_at ASC";
             using var reader = command.ExecuteReader();
             var results = new List<ExecutionResult>();
             while (reader.Read())
@@ -122,12 +134,16 @@ public sealed class SqliteJobStore : IJobStore
                 var inputs = reader.IsDBNull(10)
                     ? new Dictionary<string, JsonElement>()
                     : JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(reader.GetString(10)) ?? new Dictionary<string, JsonElement>();
+                var jobId = Guid.Parse(reader.GetString(0));
                 results.Add(new ExecutionResult
                 {
-                    JobId = Guid.Parse(reader.GetString(0)), UserId = Guid.Parse(reader.GetString(1)), InvocationId = Guid.Parse(reader.GetString(2)),
+                    JobId = jobId, UserId = Guid.Parse(reader.GetString(1)), InvocationId = Guid.Parse(reader.GetString(2)),
                     IdempotencyKey = reader.GetString(3), State = (JobState)reader.GetInt32(4), ProgressPercent = reader.GetInt32(5),
                     ErrorCode = reader.IsDBNull(6) ? null : reader.GetString(6), ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7), ExternalTaskId = reader.IsDBNull(8) ? null : reader.GetString(8), Outputs = outputs, Inputs = inputs,
-                    Tool = reader.IsDBNull(11) ? string.Empty : reader.GetString(11), Capability = (Capability)reader.GetInt32(12), Channel = reader.IsDBNull(13) ? string.Empty : reader.GetString(13)
+                    Tool = reader.IsDBNull(11) ? string.Empty : reader.GetString(11), Capability = (Capability)reader.GetInt32(12), Channel = reader.IsDBNull(13) ? string.Empty : reader.GetString(13),
+                    Attempt = reader.IsDBNull(14) ? 1 : Math.Max(1, reader.GetInt32(14)),
+                    RetryOfJobId = reader.IsDBNull(15) ? null : Guid.Parse(reader.GetString(15)),
+                    RootJobId = reader.IsDBNull(16) ? jobId : Guid.Parse(reader.GetString(16))
                 });
             }
             return results;

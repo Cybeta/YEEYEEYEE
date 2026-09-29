@@ -58,6 +58,13 @@ public sealed class AgentAction
     public string VersionNote { get; set; } = string.Empty;
     public bool MarkVersionAdopted { get; set; }
 
+    /// <summary>
+    /// 删除实体时是否明确要连带解除引用（目标 4 返工）。
+    /// 默认 false：本画布仍有引用时拒绝删除，避免自动化静默解除引用；
+    /// 其它画布/草稿仍在引用时一律硬阻断，这个开关也不能绕过。
+    /// </summary>
+    public bool RemoveReferences { get; set; }
+
     /// <summary>提议理由，展示给用户判断要不要批准。</summary>
     public string Reason { get; set; } = string.Empty;
 
@@ -199,10 +206,15 @@ public static class AgentActionParser
                 VersionNote = Read(item, "versionNote"),
                 MarkVersionAdopted = item.TryGetProperty("markVersionAdopted", out var adopted)
                     && adopted.ValueKind == JsonValueKind.True,
+                RemoveReferences = ReadBoolean(item, "removeReferences") || ReadBoolean(item, "remove_references"),
                 Reason = Read(item, "reason")
             });
         }
     }
+
+    /// <summary>读一个布尔字段；只认 JSON 的 true，不把字符串当真。</summary>
+    private static bool ReadBoolean(JsonElement item, string name) =>
+        item.TryGetProperty(name, out var element) && element.ValueKind == JsonValueKind.True;
 
     private static IReadOnlyList<string> ReadStringArray(JsonElement item, string name)
     {
@@ -431,7 +443,8 @@ public static class AgentActionExecutor
         WorkflowCanvasState canvas,
         string? workspaceDirectory,
         FileWriteMode fileMode = FileWriteMode.Apply,
-        List<FileSnapshot>? fileSnapshots = null)
+        List<FileSnapshot>? fileSnapshots = null,
+        string? canvasPath = null)
     {
         var applied = 0;
         var errors = new List<string>();
@@ -439,18 +452,45 @@ public static class AgentActionExecutor
 
         foreach (var action in actions)
         {
+            // 单动作也要原子：有的动作会先改标题再去解析引用，中途失败会把画布留在「改了一半」的状态。
+            // 这类半成品绝不能冒充成功，所以每个动作前留一份快照，**真的改动了才**回退到这个动作之前。
+            // 「只有真改了才回退」很关键：回退会把集合元素换成反序列化出来的新对象，
+            // 纯校验失败（什么都没改）时不该付出这个代价，否则调用方手上持有的节点实例会变成孤儿。
+            var before = JsonSerializer.Serialize(canvas);
+            var removedBefore = removed.Count;
             try
             {
-                var message = ApplyOne(action, canvas, workspaceDirectory, removed, fileMode, fileSnapshots);
-                if (message is null) applied++;
-                else errors.Add($"{action.Describe()}：{message}");
+                var message = ApplyOne(action, canvas, workspaceDirectory, removed, fileMode, fileSnapshots, canvasPath);
+                if (message is null) { applied++; continue; }
+
+                if (JsonSerializer.Serialize(canvas) != before) RestoreInPlace(canvas, before);
+                removed.RemoveRange(removedBefore, removed.Count - removedBefore);
+                errors.Add($"{action.Describe()}：{message}");
             }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or InvalidOperationException)
             {
+                if (JsonSerializer.Serialize(canvas) != before) RestoreInPlace(canvas, before);
+                removed.RemoveRange(removedBefore, removed.Count - removedBefore);
                 errors.Add($"{action.Describe()}：{error.Message}");
             }
         }
+
+        // 注：失败动作可能已经写过文件，它留下的 FileSnapshot 一律保留——那是恢复记录，
+        // 用它回写未改动的文件是幂等的；丢掉反而会让「撤销」漏掉一个已经被改过的文件。
         return new AgentApplyResult(applied, errors, removed);
+    }
+
+    /// <summary>
+    /// 把一段画布快照恢复到**同一个实例**上（控件持有这个实例，不能换对象）。
+    /// 只覆盖画布本身，不动文件与回收站——文件副作用由 FileSnapshot 单独负责。
+    /// </summary>
+    private static void RestoreInPlace(WorkflowCanvasState canvas, string snapshot)
+    {
+        if (JsonSerializer.Deserialize<WorkflowCanvasState>(snapshot) is not { } restored) return;
+        canvas.Nodes = restored.Nodes;
+        canvas.Edges = restored.Edges;
+        canvas.Entities = restored.Entities;
+        canvas.WorkTree = restored.WorkTree;
     }
 
     /// <summary>返回 null 表示成功，否则返回失败原因。</summary>
@@ -460,7 +500,8 @@ public static class AgentActionExecutor
         string? workspaceDirectory,
         List<string> removed,
         FileWriteMode fileMode,
-        List<FileSnapshot>? fileSnapshots)
+        List<FileSnapshot>? fileSnapshots,
+        string? canvasPath)
     {
         switch (action.Kind.Trim().ToLowerInvariant())
         {
@@ -557,6 +598,8 @@ public static class AgentActionExecutor
                     item.ParentId = parent.Id;
                 }
                 canvas.WorkTree.Add(item);
+                if (item.Kind == WorkTreeKind.Chapter)
+                    CanvasChapters.EnsureExplicitOrder(canvas);
                 return null;
             }
             case "update_work_item":
@@ -675,10 +718,28 @@ public static class AgentActionExecutor
             case "delete_entity":
             {
                 if (FindEntity(canvas, action.Target) is not { } entity) return "找不到目标实体";
+
+                // 试算跑在副本上（预览）：不写回收站、不碰磁盘，副本会丢弃，没有数据丢失风险。
+                if (fileMode == FileWriteMode.Skip)
+                {
+                    canvas.Entities.Remove(entity);
+                    return null;
+                }
+
+                // 提交时走与桌面入口完全相同的链路（目标 4 返工）：
+                // 跨画布/草稿扫描引用 → 其它来源引用硬阻断 → 回收站快照写成功后才解除引用并删除。
+                var scanReport = CanvasReferenceScanner.Scan(canvas, canvasPath);
+                var guard = CanvasDeletionGuard.CheckEntity(scanReport, entity);
+                if (guard.HardBlocked) return guard.Message;
+                if (guard.HasReferences && !action.RemoveReferences)
+                    return $"{guard.Message} 若确实要连带解除引用，请把动作的 removeReferences 设为 true。";
+
+                if (!CanvasDeletionGuard.TryDeleteEntity(canvas, entity, guard.Hits, out var deleteError))
+                    return $"未能删除实体（画布未改动）：{deleteError}";
+
                 removed.AddRange(entity.Variants.SelectMany(variant =>
                     variant.Attachments.Concat(variant.Versions.SelectMany(version => version.Attachments)))
                     .Select(attachment => attachment.Reference));
-                canvas.Entities.Remove(entity);
                 return null;
             }
             case "write_file":
@@ -703,7 +764,7 @@ public static class AgentActionExecutor
     /// 审批前的只读预检：返回需要提醒用户的后果（文件会被覆盖、节点已锁定、找不到目标等）。
     /// 不做任何修改；没有可提醒的问题时返回 null。
     /// </summary>
-    public static string? Precheck(AgentAction action, WorkflowCanvasState canvas, string? workspaceDirectory)
+    public static string? Precheck(AgentAction action, WorkflowCanvasState canvas, string? workspaceDirectory, string? canvasPath = null)
     {
         switch (action.Kind.Trim().ToLowerInvariant())
         {
@@ -764,9 +825,20 @@ public static class AgentActionExecutor
             case "delete_entity":
             {
                 if (FindEntity(canvas, action.Target) is not { } entity) return "找不到目标实体";
+                var scan = CanvasReferenceScanner.Scan(canvas, canvasPath);
+                var guard = CanvasDeletionGuard.CheckEntity(scan, entity);
+                // 其它画布/草稿仍在引用：这是硬阻断，必须在审批前就说清楚。
+                if (guard.HardBlocked) return guard.Message;
+
                 var images = entity.Variants.Sum(variant =>
                     variant.Attachments.Count + variant.Versions.Sum(version => version.Attachments.Count));
-                return images > 0 ? $"删除「{entity.Name}」会同时移除 {images} 张参考图" : null;
+                var imageHint = images > 0 ? $"删除「{entity.Name}」会同时移除 {images} 张参考图" : string.Empty;
+                var referenceHint = guard.HasReferences
+                    ? $"本画布有 {guard.LocalCount} 个节点引用它，需要显式解除引用（removeReferences）"
+                    : string.Empty;
+                if (imageHint.Length > 0 && referenceHint.Length > 0) return $"{imageHint}；{referenceHint}";
+                if (imageHint.Length > 0) return imageHint;
+                return referenceHint.Length > 0 ? referenceHint : null;
             }
             case "write_file":
             {
@@ -786,13 +858,13 @@ public static class AgentActionExecutor
     /// 试算只作用于副本，且跳过文件写入，所以预检始终是只读的。
     /// </summary>
     public static IReadOnlyList<string?> PrecheckBatch(
-        IReadOnlyList<AgentAction> actions, WorkflowCanvasState canvas, string? workspaceDirectory)
+        IReadOnlyList<AgentAction> actions, WorkflowCanvasState canvas, string? workspaceDirectory, string? canvasPath = null)
     {
         var working = CanvasPreviewBuilder.Clone(canvas);
         var hints = new List<string?>(actions.Count);
         foreach (var action in actions)
         {
-            hints.Add(Precheck(action, working, workspaceDirectory));
+            hints.Add(Precheck(action, working, workspaceDirectory, canvasPath));
             Apply(new[] { action }, working, workspaceDirectory, FileWriteMode.Skip);
         }
         return hints;
@@ -841,48 +913,52 @@ public static class AgentActionExecutor
         Regex.IsMatch(node.Title, @"第\\s*\\d+\\s*章", RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// 新节点落位：按章节分块。节点归到它所属章节的区块里，区块存在就把整块重排成网格
-    /// （新节点排在末尾）；章节还没有区块时，在所有内容右侧另起一块。
-    /// 这样节点一多也是「每章一个方块」，而不是一条来回折的蛇。
+    /// 新节点落位（C-1/C-2）：按稳定章节 ID 判定它属于哪条泳道，用与桌面「整理画布」「章节布局」
+    /// 完全同一套 <see cref="CanvasSwimlaneLayout"/> 引擎落位（分镜横排、成品挂分镜下），
+    /// 并保留手动摆放（<see cref="WorkflowNode.ManualPosition"/>）的坐标。不再按章节名分块。
     /// </summary>
     private static void PlaceNewNode(WorkflowCanvasState canvas, WorkflowNode node, string parentTarget)
     {
         var parent = FindNode(canvas, parentTarget);
         if (parent is not null) node.ParentNodeId = parent.Id;
 
-        var key = WorkflowCanvasControl.ChapterKeyOf(canvas, node);
-        var blocks = WorkflowCanvasControl.ChapterBounds(canvas, canvas.Nodes);
+        // 先按「加节点之前」的状态确定目标泳道与锚点：新节点的默认坐标不会把泳道拖走。
+        var chapterId = CanvasChapters.ResolveChapterId(canvas, node);
+        var lanesBefore = CanvasSwimlaneLayout.Lanes(canvas);
+        var laneBefore = chapterId is { } id
+            ? lanesBefore.FirstOrDefault(lane => lane.ChapterId == id)
+            : lanesBefore.First(lane => lane.Kind == CanvasLaneKind.Unassigned);
+        var anchor = laneBefore is null ? null : CanvasSwimlaneLayout.LaneTopLeft(canvas, laneBefore);
 
-        float blockX, blockY;
-        if (key.Length > 0 && blocks.TryGetValue(key, out var block))
-        {
-            blockX = block.X;
-            blockY = block.Y;
-        }
-        else
-        {
-            // 新章节（或未分章）：排到所有已有内容的右边；纵向对齐已有区块的顶边。
-            var occupied = canvas.Nodes.Select(existing => WorkflowCanvasControl.NodeRect(canvas, existing)).ToList();
-            blockX = occupied.Count == 0 ? 80f : occupied.Max(rect => rect.Right) + WorkflowCanvasControl.ChapterBlockGap;
-            blockY = blocks.Count > 0
-                ? blocks.Values.Min(rect => rect.Top)
-                : occupied.Count == 0
-                    ? 80f
-                    : occupied.Min(rect => rect.Top) - WorkflowCanvasControl.ChapterBlockPadding - WorkflowCanvasControl.ChapterBlockTitleHeight;
-        }
-
-        // 临时位置放在同章已有节点的下方，重排时就排在末尾。
-        var sameChapter = canvas.Nodes
-            .Where(existing => WorkflowCanvasControl.ChapterKeyOf(canvas, existing) == key)
-            .ToList();
-        node.X = blockX + WorkflowCanvasControl.ChapterBlockPadding;
-        node.Y = sameChapter.Count == 0
-            ? blockY + WorkflowCanvasControl.ChapterBlockPadding + WorkflowCanvasControl.ChapterBlockTitleHeight
-            : sameChapter.Max(existing => existing.Y + WorkflowCanvasControl.NodeHeightFor(canvas, existing))
-                + WorkflowCanvasControl.ChapterRowGap;
+        // 临时坐标只影响排序（引擎按 类别→工作树顺序→Y→X 排队，最终坐标会重算）：
+        // 放到现有内容下方，让新节点排在泳道末尾。
+        node.X = anchor is { } origin ? origin.X + CanvasSwimlaneLayout.LanePaddingX : CanvasSwimlaneLayout.BaseX + CanvasSwimlaneLayout.LanePaddingX;
+        node.Y = canvas.Nodes.Where(existing => existing.Id != node.Id).Select(existing => existing.Y).DefaultIfEmpty(0f).Max() + 1000f;
 
         canvas.Nodes.Add(node);
-        WorkflowCanvasControl.ArrangeChapter(canvas, key, blockX, blockY);
+
+        if (anchor is not { } laneOrigin)
+        {
+            // 该泳道原本是空的（新章节或第一个未分章节点）：排在所有内容的右下方。
+            var occupied = canvas.Nodes.Where(existing => existing.Id != node.Id)
+                .Select(existing => WorkflowCanvasControl.NodeRect(canvas, existing)).ToList();
+            node.X = occupied.Count == 0 ? CanvasSwimlaneLayout.BaseX + CanvasSwimlaneLayout.LanePaddingX : occupied.Max(rect => rect.Right) + CanvasSwimlaneLayout.LaneGapY;
+            node.Y = occupied.Count == 0
+                ? CanvasSwimlaneLayout.BaseY + CanvasSwimlaneLayout.LaneHeaderHeight
+                : occupied.Max(rect => rect.Bottom) + CanvasSwimlaneLayout.LaneGapY + CanvasSwimlaneLayout.LaneHeaderHeight;
+            return;
+        }
+
+        var lane = CanvasSwimlaneLayout.Lanes(canvas).FirstOrDefault(item => item.NodeIds.Contains(node.Id));
+        if (lane is null) return;
+        var plan = CanvasSwimlaneLayout.PlanLane(canvas, lane, anchor: laneOrigin);
+        foreach (var change in plan.Changes)
+        {
+            if (canvas.Nodes.FirstOrDefault(existing => existing.Id == change.NodeId) is not { } target) continue;
+            target.X = change.ToX;
+            target.Y = change.ToY;
+            target.ManualPosition = false;
+        }
     }
 
     /// <summary>按短 id（Guid 前 8 位）或标题精确匹配节点；同名时视为歧义并拒绝。</summary>

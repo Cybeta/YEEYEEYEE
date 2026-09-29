@@ -1,7 +1,10 @@
+using System.Drawing;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using DreamForge.Core;
 using DreamForge.Desktop;
+using DreamForge.Host;
 
 // Agent 操作层的离线校验：提议解析、操作执行、审批预检、画布虚影预览、附件加载与多模态报文。
 //
@@ -58,6 +61,110 @@ var tests = new (string Name, Action Run)[]
     ("协议块：内容里的裸引号仍能解析（真实样本）", BrokenQuotesSampleStillParses),
     ("协议块：格式损坏时不泄漏 JSON", BrokenProtocolIsHiddenFromDisplay),
     ("反问：未闭合 fenced JSON 不泄漏且流式隐藏", IncompleteAskProtocolIsHidden),
+    ("ID 校验：合法画布零问题", IdentityValidatorCleanCanvas),
+    ("ID 校验：空 ID 与重复 ID 逐项报告", IdentityValidatorEmptyAndDuplicateIds),
+    ("ID 校验：悬空边端点、父节点、工作树锚点与布局可选引用", IdentityValidatorDanglingReferences),
+    ("ID 校验：缺失实体、变体与锁定版本", IdentityValidatorMissingTargets),
+    ("ID 校验：版本错绑到其他变体", IdentityValidatorVersionMisbinding),
+    ("ID 校验：null 版本跟随当前且同名实体不合并", IdentityValidatorNullVersionAndSameName),
+    ("ID 校验：自引用与父链循环", IdentityValidatorCycles),
+    ("ID 校验：一次收集全部问题", IdentityValidatorCollectsAllProblems),
+    ("ID 校验：资产标识无效与不可访问分开", IdentityValidatorAssetReferences),
+    ("ID 校验：只读，不改对象也不动文件", IdentityValidatorIsReadOnly),
+    ("返工 R1：工作树上一版本按来源变体判定", ReworkWorkTreeSupersedesScopedByVariant),
+    ("返工 R2：重复变体 ID 不凭首条猜归属", ReworkDuplicateVariantIdsNoFirstItemInference),
+    ("返工 R3：非规范 asset:// 写法与真实解析一致", ReworkAssetNonCanonicalReferenceMatchesRealResolution),
+    ("返工 R4：非法资产形状必须报格式错误", ReworkMalformedAssetShapesAreReported),
+    ("ID 生命周期：保存重载保持 ID 与关系", SaveReloadKeepsIdsAndRelations),
+    ("迁移：旧字段搬运、打开不写盘、重复迁移幂等", MigrationMovesLegacyFields),
+    ("迁移：歧义保留并提供显式处理入口", MigrationKeepsAmbiguityAndProvidesRepairEntry),
+    ("迁移：写前备份、失败不覆盖、可恢复", MigrationBacksUpAndRestoresOnFailure),
+    ("复制画布：全部换新 ID 且内部关系重映射", DuplicateCanvasRemapsInternalIds),
+    ("复制节点：集合内重映射、集合外共享", DuplicateNodesRemapsInternalIdsAndKeepsSharedReferences),
+    ("重复导入：按 ID 去重且第二次零增量", ImportMergeIsIdempotent),
+    ("导入冲突：同 ID 不同内容不覆盖、同名保持独立", ImportMergeReportsConflictWithoutOverwrite),
+    ("导入：变体 ID 被占用时不合并实体", ImportMergeRejectsVariantIdClash),
+    ("真实入口冒烟：打开→保存重开→复制→重复导入", RealEntrySmokeOpenSaveCopyImport),
+    ("返工 R5：空 ID 旧来源的导入身份稳定", ReworkEmptyIdSourceImportIdentityIsStable),
+    ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
+    ("返工 R7：备份失败中止保存且不覆盖", ReworkBackupFailureAbortsSave),
+    ("返工 R8：保存失败不改动调用方对象", ReworkFailedSaveLeavesInputUntouched),
+    ("返工 R9：旧格式包资产会随导入复制", ReworkLegacyPackageAssetsAreImported),
+    ("返工 R10：重复 ID 不猜测消歧", ReworkDuplicateIdsAreNotGuessed),
+    ("返工 R11：更高格式版本不降级不覆盖", ReworkFutureFormatIsNotDowngraded),
+    ("返工 R12：画布库保存入口走完整保存链", ReworkLibrarySaveUsesFullChain),
+    ("返工 R13：重命名入口先备份再原子写入", ReworkRenameEntryIsBackedUpAndAtomic),
+    ("入口审计：所有真实保存入口共用同一策略", AllSaveEntryPointsShareOnePolicy),
+    ("导出包：旧字段资产随包、原子覆盖不留半截", ExportPackagePacksLegacyAssetsAtomically),
+    ("章节：显式顺序确定性补齐且幂等", ChapterOrderIsExplicitAndIdempotent),
+    ("章节：归属按 ID 与父链解析，同名不绑定", ChapterResolutionUsesIdAndContext),
+    ("章节：拆分与合并按 ID 重接引用", ChapterSplitAndMergeRekeyReferences),
+    ("章节：删除保护引用并显式改挂", ChapterDeleteProtectsReferences),
+    ("章节：移动成环阻断且不改动画布", ChapterMoveRejectsCycles),
+    ("同步：画布到工作树按上下文建锚点", SyncCanvasToWorkTreeCreatesAnchorsByContext),
+    ("同步：工作树到画布尊重人工确认", SyncWorkTreeToCanvasRespectsConfirmation),
+    ("同步：会话可应用、可撤销", SyncSessionSupportsUndo),
+    ("章节：元数据随保存重开、复制与包往返", ChapterMetadataSurvivesRoundTrip),
+    ("章节入口：结构操作会话覆盖全部操作与撤销保存", ChapterStructureEntryCoversAllOperations),
+    ("章节入口：保存失败不报成功且原文件不变", ChapterStructureSaveFailureKeepsCanvasAndFile),
+    ("泳道布局：企划外置、章节独立泳道、分镜横排、成品挂分镜下", SwimlaneLayoutArrangesLanes),
+    ("泳道布局：局部重排只动本章、预览不改画布、应用后可撤销", SwimlaneLocalRearrangeOnlyTouchesChapter),
+    ("泳道布局：手动坐标受保护，需确认覆盖；重叠阻断且不写入", SwimlaneManualProtectionAndOverlap),
+    ("引用：临时展开不落盘，锁定版本缺失可检出，反向定位按实体 ID", ReferenceExpansionAndMissingVersions),
+    ("章节投影：节点带稳定 chapterId 与显式顺序，同名不合并", ChapterProjectionCarriesStableIds),
+    ("Agent 落位：新分镜按稳定章节 ID 进泳道，不动其他章节与手动坐标", AgentNodePlacementUsesChapterLanes),
+    ("引用扫描：跨画布与草稿命中，其它来源引用硬阻断删除", ReferenceScanSpansCanvasDraftAndLibrary),
+    ("删除保护与回收站：还原后引用按稳定 ID 重新生效", DeletionGuardAndRecycleBinRestore),
+    ("回收站写入失败：删除整体取消，内存与磁盘保持原样", RecycleBinWriteFailureCancelsDeletion),
+    ("Agent 删除实体：走引用扫描与回收站链路，不再绕过保护", AgentDeleteEntityUsesReferenceProtection),
+    ("Agent 删除实体预览：只在副本生效，不写回收站", AgentDeleteEntityPreviewWritesNoRecycleBin),
+    ("Agent 批次提交：审批与自动模式各自只提交一次", AgentBatchCommitsOnlyOnce),
+    ("AI 全流程：一句创意到分镜引用与章节归属", PremiseToStoryboardChain),
+    ("AI 全流程：引用出图落盘、成品保存、失败重试与取消", PremiseToFinishedImageAndRecovery),
+    ("智能导入：从文档/curl/JSON 识别 ComfyUI 与画图画视频接口", ProviderImportDetectsKinds),
+    ("智能导入：识别不到就不猜，地址照样归一化", ProviderImportRefusesToGuess),
+    ("智能导入：写入只改相关字段，其余配置与密钥加密保持不变", ProviderImportAppliesWithoutLosingConfig),
+    ("接口文档：HTML/OpenAPI/纯文本都解析出接口、模型与尺寸档位", ApiDocAnalyzerReadsDocs),
+    ("接口文档：一条父技能 + 按模型与尺寸派生池子子技能", ApiSkillFactoryBuildsPools),
+    ("接口文档：技能落盘可被技能库装载，不可写时如实报错", ApiSkillFilesRoundTrip),
+    ("出视频能力：无链路如实失败，有链路按步骤模型产出视频", VideoCapabilityRunsThroughRunner),
+    ("接口文档：模型表定池子，详情端点与参数表不混进模型", ApiDocModelTableDrivesPools),
+    ("接口文档：基础地址保留版本前缀且扩展名按文件头", ApiDocBaseUrlAndMediaExtension),
+    ("接口账号：余额与上线模型取数解析，失败如实报出", ApiAccountProbeReadsBalanceAndModels),
+    ("大模型修正：只采信文档里有的内容，非法条目丢掉", ApiDocRepairValidatesModelOutput),
+    ("返工 R2/R3：批次提交分阶段如实报告，部分成功与保存失败都不算成功", AgentBatchCommitStagesAreHonest),
+    ("返工 R4：技能自带执行配置，按导入的路径方法与鉴权发请求", ApiSkillExecutionContractIsHonored),
+    ("返工 R5：按来源命名空间隔离，只清理自己名下的技能文件", ApiSkillSourceNamespacingAndPruning),
+    ("返工 S4：池子绑定产出它的接口，导入技能不被 ComfyUI 抢走", ApiSkillPoolsBindTheirOwnEndpoint),
+    ("返工 S6：大模型修正不得虚构（方法冲突、档位、地址）", ApiDocRepairDoesNotFabricate),
+    ("返工 U1：资产移出是可逆移动，内容能原样恢复", AssetRecycleRoundTrip),
+    ("返工 U6：替换中途失败整批回滚，不留混合批次", ApiSkillWriteRollsBackOnReplaceFailure),
+    ("返工 U2：部分回滚后进入待恢复，禁止只重存", AgentBatchLedgerNeedsRecovery),
+    ("返工 S6：接口关联（跨段落档位待确认、目录先出现后声明方法）", ApiDocRepairRespectsInterfaceAssociation),
+    ("返工 U4：归属有歧义的池子不可执行，不回退默认执行方", ApiSkillAmbiguousPoolsAreNotExecutable),
+    ("返工 V1：资产引用要解析成路径才移得动，扫描→移出→撤销全程可逆", ApiAssetRecycleResolvesReferences),
+    ("返工 V2：待恢复批次能脱离清单判定，离开入口一律拦下", AgentLedgerReportsPendingRecoveryWithoutList),
+    ("返工 V3：跨画布提交与重存被拒，画布身份用标签而不是路径", AgentBatchRejectsCrossCanvasCommit),
+    ("返工 V4：同模型两接口按档位绑定，判不出来就不可执行", ApiSkillPoolsBindByModelAndSize),
+    ("返工 V5：覆盖与清理都要完整来源身份，缺失或冲突保守保留", ApiSkillWriteRespectsFullOwnership),
+    ("返工 V6：模型表档位要与模型同处，且不得超出接口已核实限制", ApiDocModelTableSizesNeedAssociation),
+    ("返工 R16-1：控件拒绝把自身状态当来源加载（标签快照别名会清空画布）", CanvasControlRejectsSelfAliasingLoad),
+    ("返工 R16-4：部分资产恢复失败后重试只重试失败项并收敛", AssetRecycleRetryOnlyRetriesFailures),
+    ("返工 R17-2：待恢复期间新批次被统一提交入口拦住，恢复后放行", CommitRejectsNewBatchWhileRecoveryPending),
+    ("目标 6：项目级资源库读写、原子写、写前备份与幂等", ProjectLibraryRoundTrip),
+    ("目标 6：同一资源被多份画布共享，改库后各画布都看到新内容", ProjectEntitySharedAcrossCanvases),
+    ("目标 6：跨画布索引覆盖画布库与草稿，并标出外来源引用", ProjectEntityIndexCoversCanvasAndDraft),
+    ("目标 6：项目级资源删除保护（外来源阻断 + 回收站还原回库）", ProjectEntityDeletionBlocksForeignReferences),
+    ("目标 6：资源迁移幂等、同名不同实体不合并", ProjectEntityMigrationIsIdempotentAndKeepsSameNamesApart),
+    ("目标 6：迁移中途失败整批回滚（库与画布逐字恢复）", ProjectEntityMigrationRollsBackOnFailure),
+    ("返工 G6-R1：托管资源编辑写回项目库，保存重开保留；写库失败不误报", ProjectEntityEditPublishesToLibrary),
+    ("返工 G6-R2：首次迁移失败把库恢复成「本来不存在」并还原内存标记，可重试", ProjectEntityMigrationFirstRunRollbackRestoresAbsentLibrary),
+    ("返工 G6-R3：项目库权威资源缺失时解析/预检/锁定明确阻断，放回库即恢复", ProjectEntityMissingAuthorityBlocksResolve),
+    ("返工 G6-S2：版本提交立即落库，外层取消不撤销已确认提交，写库失败整体撤回", VersionCommitPersistsImmediatelyAndSurvivesCancel),
+    ("返工 G6-S3：删除变体先落库后动画布，失败时引用与实体原样、库回滚", VariantDeletionKeepsReferencesWhenPublishFails),
+    ("返工 G6-T1：打开之后库被删也在执行前核验出来（旧标记不算数）", AuthorityRecheckCatchesLaterDeletedLibrary),
+    ("返工 G6-T2：发布结果区分「真落库」与「本地内容」，本地实体不谎报已保存", PublishOutcomeDistinguishesLocalAndShared),
+    ("版本策略：存在版本可锁定，缺失版本拒绝且不静默降级", ReferenceVersionPolicy),
 };
 
 var failures = new List<string>();
@@ -101,6 +208,7 @@ static void AutoStageAppliesOnce()
     var applications = 0;
     var saves = 0;
     var beforeCount = -1;
+    string? saveFailure = null;
     void Apply(IReadOnlyList<AgentAction> actions)
     {
         beforeCount = canvas.Nodes.Count;
@@ -122,12 +230,14 @@ static void AutoStageAppliesOnce()
         PendingActions: () => pending, RemovePending: _ => { },
         SaveApplied: () =>
         {
-            if (pending.Count == 0) return;
+            if (saveFailure is not null) return saveFailure;
+            if (pending.Count == 0) return "没有待提交的动作。";
             Apply(pending.ToArray());
             saves++;
             pending = Array.Empty<AgentAction>();
+            return null;
         },
-        UndoApplied: () => { }, FocusAction: _ => { }, ContextCharacterBudget: () => 1000,
+        UndoApplied: () => null, FocusAction: _ => { }, ContextCharacterBudget: () => 1000,
         ImageInputEnabled: () => false, RequestModelSettings: () => { },
         ApplyModel: _ => { }, AcceptToNode: null);
     var actions = AgentActionParser.Parse(SampleReply()).Actions;
@@ -135,6 +245,12 @@ static void AutoStageAppliesOnce()
     Expect(applications == 1 && saves == 1, $"应执行并保存一次，实际执行 {applications} / 保存 {saves}");
     Expect(canvas.Nodes.Count == 2 && canvas.Edges.Count == 1, "自动保存重复创建了节点或连线");
     Expect(beforeCount == 0 && pending.Count == 0, "提交前状态被覆盖或保存后仍有待处理动作");
+
+    // 返工 S1：自动模式的保存结果必须经面板回调传出去——旧实现丢弃返回值，上层于是无条件报「已应用并保存」。
+    saveFailure = "保存未完成：画布文件只读";
+    var refused = host.AutoStage(actions);
+    Expect(refused.Failure == saveFailure, "自动模式必须传递保存失败：" + refused.Failure);
+    Expect(applications == 1 && saves == 1, "保存失败时不得再应用一次动作：" + applications);
 }
 
 static void ParseVersionAdopted()
@@ -1083,6 +1199,5151 @@ static AiProviderConfig ConfigFor(AiApiFormat format) => new()
 
 static void Expect(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
 
+// ── 目标 1.1：只读 ID 与引用校验 ─────────────────────────────────────────────
+
+/// <summary>一份各项引用都成立的画布：两层节点、一条连线、工作树父子与版本来源、实体引用与锁定版本、两个附件。</summary>
+static WorkflowCanvasState ValidCanvas()
+{
+    var canvas = new WorkflowCanvasState();
+
+    var plan = new WorkflowNode { Title = "第一章 企划", Category = NodeCategory.Chapter };
+    var shot = new WorkflowNode { Title = "第一章 分镜", Category = NodeCategory.Storyboard, ParentNodeId = plan.Id };
+    canvas.Nodes.Add(plan);
+    canvas.Nodes.Add(shot);
+    canvas.Edges.Add(new WorkflowEdge { SourceNodeId = plan.Id, TargetNodeId = shot.Id, TargetPort = 0, SourcePort = 0 });
+
+    var chapter = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第一章" };
+    var ability = new WorkTreeItem { Kind = WorkTreeKind.Ability, Name = "御剑术", ParentId = chapter.Id };
+    canvas.WorkTree.Add(chapter);
+    canvas.WorkTree.Add(ability);
+    shot.WorkTreeItemId = chapter.Id;
+
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("少年黑衣");
+    var initial = variant.EnsureInitialVersion();
+    variant.Description = "少年黑衣，佩剑";
+    var adopted = variant.Commit("换装");
+    canvas.Entities.Add(entity);
+
+    shot.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+    shot.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = adopted.Id });
+
+    canvas.WorkTree.Add(new WorkTreeItem
+    {
+        Kind = WorkTreeKind.Version,
+        Name = adopted.Label,
+        Chapter = "第一章",
+        Version = adopted.Label,
+        SourceEntityId = entity.Id,
+        SourceVariantId = variant.Id,
+        SourceVersionId = adopted.Id,
+        SupersedesVersionId = initial.Id
+    });
+
+    shot.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://shot-1.png", Name = "分镜底图" });
+    variant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://shen-yan.png", Name = "角色参考图" });
+    return canvas;
+}
+
+static void IdentityValidatorCleanCanvas()
+{
+    var canvas = ValidCanvas();
+    var report = CanvasIdentityValidator.Validate(canvas);
+    Expect(report.IsClean, "合法画布不应产生任何问题：" + report.ToText());
+    Expect(report.ErrorCount == 0 && report.WarningCount == 0, "合法画布的错误与警告都应为 0");
+}
+
+static void IdentityValidatorEmptyAndDuplicateIds()
+{
+    var canvas = new WorkflowCanvasState();
+    var first = new WorkflowNode { Title = "A" };
+    var second = new WorkflowNode { Title = "B", Id = first.Id };
+    canvas.Nodes.Add(first);
+    canvas.Nodes.Add(second);
+    canvas.WorkTree.Add(new WorkTreeItem { Id = Guid.Empty, Kind = WorkTreeKind.Project, Name = "空 ID 条目" });
+
+    var report = CanvasIdentityValidator.Validate(canvas);
+    var duplicates = report.WithCode(CanvasIdentityCodes.IdDuplicate);
+    Expect(duplicates.Count == 2, $"重复 ID 的每一处都应报出（预期 2 条），实际 {duplicates.Count} 条：" + report.ToText());
+    Expect(duplicates.All(issue => issue.ObjectId == first.Id.ToString()), "重复问题应指向冲突的那个 ID");
+    Expect(duplicates.Select(issue => issue.FieldPath).Distinct().Count() == 2, "重复问题应分别给出两处字段路径，而不是只取第一条");
+    Expect(duplicates.All(issue => issue.Severity == CanvasIdentitySeverity.Error), "会作为查找键的重复 ID 属于错误");
+
+    var empties = report.WithCode(CanvasIdentityCodes.IdEmpty);
+    Expect(empties.Any(issue => issue.ObjectType == "WorkTreeItem" && issue.FieldPath == "WorkTree[0].Id"), "工作树条目空 ID 应报告");
+    Expect(empties.All(issue => issue.TargetId.Length == 0), "空 ID 报告不应伪造目标 ID");
+
+    // 重复 ID 的对象不应被静默丢弃或改写
+    Expect(canvas.Nodes.Count == 2 && canvas.Nodes[1].Title == "B", "校验不得删除或改写重复 ID 的对象");
+}
+
+static void IdentityValidatorDanglingReferences()
+{
+    var canvas = new WorkflowCanvasState();
+    var node = new WorkflowNode
+    {
+        Title = "悬空引用节点",
+        ParentNodeId = Guid.NewGuid(),
+        WorkTreeItemId = Guid.NewGuid()
+    };
+    canvas.Nodes.Add(node);
+    canvas.Edges.Add(new WorkflowEdge { SourceNodeId = node.Id, TargetNodeId = Guid.NewGuid() });
+
+    var scene = new WorkflowEntity { Kind = EntityKind.Scene, Name = "宗门" };
+    var sceneVariant = scene.CreateVariant("晴日");
+    sceneVariant.Layout!.Items.Add(new SceneLayoutItem { Element = "大殿", EntityId = scene.Id });
+    sceneVariant.Layout!.Items.Add(new SceneLayoutItem { Element = "茅草屋", EntityId = Guid.NewGuid() });
+    canvas.Entities.Add(scene);
+
+    var report = CanvasIdentityValidator.Validate(canvas);
+    Expect(report.WithCode(CanvasIdentityCodes.ParentMissing).Count == 1, "悬空父节点应报告一次");
+    Expect(report.WithCode(CanvasIdentityCodes.AnchorMissing).Count == 1, "悬空工作树锚应报告一次");
+    Expect(report.WithCode(CanvasIdentityCodes.EdgeEndpointMissing).Count == 1, "悬空连线端点应报告一次");
+
+    var layout = report.WithCode(CanvasIdentityCodes.LayoutElementEntityMissing);
+    Expect(layout.Count == 1, $"只有指向不存在实体的那个布局元素应被报告，实际 {layout.Count} 条：" + report.ToText());
+    Expect(layout[0].Severity == CanvasIdentitySeverity.Warning, "布局元素上的可选实体引用属于警告");
+    Expect(layout[0].FieldPath == "Entities[0].Variants[0].Layout.Items[1].EntityId", $"布局问题路径不符：{layout[0].FieldPath}");
+}
+
+static void IdentityValidatorMissingTargets()
+{
+    var canvas = new WorkflowCanvasState();
+    var node = new WorkflowNode { Title = "分镜" };
+    node.References.Add(new NodeReference { EntityId = Guid.NewGuid(), VariantId = Guid.NewGuid(), VariantVersionId = Guid.NewGuid() });
+    node.References.Add(new NodeReference());
+    canvas.Nodes.Add(node);
+
+    canvas.WorkTree.Add(new WorkTreeItem
+    {
+        Kind = WorkTreeKind.Version,
+        Name = "来源全悬空",
+        SourceEntityId = Guid.NewGuid(),
+        SourceVariantId = Guid.NewGuid(),
+        SourceVersionId = Guid.NewGuid(),
+        SupersedesVersionId = Guid.NewGuid()
+    });
+
+    var report = CanvasIdentityValidator.Validate(canvas);
+    Expect(report.WithCode(CanvasIdentityCodes.EntityMissing).Count == 1, "缺失实体应报告");
+    Expect(report.WithCode(CanvasIdentityCodes.VariantMissing).Count == 1, "缺失变体应报告");
+    Expect(report.WithCode(CanvasIdentityCodes.VersionMissing).Count == 1, "缺失锁定版本应报告");
+    Expect(report.WithCode(CanvasIdentityCodes.NodeReferenceEmpty).Count == 1, "空引用应报告");
+    Expect(report.WithCode(CanvasIdentityCodes.SourceEntityMissing).Count == 1, "工作树来源实体悬空应报告");
+    Expect(report.WithCode(CanvasIdentityCodes.SourceVariantMissing).Count == 1, "工作树来源变体悬空应报告");
+    Expect(report.WithCode(CanvasIdentityCodes.SourceVersionMissing).Count == 1, "工作树来源版本悬空应报告");
+    Expect(report.WithCode(CanvasIdentityCodes.SupersedesMissing).Count == 1, "工作树上一版本悬空应报告");
+
+    // 报告不猜绑定：悬空引用保持原样，不被清空也不被改成别的对象
+    Expect(node.References.Count == 2 && node.References[0].EntityId != Guid.Empty, "校验不得清空悬空引用");
+}
+
+static void IdentityValidatorVersionMisbinding()
+{
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variantA = entity.CreateVariant("少年");
+    var variantB = entity.CreateVariant("成年");
+    canvas.Entities.Add(entity);
+
+    var node = new WorkflowNode { Title = "分镜" };
+    // 引用了变体 A，却锁定到变体 B 的版本：错绑
+    node.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variantA.Id, VariantVersionId = variantB.Versions[0].Id });
+    canvas.Nodes.Add(node);
+
+    canvas.WorkTree.Add(new WorkTreeItem
+    {
+        Kind = WorkTreeKind.Version,
+        Name = "错绑来源",
+        SourceEntityId = entity.Id,
+        SourceVariantId = variantA.Id,
+        SourceVersionId = variantB.Versions[0].Id
+    });
+
+    var report = CanvasIdentityValidator.Validate(canvas);
+    Expect(report.WithCode(CanvasIdentityCodes.VersionOwnerMismatch).Count == 1, "节点版本错绑应报告一次：" + report.ToText());
+    Expect(report.WithCode(CanvasIdentityCodes.SourceVersionOwnerMismatch).Count == 1, "工作树来源版本错绑应报告一次");
+    Expect(report.WithCode(CanvasIdentityCodes.VersionMissing).Count == 0, "版本确实存在，不应报成缺失");
+    Expect(report.WithCode(CanvasIdentityCodes.VariantMissing).Count == 0, "变体确实存在，不应报成缺失");
+
+    Expect(node.References[0].VariantVersionId == variantB.Versions[0].Id, "校验不得改写错绑的版本 ID");
+}
+
+static void IdentityValidatorNullVersionAndSameName()
+{
+    var canvas = new WorkflowCanvasState();
+    var first = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var firstVariant = first.CreateVariant("默认");
+    var second = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var secondVariant = second.CreateVariant("默认");
+    canvas.Entities.Add(first);
+    canvas.Entities.Add(second);
+
+    var node = new WorkflowNode { Title = "分镜" };
+    node.References.Add(new NodeReference { EntityId = first.Id, VariantId = firstVariant.Id, VariantVersionId = null });
+    node.References.Add(new NodeReference { EntityId = second.Id, VariantId = secondVariant.Id });
+    canvas.Nodes.Add(node);
+
+    var report = CanvasIdentityValidator.Validate(canvas);
+    Expect(report.IsClean, "null 版本跟随当前是合法值，同名不同 ID 的实体也不应误报：" + report.ToText());
+    Expect(canvas.Entities.Count == 2, "同名实体不得被合并");
+    Expect(first.Id != second.Id && firstVariant.Id != secondVariant.Id, "同名实体的 ID 应各自独立");
+    Expect(node.References[0].VariantVersionId is null, "校验不得把 null 版本改成具体版本");
+}
+
+static void IdentityValidatorCycles()
+{
+    var canvas = new WorkflowCanvasState();
+    var selfParent = new WorkflowNode { Title = "自引用" };
+    var loopA = new WorkflowNode { Title = "循环 A" };
+    var loopB = new WorkflowNode { Title = "循环 B" };
+    selfParent.ParentNodeId = selfParent.Id;
+    loopA.ParentNodeId = loopB.Id;
+    loopB.ParentNodeId = loopA.Id;
+    canvas.Nodes.Add(selfParent);
+    canvas.Nodes.Add(loopA);
+    canvas.Nodes.Add(loopB);
+    canvas.Edges.Add(new WorkflowEdge { SourceNodeId = selfParent.Id, TargetNodeId = selfParent.Id });
+
+    var root = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "一章" };
+    var workA = new WorkTreeItem { Kind = WorkTreeKind.Ability, Name = "甲" };
+    var workB = new WorkTreeItem { Kind = WorkTreeKind.Ability, Name = "乙" };
+    workA.ParentId = workB.Id;
+    workB.ParentId = workA.Id;
+    canvas.WorkTree.Add(root);
+    canvas.WorkTree.Add(workA);
+    canvas.WorkTree.Add(workB);
+
+    var report = CanvasIdentityValidator.Validate(canvas);
+    Expect(report.WithCode(CanvasIdentityCodes.ParentSelf).Count == 1, "节点自引用父节点应报告");
+    Expect(report.WithCode(CanvasIdentityCodes.ParentCycle).Count == 1, $"同一个循环只应报告一次，实际 {report.WithCode(CanvasIdentityCodes.ParentCycle).Count} 次");
+    Expect(report.WithCode(CanvasIdentityCodes.EdgeSelfLoop).Count == 1, "连线自环应报告");
+    Expect(report.WithCode(CanvasIdentityCodes.WorkTreeParentCycle).Count == 1, "工作树父链循环应报告");
+    Expect(report.WithCode(CanvasIdentityCodes.IdDuplicate).Count == 0, "循环检测不得把不同节点的 ID 当成重复");
+
+    var cycle = report.WithCode(CanvasIdentityCodes.ParentCycle)[0];
+    Expect(cycle.Message.Contains(loopA.Id.ToString(), StringComparison.Ordinal)
+        && cycle.Message.Contains(loopB.Id.ToString(), StringComparison.Ordinal), "循环报告应列出循环内的全部节点");
+}
+
+static void IdentityValidatorCollectsAllProblems()
+{
+    var canvas = new WorkflowCanvasState();
+    var node = new WorkflowNode { Title = "问题节点", ParentNodeId = Guid.NewGuid(), WorkTreeItemId = Guid.NewGuid() };
+    node.References.Add(new NodeReference { EntityId = Guid.NewGuid(), VariantId = Guid.NewGuid() });
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = string.Empty });
+    canvas.Nodes.Add(node);
+    canvas.Edges.Add(new WorkflowEdge { SourceNodeId = Guid.NewGuid(), TargetNodeId = node.Id });
+
+    var report = CanvasIdentityValidator.Validate(canvas);
+    Expect(report.Issues.Count >= 6, $"应一次收集全部问题，实际只收集到 {report.Issues.Count} 项：" + report.ToText());
+    Expect(report.CountByCode().Count >= 5, "应覆盖多种错误代码，而不是在第一项失败后中断");
+    Expect(report.HasErrors && report.ErrorCount == report.Issues.Count, "本样例的问题都应是错误级");
+
+    var text = report.ToText();
+    Expect(text.Contains(CanvasIdentityCodes.EntityMissing, StringComparison.Ordinal)
+        && text.Contains(CanvasIdentityCodes.AssetReferenceEmpty, StringComparison.Ordinal), "报告文本应逐项列出代码");
+}
+
+static void IdentityValidatorAssetReferences()
+{
+    var canvas = new WorkflowCanvasState();
+    var node = new WorkflowNode { Title = "分镜" };
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = string.Empty });
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://" });
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://sub/dir.png" });
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://missing.png" });
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "C:/assets/ok.png" });
+    canvas.Nodes.Add(node);
+
+    var report = CanvasIdentityValidator.Validate(canvas, reference => reference is "asset://sub/dir.png" or "C:/assets/ok.png");
+    Expect(report.WithCode(CanvasIdentityCodes.AssetReferenceEmpty).Count == 1, "空资产标识应报告为标识无效");
+    Expect(report.WithCode(CanvasIdentityCodes.AssetReferenceMalformed).Count == 1, "只有 asset:// 后没有文件名才应报告为不可用");
+    // 带目录的 asset:// 写法当前读取能解析（只取文件名），属于兼容可用，只警告不报错。
+    var nonCanonical = report.WithCode(CanvasIdentityCodes.AssetReferenceNonCanonical);
+    Expect(nonCanonical.Count == 1 && nonCanonical[0].Severity == CanvasIdentitySeverity.Warning,
+        $"asset://sub/dir.png 应只报非规范警告，实际：{report.ToText()}");
+    var unreachable = report.WithCode(CanvasIdentityCodes.AssetUnreachable);
+    Expect(unreachable.Count == 1, $"只有形状正确但取不到的资产应报不可访问，实际 {unreachable.Count} 条：" + report.ToText());
+    Expect(unreachable[0].Severity == CanvasIdentitySeverity.Warning, "资产不可访问属于警告，不阻止打开旧项目");
+    Expect(report.WithCode(CanvasIdentityCodes.IdEmpty).Count == 0 && report.WithCode(CanvasIdentityCodes.IdDuplicate).Count == 0,
+        "资产标识是路径或 URI，不得按 GUID 校验");
+
+    // 不传委托时只做形状检查，不访问磁盘
+    var shapeOnly = CanvasIdentityValidator.Validate(canvas);
+    Expect(shapeOnly.WithCode(CanvasIdentityCodes.AssetUnreachable).Count == 0, "未提供资产解析委托时不应猜文件是否存在");
+    Expect(shapeOnly.WithCode(CanvasIdentityCodes.AssetReferenceMalformed).Count == 1
+        && shapeOnly.WithCode(CanvasIdentityCodes.AssetReferenceEmpty).Count == 1
+        && shapeOnly.WithCode(CanvasIdentityCodes.AssetReferenceNonCanonical).Count == 1, "形状检查仍应照常报告");
+}
+
+static void IdentityValidatorIsReadOnly()
+{
+    var workspace = NewWorkspace();
+    try
+    {
+        var canvas = ValidCanvas();
+        var path = Path.Combine(workspace, "canvas.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(new RecentCanvasState("只读校验", 1, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas)));
+
+        var before = JsonSerializer.Serialize(canvas);
+        var beforeBytes = File.ReadAllBytes(path);
+
+        var report = CanvasIdentityValidator.Validate(canvas, _ => false);
+        Expect(report.Issues.Count > 0, "本样例应报告资产不可访问");
+
+        Expect(JsonSerializer.Serialize(canvas) == before, "校验不得改动传入的画布对象");
+        Expect(File.ReadAllBytes(path).SequenceEqual(beforeBytes), "校验不得改动磁盘上的画布文件");
+        Expect(Directory.GetFiles(workspace).Length == 1, "校验不得写入任何额外文件");
+    }
+    finally
+    {
+        if (Directory.Exists(workspace)) Directory.Delete(workspace, true);
+    }
+}
+
+// ── 第 2 轮返工 R1–R4 与目标 A：ID 生命周期、迁移、导入去重 ─────────────────
+
+/// <summary>R1：两个变体各有相同 ID 的初始版本；工作树引用其中一条的版本与上一版本，两种顺序都必须零错。</summary>
+static void ReworkWorkTreeSupersedesScopedByVariant()
+{
+    foreach (var swap in new[] { false, true })
+    {
+        var canvas = new WorkflowCanvasState();
+        var sameVersionId = Guid.NewGuid();
+        var entityA = new WorkflowEntity { Kind = EntityKind.Character, Name = "甲" };
+        var variantA = entityA.CreateVariant("默认");
+        variantA.Versions[0].Id = sameVersionId;
+        var entityB = new WorkflowEntity { Kind = EntityKind.Character, Name = "乙" };
+        var variantB = entityB.CreateVariant("默认");
+        variantB.Versions[0].Id = sameVersionId;
+
+        // B 再提交一个新版本，工作树条目引用 B 的新版本与上一版本。
+        variantB.Description = "换装";
+        var newVersion = variantB.Commit("换装");
+
+        if (swap) { canvas.Entities.Add(entityB); canvas.Entities.Add(entityA); }
+        else { canvas.Entities.Add(entityA); canvas.Entities.Add(entityB); }
+
+        canvas.WorkTree.Add(new WorkTreeItem
+        {
+            Kind = WorkTreeKind.Version,
+            Name = newVersion.Label,
+            Version = newVersion.Label,
+            SourceEntityId = entityB.Id,
+            SourceVariantId = variantB.Id,
+            SourceVersionId = newVersion.Id,
+            SupersedesVersionId = sameVersionId
+        });
+
+        var report = CanvasIdentityValidator.Validate(canvas);
+        Expect(report.WithCode(CanvasIdentityCodes.SupersedesOwnerMismatch).Count == 0,
+            $"顺序 swap={swap}：上一版本属于来源变体，不应报错绑：{report.ToText()}");
+        Expect(report.WithCode(CanvasIdentityCodes.SupersedesMissing).Count == 0,
+            $"顺序 swap={swap}：上一版本确实存在于来源变体，不应报缺失：{report.ToText()}");
+        Expect(report.WithCode(CanvasIdentityCodes.SupersedesAmbiguous).Count == 0,
+            $"顺序 swap={swap}：来源变体明确，不应报歧义：{report.ToText()}");
+        // 版本 ID 在所属变体内唯一，跨变体相同只体现在位置（这里没有引用指向它，因此不应有任何错误）
+        Expect(report.ErrorCount == 0, $"顺序 swap={swap}：合法样例应零错误：{report.ToText()}");
+    }
+}
+
+/// <summary>R2：变体 ID 跨实体重复时按实体上下文解析，不得凭首条数据断定错绑。</summary>
+static void ReworkDuplicateVariantIdsNoFirstItemInference()
+{
+    foreach (var swap in new[] { false, true })
+    {
+        var canvas = new WorkflowCanvasState();
+        var sharedVariantId = Guid.NewGuid();
+        var entity1 = new WorkflowEntity { Kind = EntityKind.Character, Name = "甲" };
+        var variant1 = entity1.CreateVariant("默认");
+        variant1.Id = sharedVariantId;
+        var entity2 = new WorkflowEntity { Kind = EntityKind.Character, Name = "乙" };
+        var variant2 = entity2.CreateVariant("默认");
+        variant2.Id = sharedVariantId;
+        variant2.Description = "乙的外观";
+        var version2 = variant2.Commit("乙的版本");
+
+        if (swap) { canvas.Entities.Add(entity2); canvas.Entities.Add(entity1); }
+        else { canvas.Entities.Add(entity1); canvas.Entities.Add(entity2); }
+
+        var node = new WorkflowNode { Title = "分镜" };
+        node.References.Add(new NodeReference { EntityId = entity2.Id, VariantId = sharedVariantId, VariantVersionId = version2.Id });
+        canvas.Nodes.Add(node);
+
+        var report = CanvasIdentityValidator.Validate(canvas);
+        Expect(report.WithCode(CanvasIdentityCodes.VariantOwnerMismatch).Count == 0,
+            $"顺序 swap={swap}：引用写的实体就是变体所属实体，不应报错绑：{report.ToText()}");
+        Expect(report.WithCode(CanvasIdentityCodes.VersionOwnerMismatch).Count == 0,
+            $"顺序 swap={swap}：锁定的版本属于该实体的变体，不应报错绑：{report.ToText()}");
+        Expect(report.WithCode(CanvasIdentityCodes.VariantMissing).Count == 0 && report.WithCode(CanvasIdentityCodes.VersionMissing).Count == 0,
+            $"顺序 swap={swap}：变体与版本都存在，不应报缺失");
+        Expect(report.WithCode(CanvasIdentityCodes.IdDuplicate).Count == 2,
+            $"顺序 swap={swap}：重复的变体 ID 仍应逐处报出（2 条），实际 {report.WithCode(CanvasIdentityCodes.IdDuplicate).Count}");
+        Expect(!report.WithCode(CanvasIdentityCodes.IdDuplicate).Any(issue => issue.Severity == CanvasIdentitySeverity.Warning),
+            "会作为查找键的重复 ID 属于错误级");
+    }
+
+    // 同类推断排查：重复的节点 ID、工作树 ID 也只报歧义，不猜归属。
+    var canvas2 = new WorkflowCanvasState();
+    var nodeA = new WorkflowNode { Title = "A" };
+    var nodeB = new WorkflowNode { Title = "B", Id = nodeA.Id };
+    var child = new WorkflowNode { Title = "子", ParentNodeId = nodeA.Id };
+    canvas2.Nodes.Add(nodeA);
+    canvas2.Nodes.Add(nodeB);
+    canvas2.Nodes.Add(child);
+    var chapterX = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "章" };
+    var chapterY = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "章副本", Id = chapterX.Id };
+    var anchored = new WorkflowNode { Title = "锚点节点", WorkTreeItemId = chapterX.Id };
+    canvas2.Nodes.Add(anchored);
+    canvas2.WorkTree.Add(chapterX);
+    canvas2.WorkTree.Add(chapterY);
+
+    var report2 = CanvasIdentityValidator.Validate(canvas2);
+    Expect(report2.WithCode(CanvasIdentityCodes.ParentAmbiguous).Count == 1, "重复节点 ID 作父节点时应报歧义：" + report2.ToText());
+    Expect(report2.WithCode(CanvasIdentityCodes.ParentMissing).Count == 0, "重复节点 ID 不应被报成悬空");
+    Expect(report2.WithCode(CanvasIdentityCodes.AnchorAmbiguous).Count == 1, "重复工作树 ID 作锚点时应报歧义");
+    Expect(report2.WithCode(CanvasIdentityCodes.AnchorMissing).Count == 0, "重复工作树 ID 不应被报成悬空");
+}
+
+/// <summary>R3：隔离资产目录里真实存在的文件，其非规范 asset:// 写法只警告，不因只读校验收紧读取兼容性。</summary>
+static void ReworkAssetNonCanonicalReferenceMatchesRealResolution()
+{
+    using var stores = new IsolatedStores();
+    stores.WriteAsset("ok.png");
+
+    Expect(AssetStore.Exists("asset://sub/ok.png"), "真实读取会把 asset://sub/ok.png 解析到 ok.png");
+    Expect(AssetStore.Exists("asset://ok.png"), "规范写法同样可解析");
+
+    var canvas = new WorkflowCanvasState();
+    var node = new WorkflowNode { Title = "分镜" };
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://sub/ok.png" });
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://ok.png" });
+    canvas.Nodes.Add(node);
+
+    var report = CanvasIdentityValidator.Validate(canvas, AssetStore.Exists);
+    Expect(report.ErrorCount == 0, "可用的非规范引用不得报错：" + report.ToText());
+    Expect(report.WithCode(CanvasIdentityCodes.AssetReferenceNonCanonical).Count == 1, "非规范写法应给出单独警告");
+    Expect(report.WithCode(CanvasIdentityCodes.AssetUnreachable).Count == 0, "文件确实存在，不应报不可访问");
+    Expect(report.WithCode(CanvasIdentityCodes.AssetReferenceMalformed).Count == 0, "不得把兼容写法报成格式错误");
+}
+
+/// <summary>R4：确实不可用的资产形状必须报格式错误，不能用「文件缺失」代替。</summary>
+static void ReworkMalformedAssetShapesAreReported()
+{
+    using var stores = new IsolatedStores();
+    var canvas = new WorkflowCanvasState();
+    var node = new WorkflowNode { Title = "分镜" };
+    foreach (var reference in new[] { "asset://.", "asset://..", "C:/assets/bad*.png", "asset://bad?.png", @"C:\assets\ok|.png" })
+        node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = reference });
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://missing.png" });
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "https://example.com/a.png" });
+    node.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "data:image/png;base64,AAAA" });
+    canvas.Nodes.Add(node);
+
+    var report = CanvasIdentityValidator.Validate(canvas, reference => reference.StartsWith("http", StringComparison.Ordinal) || reference.StartsWith("data:", StringComparison.Ordinal));
+    var malformed = report.WithCode(CanvasIdentityCodes.AssetReferenceMalformed);
+    Expect(malformed.Count == 5, $"目录名与通配符写法都应报格式错误，实际 {malformed.Count} 条：{report.ToText()}");
+    Expect(malformed.All(issue => issue.Severity == CanvasIdentitySeverity.Error), "格式错误属于错误级");
+    Expect(report.WithCode(CanvasIdentityCodes.AssetUnreachable).Count == 1, "普通缺失文件仍按不可访问（警告）报告");
+    Expect(report.WithCode(CanvasIdentityCodes.AssetReferenceMalformed).All(issue => !issue.Message.Contains("取不到")),
+        "格式错误不得用「文件缺失」代替");
+    Expect(report.WithCode(CanvasIdentityCodes.AssetReferenceNonCanonical).Count == 0, "这些写法都不是「可用但非规范」");
+}
+
+/// <summary>1.2：保存重载保持 ID、关系与版本语义一致，并标注格式版本。</summary>
+static void SaveReloadKeepsIdsAndRelations()
+{
+    using var stores = new IsolatedStores();
+    var canvas = ValidCanvas();
+    var path = Path.Combine(stores.CanvasDirectory, "roundtrip.json");
+    var state = new RecentCanvasState("往返", 3, "正", "负", 512, 512, 20, 7, "", canvas) { FormatVersion = CanvasFormat.Current };
+
+    var first = CanvasSaveService.Save(state, path);
+    Expect(first.BackupPath is null, "首次保存没有旧文件，不应产生备份");
+    Expect(CanvasOpenService.TryOpen(path, out var reloaded, out var error), "重开失败：" + error);
+    Expect(!reloaded.Migration.Changed, "已标注当前格式的画布重载不应再有迁移改动");
+    Expect(reloaded.State.FormatVersion == CanvasFormat.Current, "格式版本应保持当前值");
+    Expect(SameIdsAndRelations(canvas, reloaded.State.Canvas), "保存重载不得改变 ID 与关系");
+    Expect(CanvasIdentityValidator.Validate(reloaded.State.Canvas).IsClean, "往返后应仍然自洽");
+
+    var second = CanvasSaveService.Save(reloaded.State, path);
+    Expect(second.BackupPath is { } backup && File.Exists(backup), "覆盖保存前应留下可恢复备份");
+    Expect(reloaded.State.Title == "往返" && reloaded.State.Width == 512, "保存重载不应改动标量字段");
+}
+
+/// <summary>1.3：旧格式字段搬进引用与附件，并记录变更；打开不改写磁盘文件。</summary>
+static void MigrationMovesLegacyFields()
+{
+    using var stores = new IsolatedStores();
+    var state = LegacyCanvasFile();
+    var path = Path.Combine(stores.CanvasDirectory, "legacy.json");
+    File.WriteAllText(path, JsonSerializer.Serialize(state));
+    var original = File.ReadAllBytes(path);
+
+    Expect(CanvasOpenService.TryOpen(path, out var opened, out var error), "打开旧画布失败：" + error);
+    Expect(opened.Migration.Changed, "旧文件应产生确定性迁移改动");
+    Expect(opened.State.FormatVersion == CanvasFormat.Current, "迁移后应标注当前格式版本");
+
+    var node = opened.State.Canvas.Nodes[0];
+    Expect(node.References.Count == 1, "旧单引用应转成一条引用");
+    Expect(node.References[0].EntityId == state.Canvas.Entities[0].Id
+        && node.References[0].VariantId == state.Canvas.Entities[0].Variants[0].Id
+        && node.References[0].VariantVersionId == state.Canvas.Entities[0].Variants[0].Versions[0].Id, "引用内容应完整保留");
+    Expect(node.Attachments.Count == 1 && node.Attachments[0].Reference == "asset://shot-1.png", "旧图片路径应转成附件");
+    Expect(node.LegacyEntityId is null && node.LegacyVariantId is null && node.LegacyAssetPaths.Count == 0, "旧字段应清空以保持幂等");
+
+    Expect(opened.Migration.Changes.Any(change => change.Kind == MigrationChangeKind.MovedLegacyReference), "应记录引用迁移");
+    Expect(opened.Migration.Changes.Any(change => change.Kind == MigrationChangeKind.MovedLegacyAttachments), "应记录附件迁移");
+    Expect(opened.Migration.Changes.Any(change => change.Kind == MigrationChangeKind.AssignedId), "应为空 ID 补全并记录映射");
+    Expect(opened.Validation.ErrorCount == 0, "迁移后的样例不应有错误级问题：" + opened.Validation.ToText());
+
+    // 打开只作用于内存：磁盘文件必须原样
+    Expect(File.ReadAllBytes(path).SequenceEqual(original), "打开不得改写磁盘文件");
+
+    // 重复迁移幂等
+    var again = CanvasMigration.Migrate(opened.State);
+    Expect(!again.Report.Changed, "第二次迁移不应产生额外改动");
+    var migratedAgain = CanvasMigration.MigrateCanvas(opened.State.Canvas, CanvasFormat.Current);
+    Expect(!migratedAgain.Changed, "按当前格式再迁移也应无改动");
+}
+
+/// <summary>1.3：无法确定的引用留成歧义并提供显式处理入口，不猜绑定。</summary>
+static void MigrationKeepsAmbiguityAndProvidesRepairEntry()
+{
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("默认");
+    canvas.Entities.Add(entity);
+
+    var node = new WorkflowNode { Title = "问题节点" };
+    node.References.Add(new NodeReference());
+    node.References.Add(new NodeReference { EntityId = Guid.NewGuid(), VariantId = Guid.NewGuid() });
+    node.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = Guid.Empty });
+    canvas.Nodes.Add(node);
+
+    var report = CanvasMigration.MigrateCanvas(canvas, CanvasFormat.Current);
+    Expect(report.Ambiguities.Any(item => item.FieldPath == "Nodes[0].References[0]"), "空引用应留成歧义项");
+    Expect(report.Ambiguities.Any(item => item.FieldPath.EndsWith(".VariantVersionId", StringComparison.Ordinal)),
+        "空 GUID 的锁定版本应留成歧义项，而不是猜成跟随当前：" + report.ToText());
+    Expect(node.References.Count == 3 && node.References[2].VariantVersionId == Guid.Empty, "迁移不得自行改动这些引用");
+
+    var dropped = CanvasMigration.DropUnresolvableReferences(canvas);
+    Expect(dropped.Affected == 2, $"应丢弃两条无法解析的引用，实际 {dropped.Affected}");
+    Expect(node.References.Count == 1 && node.References[0].VariantId == variant.Id, "可解析的引用必须保留");
+
+    var follow = CanvasMigration.TreatEmptyLockedVersionAsFollowCurrent(canvas);
+    Expect(follow.Affected == 1 && node.References[0].VariantVersionId is null, "显式处理入口应把空锁定版本改为跟随当前");
+}
+
+/// <summary>1.3：写入前备份、写入失败不覆盖源文件、可从备份恢复。</summary>
+static void MigrationBacksUpAndRestoresOnFailure()
+{
+    using var stores = new IsolatedStores();
+    var canvas = ValidCanvas();
+    var path = Path.Combine(stores.CanvasDirectory, "guard.json");
+    var v1 = new RecentCanvasState("第一版", 1, "", "", 512, 512, 20, 7, "", canvas) { FormatVersion = CanvasFormat.Current };
+    CanvasFileWriter.Write(path, v1);
+    var original = File.ReadAllBytes(path);
+
+    var backup = CanvasBackup.TryBackup(path, out var backupError);
+    var backupPath = backup ?? string.Empty;
+    Expect(backupPath.Length > 0 && File.Exists(backupPath), "应写出可恢复备份：" + backupError);
+
+    // 写入失败：目标路径被一个目录占用，替换必然失败。
+    var blocked = Path.Combine(stores.CanvasDirectory, "blocked.json");
+    Directory.CreateDirectory(blocked);
+    ExpectThrows<SystemException>(() => CanvasFileWriter.Write(blocked, v1 with { Title = "第二版" }), "目标被目录占用时应写入失败");
+    Expect(Directory.Exists(blocked) && !File.Exists(blocked), "失败不得创建目标文件");
+    Expect(!Directory.EnumerateFiles(stores.CanvasDirectory, "*.tmp").Any(), "失败应清理临时文件");
+
+    // 源文件在失败后保持原样
+    Expect(File.ReadAllBytes(path).SequenceEqual(original), "写入失败不得影响其它画布文件");
+
+    // 恢复：换一版内容后从备份回滚
+    CanvasFileWriter.Write(path, v1 with { Title = "改坏了" });
+    CanvasBackup.Restore(backupPath, path);
+    Expect(File.ReadAllBytes(path).SequenceEqual(original), "恢复后应与备份字节一致");
+    Expect(CanvasOpenService.TryOpen(path, out var restored, out _) && restored.State.Title == "第一版", "恢复后的内容应是备份那一版");
+    Expect(CanvasBackup.ListFor(path).Count >= 1, "应能列出该画布的备份");
+    Expect(CanvasBackup.Prune(1) >= 0, "清理备份不应抛错");
+}
+
+/// <summary>1.2：复制画布时全部换新 ID，集合内关系按映射改写，版本语义保持。</summary>
+static void DuplicateCanvasRemapsInternalIds()
+{
+    var source = ValidCanvas();
+    var copy = CanvasDuplication.DuplicateCanvas(source);
+
+    Expect(copy.Canvas.Nodes.Count == source.Nodes.Count && copy.Canvas.Edges.Count == source.Edges.Count, "复制应保持对象数量");
+    Expect(copy.Canvas.Nodes.All(node => source.Nodes.All(origin => origin.Id != node.Id)), "复制出的节点必须换新 ID");
+    Expect(copy.Canvas.Edges.All(edge => source.Edges.All(origin => origin.Id != edge.Id)), "复制出的连线必须换新 ID");
+    Expect(copy.Canvas.WorkTree.All(item => source.WorkTree.All(origin => origin.Id != item.Id)), "复制出的工作树条目必须换新 ID");
+
+    var copiedEntity = copy.Canvas.Entities[0];
+    var sourceEntity = source.Entities[0];
+    Expect(copiedEntity.Id != sourceEntity.Id, "实体应换新 ID");
+    Expect(copiedEntity.Variants[0].Id != sourceEntity.Variants[0].Id, "变体应换新 ID");
+    Expect(copiedEntity.Variants[0].Versions.Select(version => version.Id)
+        .Intersect(sourceEntity.Variants[0].Versions.Select(version => version.Id)).Count() == 0, "版本应换新 ID");
+
+    var copiedNodes = copy.Canvas.Nodes.ToDictionary(node => node.Id);
+    Expect(copiedNodes.ContainsKey(copy.Canvas.Edges[0].SourceNodeId) && copiedNodes.ContainsKey(copy.Canvas.Edges[0].TargetNodeId),
+        "连线端点应重映射到复制后的节点");
+    Expect(copy.Canvas.Nodes[1].ParentNodeId == copy.Canvas.Nodes[0].Id, "父链应重映射到复制后的节点");
+    Expect(copy.Canvas.Nodes[1].WorkTreeItemId == copy.Canvas.WorkTree[0].Id, "工作树锚应重映射到复制后的条目");
+
+    var shot = copy.Canvas.Nodes[1];
+    Expect(shot.References[0].EntityId == copiedEntity.Id && shot.References[0].VariantId == copiedEntity.Variants[0].Id,
+        "节点引用应重映射到复制后的实体与变体");
+    Expect(shot.References[0].VariantVersionId is null, "跟随当前版本的 null 语义必须保留");
+    Expect(shot.References[1].VariantVersionId == copiedEntity.Variants[0].Versions[1].Id, "锁定版本应重映射到复制后的版本");
+
+    var versionItem = copy.Canvas.WorkTree[2];
+    Expect(versionItem.SourceVersionId == copiedEntity.Variants[0].Versions[1].Id, "工作树来源版本应重映射");
+    Expect(versionItem.SupersedesVersionId == copiedEntity.Variants[0].Versions[0].Id, "工作树上一版本应重映射");
+
+    Expect(copy.Map.SharedReferences.Count == 0, "整份复制没有集合外引用");
+    Expect(CanvasIdentityValidator.Validate(copy.Canvas).IsClean, "复制结果应自洽：" + CanvasIdentityValidator.Validate(copy.Canvas).ToText());
+
+    // 原画布不受影响
+    Expect(source.Nodes[1].ParentNodeId == source.Nodes[0].Id && source.Entities[0].Id == sourceEntity.Id, "复制不得改动原画布");
+}
+
+/// <summary>1.2：复制节点时集合内关系重映射、集合外引用保留为共享。</summary>
+static void DuplicateNodesRemapsInternalIdsAndKeepsSharedReferences()
+{
+    var source = ValidCanvas();
+    var plan = source.Nodes[0];
+    var shot = source.Nodes[1];
+    var entity = source.Entities[0];
+
+    var single = CanvasDuplication.DuplicateNodes(source, new[] { shot.Id }, includeEdges: false);
+    Expect(single.Nodes.Count == 1 && single.Nodes[0].Id != shot.Id, "应复制出一个新 ID 的节点");
+    Expect(single.Nodes[0].ParentNodeId == plan.Id, "父节点在复制范围外，应按原样保留（集合外引用）");
+    Expect(single.Nodes[0].References[0].EntityId == entity.Id && single.Nodes[0].References[1].VariantVersionId == entity.Variants[0].Versions[1].Id,
+        "引用指向画布级设定库，复制后仍指向同一实体/版本（共享语义）");
+    Expect(single.Nodes[0].X == shot.X + 40 && single.Nodes[0].Y == shot.Y + 40, "复制出的节点应有偏移，避免完全重叠");
+    Expect(single.Report.Notes.Any(note => note.Contains("父节点不在复制范围内")), "应说明父节点按集合外引用保留：" + single.Report.ToText());
+
+    var both = CanvasDuplication.DuplicateNodes(source, new[] { plan.Id, shot.Id });
+    Expect(both.Nodes.Count == 2 && both.Edges.Count == 1, "复制两个节点应连同内部连线一起复制");
+    var newPlanId = both.Map.Nodes[plan.Id];
+    var newShotId = both.Map.Nodes[shot.Id];
+    Expect(both.Nodes.Single(node => node.Id == newShotId).ParentNodeId == newPlanId, "集合内父子关系应重映射");
+    Expect(both.Edges[0].SourceNodeId == newPlanId && both.Edges[0].TargetNodeId == newShotId, "内部连线端点应重映射");
+
+    var added = CanvasDuplication.Append(source, both.Nodes, both.Edges);
+    Expect(added == 2 && source.Nodes.Count == 4 && source.Edges.Count == 2, "追加后画布应多出复制对象");
+    Expect(CanvasIdentityValidator.Validate(source).IsClean, "复制后画布应仍然自洽：" + CanvasIdentityValidator.Validate(source).ToText());
+}
+
+/// <summary>1.4：重复导入按 ID 去重，第二次导入零增量且不改动画布。</summary>
+static void ImportMergeIsIdempotent()
+{
+    var target = ValidCanvas();
+    var incoming = CanvasDuplication.DuplicateCanvas(ValidCanvas()).Canvas;
+
+    var first = CanvasImportMerge.Merge(target, incoming);
+    Expect(first.Changed, "第一次合并应加入对象");
+    Expect(first.AddedNodes == 2 && first.AddedEdges == 1 && first.AddedEntities == 1 && first.AddedWorkTreeItems == 3,
+        $"第一次合并数量不符：{first.ToText()}");
+    Expect(!first.HasConflicts, "两份不同 ID 的画布合并不应产生冲突：" + first.ToText());
+
+    var snapshot = JsonSerializer.Serialize(target);
+    var second = CanvasImportMerge.Merge(target, incoming);
+    Expect(!second.Changed, "重复导入同一份数据不应再增量：" + second.ToText());
+    Expect(second.SkippedNodes == 2 && second.SkippedEntities == 1 && second.SkippedWorkTreeItems == 3, "已导入对象应被识别并跳过");
+    Expect(JsonSerializer.Serialize(target) == snapshot, "重复导入不得改动画布内容");
+    Expect(CanvasIdentityValidator.Validate(target).IsClean, "合并后画布应自洽：" + CanvasIdentityValidator.Validate(target).ToText());
+}
+
+/// <summary>1.4：同 ID 不同内容只报告冲突，不覆盖目标；同名不同 ID 保持独立。</summary>
+static void ImportMergeReportsConflictWithoutOverwrite()
+{
+    var target = ValidCanvas();
+    var incoming = CanvasDuplication.DuplicateCanvas(ValidCanvas()).Canvas;
+    incoming.Nodes[0].Id = target.Nodes[0].Id;
+    incoming.Nodes[0].Title = "被改过的同 ID 节点";
+    incoming.Entities[0].Id = target.Entities[0].Id;
+    incoming.Entities[0].Name = "被改过的同 ID 实体";
+
+    var report = CanvasImportMerge.Merge(target, incoming);
+    Expect(report.Conflicts.Any(conflict => conflict.ObjectType == "WorkflowNode"), "同 ID 不同内容的节点应报冲突");
+    Expect(report.Conflicts.Any(conflict => conflict.ObjectType == "WorkflowEntity"), "同 ID 不同内容的实体应报冲突");
+    Expect(target.Nodes.All(node => node.Title != "被改过的同 ID 节点"), "冲突不得覆盖目标节点内容");
+    Expect(target.Entities.All(entity => entity.Name != "被改过的同 ID 实体"), "冲突不得覆盖目标实体内容");
+    Expect(target.Nodes.Count(node => node.Id == incoming.Nodes[0].Id) == 1, "同 ID 不得重复出现两个对象");
+
+    // 同名不同 ID：各自保留，并提示没有按名称去重
+    var named = new WorkflowCanvasState();
+    var sameName = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    sameName.CreateVariant("默认");
+    named.Entities.Add(sameName);
+    var incomingSameName = new WorkflowCanvasState();
+    var other = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    other.CreateVariant("默认");
+    incomingSameName.Entities.Add(other);
+
+    var nameReport = CanvasImportMerge.Merge(named, incomingSameName);
+    Expect(nameReport.AddedEntities == 1 && named.Entities.Count == 2, "同名不同 ID 的实体应各自保留");
+    Expect(named.Entities.Select(entity => entity.Id).Distinct().Count() == 2, "同名实体不得被合并");
+    Expect(nameReport.Notes.Any(note => note.Contains("同名")), "应提示未按名称去重");
+}
+
+/// <summary>1.4：变体 ID 已被别的实体占用时整条实体不合并，避免设定挂到错误实体下。</summary>
+static void ImportMergeRejectsVariantIdClash()
+{
+    var target = new WorkflowCanvasState();
+    var existing = new WorkflowEntity { Kind = EntityKind.Character, Name = "甲" };
+    var existingVariant = existing.CreateVariant("默认");
+    target.Entities.Add(existing);
+
+    var incoming = new WorkflowCanvasState();
+    var clashing = new WorkflowEntity { Kind = EntityKind.Character, Name = "乙" };
+    var clashingVariant = clashing.CreateVariant("默认");
+    clashingVariant.Id = existingVariant.Id;
+    incoming.Entities.Add(clashing);
+
+    var report = CanvasImportMerge.Merge(target, incoming);
+    Expect(report.Conflicts.Any(conflict => conflict.ObjectType == "WorkflowEntity" && conflict.Reason.Contains("占用")),
+        "变体 ID 被占用应报冲突：" + report.ToText());
+    Expect(target.Entities.Count == 1 && target.Entities[0].Name == "甲", "冲突时不得把来源实体挂进来");
+    Expect(target.Entities[0].Variants[0].Id == existingVariant.Id, "目标变体不得被改写");
+}
+
+/// <summary>目标 A 的真实入口冒烟：打开旧文件 → 迁移 → 保存重开 → 复制 → 重复导入。</summary>
+static void RealEntrySmokeOpenSaveCopyImport()
+{
+    using var stores = new IsolatedStores();
+    stores.WriteAsset("shot-1.png");
+
+    var path = Path.Combine(stores.CanvasDirectory, "smoke.json");
+    File.WriteAllText(path, JsonSerializer.Serialize(LegacyCanvasFile()));
+    var originalBytes = File.ReadAllBytes(path);
+
+    // 打开：迁移 + 校验，且不改写磁盘
+    Expect(CanvasOpenService.TryOpen(path, out var opened, out var error), "打开失败：" + error);
+    Expect(opened.Migrated && opened.NeedsAttention, "旧文件应产生迁移改动并提示检查");
+    Expect(File.ReadAllBytes(path).SequenceEqual(originalBytes), "打开阶段不得写盘");
+    Expect(opened.Validation.ErrorCount == 0, "迁移后的样例不应有错误：" + opened.Validation.ToText());
+
+    // 保存：写前备份 + 标注格式版本 + 原子写入
+    var saved = CanvasSaveService.Save(opened.State, path);
+    Expect(saved.BackupPath is { } backup && File.Exists(backup), "覆盖保存前应留备份");
+    Expect(!File.ReadAllText(path).Contains("\"FormatVersion\": 0", StringComparison.Ordinal), "保存后应标注当前格式版本");
+
+    // 重开：无迁移改动、ID 与关系一致
+    Expect(CanvasOpenService.TryOpen(path, out var reloaded, out var reloadError), "重开失败：" + reloadError);
+    Expect(!reloaded.Migration.Changed, "已迁移画布重开不应再有确定改动");
+    Expect(SameIdsAndRelations(opened.State.Canvas, reloaded.State.Canvas), "保存重开应保持 ID 与关系");
+    Expect(reloaded.State.FormatVersion == CanvasFormat.Current, "重开后应保持当前格式版本");
+
+    // 复制画布：全部换新 ID 且自洽
+    var copy = CanvasDuplication.DuplicateCanvas(reloaded.State.Canvas);
+    Expect(copy.Map.SharedReferences.Count == 0, "整份复制不应有集合外引用");
+    Expect(CanvasIdentityValidator.Validate(copy.Canvas).IsClean, "复制结果应自洽");
+
+    // 重复导入：先合并到一份空白画布（第一次增量），同一份数据第二次导入应零增量
+    var blank = new RecentCanvasState("空白", 0, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, new WorkflowCanvasState());
+    Expect(CanvasImportService.TryImport(path, blank, CanvasImportMode.Merge, out var merged, out var importError), "导入失败：" + importError);
+    Expect(merged.Merge!.Changed && merged.Merge!.AddedNodes > 0 && merged.Merge!.AddedEntities > 0, "第一次合并应加入对象：" + merged.Merge!.ToText());
+    Expect(CanvasImportService.TryImport(path, merged.State, CanvasImportMode.Merge, out var again, out var againError), "二次导入失败：" + againError);
+    Expect(!again.Merge!.Changed, "第二次导入同一份数据不应增量：" + again.Merge!.ToText());
+    Expect(!again.Merge!.HasConflicts, "同一份数据重复导入不应产生冲突：" + again.Merge!.ToText());
+    Expect(CanvasIdentityValidator.Validate(again.State.Canvas).IsClean, "重复导入后画布仍应自洽");
+
+    // 已经含有同一份数据的画布再导入该文件：同样零增量、无冲突
+    Expect(CanvasImportService.TryImport(path, reloaded.State, CanvasImportMode.Merge, out var selfImport, out var selfError), "自导入失败：" + selfError);
+    Expect(!selfImport.Merge!.Changed && !selfImport.Merge!.HasConflicts, "导入自己已有的数据应零增量且无冲突：" + selfImport.Merge!.ToText());
+
+    // 替换导入仍然可用（资产已在本机，不再重复导入）
+    Expect(CanvasImportService.TryImport(path, reloaded.State, CanvasImportMode.Replace, out var replaced, out _), "替换导入失败");
+    Expect(replaced.Merge is null && replaced.State.FormatVersion == CanvasFormat.Current, "替换导入应直接采用来源画布并标注格式版本");
+}
+
+/// <summary>测试用的旧格式画布文件：旧单引用、旧图片路径、空 ID 附件，且没有格式版本标注。</summary>
+static RecentCanvasState LegacyCanvasFile()
+{
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("默认");
+    var version = variant.EnsureInitialVersion();
+
+    var canvas = new WorkflowCanvasState();
+    canvas.Entities.Add(entity);
+
+    var node = new WorkflowNode
+    {
+        Title = "旧分镜",
+        LegacyEntityId = entity.Id,
+        LegacyVariantId = variant.Id,
+        LegacyVariantVersionId = version.Id
+    };
+    node.LegacyAssetPaths.Add("asset://shot-1.png");
+    node.LegacyAssetPaths.Add("   ");
+    canvas.Nodes.Add(node);
+    node.WorkTreeItemId = AddChapter(canvas);
+
+    canvas.WorkTree.Add(new WorkTreeItem
+    {
+        Kind = WorkTreeKind.Version,
+        Name = version.Label,
+        Chapter = "第一章",
+        Version = version.Label,
+        SourceEntityId = entity.Id,
+        SourceVariantId = variant.Id,
+        SourceVersionId = version.Id,
+        // 旧文件里可能有空 GUID 的标识：迁移应按确定规则补全并记录映射。
+        Attachments = { new WorkflowAttachment { Id = Guid.Empty, Kind = AttachmentKind.Image, Reference = "asset://shot-1.png" } }
+    });
+
+    return new RecentCanvasState("冒烟样例", 1, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas);
+}
+
+static Guid AddChapter(WorkflowCanvasState canvas)
+{
+    var chapter = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第一章" };
+    canvas.WorkTree.Add(chapter);
+    return chapter.Id;
+}
+
+/// <summary>对比两份画布的 ID 与关系字段，用于「保存重载/复制重映射」的一致性断言。</summary>
+static bool SameIdsAndRelations(WorkflowCanvasState left, WorkflowCanvasState right)
+{
+    if (!left.Nodes.Select(node => node.Id).SequenceEqual(right.Nodes.Select(node => node.Id))) return false;
+    if (!left.Edges.Select(edge => (edge.Id, edge.SourceNodeId, edge.TargetNodeId))
+        .SequenceEqual(right.Edges.Select(edge => (edge.Id, edge.SourceNodeId, edge.TargetNodeId)))) return false;
+    if (!left.Entities.Select(entity => entity.Id).SequenceEqual(right.Entities.Select(entity => entity.Id))) return false;
+    if (!left.Entities.SelectMany(entity => entity.Variants).Select(variant => variant.Id)
+        .SequenceEqual(right.Entities.SelectMany(entity => entity.Variants).Select(variant => variant.Id))) return false;
+    if (!left.Entities.SelectMany(entity => entity.Variants).SelectMany(variant => variant.Versions).Select(version => version.Id)
+        .SequenceEqual(right.Entities.SelectMany(entity => entity.Variants).SelectMany(variant => variant.Versions).Select(version => version.Id))) return false;
+    if (!left.WorkTree.Select(item => (item.Id, item.ParentId, item.SourceEntityId, item.SourceVariantId, item.SourceVersionId, item.SupersedesVersionId))
+        .SequenceEqual(right.WorkTree.Select(item => (item.Id, item.ParentId, item.SourceEntityId, item.SourceVariantId, item.SourceVersionId, item.SupersedesVersionId)))) return false;
+
+    for (var index = 0; index < left.Nodes.Count; index++)
+    {
+        var a = left.Nodes[index];
+        var b = right.Nodes[index];
+        if (a.ParentNodeId != b.ParentNodeId || a.WorkTreeItemId != b.WorkTreeItemId) return false;
+        if (a.References.Count != b.References.Count) return false;
+        for (var referenceIndex = 0; referenceIndex < a.References.Count; referenceIndex++)
+        {
+            var leftReference = a.References[referenceIndex];
+            var rightReference = b.References[referenceIndex];
+            if (leftReference.EntityId != rightReference.EntityId
+                || leftReference.VariantId != rightReference.VariantId
+                || leftReference.VariantVersionId != rightReference.VariantVersionId) return false;
+        }
+    }
+
+    return true;
+}
+
+static T ExpectThrows<T>(Action action, string message) where T : Exception
+{
+    try { action(); }
+    catch (T expected) { return expected; }
+    catch (Exception other) { throw new InvalidOperationException($"{message}（实际抛出 {other.GetType().Name}：{other.Message}）"); }
+    throw new InvalidOperationException(message + "（没有抛出异常）");
+}
+
+// ── 第 4 轮整批返工 R5–R11 的回归 ───────────────────────────────────────────
+
+/// <summary>R5：含空 ID 的旧来源必须可持久地识别为同一批对象，连续导入与保存重开后都零增量。</summary>
+static void ReworkEmptyIdSourceImportIdentityIsStable()
+{
+    using var stores = new IsolatedStores();
+    var sourcePath = Path.Combine(stores.CanvasDirectory, "empty-id-source.json");
+    File.WriteAllText(sourcePath, JsonSerializer.Serialize(LegacyEmptyIdSource()));
+    var sourceBytes = File.ReadAllBytes(sourcePath);
+
+    var target = new RecentCanvasState("目标", 0, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, new WorkflowCanvasState());
+    Expect(CanvasImportService.TryImport(sourcePath, target, CanvasImportMode.Merge, out var first, out var firstError), "首次导入失败：" + firstError);
+    Expect(first.Merge!.Changed && first.Merge!.AddedEntities == 1, "首次导入应加入对象：" + first.Merge!.ToText());
+
+    // 关键：第二次仍从同一份未修改的来源导入第一次得到的状态
+    Expect(CanvasImportService.TryImport(sourcePath, first.State, CanvasImportMode.Merge, out var second, out var secondError), "二次导入失败：" + secondError);
+    Expect(!second.Merge!.Changed, "同一份旧来源连续导入必须零增量：" + second.Merge!.ToText());
+    Expect(second.State.Canvas.Nodes.Count == first.State.Canvas.Nodes.Count
+        && second.State.Canvas.Entities.Count == first.State.Canvas.Entities.Count
+        && second.State.Canvas.Edges.Count == first.State.Canvas.Edges.Count
+        && second.State.Canvas.WorkTree.Count == first.State.Canvas.WorkTree.Count, "不应产生重复对象");
+
+    // 目标保存重开后再次导入同一来源，仍应零增量
+    var targetPath = Path.Combine(stores.CanvasDirectory, "target.json");
+    CanvasSaveService.Save(second.State, targetPath);
+    Expect(CanvasOpenService.TryOpen(targetPath, out var reopened, out var openError), "重开失败：" + openError);
+    Expect(CanvasImportService.TryImport(sourcePath, reopened.State, CanvasImportMode.Merge, out var third, out var thirdError), "三次导入失败：" + thirdError);
+    Expect(!third.Merge!.Changed, "目标保存重开后再次导入同一来源必须零增量：" + third.Merge!.ToText());
+
+    Expect(File.ReadAllBytes(sourcePath).SequenceEqual(sourceBytes), "不得通过改动来源文件伪造幂等");
+
+    // 参与查找的缺失 ID 全覆盖
+    var canvas = third.State.Canvas;
+    var legacyNode = canvas.Nodes.First(node => node.Title == "空 ID 节点");
+    var legacyEntity = canvas.Entities.First(entity => entity.Name == "沈砚");
+    Expect(canvas.Edges[0].Id != Guid.Empty && canvas.WorkTree[0].Id != Guid.Empty
+        && legacyNode.Id != Guid.Empty && legacyEntity.Id != Guid.Empty
+        && legacyEntity.Variants[0].Id != Guid.Empty && legacyEntity.Variants[0].Versions[0].Id != Guid.Empty
+        && legacyNode.Attachments[0].Id != Guid.Empty && legacyNode.GenerationHistory[0].Id != Guid.Empty,
+        "参与查找的缺失 ID（节点、连线、工作树、实体、变体、版本、附件、历史）应全部补齐");
+    Expect(CanvasIdentityValidator.Validate(canvas).IsClean, "合并结果应自洽：" + CanvasIdentityValidator.Validate(canvas).ToText());
+
+    // 不同来源的同名对象保持独立
+    var otherPath = Path.Combine(stores.CanvasDirectory, "other-source.json");
+    File.WriteAllText(otherPath, JsonSerializer.Serialize(LegacySameNameSource()));
+    Expect(CanvasImportService.TryImport(otherPath, third.State, CanvasImportMode.Merge, out var extra, out var extraError), "同名来源导入失败：" + extraError);
+    Expect(extra.Merge!.AddedEntities == 1, "不同来源的同名实体应作为新对象加入");
+    Expect(extra.State.Canvas.Entities.Count(entity => entity.Name == "沈砚") == 2, "同名不同来源的实体必须保持独立");
+    Expect(extra.State.Canvas.Entities.Select(entity => entity.Id).Distinct().Count() == 2, "同名实体不得共用 ID");
+}
+
+/// <summary>R6：跨变体相同版本 GUID 是合法作用域，复制不得造成版本错绑。</summary>
+static void ReworkDuplicateCanvasKeepsVersionScope()
+{
+    foreach (var swap in new[] { false, true })
+    {
+        var sharedVersionId = Guid.NewGuid();
+        var entityA = new WorkflowEntity { Kind = EntityKind.Character, Name = "甲" };
+        var variantA = entityA.CreateVariant("默认");
+        variantA.Versions[0].Id = sharedVersionId;
+        var entityB = new WorkflowEntity { Kind = EntityKind.Character, Name = "乙" };
+        var variantB = entityB.CreateVariant("默认");
+        variantB.Versions[0].Id = sharedVersionId;
+
+        var canvas = new WorkflowCanvasState();
+        if (swap) { canvas.Entities.Add(entityB); canvas.Entities.Add(entityA); }
+        else { canvas.Entities.Add(entityA); canvas.Entities.Add(entityB); }
+
+        var nodeA = new WorkflowNode { Title = "分镜A" };
+        nodeA.References.Add(new NodeReference { EntityId = entityA.Id, VariantId = variantA.Id, VariantVersionId = sharedVersionId });
+        var nodeB = new WorkflowNode { Title = "分镜B" };
+        nodeB.References.Add(new NodeReference { EntityId = entityB.Id, VariantId = variantB.Id, VariantVersionId = sharedVersionId });
+        var nodeFollow = new WorkflowNode { Title = "跟随当前" };
+        nodeFollow.References.Add(new NodeReference { EntityId = entityA.Id, VariantId = variantA.Id, VariantVersionId = null });
+        canvas.Nodes.Add(nodeA);
+        canvas.Nodes.Add(nodeB);
+        canvas.Nodes.Add(nodeFollow);
+        canvas.WorkTree.Add(new WorkTreeItem
+        {
+            Kind = WorkTreeKind.Version,
+            Name = "B 的版本",
+            SourceEntityId = entityB.Id,
+            SourceVariantId = variantB.Id,
+            SourceVersionId = sharedVersionId
+        });
+
+        var source = CanvasIdentityValidator.Validate(canvas);
+        Expect(source.ErrorCount == 0, $"源画布应零错误（swap={swap}）：" + source.ToText());
+
+        var copy = CanvasDuplication.DuplicateCanvas(canvas);
+        var after = CanvasIdentityValidator.Validate(copy.Canvas);
+        Expect(after.ErrorCount == 0, $"复制后应零错误（swap={swap}）：" + after.ToText());
+        Expect(copy.Map.Ambiguities.Count == 0, $"合法作用域不应产生歧义（swap={swap}）：" + copy.Report.ToText());
+
+        var copiedA = copy.Canvas.Entities.First(entity => entity.Name == "甲");
+        var copiedB = copy.Canvas.Entities.First(entity => entity.Name == "乙");
+        Expect(copiedA.Variants[0].Versions[0].Id != copiedB.Variants[0].Versions[0].Id, "复制后各变体的版本 ID 应各不相同");
+
+        var lockedA = copy.Canvas.Nodes.First(node => node.Title == "分镜A").References[0];
+        var lockedB = copy.Canvas.Nodes.First(node => node.Title == "分镜B").References[0];
+        Expect(lockedA.EntityId == copiedA.Id && lockedA.VariantId == copiedA.Variants[0].Id
+            && lockedA.VariantVersionId == copiedA.Variants[0].Versions[0].Id, $"A 的锁定版本应指向复制后 A 自己的版本（swap={swap}）");
+        Expect(lockedB.EntityId == copiedB.Id && lockedB.VariantId == copiedB.Variants[0].Id
+            && lockedB.VariantVersionId == copiedB.Variants[0].Versions[0].Id, $"B 的锁定版本应指向复制后 B 自己的版本（swap={swap}）");
+        Expect(copy.Canvas.Nodes.First(node => node.Title == "跟随当前").References[0].VariantVersionId is null,
+            "null 跟随当前的语义必须保留");
+
+        var copiedWork = copy.Canvas.WorkTree[0];
+        Expect(copiedWork.SourceEntityId == copiedB.Id && copiedWork.SourceVersionId == copiedB.Variants[0].Versions[0].Id,
+            "工作树来源版本应按上下文重映射");
+    }
+
+    // 版本 ID 在同一变体内重复：仍应报重复，且复制不猜归属
+    var duplicate = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "丙" };
+    var variant = entity.CreateVariant("默认");
+    variant.Versions[0].Id = Guid.NewGuid();
+    var second = variant.Commit("第二版");
+    second.Id = variant.Versions[0].Id;
+    duplicate.Entities.Add(entity);
+    var node = new WorkflowNode { Title = "分镜" };
+    node.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = second.Id });
+    duplicate.Nodes.Add(node);
+
+    Expect(CanvasIdentityValidator.Validate(duplicate).WithCode(CanvasIdentityCodes.IdDuplicate).Count >= 1,
+        "变体内重复的版本 ID 仍应报告");
+    var duplicateCopy = CanvasDuplication.DuplicateCanvas(duplicate);
+    Expect(duplicateCopy.Map.Ambiguities.Count >= 1, "同一变体内版本 ID 重复时不得猜归属：" + duplicateCopy.Report.ToText());
+    Expect(duplicateCopy.Canvas.Nodes[0].References[0].VariantVersionId == second.Id, "无法唯一解析时应保留原版本引用");
+}
+
+/// <summary>R7：目标已存在而备份失败时必须中止保存，不得覆盖源文件；恢复同样受保护。</summary>
+static void ReworkBackupFailureAbortsSave()
+{
+    using var stores = new IsolatedStores();
+    var canvas = ValidCanvas();
+    var path = Path.Combine(stores.CanvasDirectory, "save.json");
+    var v1 = new RecentCanvasState("第一版", 1, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas) { FormatVersion = CanvasFormat.Current };
+    CanvasFileWriter.Write(path, v1);
+    var original = File.ReadAllBytes(path);
+
+    // 先留一份有效备份，再把备份目录位置换成普通文件，阻止后续备份
+    var validBackup = CanvasBackup.TryBackup(path, out _);
+    Expect(validBackup is not null, "应能创建备份");
+    var externalBackup = Path.Combine(stores.Root, "external-backup.json");
+    File.Copy(validBackup!, externalBackup);
+    Directory.Delete(CanvasBackup.Directory, true);
+    File.WriteAllText(CanvasBackup.Directory, "blocked");
+
+    var failure = ExpectThrows<CanvasSaveAbortedException>(() => CanvasSaveService.Save(v1 with { Title = "第二版" }, path), "备份失败必须中止保存");
+    Expect(failure.Message.Contains("备份", StringComparison.Ordinal), "失败原因应可读：" + failure.Message);
+    Expect(File.ReadAllBytes(path).SequenceEqual(original), "备份失败不得覆盖原文件");
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasLibrary.Save(v1 with { Title = "第三版" }, path), "画布库保存必须走同一策略");
+    Expect(File.ReadAllBytes(path).SequenceEqual(original), "画布库保存失败同样不得覆盖原文件");
+
+    // 首次保存（目标不存在）不需要备份，仍应成功
+    var fresh = Path.Combine(stores.CanvasDirectory, "fresh.json");
+    var freshOutcome = CanvasSaveService.Save(v1, fresh);
+    Expect(File.Exists(fresh) && freshOutcome.BackupPath is null, "首次保存不需要备份且应成功");
+
+    // 恢复前备份失败也不得覆盖当前文件
+    CanvasFileWriter.Write(path, v1 with { Title = "改坏了" });
+    var damaged = File.ReadAllBytes(path);
+    var restoreFailure = ExpectThrows<CanvasSaveAbortedException>(() => CanvasBackup.Restore(externalBackup, path), "恢复前备份失败必须中止恢复");
+    Expect(restoreFailure.Message.Contains("备份", StringComparison.Ordinal), "恢复失败原因应可读：" + restoreFailure.Message);
+    Expect(File.ReadAllBytes(path).SequenceEqual(damaged), "恢复失败不得覆盖当前文件");
+
+    // 解除阻断后，恢复应还原内容、ID 与锁定/跟随关系
+    File.Delete(CanvasBackup.Directory);
+    CanvasBackup.Restore(externalBackup, path);
+    Expect(CanvasOpenService.TryOpen(path, out var restored, out var error), "恢复后应能打开：" + error);
+    Expect(restored.State.Title == "第一版", "恢复后应是备份那一版的内容");
+    Expect(SameIdsAndRelations(canvas, restored.State.Canvas), "恢复后 ID、锁定版本与跟随当前关系必须一致");
+}
+
+/// <summary>R8：保存失败（写入失败或备份失败）都不得改动调用方的对象图。</summary>
+static void ReworkFailedSaveLeavesInputUntouched()
+{
+    using var stores = new IsolatedStores();
+    var canvas = new WorkflowCanvasState();
+    var node = new WorkflowNode { Id = Guid.Empty, Title = "空 ID 节点" };
+    node.LegacyAssetPaths.Add("asset://legacy.png");
+    node.LegacyEntityId = Guid.NewGuid();
+    canvas.Nodes.Add(node);
+    var state = new RecentCanvasState("输入", 1, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas);
+    var before = JsonSerializer.Serialize(state);
+
+    // 写入失败：目标路径被目录占用
+    var blocked = Path.Combine(stores.CanvasDirectory, "blocked.json");
+    Directory.CreateDirectory(blocked);
+    ExpectThrows<SystemException>(() => CanvasSaveService.Save(state, blocked), "写入失败应抛出");
+    Expect(JsonSerializer.Serialize(state) == before, "写入失败不得改动调用方对象图（ID、旧字段、空 ID 保持原样）");
+
+    // 备份失败：目标已存在
+    var existing = Path.Combine(stores.CanvasDirectory, "existing.json");
+    CanvasFileWriter.Write(existing, state with { Title = "已存在" });
+    File.WriteAllText(CanvasBackup.Directory, "blocked");
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasSaveService.Save(state, existing), "备份失败应中止保存");
+    Expect(JsonSerializer.Serialize(state) == before, "备份失败也不得改动调用方对象图");
+    Expect(!Directory.EnumerateFiles(stores.CanvasDirectory, "*.tmp").Any(), "失败应清理临时文件");
+
+    // 成功保存：调用方对象仍不被就地迁移，写出的文件里是迁移后的副本
+    File.Delete(CanvasBackup.Directory);
+    var ok = Path.Combine(stores.CanvasDirectory, "ok.json");
+    var outcome = CanvasSaveService.Save(state, ok);
+    Expect(JsonSerializer.Serialize(state) == before, "成功保存也不得就地迁移调用方对象");
+    Expect(outcome.Migration.Changed, "写出的副本应完成迁移");
+    Expect(CanvasOpenService.TryOpen(ok, out var reopened, out var error), "重开失败：" + error);
+    Expect(reopened.State.Canvas.Nodes[0].Id != Guid.Empty, "写出的文件应含补齐后的 ID");
+    Expect(reopened.State.Canvas.Nodes[0].Attachments.Count == 1, "写出的文件应含旧字段迁移后的附件");
+}
+
+/// <summary>R9：旧格式包里的资产（只存在于 LegacyAssetPaths）也必须被复制，缺失资产要真实计数。</summary>
+static void ReworkLegacyPackageAssetsAreImported()
+{
+    using var stores = new IsolatedStores();
+    var packageDirectory = Path.Combine(stores.Root, "package");
+    Directory.CreateDirectory(Path.Combine(packageDirectory, "assets"));
+    var legacyAsset = Path.Combine(packageDirectory, "assets", "legacy-only.png");
+    File.WriteAllText(legacyAsset, "legacy-bytes");
+
+    // 只靠旧字段 LegacyAssetPaths 引用的包：新字段为空，收集顺序错了就会漏掉
+    var canvas = new WorkflowCanvasState();
+    var node = new WorkflowNode { Title = "旧节点" };
+    node.LegacyAssetPaths.Add("asset://legacy-only.png");
+    canvas.Nodes.Add(node);
+    var packageFile = Path.Combine(packageDirectory, "canvas.json");
+    File.WriteAllText(packageFile, JsonSerializer.Serialize(new RecentCanvasState("旧包", 1, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas)));
+
+    Expect(!AssetStore.Exists("asset://legacy-only.png"), "本地资产目录初始应没有该文件");
+
+    var target = new RecentCanvasState("目标", 0, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, new WorkflowCanvasState());
+    Expect(CanvasImportService.TryImport(packageFile, target, CanvasImportMode.Merge, out var merged, out var mergeError), "合并导入失败：" + mergeError);
+    Expect(merged.ImportedAssets == 1 && merged.MissingAssets == 0,
+        $"旧字段里的包内资产应被复制一次且无缺失，实际 导入 {merged.ImportedAssets} / 缺失 {merged.MissingAssets}");
+    Expect(AssetStore.Exists("asset://legacy-only.png"), "导入后真实解析应能找到该资产");
+    Expect(File.ReadAllText(Path.Combine(stores.AssetDirectory, "legacy-only.png")) == "legacy-bytes", "资产字节应一致");
+
+    Expect(CanvasImportService.TryImport(packageFile, merged.State, CanvasImportMode.Merge, out var again, out _), "二次导入失败");
+    Expect(again.ImportedAssets == 0 && !again.Merge!.Changed, "重复导入不应再增量");
+
+    // 新旧字段同时引用同一个文件：只应复制一次
+    var mixed = new WorkflowCanvasState();
+    var mixedNode = new WorkflowNode { Title = "新旧混用节点" };
+    mixedNode.LegacyAssetPaths.Add("asset://legacy-only.png");
+    mixedNode.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://legacy-only.png" });
+    mixed.Nodes.Add(mixedNode);
+    var mixedFile = Path.Combine(packageDirectory, "mixed.json");
+    File.WriteAllText(mixedFile, JsonSerializer.Serialize(new RecentCanvasState("混用包", 1, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, mixed)));
+    Expect(CanvasImportService.TryImport(mixedFile, target, CanvasImportMode.Replace, out var mixedOutcome, out var mixedError), "混用导入失败：" + mixedError);
+    Expect(mixedOutcome.ImportedAssets == 0 && mixedOutcome.MissingAssets == 0,
+        $"资产已在本机，混用字段不应重复复制：导入 {mixedOutcome.ImportedAssets} / 缺失 {mixedOutcome.MissingAssets}");
+
+    // 真正缺失的资产必须计数：删掉包内资产、清空本地资产后替换导入
+    File.Delete(legacyAsset);
+    Directory.Delete(stores.AssetDirectory, true);
+    Directory.CreateDirectory(stores.AssetDirectory);
+    Expect(CanvasImportService.TryImport(packageFile, target, CanvasImportMode.Replace, out var replaced, out var replaceError), "替换导入失败：" + replaceError);
+    Expect(replaced.MissingAssets == 1, $"包内确实缺失的资产应计数，实际 {replaced.MissingAssets}");
+    Expect(!AssetStore.Exists("asset://legacy-only.png"), "资产确实不存在，不应被静默视为成功");
+}
+
+/// <summary>R10：重复 ID 不得被猜测消歧，也不得用新 ID 抹掉诊断。</summary>
+static void ReworkDuplicateIdsAreNotGuessed()
+{
+    var canvas = new WorkflowCanvasState();
+    var first = new WorkflowNode { Title = "副本一" };
+    var second = new WorkflowNode { Title = "副本二", Id = first.Id };
+    var child = new WorkflowNode { Title = "子节点", ParentNodeId = first.Id };
+    canvas.Nodes.Add(first);
+    canvas.Nodes.Add(second);
+    canvas.Nodes.Add(child);
+    var chapter = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "章" };
+    var chapterCopy = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "章副本", Id = chapter.Id };
+    canvas.WorkTree.Add(chapter);
+    canvas.WorkTree.Add(chapterCopy);
+
+    var before = CanvasIdentityValidator.Validate(canvas);
+    Expect(before.WithCode(CanvasIdentityCodes.IdDuplicate).Count == 4, $"源画布应逐处报出 4 条重复 ID，实际 {before.WithCode(CanvasIdentityCodes.IdDuplicate).Count}");
+    Expect(before.WithCode(CanvasIdentityCodes.ParentAmbiguous).Count == 1, "重复节点 ID 作父节点时应报歧义");
+
+    // DuplicateNodes：重复 ID 请求必须被拒绝，不得复制两份、也不得取首条
+    var nodes = CanvasDuplication.DuplicateNodes(canvas, new[] { first.Id });
+    Expect(nodes.Nodes.Count == 0, "重复 ID 请求必须被拒绝（复制 0 个），实际 " + nodes.Nodes.Count);
+    Expect(nodes.Report.Ambiguities.Count == 1, "应给出结构化歧义报告：" + nodes.Report.ToText());
+
+    // DuplicateCanvas：不得自动绑定首条，也不得把诊断抹成 0
+    var copy = CanvasDuplication.DuplicateCanvas(canvas);
+    Expect(copy.Map.Nodes.ContainsKey(first.Id) == false, "重复 ID 不得进入唯一映射");
+    Expect(copy.Map.Ambiguities.Count >= 1, "重复的节点与工作树 ID 应留成歧义：" + copy.Report.ToText());
+    Expect(copy.Canvas.Nodes[2].ParentNodeId == first.Id, "无法唯一解析时应保留原引用值，而不是绑定第一个副本");
+    Expect(copy.Canvas.Nodes.Select(item => item.Id).Distinct().Count() == 3, "复制出的节点 ID 应各不相同");
+    var after = CanvasIdentityValidator.Validate(copy.Canvas);
+    Expect(after.ErrorCount >= 1, "复制后仍应有可诊断的错误，不能用新 ID 抹掉问题：" + after.ToText());
+    Expect(copy.Map.WorkTreeItems.ContainsKey(chapter.Id) == false, "重复的工作树 ID 同样不得进入映射");
+
+    // 复制不得改动源对象
+    Expect(first.Id == second.Id && child.ParentNodeId == first.Id && canvas.Nodes.Count == 3, "复制不得改动源画布");
+}
+
+/// <summary>R11：高于当前支持的格式版本不得被降级标注或覆盖保存。</summary>
+static void ReworkFutureFormatIsNotDowngraded()
+{
+    using var stores = new IsolatedStores();
+    var canvas = ValidCanvas();
+    var future = new RecentCanvasState("未来格式", 5, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas)
+    {
+        FormatVersion = CanvasFormat.Current + 98
+    };
+    var snapshot = JsonSerializer.Serialize(future);
+
+    // 迁移不得降级，也不得改动内容
+    var migrated = CanvasMigration.Migrate(future);
+    Expect(!migrated.Report.Changed, "未知格式不应产生任何迁移改动");
+    Expect(migrated.Report.UnsupportedFormat && migrated.Report.ToVersion == future.FormatVersion,
+        $"不得把未知格式标注为当前版本：{migrated.Report.ToVersion}");
+    Expect(migrated.State.FormatVersion == future.FormatVersion, "迁移结果应保持原格式版本");
+    Expect(JsonSerializer.Serialize(future) == snapshot, "迁移不得改动调用方对象");
+
+    // 打开：可以只读查看，但要有可读诊断
+    var path = Path.Combine(stores.CanvasDirectory, "future.json");
+    File.WriteAllText(path, snapshot);
+    var fileBytes = File.ReadAllBytes(path);
+    Expect(CanvasOpenService.TryOpen(path, out var opened, out var openError), "未知格式仍应允许只读打开：" + openError);
+    Expect(opened.UnsupportedFormat && opened.NeedsAttention, "应标记为只读查看并提示");
+    Expect(opened.Migration.ToText().Contains("高于当前支持", StringComparison.Ordinal), "诊断应说明原因：" + opened.Migration.ToText());
+    Expect(File.ReadAllBytes(path).SequenceEqual(fileBytes), "只读查看不得改写文件");
+
+    // 保存：拒绝覆盖
+    var saveFailure = ExpectThrows<CanvasSaveAbortedException>(() => CanvasSaveService.Save(opened.State, path), "未知格式必须拒绝覆盖保存");
+    Expect(saveFailure.Message.Contains("高于当前支持", StringComparison.Ordinal), "拒绝原因应可读：" + saveFailure.Message);
+    Expect(File.ReadAllBytes(path).SequenceEqual(fileBytes), "拒绝保存后文件必须原样");
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasLibrary.Save(opened.State, path), "画布库保存同样必须拒绝");
+
+    // 导入：拒绝并给出可读诊断
+    var target = new RecentCanvasState("目标", 0, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, new WorkflowCanvasState());
+    Expect(!CanvasImportService.TryImport(path, target, CanvasImportMode.Merge, out _, out var importError), "未知格式必须拒绝导入");
+    Expect(importError.Contains("高于当前支持", StringComparison.Ordinal), "导入诊断应可读：" + importError);
+
+    // 当前画布是未知格式时，也不允许把别的数据导入进来
+    Expect(!CanvasImportService.TryImport(path, opened.State, CanvasImportMode.Replace, out _, out var replaceError), "未知格式的目标也不应接受导入");
+    Expect(replaceError.Contains("高于当前支持", StringComparison.Ordinal), "目标诊断应可读：" + replaceError);
+
+    // 0 → 1 仍正常，1 → 1 幂等
+    var legacy = LegacyCanvasFile();
+    var migratedLegacy = CanvasMigration.Migrate(legacy);
+    Expect(migratedLegacy.State.FormatVersion == CanvasFormat.Current && migratedLegacy.Report.Changed, "旧格式应正常迁移到当前版本");
+    var again = CanvasMigration.Migrate(migratedLegacy.State);
+    Expect(!again.Report.Changed && !again.Report.UnsupportedFormat, "已标注当前格式的画布再迁移应零改动");
+}
+
+/// <summary>R5 用的旧格式来源：参与查找的对象 ID 全为空 GUID，引用保持一致且可解析。</summary>
+static RecentCanvasState LegacyEmptyIdSource()
+{
+    var canvas = new WorkflowCanvasState();
+
+    // 空 ID 的连线，两端是正常 ID 的节点
+    var from = new WorkflowNode { Title = "起点" };
+    var to = new WorkflowNode { Title = "终点" };
+    canvas.Nodes.Add(from);
+    canvas.Nodes.Add(to);
+    canvas.Edges.Add(new WorkflowEdge { Id = Guid.Empty, SourceNodeId = from.Id, TargetNodeId = to.Id });
+
+    // 空 ID 的节点：带旧图片路径与空 ID 生成历史，不引用其它对象
+    var legacyNode = new WorkflowNode { Id = Guid.Empty, Title = "空 ID 节点" };
+    legacyNode.LegacyAssetPaths.Add("asset://legacy-empty.png");
+    legacyNode.GenerationHistory.Add(new GenerationHistory { Id = Guid.Empty, Input = "旧输入", Instruction = "旧指令", Output = string.Empty });
+    canvas.Nodes.Add(legacyNode);
+
+    // 空 ID 的工作树条目、实体、变体、版本
+    canvas.WorkTree.Add(new WorkTreeItem { Id = Guid.Empty, Kind = WorkTreeKind.Chapter, Name = "空 ID 章节" });
+    var entity = new WorkflowEntity { Id = Guid.Empty, Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("默认");
+    variant.Id = Guid.Empty;
+    variant.Versions[0].Id = Guid.Empty;
+    canvas.Entities.Add(entity);
+
+    return new RecentCanvasState("空 ID 旧来源", 1, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas);
+}
+
+/// <summary>R5 用的第二个来源：与第一个来源同名的实体，但内容不同，必须保持独立。</summary>
+static RecentCanvasState LegacySameNameSource()
+{
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("默认");
+    variant.Description = "另一个来源的外观";
+    variant.Commit("另一个来源的版本");
+    canvas.Entities.Add(entity);
+    return new RecentCanvasState("同名旧来源", 2, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas);
+}
+
+// ── 第 6 轮入口审计的回归：所有真实保存入口共用同一策略 ─────────────────────
+
+/// <summary>R12：画布库保存入口必须走完整保存链（深拷贝 + 迁移 + 校验 + 备份 + 原子写），不能只做备份+写入。</summary>
+static void ReworkLibrarySaveUsesFullChain()
+{
+    using var stores = new IsolatedStores();
+    var state = EntryAuditState();
+    var before = JsonSerializer.Serialize(state);
+    var path = CanvasLibrary.PathForTitle(state.Title);
+
+    // 首次保存：目标不存在，无需备份；写出的是迁移后的副本，调用方对象不变
+    var saved = CanvasLibrary.Save(state, null);
+    Expect(saved == path && File.Exists(path), "应按标题写入画布库：" + saved);
+    Expect(JsonSerializer.Serialize(state) == before, "库入口保存不得就地迁移调用方对象");
+
+    // 直接读文件（不经过打开时的迁移），确认库入口在写入前就完成了迁移
+    var written = ReadRaw(path);
+    Expect(written.FormatVersion == CanvasFormat.Current, "库入口写出的文件应标注当前格式版本");
+    Expect(written.Canvas.Nodes[0].Id != Guid.Empty, "库入口应在写入前补齐空 ID");
+    Expect(written.Canvas.Nodes[0].Attachments.Count == 1 && written.Canvas.Nodes[0].LegacyAssetPaths.Count == 0,
+        "库入口应在写入前完成旧字段迁移");
+
+    // 覆盖保存：产生备份
+    var outcome = CanvasSaveService.Save(state, path);
+    Expect(outcome.BackupPath is not null && File.Exists(outcome.BackupPath), "覆盖保存应留下备份");
+
+    // 未知格式：库入口也要拒绝覆盖（不能只让服务入口拒绝）
+    var future = state with { FormatVersion = CanvasFormat.Current + 98 };
+    var fileBytes = File.ReadAllBytes(path);
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasLibrary.Save(future, path), "未知格式应被库入口拒绝");
+    Expect(File.ReadAllBytes(path).SequenceEqual(fileBytes), "拒绝保存后文件必须原样");
+
+    // 写入失败：目标被目录占用；调用方对象与其它文件都不受影响
+    var blocked = Path.Combine(stores.CanvasDirectory, "blocked.json");
+    Directory.CreateDirectory(blocked);
+    ExpectThrows<SystemException>(() => CanvasLibrary.Save(state, blocked), "库入口写入失败应抛出");
+    Expect(JsonSerializer.Serialize(state) == before, "库入口写入失败不得改动调用方对象");
+    Expect(!Directory.EnumerateFiles(stores.CanvasDirectory, "*.tmp").Any(), "失败应清理临时文件");
+
+    // 备份失败：库入口必须中止
+    Directory.Delete(CanvasBackup.Directory, true);
+    File.WriteAllText(CanvasBackup.Directory, "blocked");
+    var failure = ExpectThrows<CanvasSaveAbortedException>(() => CanvasLibrary.Save(state, path), "库入口备份失败必须中止");
+    Expect(failure.Message.Contains("备份", StringComparison.Ordinal), "失败原因应可读：" + failure.Message);
+    Expect(File.ReadAllBytes(path).SequenceEqual(fileBytes), "库入口备份失败不得覆盖原文件");
+    Expect(JsonSerializer.Serialize(state) == before, "库入口备份失败不得改动调用方对象");
+}
+
+/// <summary>R13：重命名入口覆盖目标前必须备份、写入原子、失败不丢内容。</summary>
+static void ReworkRenameEntryIsBackedUpAndAtomic()
+{
+    using var stores = new IsolatedStores();
+    var state = EntryAuditState();
+    var source = CanvasLibrary.PathForTitle(state.Title);
+    CanvasFileWriter.Write(source, state);
+
+    // 目标已存在：覆盖前先备份，成功后源文件被删除
+    var occupied = CanvasLibrary.PathForTitle("被占用的标题");
+    var occupiedState = state with { Title = "被占用的标题", Revision = 7 };
+    CanvasFileWriter.Write(occupied, occupiedState);
+    var occupiedBytes = File.ReadAllBytes(occupied);
+
+    var renamed = CanvasLibrary.Rename(source, "被占用的标题", overwrite: true);
+    Expect(renamed == occupied, "应重命名到目标路径：" + renamed);
+    Expect(!File.Exists(source), "重命名成功后源文件应被删除");
+    var backups = CanvasBackup.ListFor(occupied);
+    Expect(backups.Count >= 1, "覆盖目标前必须留下备份");
+    Expect(File.ReadAllBytes(backups[0]).SequenceEqual(occupiedBytes), "备份应是被覆盖前的目标内容");
+    Expect(CanvasOpenService.TryOpen(occupied, out var afterRename, out _) && afterRename.State.Title == "被占用的标题", "重命名后内容应是新标题");
+
+    // 备份失败：必须中止，目标文件与源文件都不变
+    var source2 = CanvasLibrary.PathForTitle("重命名源");
+    CanvasFileWriter.Write(source2, state with { Title = "重命名源" });
+    var source2Bytes = File.ReadAllBytes(source2);
+    var target2 = CanvasLibrary.PathForTitle("重命名目标");
+    CanvasFileWriter.Write(target2, state with { Title = "重命名目标" });
+    var target2Bytes = File.ReadAllBytes(target2);
+
+    Directory.Delete(CanvasBackup.Directory, true);
+    File.WriteAllText(CanvasBackup.Directory, "blocked");
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasLibrary.Rename(source2, "重命名目标", overwrite: true), "备份失败必须中止重命名");
+    Expect(File.ReadAllBytes(target2).SequenceEqual(target2Bytes), "备份失败不得覆盖目标文件");
+    Expect(File.ReadAllBytes(source2).SequenceEqual(source2Bytes), "备份失败不得删除源文件");
+
+    // 同名（原地重写）：同样先备份再原子写入
+    File.Delete(CanvasBackup.Directory);
+    var renamed2 = CanvasLibrary.Rename(source2, "重命名源");
+    Expect(renamed2 == source2 && File.Exists(source2), "同名重命名应原地写回");
+    Expect(CanvasBackup.ListFor(source2).Count >= 1, "原地重写也要留下备份");
+    Expect(CanvasOpenService.TryOpen(source2, out var reopened2, out _) && reopened2.State.Canvas.Nodes[0].Id != Guid.Empty,
+        "重命名写出的文件应含迁移后的内容");
+
+    // 未知格式文件不得被重命名覆盖写回
+    var futurePath = CanvasLibrary.PathForTitle("未来格式重命名");
+    CanvasFileWriter.Write(futurePath, state with { Title = "未来格式重命名", FormatVersion = CanvasFormat.Current + 98 });
+    var futureBytes = File.ReadAllBytes(futurePath);
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasLibrary.Rename(futurePath, "未来格式改名"), "未知格式必须拒绝重命名写入");
+    Expect(File.ReadAllBytes(futurePath).SequenceEqual(futureBytes), "拒绝重命名后文件必须原样");
+}
+
+/// <summary>
+/// 入口审计：手动保存、库保存（标签切换/关闭写回）、命令服务、复制落盘、重命名五条真实入口
+/// 在备份失败时都必须中止且不覆盖，成功时都必须写出迁移后的内容。
+/// </summary>
+static void AllSaveEntryPointsShareOnePolicy()
+{
+    using var stores = new IsolatedStores();
+    var canvas = ValidCanvas();
+    var state = new RecentCanvasState("入口审计", 3, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas) { FormatVersion = CanvasFormat.Current };
+
+    var manual = Path.Combine(stores.CanvasDirectory, "manual.json");        // 手动保存（CanvasSaveService）
+    var library = Path.Combine(stores.CanvasDirectory, "library.json");      // 标签切换 / 关闭写回（CanvasLibrary.Save）
+    var command = Path.Combine(stores.CanvasDirectory, "command.json");      // 命令服务（CanvasCommandService.Save）
+    var duplicate = Path.Combine(stores.CanvasDirectory, "duplicate.json");  // 复制落盘（CanvasSaveService）
+    var renameSource = Path.Combine(stores.CanvasDirectory, "rename-source.json");
+    var renameTarget = Path.Combine(stores.CanvasDirectory, "rename-target.json");
+
+    foreach (var path in new[] { manual, library, command, duplicate, renameSource, renameTarget })
+        CanvasFileWriter.Write(path, state with { Title = Path.GetFileNameWithoutExtension(path) });
+
+    var snapshot = JsonSerializer.Serialize(state);
+    var original = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+    foreach (var path in new[] { manual, library, command, duplicate, renameSource, renameTarget })
+        original[path] = File.ReadAllBytes(path);
+
+    // 阻断备份目录：五条入口都必须中止，且都不覆盖已有文件
+    File.WriteAllText(CanvasBackup.Directory, "blocked");
+    var commandService = new CanvasCommandService(canvas);
+
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasSaveService.Save(state, manual), "手动保存入口必须中止");
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasLibrary.Save(state, library), "库保存入口（标签切换/关闭写回）必须中止");
+    ExpectThrows<CanvasSaveAbortedException>(() => commandService.Save(state, command), "命令服务入口必须中止");
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasSaveService.Save(state, duplicate), "复制落盘入口必须中止");
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasLibrary.Rename(renameSource, "rename-target", overwrite: true), "重命名入口必须中止");
+
+    foreach (var path in original.Keys)
+        Expect(File.ReadAllBytes(path).SequenceEqual(original[path]), $"入口 {Path.GetFileName(path)} 在备份失败时不得被覆盖");
+    Expect(File.Exists(renameSource), "重命名中止后源文件必须仍在");
+    Expect(JsonSerializer.Serialize(state) == snapshot, "任何入口失败都不得改动调用方对象");
+    Expect(!Directory.EnumerateFiles(stores.CanvasDirectory, "*.tmp").Any(), "失败应清理临时文件");
+
+    // 解除阻断：同一批入口成功，且写出的都是迁移后的内容（空 ID 被补齐）
+    File.Delete(CanvasBackup.Directory);
+    var legacy = EntryAuditState() with { Title = "入口审计迁移" };
+    var legacyPath = Path.Combine(stores.CanvasDirectory, "legacy-entry.json");
+    var legacyBefore = JsonSerializer.Serialize(legacy);
+
+    CanvasSaveService.Save(legacy, legacyPath);
+    Expect(RawMigrated(legacyPath), "服务入口应在写入前完成迁移并标注格式版本");
+
+    var legacyLibrary = Path.Combine(stores.CanvasDirectory, "legacy-library.json");
+    CanvasLibrary.Save(legacy, legacyLibrary);
+    Expect(RawMigrated(legacyLibrary), "库入口应在写入前完成迁移并标注格式版本");
+
+    var legacyCommand = Path.Combine(stores.CanvasDirectory, "legacy-command.json");
+    new CanvasCommandService(new WorkflowCanvasState()).Save(legacy, legacyCommand);
+    Expect(RawMigrated(legacyCommand), "命令服务入口应在写入前完成迁移并标注格式版本");
+
+    Expect(JsonSerializer.Serialize(legacy) == legacyBefore, "成功保存也不得就地迁移调用方对象");
+
+    // 成功覆盖已有文件时才产生备份
+    var overwrite = CanvasSaveService.Save(state, manual);
+    Expect(overwrite.BackupPath is not null && File.Exists(overwrite.BackupPath), "成功覆盖保存应留下备份");
+    Expect(CanvasBackup.ListFor(manual).Count >= 1, "应能按画布找到该备份");
+}
+
+/// <summary>导出包也要打包旧字段引用的资产、写出当前格式画布，并且覆盖导出不留半截文件。</summary>
+static void ExportPackagePacksLegacyAssetsAtomically()
+{
+    using var stores = new IsolatedStores();
+    stores.WriteAsset("legacy-export.png");
+
+    var canvas = new WorkflowCanvasState();
+    var node = new WorkflowNode { Id = Guid.Empty, Title = "旧节点" };
+    node.LegacyAssetPaths.Add("asset://legacy-export.png");
+    canvas.Nodes.Add(node);
+    var state = new RecentCanvasState("导出审计", 1, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas);
+    var before = JsonSerializer.Serialize(state);
+
+    var packageDirectory = Path.Combine(stores.Root, "export-package");
+    var (copied, missing) = CanvasPackage.Export(packageDirectory, state);
+    Expect(copied == 1 && missing == 0, $"旧字段引用的资产也应被打包，实际 复制 {copied} / 缺失 {missing}");
+    Expect(File.Exists(Path.Combine(packageDirectory, "assets", "legacy-export.png")), "包内 assets 应有该资产");
+
+    var exported = ReadRaw(Path.Combine(packageDirectory, CanvasPackage.CanvasFileName));
+    Expect(exported.FormatVersion == CanvasFormat.Current, "导出的包内画布应标注当前格式版本");
+    Expect(exported.Canvas.Nodes[0].Id != Guid.Empty && exported.Canvas.Nodes[0].Attachments.Count == 1,
+        "导出的包内画布应已完成迁移");
+    Expect(JsonSerializer.Serialize(state) == before, "导出不得改动调用方对象");
+
+    // 覆盖导出到同一目录：内容更新、不残留临时文件
+    CanvasPackage.Export(packageDirectory, state with { Title = "导出审计（二次）" });
+    Expect(ReadRaw(Path.Combine(packageDirectory, CanvasPackage.CanvasFileName)).Title == "导出审计（二次）", "覆盖导出应写入新内容");
+    Expect(!Directory.EnumerateFiles(packageDirectory, "*.tmp", SearchOption.AllDirectories).Any(), "导出不应留下临时文件");
+}
+
+/// <summary>直接读文件内容，不经过 CanvasOpenService 的迁移，用于判断「写出时是否已迁移」。</summary>
+static RecentCanvasState ReadRaw(string path) =>
+    JsonSerializer.Deserialize<RecentCanvasState>(File.ReadAllText(path))
+    ?? throw new InvalidDataException("画布文件读取失败：" + path);
+
+/// <summary>写出时是否已完成迁移并标注当前格式版本。</summary>
+static bool RawMigrated(string path)
+{
+    var raw = ReadRaw(path);
+    return raw.FormatVersion == CanvasFormat.Current
+        && raw.Canvas.Nodes.All(node => node.Id != Guid.Empty)
+        && raw.Canvas.Nodes[0].Attachments.Count == 1
+        && raw.Canvas.Nodes[0].LegacyAssetPaths.Count == 0;
+}
+
+/// <summary>入口审计用的状态：含空 ID 与旧字段，用来验证每个入口都执行了迁移。</summary>
+static RecentCanvasState EntryAuditState()
+{
+    var canvas = new WorkflowCanvasState();
+    var node = new WorkflowNode { Id = Guid.Empty, Title = "入口审计节点" };
+    node.LegacyAssetPaths.Add("asset://entry-audit.png");
+    node.LegacyEntityId = Guid.NewGuid();
+    canvas.Nodes.Add(node);
+    return new RecentCanvasState("入口审计源", 1, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas);
+}
+
+// ── 大目标 B：工作树同步与章节画布 ─────────────────────────────────────────
+
+/// <summary>章节显式顺序：确定性补齐、第二次零改动、列表顺序稳定。</summary>
+static void ChapterOrderIsExplicitAndIdempotent()
+{
+    var (canvas, chapter1, chapter2, _, _) = ChapterFixture();
+    Expect(canvas.WorkTree.All(item => item.Kind != WorkTreeKind.Chapter || item.Order == 0), "样例初始没有显式顺序");
+
+    var first = CanvasMigration.Migrate(new RecentCanvasState("章节顺序", 1, "", "", 512, 512, 20, 7, "", canvas));
+    Expect(first.Report.Changes.Any(change => change.Kind == MigrationChangeKind.NormalizedChapterOrder), "迁移应补齐章节顺序并记录");
+    var ordered = CanvasChapters.ChapterItems(first.State.Canvas);
+    Expect(ordered.All(item => item.Order > 0), "补齐后每个章节都有显式顺序");
+    Expect(ordered[0].Order < ordered[1].Order, "顺序值应按现有顺序递增");
+
+    var again = CanvasMigration.Migrate(first.State);
+    Expect(!again.Report.Changed, "顺序已显式时重复迁移不得再有改动");
+
+    var listed = CanvasChapters.List(first.State.Canvas);
+    Expect(listed.Count == 2 && listed[0].Id == chapter1.Id && listed[1].Id == chapter2.Id, "章节列表应按显式顺序排列");
+
+    // 名称里没有数字也不影响：顺序由字段决定，不由名称猜
+    var renamed = CanvasChapterOperations.Rename(first.State.Canvas, chapter1.Id, "序章");
+    var reordered = CanvasChapterOperations.Reorder(renamed.Canvas, chapter1.Id, 500);
+    var after = CanvasChapters.List(reordered.Canvas);
+    Expect(after[0].Id == chapter2.Id && after[1].Id == chapter1.Id, "顺序值改变后列表顺序应随之变化：" + after.Count);
+}
+
+/// <summary>节点归属按锚点与父链解析，不按名称；同名章节只报冲突。</summary>
+static void ChapterResolutionUsesIdAndContext()
+{
+    var (canvas, chapter1, _, shot1, _) = ChapterFixture();
+    var inherited = new WorkflowNode { Title = "第1章成品", Category = NodeCategory.Product, ParentNodeId = shot1.Id };
+    canvas.Nodes.Add(inherited);
+
+    Expect(CanvasChapters.ResolveChapterId(canvas, shot1) == chapter1.Id, "锚点直接解析章节");
+    Expect(CanvasChapters.ResolveChapterId(canvas, inherited) == chapter1.Id, "父链解析章节");
+
+    // 同名章节：只报名称歧义，不按名称绑定
+    canvas.WorkTree.Add(new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章" });
+    var textOnly = new WorkflowNode { Title = "只有文本", Chapter = "第1章" };
+    canvas.Nodes.Add(textOnly);
+    var issues = CanvasChapters.Diagnose(canvas);
+    Expect(issues.Any(issue => issue.Code == CanvasChapterCodes.NameAmbiguous), "同名章节应报名称歧义：" + string.Join("；", issues.Select(i => i.Code)));
+    Expect(CanvasChapters.ResolveChapterId(canvas, textOnly) is null, "没有锚点也没有父链时不得按名称解析");
+
+    var plan = CanvasWorkTreeSync.Plan(canvas, SyncDirection.CanvasToWorkTree);
+    Expect(plan.HasBlockingConflicts, "同名多章节时应拒绝自动绑定：" + plan.ToText());
+    var apply = CanvasWorkTreeSync.Apply(canvas, plan, applyUnconfirmed: true);
+    Expect(apply.Refused && !apply.Changed, "有阻断冲突时整批拒绝，不做任何改动");
+    Expect(apply.Canvas.Nodes.Count == canvas.Nodes.Count, "拒绝后结果画布与输入一致");
+}
+
+/// <summary>拆分与合并按 ID 重接引用并保持可追踪。</summary>
+static void ChapterSplitAndMergeRekeyReferences()
+{
+    var (canvas, chapter1, chapter2, shot1, _) = ChapterFixture();
+    var extra = new WorkflowNode { Title = "第1章尾镜", Category = NodeCategory.Storyboard, WorkTreeItemId = chapter1.Id, Chapter = "第1章" };
+    canvas.Nodes.Add(extra);
+
+    var split = CanvasChapterOperations.Split(canvas, chapter1.Id, "第1章下", new[] { extra.Id });
+    Expect(!split.HasBlockingConflicts && split.Changed, "拆分应成功：" + split.ToText());
+    var created = CanvasChapters.ChapterItems(split.Canvas).First(item => item.Name == "第1章下");
+    var movedNode = split.Canvas.Nodes.First(node => node.Id == extra.Id);
+    Expect(movedNode.WorkTreeItemId == created.Id && movedNode.Chapter == "第1章下", "被拆出的节点应改锚到新章节");
+    Expect(split.Canvas.Nodes.First(node => node.Id == shot1.Id).WorkTreeItemId == chapter1.Id, "未拆出的节点锚点不变");
+
+    var merge = CanvasChapterOperations.Merge(split.Canvas, created.Id, chapter2.Id);
+    Expect(merge.Changed && CanvasChapters.ChapterItems(merge.Canvas).All(item => item.Id != created.Id), "合并后源章节应删除");
+    var mergedNode = merge.Canvas.Nodes.First(node => node.Id == extra.Id);
+    Expect(mergedNode.WorkTreeItemId == chapter2.Id && mergedNode.Chapter == "第2章", "合并应把节点改锚到目标章节：" + merge.ToText());
+    Expect(CanvasChapters.ResolveChapterId(merge.Canvas, mergedNode) == chapter2.Id, "合并后归属仍可按 ID 解析");
+
+    // 拆分的取消条件：没有指定节点时阻断
+    var blocked = CanvasChapterOperations.Split(canvas, chapter1.Id, "空拆分", Array.Empty<Guid>());
+    Expect(blocked.HasBlockingConflicts && !blocked.Changed, "没有节点时拆分应阻断");
+}
+
+/// <summary>删除有引用的章节默认阻断；显式改挂上级或清空锚点都要保留可追踪信息。</summary>
+static void ChapterDeleteProtectsReferences()
+{
+    var (canvas, chapter1, _, shot1, _) = ChapterFixture();
+
+    var blocked = CanvasChapterOperations.Delete(canvas, chapter1.Id);
+    Expect(blocked.HasBlockingConflicts && !blocked.Changed, "有节点引用时删除应阻断：" + blocked.ToText());
+    Expect(blocked.Canvas.WorkTree.Any(item => item.Id == chapter1.Id), "阻断后章节仍在");
+    Expect(canvas.Nodes.First(node => node.Id == shot1.Id).WorkTreeItemId == chapter1.Id, "阻断不得改动原画布");
+
+    // 带上级章节时改挂到上级
+    var parentChapter = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "总纲" };
+    var childChapter = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章其一", ParentId = parentChapter.Id };
+    var nested = new WorkflowCanvasState();
+    nested.WorkTree.Add(parentChapter);
+    nested.WorkTree.Add(childChapter);
+    var nestedNode = new WorkflowNode { Title = "嵌套分镜", WorkTreeItemId = childChapter.Id, Chapter = "第1章其一" };
+    nested.Nodes.Add(nestedNode);
+
+    var reassigned = CanvasChapterOperations.Delete(nested, childChapter.Id, reassignNodesToParent: true);
+    Expect(reassigned.Changed && !reassigned.HasBlockingConflicts, "显式改挂后应允许删除：" + reassigned.ToText());
+    var reanchored = reassigned.Canvas.Nodes.First(node => node.Id == nestedNode.Id);
+    Expect(reanchored.WorkTreeItemId == parentChapter.Id && reanchored.Chapter == "总纲", "节点应改挂到上级章节");
+
+    // 没有上级章节时清空锚点但保留文本
+    var single = new WorkflowCanvasState();
+    var loneChapter = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "孤立章节" };
+    single.WorkTree.Add(loneChapter);
+    var loneNode = new WorkflowNode { Title = "孤立分镜", WorkTreeItemId = loneChapter.Id, Chapter = "孤立章节" };
+    single.Nodes.Add(loneNode);
+    var cleared = CanvasChapterOperations.Delete(single, loneChapter.Id, reassignNodesToParent: true);
+    var orphan = cleared.Canvas.Nodes.First(node => node.Id == loneNode.Id);
+    Expect(orphan.WorkTreeItemId is null && orphan.Chapter == "孤立章节", "没有上级时清空锚点并保留显示文本");
+}
+
+/// <summary>章节移动成环必须阻断，且不改动调用方画布。</summary>
+static void ChapterMoveRejectsCycles()
+{
+    var parent = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第一幕" };
+    var child = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第一个场景", ParentId = parent.Id };
+    var canvas = new WorkflowCanvasState();
+    canvas.WorkTree.Add(parent);
+    canvas.WorkTree.Add(child);
+    var before = JsonSerializer.Serialize(canvas);
+
+    var cycle = CanvasChapterOperations.Move(canvas, parent.Id, child.Id);
+    Expect(cycle.HasBlockingConflicts && !cycle.Changed, "移动到自己的下级应阻断：" + cycle.ToText());
+    Expect(JsonSerializer.Serialize(canvas) == before, "阻断操作不得改动调用方画布");
+
+    var moved = CanvasChapterOperations.Move(canvas, child.Id, null);
+    Expect(moved.Changed && !moved.HasBlockingConflicts, "移动到顶层应成功");
+    Expect(moved.Canvas.WorkTree.First(item => item.Id == child.Id).ParentId is null, "移动后父章节应为空");
+    Expect(CanvasChapters.List(moved.Canvas).Count == 2, "移动不改变章节数量");
+}
+
+/// <summary>画布 → 工作树：为章节节点建章节条目与锚点；文本节点按父链上下文建锚点。</summary>
+static void SyncCanvasToWorkTreeCreatesAnchorsByContext()
+{
+    var canvas = new WorkflowCanvasState();
+    var chapterNode = new WorkflowNode { Title = "第3章", Category = NodeCategory.Chapter };
+    canvas.Nodes.Add(chapterNode);
+    var shot = new WorkflowNode { Title = "第3章分镜", Category = NodeCategory.Storyboard, ParentNodeId = chapterNode.Id, Chapter = "第3章" };
+    canvas.Nodes.Add(shot);
+    var before = JsonSerializer.Serialize(canvas);
+
+    var plan = CanvasWorkTreeSync.Plan(canvas, SyncDirection.CanvasToWorkTree);
+    Expect(!plan.HasBlockingConflicts, "无同名歧义时不应阻断：" + plan.ToText());
+    Expect(plan.Changes.Any(change => change.Kind == SyncChangeKind.CreateChapterItem && !change.RequiresConfirmation), "应为章节节点新建章节条目");
+    Expect(plan.Changes.Any(change => change.Kind == SyncChangeKind.LinkNodeAnchor), "应建立稳定锚点");
+
+    var apply = CanvasWorkTreeSync.Apply(canvas, plan);
+    Expect(apply.Changed && !apply.Refused, "应用应成功：" + apply.ToText());
+    Expect(JsonSerializer.Serialize(canvas) == before, "应用不得改动调用方画布（只在副本上做）");
+
+    var created = CanvasChapters.ChapterItems(apply.Canvas);
+    Expect(created.Count == 1 && created[0].Name == "第3章" && created[0].Order > 0, "新章节应带显式顺序");
+    var appliedChapterNode = apply.Canvas.Nodes.First(node => node.Id == chapterNode.Id);
+    Expect(appliedChapterNode.WorkTreeItemId == created[0].Id, "章节节点应锚定到新条目");
+    var appliedShot = apply.Canvas.Nodes.First(node => node.Id == shot.Id);
+    Expect(appliedShot.WorkTreeItemId == created[0].Id, "分镜应按父链上下文锚定到同一章节");
+    Expect(CanvasIdentityValidator.Validate(apply.Canvas).IsClean, "同步结果应自洽：" + CanvasIdentityValidator.Validate(apply.Canvas).ToText());
+
+    // 再次规划：已经对齐时不应再有改动
+    var replanned = CanvasWorkTreeSync.Plan(apply.Canvas, SyncDirection.CanvasToWorkTree);
+    Expect(replanned.Changes.Count == 0, "重复同步应零改动：" + replanned.ToText());
+}
+
+/// <summary>工作树 → 画布：显示文本自动同步，标题/悬空锚点需要人工确认。</summary>
+static void SyncWorkTreeToCanvasRespectsConfirmation()
+{
+    var (canvas, chapter1, _, shot1, _) = ChapterFixture();
+    var chapterNode = new WorkflowNode { Title = "旧标题", Category = NodeCategory.Chapter, WorkTreeItemId = chapter1.Id };
+    var dangling = new WorkflowNode { Title = "悬空锚点", WorkTreeItemId = Guid.NewGuid(), Chapter = "第7章" };
+    canvas.Nodes.Add(chapterNode);
+    canvas.Nodes.Add(dangling);
+    var before = JsonSerializer.Serialize(canvas);
+
+    var plan = CanvasWorkTreeSync.Plan(canvas, SyncDirection.WorkTreeToCanvas);
+    Expect(plan.Changes.Any(change => change.Kind == SyncChangeKind.UpdateChapterNodeTitle && change.RequiresConfirmation), "章节节点标题不一致应待确认");
+    Expect(plan.Changes.Any(change => change.Kind == SyncChangeKind.DetachMissingAnchor && change.RequiresConfirmation), "悬空锚点应待确认");
+    Expect(plan.Conflicts.Any(conflict => conflict.Code == CanvasSyncConflictCodes.AnchorDangling), "悬空锚点应报冲突");
+
+    var withoutConfirm = CanvasWorkTreeSync.Apply(canvas, plan, applyUnconfirmed: false);
+    Expect(!withoutConfirm.Refused, "非阻断计划不应被拒绝");
+    Expect(withoutConfirm.Skipped.Any(change => change.RequiresConfirmation), "待确认项应被跳过");
+    Expect(withoutConfirm.Canvas.Nodes.First(node => node.Id == chapterNode.Id).Title == "旧标题", "未确认时不得改标题");
+    Expect(withoutConfirm.Canvas.Nodes.First(node => node.Id == dangling.Id).WorkTreeItemId == dangling.WorkTreeItemId, "未确认时不得清空锚点");
+
+    var confirmed = CanvasWorkTreeSync.Apply(canvas, plan, applyUnconfirmed: true);
+    Expect(confirmed.Canvas.Nodes.First(node => node.Id == chapterNode.Id).Title == "第1章", "确认后按事实源同步章节标题");
+    Expect(confirmed.Canvas.Nodes.First(node => node.Id == dangling.Id).WorkTreeItemId is null, "确认后清空悬空锚点");
+    Expect(confirmed.Canvas.Nodes.First(node => node.Id == dangling.Id).Chapter == "第7章", "清空锚点后保留显示文本");
+    Expect(JsonSerializer.Serialize(canvas) == before, "应用不得改动调用方画布");
+}
+
+/// <summary>同步会话：应用可撤销，撤销回到同步前状态。</summary>
+static void SyncSessionSupportsUndo()
+{
+    var canvas = new WorkflowCanvasState();
+    var chapterNode = new WorkflowNode { Title = "第5章", Category = NodeCategory.Chapter };
+    canvas.Nodes.Add(chapterNode);
+    var original = JsonSerializer.Serialize(canvas);
+
+    var session = new CanvasSyncSession();
+    session.Plan(canvas, SyncDirection.CanvasToWorkTree);
+    var applied = session.Apply(canvas);
+    Expect(applied.Changed && session.CanUndo, "应用后应可撤销");
+    Expect(JsonSerializer.Serialize(canvas) == original, "同步应用不改动调用方画布");
+
+    var restored = session.Undo();
+    Expect(restored is not null && JsonSerializer.Serialize(restored) == original, "撤销应回到同步前状态");
+    Expect(!session.CanUndo, "撤销后不应再有快照");
+
+    // 撤销用到的是内存快照，磁盘文件不受影响
+    Expect(CanvasWorkTreeSync.Plan(canvas, SyncDirection.CanvasToWorkTree).Changes.Count > 0, "撤销后画布仍是同步前的待同步状态");
+}
+
+/// <summary>章节元数据随保存重开、复制与资产包往返保真，且只读画布仍拒绝覆盖保存。</summary>
+static void ChapterMetadataSurvivesRoundTrip()
+{
+    using var stores = new IsolatedStores();
+    var (canvas, chapter1, chapter2, shot1, _) = ChapterFixture();
+    var normalized = CanvasMigration.Migrate(new RecentCanvasState("章节往返", 2, "", "", 512, 512, 20, 7, "", canvas)).State;
+
+    var path = Path.Combine(stores.CanvasDirectory, "chapters.json");
+    CanvasSaveService.Save(normalized, path);
+    Expect(CanvasOpenService.TryOpen(path, out var reopened, out var openError), "重开失败：" + openError);
+    var reopenedChapter = CanvasChapters.ChapterItems(reopened.State.Canvas);
+    Expect(reopenedChapter.Count == 2 && reopenedChapter.All(item => item.Order > 0), "重开后章节顺序应保留");
+    Expect(CanvasChapters.ResolveChapterId(reopened.State.Canvas, reopened.State.Canvas.Nodes.First(node => node.Id == shot1.Id)) == chapter1.Id,
+        "重开后节点锚点应指向同一章节");
+
+    // 复制：章节 ID 换新，锚点重映射到复制后的章节
+    var copy = CanvasDuplication.DuplicateCanvas(reopened.State.Canvas);
+    var copiedChapters = CanvasChapters.ChapterItems(copy.Canvas);
+    Expect(copiedChapters.Count == 2 && copiedChapters.All(item => copiedChapters.Count(candidate => candidate.Id == item.Id) == 1),
+        "复制出的章节 ID 应各不相同");
+    Expect(copiedChapters.All(item => item.Order > 0), "复制应保留显式顺序");
+    var copiedShot = copy.Canvas.Nodes.First(node => node.Title == shot1.Title);
+    Expect(copiedShot.WorkTreeItemId is { } anchor && copiedChapters.Any(item => item.Id == anchor), "复制后节点应锚定到复制出的章节");
+    Expect(CanvasIdentityValidator.Validate(copy.Canvas).IsClean, "复制结果应自洽");
+
+    // 资产包往返：章节元数据与映射随包进出
+    var packageDirectory = Path.Combine(stores.Root, "chapter-package");
+    CanvasPackage.Export(packageDirectory, reopened.State);
+    var packageFile = Path.Combine(packageDirectory, CanvasPackage.CanvasFileName);
+    var target = new RecentCanvasState("目标", 0, "", "", 512, 512, 20, 7, "", new WorkflowCanvasState());
+    Expect(CanvasImportService.TryImport(packageFile, target, CanvasImportMode.Merge, out var imported, out var importError), "导入失败：" + importError);
+    var importedChapters = CanvasChapters.ChapterItems(imported.State.Canvas);
+    Expect(importedChapters.Count == 2 && importedChapters.All(item => item.Order > 0), "导入后章节与顺序应保留");
+    Expect(imported.Chapters.ChapterCount == 2, "导入结果应报告章节摘要：" + imported.Chapters.Text);
+    Expect(CanvasChapters.ResolveChapterId(imported.State.Canvas, imported.State.Canvas.Nodes.First(node => node.Id == shot1.Id)) == chapter1.Id,
+        "导入后节点锚点仍指向同一章节");
+    Expect(CanvasImportService.TryImport(packageFile, imported.State, CanvasImportMode.Merge, out var again, out _), "二次导入失败");
+    Expect(!again.Merge!.Changed, "重复导入同一包仍应零增量");
+
+    // 只读的更高格式版本：章节同步不落盘，保存依旧被拒绝
+    var future = imported.State with { FormatVersion = CanvasFormat.Current + 98 };
+    var futurePath = Path.Combine(stores.CanvasDirectory, "chapters-future.json");
+    CanvasFileWriter.Write(futurePath, future);
+    var futureBytes = File.ReadAllBytes(futurePath);
+    ExpectThrows<CanvasSaveAbortedException>(() => CanvasSaveService.Save(future, futurePath), "未知格式必须拒绝覆盖保存");
+    Expect(File.ReadAllBytes(futurePath).SequenceEqual(futureBytes), "拒绝后文件必须原样");
+    Expect(CanvasChapters.List(future.Canvas ?? new WorkflowCanvasState()).Count == importedChapters.Count, "只读画布仍可查看章节结构");
+}
+
+/// <summary>章节测试用的样例：两个章节 + 各自锚定的分镜节点。</summary>
+static (WorkflowCanvasState Canvas, WorkTreeItem Chapter1, WorkTreeItem Chapter2, WorkflowNode Shot1, WorkflowNode Shot2) ChapterFixture()
+{
+    var canvas = new WorkflowCanvasState();
+    var chapter1 = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章" };
+    var chapter2 = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第2章" };
+    canvas.WorkTree.Add(chapter1);
+    canvas.WorkTree.Add(chapter2);
+    var shot1 = new WorkflowNode { Title = "第1章分镜", Category = NodeCategory.Storyboard, WorkTreeItemId = chapter1.Id, Chapter = "第1章" };
+    var shot2 = new WorkflowNode { Title = "第2章分镜", Category = NodeCategory.Storyboard, WorkTreeItemId = chapter2.Id, Chapter = "第2章" };
+    canvas.Nodes.Add(shot1);
+    canvas.Nodes.Add(shot2);
+    return (canvas, chapter1, chapter2, shot1, shot2);
+}
+
+/// <summary>
+/// 章节结构入口（返工 B-UI-01）：桌面「章节结构」对话框按钮调用的是
+/// <see cref="CanvasChapterStructureSession"/>，这里按同一路径逐步驱动全部七种结构操作，
+/// 覆盖阻断冲突不改画布、撤销、经统一保存入口落盘与重开保真。
+/// </summary>
+static void ChapterStructureEntryCoversAllOperations()
+{
+    using var stores = new IsolatedStores();
+    var (seed, chapter1, chapter2, shot1, shot2) = ChapterFixture();
+    var document = CanvasMigration.Migrate(new RecentCanvasState("章节结构", 0, "", "", 512, 512, 20, 7, "", seed)).State;
+    var canvas = document.Canvas;
+
+    var saved = new List<string>();
+    var path = Path.Combine(stores.CanvasDirectory, "structure.json");
+    var session = new CanvasChapterStructureSession(canvas, state =>
+    {
+        CanvasSaveService.Save(document with { Canvas = state }, path);
+        saved.Add(path);
+        return true;
+    });
+
+    // 建立
+    var created = session.Create("第3章");
+    Expect(created.Changed && !session.LastBlocked, "建立章节应成功：" + session.LastSummary);
+    var chapter3 = CanvasChapters.List(session.State).First(info => info.Name == "第3章");
+
+    // 改名
+    session.Rename(chapter3.Id, "第3章·改");
+    Expect(CanvasChapters.List(session.State).Any(info => info.Name == "第3章·改"), "改名应生效：" + session.LastSummary);
+
+    // 排序（把第3章调到最前）
+    session.Reorder(chapter3.Id, 5);
+    Expect(CanvasChapters.List(session.State)[0].Id == chapter3.Id, "排序应把目标章节排到最前：" + session.LastSummary);
+
+    // 移动（把第3章挂到第1章下）
+    session.Move(chapter3.Id, chapter1.Id);
+    Expect(CanvasChapters.List(session.State).First(info => info.Id == chapter3.Id).ParentChapterId == chapter1.Id,
+        "移动应改变父章节：" + session.LastSummary);
+
+    // 移动成环：阻断且不改状态
+    var beforeCycle = JsonSerializer.Serialize(session.State);
+    var cycle = session.Move(chapter1.Id, chapter3.Id);
+    Expect(cycle.HasBlockingConflicts && session.LastBlocked, "成环移动应被阻断");
+    Expect(JsonSerializer.Serialize(session.State) == beforeCycle, "阻断操作不得改变会话状态");
+
+    // 拆分：把第2章的一个节点拆到新章节
+    var split = session.Split(chapter2.Id, "第2章·后半", new[] { shot2.Id });
+    Expect(split.Changed && !session.LastBlocked, "拆分应成功：" + session.LastSummary);
+    var newChapter = CanvasChapters.List(session.State).First(info => info.Name == "第2章·后半");
+    Expect(session.State.Nodes.First(node => node.Id == shot2.Id).WorkTreeItemId == newChapter.Id, "拆分应把节点改锚到新章节");
+
+    // 合并：把拆出的章节并回第2章
+    var merge = session.Merge(newChapter.Id, chapter2.Id);
+    Expect(merge.Changed && CanvasChapters.List(session.State).All(info => info.Id != newChapter.Id), "合并应删除源章节");
+    Expect(session.State.Nodes.First(node => node.Id == shot2.Id).WorkTreeItemId == chapter2.Id, "合并应把节点改锚回目标章节");
+
+    // 删除有引用：阻断且不改状态
+    var beforeDelete = JsonSerializer.Serialize(session.State);
+    var blocked = session.Delete(chapter1.Id, reassignNodesToParent: false);
+    Expect(blocked.HasBlockingConflicts && session.LastBlocked, "删除有引用的章节应阻断");
+    Expect(session.LastSummary.Contains("画布未改动"), "阻断摘要应说明画布未改动");
+    Expect(JsonSerializer.Serialize(session.State) == beforeDelete, "阻断的删除不得改变会话状态");
+
+    // 删除并改挂：成功
+    var deleted = session.Delete(chapter3.Id, reassignNodesToParent: true);
+    Expect(deleted.Changed && !session.LastBlocked, "改挂后删除应成功：" + session.LastSummary);
+
+    // 顺序归一化
+    session.NormalizeOrder();
+    Expect(CanvasChapters.List(session.State).All(info => info.IsOrderExplicit), "归一化后每个章节都应有显式顺序");
+
+    // 撤销：回到删除前
+    var beforeUndo = JsonSerializer.Serialize(session.State);
+    Expect(session.Undo(), "应可撤销");
+    Expect(JsonSerializer.Serialize(session.State) != beforeUndo, "撤销后状态应不同");
+    Expect(CanvasChapters.List(session.State).Any(info => info.Id == chapter3.Id), "撤销应把被删章节恢复回来");
+
+    // 保存：走注入的统一保存入口，重开后保真
+    Expect(session.SaveCurrent() && saved.Count == 1, "保存应调用注入的统一保存入口");
+    Expect(CanvasOpenService.TryOpen(path, out var reopened, out var openError), "重开失败：" + openError);
+    var reopenedChapters = CanvasChapters.List(reopened.State.Canvas);
+    Expect(reopenedChapters.Count == CanvasChapters.List(session.State).Count, "重开后章节数量应一致");
+    Expect(reopenedChapters.All(info => info.IsOrderExplicit), "重开后显式顺序应保留");
+    Expect(reopened.State.Canvas.Nodes.First(node => node.Id == shot2.Id).WorkTreeItemId == chapter2.Id, "重开后节点锚点应保留");
+    Expect(CanvasIdentityValidator.Validate(reopened.State.Canvas).IsClean, "重开后应自洽：" + CanvasIdentityValidator.Validate(reopened.State.Canvas).ToText());
+    session.Reset();
+    Expect(!session.CanUndo, "重置后不应再有快照");
+}
+
+/// <summary>
+/// 章节结构入口的保存结果闭环（返工 B-UI-02）：注入的保存回调必须把统一保存入口的真实结果传回，
+/// 备份失败与写入失败两条真实失败路径都不得报成功；失败时内存画布保留、原画布文件字节不变，撤销仍只影响内存。
+/// </summary>
+static void ChapterStructureSaveFailureKeepsCanvasAndFile()
+{
+    using var stores = new IsolatedStores();
+    var (seed, _, _, _, _) = ChapterFixture();
+    var document = CanvasMigration.Migrate(new RecentCanvasState("保存闭环", 0, "", "", 512, 512, 20, 7, "", seed)).State;
+    var path = Path.Combine(stores.CanvasDirectory, "save-loop.json");
+
+    // 先正常落盘一份基线文件，作为「原文件」。
+    CanvasSaveService.Save(document with { Canvas = seed }, path);
+    var baselineBytes = File.ReadAllBytes(path);
+
+    // 与 MainForm.SaveCanvasToLibrary 同一收敛点：任何失败都返回 false，绝不谎报成功。
+    bool SaveLikeDesktop(WorkflowCanvasState state)
+    {
+        try { CanvasSaveService.Save(document with { Canvas = state }, path); return true; }
+        catch (CanvasSaveAbortedException) { return false; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    var session = new CanvasChapterStructureSession(seed, SaveLikeDesktop);
+    Expect(!session.HasUnsavedChanges, "初始状态应视为已保存");
+    Expect(session.LastSaveSucceeded is null, "未保存过时不应有保存结论");
+
+    var created = session.Create("第3章");
+    Expect(created.Changed && session.HasUnsavedChanges, "结构操作后应有未保存改动");
+
+    // 失败路径一：备份失败——把备份目录的位置放成一个文件，TryBackup 无法建目录，Save 抛 CanvasSaveAbortedException。
+    var backups = CanvasBackup.Directory;
+    System.IO.Directory.CreateDirectory(Path.GetDirectoryName(backups)!);
+    File.WriteAllText(backups, "blocked");
+    try
+    {
+        Expect(!session.SaveCurrent(), "备份失败时保存必须返回 false");
+        Expect(session.LastSaveSucceeded == false, "备份失败时保存结论必须是失败");
+        Expect(session.HasUnsavedChanges, "备份失败后仍应有未保存改动");
+        Expect(File.ReadAllBytes(path).SequenceEqual(baselineBytes), "备份失败时原画布文件字节不得改变");
+        Expect(session.Rename(CanvasChapters.List(session.State)[0].Id, "第1章·继续").Changed, "保存失败后应仍能继续编辑");
+    }
+    finally { File.Delete(backups); }
+
+    // 解除阻断后应能保存成功，并刷新「已保存」状态。
+    Expect(session.SaveCurrent(), "解除阻断后应保存成功");
+    Expect(session.LastSaveSucceeded == true, "成功保存后结论应为成功");
+    Expect(!session.HasUnsavedChanges, "保存成功后不应再有未保存改动");
+    var afterSuccess = File.ReadAllBytes(path);
+    Expect(!afterSuccess.SequenceEqual(baselineBytes), "保存成功后画布文件应已更新");
+    Expect(CanvasOpenService.TryOpen(path, out var reopened, out var reopenError), "保存结果应可重开：" + reopenError);
+    Expect(CanvasChapters.List(reopened.State.Canvas).Any(info => info.Name == "第3章"), "重开后应包含保存时的章节");
+
+    // 失败路径二：写入失败——目标父路径被一个文件占用，CreateDirectory 直接抛 IOException。
+    var blockedParent = Path.Combine(stores.CanvasDirectory, "blocked");
+    File.WriteAllText(blockedParent, "blocked");
+    var writeFailure = new CanvasChapterStructureSession(seed, state =>
+    {
+        try { CanvasSaveService.Save(document with { Canvas = state }, Path.Combine(blockedParent, "inner.json")); return true; }
+        catch (CanvasSaveAbortedException) { return false; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return false; }
+    });
+    writeFailure.Create("第4章");
+    Expect(!writeFailure.SaveCurrent(), "写入失败时保存必须返回 false");
+    Expect(writeFailure.LastSaveSucceeded == false, "写入失败时保存结论必须是失败");
+    Expect(writeFailure.HasUnsavedChanges, "写入失败后仍应有未保存改动");
+    Expect(File.ReadAllBytes(path).SequenceEqual(afterSuccess), "写入失败不得影响已有画布文件");
+
+    // 撤销只改内存：撤销后磁盘字节不变，但仍处于「有未保存改动」。
+    var beforeUndo = File.ReadAllBytes(path);
+    Expect(session.CanUndo, "应有可撤销操作");
+    Expect(session.Undo(), "应可撤销");
+    Expect(File.ReadAllBytes(path).SequenceEqual(beforeUndo), "撤销不得改动磁盘文件");
+    Expect(session.HasUnsavedChanges, "撤销后内存与磁盘不一致，应仍有未保存改动");
+
+    // 只读拒绝（保存回调返回 false）：同样只能得出失败结论。
+    var readOnly = new CanvasChapterStructureSession(seed, _ => false);
+    readOnly.Create("第5章");
+    Expect(!readOnly.SaveCurrent(), "只读拒绝时保存必须返回 false");
+    Expect(readOnly.LastSaveSucceeded == false, "只读拒绝时保存结论必须是失败");
+    Expect(readOnly.HasUnsavedChanges, "只读拒绝后仍应有未保存改动");
+}
+
+/// <summary>
+/// 批次 C 布局夹具（C-1）：企划节点在泳道外、两个显式顺序的章节、每章若干分镜、
+/// 一个挂在分镜下的成品，以及一个「只有章节名、没有稳定锚点」的游离节点（不得被按名字绑定）。
+/// </summary>
+static (WorkflowCanvasState Canvas, WorkTreeItem Chapter1, WorkTreeItem Chapter2, List<WorkflowNode> Shots1, List<WorkflowNode> Shots2, WorkflowNode Product, WorkflowNode Orphan) LayoutFixture()
+{
+    var canvas = new WorkflowCanvasState();
+    canvas.Nodes.Add(new WorkflowNode { Title = "剧情源", Category = NodeCategory.StoryPlan, X = 400, Y = 500 });
+    canvas.Nodes.Add(new WorkflowNode { Title = "企划", Category = NodeCategory.StoryOutline, X = 600, Y = 520 });
+
+    var chapter1 = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章", Order = 10 };
+    var chapter2 = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第2章", Order = 20 };
+    canvas.WorkTree.Add(chapter1);
+    canvas.WorkTree.Add(chapter2);
+
+    var shots1 = new List<WorkflowNode>();
+    for (var index = 1; index <= 3; index++)
+    {
+        var shot = new WorkflowNode
+        {
+            Title = $"第1章分镜{index}",
+            Category = NodeCategory.Storyboard,
+            WorkTreeItemId = chapter1.Id,
+            Chapter = "第1章",
+            X = 800,
+            Y = 1000
+        };
+        canvas.Nodes.Add(shot);
+        shots1.Add(shot);
+    }
+
+    var shots2 = new List<WorkflowNode>();
+    for (var index = 1; index <= 2; index++)
+    {
+        var shot = new WorkflowNode
+        {
+            Title = $"第2章分镜{index}",
+            Category = NodeCategory.Storyboard,
+            WorkTreeItemId = chapter2.Id,
+            Chapter = "第2章",
+            X = 1500 + index * 200,
+            Y = 1400 + index * 100
+        };
+        canvas.Nodes.Add(shot);
+        shots2.Add(shot);
+    }
+
+    var product = new WorkflowNode
+    {
+        Title = "第1章成品",
+        Category = NodeCategory.Product,
+        ParentNodeId = shots1[0].Id,
+        WorkTreeItemId = chapter1.Id,
+        Chapter = "第1章",
+        X = 2200,
+        Y = 2400
+    };
+    canvas.Nodes.Add(product);
+
+    // 只有章节名文本、没有稳定锚点：不得被绑定到「第1章」。
+    var orphan = new WorkflowNode { Title = "游离分镜", Category = NodeCategory.Storyboard, Chapter = "第1章", X = 3000, Y = 3000 };
+    canvas.Nodes.Add(orphan);
+
+    return (canvas, chapter1, chapter2, shots1, shots2, product, orphan);
+}
+
+/// <summary>批次 C / C-1：企划在泳道外、每章一条独立泳道、分镜横排、成品挂分镜下，且不新增/改动身份。</summary>
+static void SwimlaneLayoutArrangesLanes()
+{
+    var (canvas, chapter1, chapter2, shots1, _, product, orphan) = LayoutFixture();
+    var lanes = CanvasSwimlaneLayout.Lanes(canvas);
+
+    Expect(lanes[0].Kind == CanvasLaneKind.Planning, "第一条泳道应是泳道外的企划区");
+    Expect(lanes[0].NodeIds.Count == 2, "企划区应包含剧情源与企划两个节点");
+
+    var chapterLanes = lanes.Where(lane => lane.Kind == CanvasLaneKind.Chapter).ToList();
+    Expect(chapterLanes.Count == 2, "应有两个章节泳道");
+    Expect(chapterLanes[0].ChapterId == chapter1.Id && chapterLanes[1].ChapterId == chapter2.Id,
+        "章节泳道应按显式顺序排列且身份是稳定 ID");
+    Expect(chapterLanes[0].NodeIds.Contains(orphan.Id) == false,
+        "只有同名文本、没有稳定锚点的节点不得被绑定到该章节（不按名称猜身份）");
+    Expect(lanes.First(lane => lane.Kind == CanvasLaneKind.Unassigned).NodeIds.Contains(orphan.Id),
+        "没有稳定锚点的节点应归入未分章泳道");
+    Expect(canvas.Nodes.Where(node => CanvasSwimlaneLayout.IsPlanningCategory(node.Category))
+        .All(node => chapterLanes.All(lane => !lane.NodeIds.Contains(node.Id))), "企划节点不得进入任何章节泳道");
+
+    var session = new CanvasLayoutSession(canvas);
+    var plan = session.PreviewAll();
+    Expect(!plan.HasBlockingConflicts, "无手动坐标时布局不应阻断：" + plan.ToText(canvas));
+    Expect(session.Apply(), "应用整画布泳道布局应成功：" + session.LastSummary);
+
+    var applied = session.State;
+    var ordered = shots1.OrderBy(node => applied.Nodes.First(item => item.Id == node.Id).X).ToList();
+    var xs = ordered.Select(node => applied.Nodes.First(item => item.Id == node.Id).X).ToList();
+    Expect(xs.SequenceEqual(xs.OrderBy(value => value)), "分镜应按 X 递增排成一行");
+    Expect(xs.Distinct().Count() == 3, "三个分镜不应重叠在同一列");
+    Expect(ordered.Select(node => applied.Nodes.First(item => item.Id == node.Id).Y).Distinct().Count() == 1,
+        "同章分镜应在同一行（Y 相同）");
+    Expect(ordered[0].Title == "第1章分镜1", "分镜应按工作树顺序从左到右：" + string.Join("、", ordered.Select(node => node.Title)));
+
+    var productNode = applied.Nodes.First(node => node.Id == product.Id);
+    var parentNode = applied.Nodes.First(node => node.Id == shots1[0].Id);
+    Expect(Math.Abs(productNode.X - parentNode.X) < 0.5f, "成品应与所属分镜同列");
+    Expect(productNode.Y > parentNode.Y, "成品应在所属分镜下方");
+
+    var bounds = CanvasSwimlaneLayout.LaneBounds(applied, CanvasSwimlaneLayout.Lanes(applied));
+    var planning = bounds.First(item => item.Lane.Kind == CanvasLaneKind.Planning).Bounds;
+    var firstChapter = bounds.First(item => item.Lane.Kind == CanvasLaneKind.Chapter).Bounds;
+    Expect(planning.Bottom <= firstChapter.Top, "企划区应位于章节泳道之外（在章节泳道上方）");
+
+    Expect(applied.Nodes.Count == canvas.Nodes.Count, "布局不得新增或删除节点");
+    Expect(applied.Nodes.All(node => canvas.Nodes.Any(origin => origin.Id == node.Id)), "布局不得改动节点 ID");
+    Expect(applied.Nodes.All(node => node.WorkTreeItemId == canvas.Nodes.First(origin => origin.Id == node.Id).WorkTreeItemId),
+        "布局不得改动工作树锚点");
+    Expect(applied.Nodes.All(node => node.References.Count == canvas.Nodes.First(origin => origin.Id == node.Id).References.Count),
+        "布局不得改动引用");
+}
+
+/// <summary>批次 C / C-2：局部重排只动本章，预览不改画布，应用后可撤销。</summary>
+static void SwimlaneLocalRearrangeOnlyTouchesChapter()
+{
+    var (canvas, chapter1, _, shots1, _, _, _) = LayoutFixture();
+    var lane = CanvasSwimlaneLayout.Lanes(canvas).First(item => item.ChapterId == chapter1.Id);
+    var before = JsonSerializer.Serialize(canvas);
+
+    var session = new CanvasLayoutSession(canvas);
+    var plan = session.PreviewChapter(chapter1.Id);
+
+    Expect(JsonSerializer.Serialize(canvas) == before, "预览不得改动调用方画布");
+    Expect(plan.Changed, "本章分镜初始重叠，局部重排应产生改动：" + plan.ToText(canvas));
+    Expect(plan.Changes.All(change => lane.NodeIds.Contains(change.NodeId)),
+        "局部重排只能改动本章泳道的节点");
+
+    var others = canvas.Nodes.Where(node => !lane.NodeIds.Contains(node.Id))
+        .ToDictionary(node => node.Id, node => (node.X, node.Y));
+    Expect(session.Apply(), "应用局部重排应成功：" + session.LastSummary);
+    foreach (var (id, position) in others)
+    {
+        var node = session.State.Nodes.First(item => item.Id == id);
+        Expect(Math.Abs(node.X - position.X) < 0.5f && Math.Abs(node.Y - position.Y) < 0.5f,
+            $"局部重排不得移动其他章节的节点：{node.Title}");
+    }
+
+    var xs = shots1.Select(node => session.State.Nodes.First(item => item.Id == node.Id).X).ToList();
+    Expect(xs.Distinct().Count() == xs.Count, "本章分镜应被排到不同列");
+
+    Expect(session.Undo(), "应可撤销布局");
+    Expect(JsonSerializer.Serialize(session.State) == before, "撤销后应回到布局前的状态");
+
+    // 不存在的章节：阻断，不写入
+    var missing = session.PreviewChapter(Guid.NewGuid());
+    Expect(missing.HasBlockingConflicts && missing.Conflicts.Any(conflict => conflict.Code == CanvasLayoutCodes.ChapterMissing),
+        "重排不存在的章节应阻断");
+    var snapshot = JsonSerializer.Serialize(session.State);
+    Expect(!session.Apply(confirmManual: true) && JsonSerializer.Serialize(session.State) == snapshot,
+        "章节目录缺失时不得写入画布");
+}
+
+/// <summary>批次 C / C-2：手动坐标受保护、需显式确认覆盖；两个手动节点重叠时阻断。</summary>
+static void SwimlaneManualProtectionAndOverlap()
+{
+    var (canvas, chapter1, _, shots1, _, _, _) = LayoutFixture();
+    var manual = shots1[1];
+    manual.X = 120;
+    manual.Y = 3200;
+    manual.ManualPosition = true;
+
+    var session = new CanvasLayoutSession(canvas);
+    var plan = session.PreviewAll();
+    Expect(plan.ProtectedNodeIds.Contains(manual.Id), "手动摆放的节点应进入保护名单");
+    Expect(plan.Changes.All(change => change.NodeId != manual.Id), "手动摆放的节点不得出现在自动改动里");
+    Expect(plan.RequiresConfirmation && !plan.HasBlockingConflicts, "有手动坐标时应要求确认，而不是阻断");
+
+    Expect(!session.Apply(confirmManual: false), "未确认覆盖时不得写入");
+    Expect(session.LastBlocked, "未确认覆盖应标记为阻断");
+    var kept = session.State.Nodes.First(node => node.Id == manual.Id);
+    Expect(Math.Abs(kept.X - 120) < 0.5f && Math.Abs(kept.Y - 3200) < 0.5f, "拒绝后手动坐标必须原样保留");
+
+    Expect(session.Apply(confirmManual: true), "确认覆盖后应写入：" + session.LastSummary);
+    var moved = session.State.Nodes.First(node => node.Id == manual.Id);
+    Expect(Math.Abs(moved.X - 120) > 0.5f || Math.Abs(moved.Y - 3200) > 0.5f, "确认覆盖后手动节点应被重新排列");
+    Expect(!moved.ManualPosition, "自动布局写回后应清除手动标记");
+
+    // 两个手动节点重叠：阻断，且确认覆盖也不写入
+    var (canvas2, _, _, _, shotsOther, _, _) = LayoutFixture();
+    shotsOther[0].X = 5000; shotsOther[0].Y = 5000; shotsOther[0].ManualPosition = true;
+    shotsOther[1].X = 5000; shotsOther[1].Y = 5000; shotsOther[1].ManualPosition = true;
+
+    var overlapping = new CanvasLayoutSession(canvas2);
+    var blocked = overlapping.PreviewAll();
+    Expect(blocked.HasBlockingConflicts, "两个手动节点重叠应报阻断冲突：" + blocked.ToText(canvas2));
+    Expect(blocked.Conflicts.Any(conflict => conflict.Code == CanvasLayoutCodes.ManualOverlap && conflict.Blocking),
+        "冲突代码应是 LAYOUT_MANUAL_OVERLAP 且为阻断");
+    var snapshot = JsonSerializer.Serialize(overlapping.State);
+    Expect(!overlapping.Apply(confirmManual: true), "有阻断冲突时即使确认覆盖也不得写入");
+    Expect(JsonSerializer.Serialize(overlapping.State) == snapshot, "阻断时画布必须原样不变");
+}
+
+/// <summary>批次 C / C-3：临时展开不落盘、锁定版本缺失可检出、反向定位按稳定实体 ID。</summary>
+static void ReferenceExpansionAndMissingVersions()
+{
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("少年");
+    canvas.Entities.Add(entity);
+
+    var bound = new WorkflowNode { Title = "分镜·锁定有效版本", Category = NodeCategory.Storyboard };
+    bound.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = variant.Versions[0].Id });
+    var broken = new WorkflowNode { Title = "分镜·锁定缺失版本", Category = NodeCategory.Storyboard };
+    broken.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = Guid.NewGuid() });
+    var following = new WorkflowNode { Title = "分镜·跟随最新", Category = NodeCategory.Storyboard };
+    following.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+    canvas.Nodes.AddRange(new[] { bound, broken, following });
+
+    Expect(CanvasReferences.MissingLockedVersionCount(canvas, bound) == 0, "锁定有效版本不应报缺失");
+    Expect(CanvasReferences.MissingLockedVersionCount(canvas, broken) == 1, "锁定缺失版本应报 1 条");
+    Expect(CanvasReferences.MissingLockedVersionCount(canvas, following) == 0, "跟随最新不算缺失");
+    var missing = CanvasReferences.MissingLockedVersions(canvas);
+    Expect(missing.Count == 1 && missing[0].Node.Id == broken.Id, "缺失清单应只含锁定缺失的那条");
+
+    var boundPairs = canvas.ResolveReferencePairs(bound);
+    Expect(CanvasReferences.VersionLabel(boundPairs[0].Reference, boundPairs[0].Content) == variant.Versions[0].Label,
+        "有效锁定应显示版本号");
+    var brokenPairs = canvas.ResolveReferencePairs(broken);
+    Expect(CanvasReferences.VersionLabel(brokenPairs[0].Reference, brokenPairs[0].Content) == "版本缺失",
+        "缺失锁定应显示「版本缺失」");
+    var followPairs = canvas.ResolveReferencePairs(following);
+    Expect(CanvasReferences.VersionLabel(followPairs[0].Reference, followPairs[0].Content) == "跟随最新",
+        "未锁定时应显示「跟随最新」");
+
+    Expect(CanvasReferences.NodesReferencing(canvas, entity.Id).Count == 3, "三个分镜都引用同一实体，应全部定位到");
+    Expect(CanvasReferences.NodesReferencing(canvas, Guid.NewGuid()).Count == 0, "不存在的实体不应定位到任何节点");
+
+    var before = JsonSerializer.Serialize(canvas);
+    var nodeCount = canvas.Nodes.Count;
+    var anchors = canvas.Nodes.ToDictionary(node => node.Id, node => node.WorkTreeItemId);
+    var referenceCounts = canvas.Nodes.ToDictionary(node => node.Id, node => node.References.Count);
+
+    var expansion = new CanvasReferenceExpansionState();
+    Expect(expansion.Toggle(bound.Id), "首次切换应展开");
+    Expect(expansion.IsExpanded(bound.Id) && expansion.Count == 1, "展开集合应记录该节点");
+    Expect(!expansion.Toggle(bound.Id), "再次切换应收起");
+    Expect(expansion.Count == 0, "收起后集合应为空");
+    expansion.Toggle(bound.Id);
+    expansion.Toggle(broken.Id);
+    Expect(expansion.Count == 2, "应支持多个节点同时展开");
+    expansion.CollapseAll();
+    Expect(expansion.Count == 0, "CollapseAll 应清空");
+
+    Expect(JsonSerializer.Serialize(canvas) == before, "临时展开不得改动画布数据");
+    Expect(canvas.Nodes.Count == nodeCount, "临时展开不得生成常驻节点");
+    Expect(canvas.Nodes.All(node => anchors[node.Id] == node.WorkTreeItemId), "临时展开不得改动工作树锚点");
+    Expect(canvas.Nodes.All(node => node.References.Count == referenceCounts[node.Id]), "临时展开不得改动引用条数");
+}
+
+/// <summary>批次 C / C-4：桌面投影给 Web 带稳定 chapterId 与显式顺序；同名不同 ID 的章节不合并。</summary>
+static void ChapterProjectionCarriesStableIds()
+{
+    var canvas = new WorkflowCanvasState();
+    var first = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章", Order = 10 };
+    var second = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章", Order = 20 };
+    canvas.WorkTree.Add(first);
+    canvas.WorkTree.Add(second);
+
+    var shotA = new WorkflowNode { Title = "A 分镜", Category = NodeCategory.Storyboard, WorkTreeItemId = first.Id, Chapter = "第1章" };
+    var shotB = new WorkflowNode { Title = "B 分镜", Category = NodeCategory.Storyboard, WorkTreeItemId = second.Id, Chapter = "第1章" };
+    var orphan = new WorkflowNode { Title = "未归档分镜", Category = NodeCategory.Storyboard, Chapter = "第1章" };
+    canvas.Nodes.AddRange(new[] { shotA, shotB, orphan });
+
+    var json = JsonSerializer.Serialize(NodeProjection.ProjectRecords(canvas.Nodes, canvas));
+    using var document = JsonDocument.Parse(json);
+    var chapterOfRecord = new Dictionary<string, string?>(StringComparer.Ordinal);
+    var orderOfRecord = new Dictionary<string, int?>(StringComparer.Ordinal);
+    var chapterRecordCount = 0;
+    foreach (var element in document.RootElement.EnumerateArray())
+    {
+        var recordId = element.GetProperty("recordId").GetString() ?? string.Empty;
+        var recordType = element.GetProperty("recordType").GetString() ?? string.Empty;
+        if (recordType == "chapter") chapterRecordCount++;
+        var record = element.GetProperty("record");
+        chapterOfRecord[recordId] = record.TryGetProperty("chapterId", out var chapterId) ? chapterId.GetString() : null;
+        orderOfRecord[recordId] = record.TryGetProperty("order", out var order) && order.TryGetInt32(out var value) ? value : null;
+    }
+
+    Expect(chapterRecordCount == 2, "两个同名不同 ID 的章节应投影为两条记录，不合并：" + chapterRecordCount);
+    Expect(chapterOfRecord.TryGetValue(shotA.Id.ToString(), out var shotAChapter) && shotAChapter == first.Id.ToString(),
+        "A 分镜应带第一个章节的稳定 ID");
+    Expect(chapterOfRecord.TryGetValue(shotB.Id.ToString(), out var shotBChapter) && shotBChapter == second.Id.ToString(),
+        "B 分镜应带第二个章节的稳定 ID");
+    Expect(chapterOfRecord.TryGetValue(orphan.Id.ToString(), out var orphanChapter) && orphanChapter is null,
+        "只有章节名文本、没有稳定锚点的节点不得带章节 ID");
+    Expect(orderOfRecord.TryGetValue($"wt-{first.Id}", out var firstOrder) && firstOrder == 10,
+        "章节记录应带显式顺序（第一个 10）");
+    Expect(orderOfRecord.TryGetValue($"wt-{second.Id}", out var secondOrder) && secondOrder == 20,
+        "章节记录应带显式顺序（第二个 20）");
+}
+
+/// <summary>批次 C / C-1、C-2：Agent 建节点落位走稳定章节 ID 与泳道引擎，不再按章节名分块，也不动手动坐标。</summary>
+static void AgentNodePlacementUsesChapterLanes()
+{
+    var (canvas, chapter1, chapter2, _, shots2, _, _) = LayoutFixture();
+
+    // 手动摆放一个第2章分镜：Agent 落位不得移动它。
+    var manual = shots2[0];
+    manual.X = 120;
+    manual.Y = 3300;
+    manual.ManualPosition = true;
+
+    var others = canvas.Nodes.Where(node => node.Id != manual.Id)
+        .ToDictionary(node => node.Id, node => (node.X, node.Y));
+    // 落位只允许重排目标泳道（第1章）：其他泳道的节点必须原地不动。
+    var movable = CanvasSwimlaneLayout.Lanes(canvas).First(item => item.ChapterId == chapter1.Id).NodeIds.ToHashSet();
+    var nodesBefore = canvas.Nodes.Count;
+
+    var result = AgentActionExecutor.Apply(new[]
+    {
+        new AgentAction { Kind = "create_node", Title = "第1章分镜4", NodeCategory = "分镜", WorkTreeTarget = chapter1.Name }
+    }, canvas, null);
+    Expect(result.Applied == 1 && result.Errors.Count == 0, "Agent 建节点应成功：" + string.Join("；", result.Errors));
+
+    var created = canvas.Nodes.Single(node => node.Title == "第1章分镜4");
+    Expect(CanvasChapters.ResolveChapterId(canvas, created) == chapter1.Id, "新分镜应按稳定 ID 归到第1章");
+
+    var lanes = CanvasSwimlaneLayout.Lanes(canvas);
+    var lane1 = lanes.First(item => item.ChapterId == chapter1.Id);
+    var lane2 = lanes.First(item => item.ChapterId == chapter2.Id);
+    Expect(lane1.NodeIds.Contains(created.Id), "新分镜应落在第1章泳道里");
+    Expect(!lane2.NodeIds.Contains(created.Id), "新分镜不得落进第2章泳道");
+
+    // 手动摆放的节点坐标与标记都必须保留。
+    var keptManual = canvas.Nodes.First(node => node.Id == manual.Id);
+    Expect(Math.Abs(keptManual.X - 120) < 0.5f && Math.Abs(keptManual.Y - 3300) < 0.5f, "Agent 落位不得移动手动摆放的节点");
+    Expect(keptManual.ManualPosition, "手动标记应保留");
+
+    // 目标泳道之外的节点坐标一律不变（尤其其他章节）。
+    foreach (var (id, position) in others)
+    {
+        if (movable.Contains(id)) continue;
+        var node = canvas.Nodes.First(item => item.Id == id);
+        Expect(Math.Abs(node.X - position.X) < 0.5f && Math.Abs(node.Y - position.Y) < 0.5f,
+            $"Agent 落位不得移动其他泳道的节点：{node.Title}");
+    }
+
+    // 第1章泳道内的非成品节点排在同一行（分镜横排）。
+    var rowCount = lane1.NodeIds
+        .Select(id => canvas.Nodes.First(node => node.Id == id))
+        .Where(node => node.Category != NodeCategory.Product)
+        .Select(node => node.Y)
+        .Distinct()
+        .Count();
+    Expect(rowCount == 1, "第1章泳道内的分镜应排在同一行");
+
+    // 新节点不产生常驻资源节点，也不多建节点。
+    Expect(canvas.Entities.Count == 0, "Agent 落位不得新增实体");
+    Expect(canvas.Nodes.Count == nodesBefore + 1, "Agent 落位只应新增被创建的那一个节点");
+}
+
+/// <summary>目标 4 / 4.1、4.3：引用扫描要覆盖当前画布 + 画布库 + 草稿；其它来源仍在引用时硬阻断删除。</summary>
+static void ReferenceScanSpansCanvasDraftAndLibrary()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var current = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("默认");
+    current.Entities.Add(entity);
+    var node = new WorkflowNode { Title = "当前分镜", Category = NodeCategory.Storyboard };
+    node.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = variant.Versions[0].Id });
+    current.Nodes.Add(node);
+
+    var currentPath = Path.Combine(stores.CanvasDirectory, "current.json");
+    CanvasSaveService.Save(new RecentCanvasState("当前画布", 0, "", "", 512, 512, 20, 7, "", current), currentPath);
+
+    // 画布库里的另一份画布引用同一实体（同一个 ID）。
+    var libraryCanvas = new WorkflowCanvasState();
+    libraryCanvas.Entities.Add(entity);
+    var libraryNode = new WorkflowNode { Title = "库内分镜", Category = NodeCategory.Storyboard };
+    libraryNode.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+    libraryCanvas.Nodes.Add(libraryNode);
+    var libraryPath = Path.Combine(stores.CanvasDirectory, "library.json");
+    CanvasSaveService.Save(new RecentCanvasState("库画布", 0, "", "", 512, 512, 20, 7, "", libraryCanvas), libraryPath);
+
+    // 草稿画布也引用同一实体。
+    var draftCanvas = new WorkflowCanvasState();
+    draftCanvas.Entities.Add(entity);
+    var draftNode = new WorkflowNode { Title = "草稿分镜", Category = NodeCategory.Storyboard };
+    draftNode.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+    draftCanvas.Nodes.Add(draftNode);
+    CanvasSaveService.Save(new RecentCanvasState("草稿画布", 0, "", "", 512, 512, 20, 7, "", draftCanvas), StorageMaintenance.DraftCanvasPath);
+
+    var report = CanvasReferenceScanner.Scan(current, currentPath);
+    Expect(report.ScannedCanvases == 3, "应扫描当前画布 + 画布库 + 草稿三个来源：" + report.ScannedCanvases);
+    Expect(report.Skipped.Count == 0, "不应有打不开的来源：" + string.Join("；", report.Skipped));
+
+    var hits = CanvasReferenceScanner.ForEntity(report, entity.Id);
+    Expect(hits.Count == 3, "三个来源各命中一条引用：" + hits.Count);
+    Expect(hits.Count(hit => hit.Scope == ReferenceScopeKind.Canvas) == 1, "当前画布应命中 1 条");
+    Expect(hits.Count(hit => hit.Scope == ReferenceScopeKind.Library) == 1, "画布库应命中 1 条");
+    Expect(hits.Count(hit => hit.Scope == ReferenceScopeKind.Draft) == 1, "草稿应命中 1 条");
+    Expect(!hits.Single(hit => hit.Scope == ReferenceScopeKind.Canvas).LockedVersionMissing, "锁定了存在的版本不应报缺失");
+
+    var guard = CanvasDeletionGuard.CheckEntity(report, entity);
+    Expect(guard.HardBlocked && !guard.CanDelete, "其它来源仍在引用时必须硬阻断删除");
+    Expect(guard.LocalCount == 1 && guard.ForeignCount == 2, $"应为本画布 1、其它来源 2：{guard.LocalCount}/{guard.ForeignCount}");
+
+    // 其它来源不再引用后：只剩本画布引用，可以删除（但要求显式解除引用）。
+    File.Delete(libraryPath);
+    File.Delete(StorageMaintenance.DraftCanvasPath);
+    var narrowed = CanvasReferenceScanner.Scan(current, currentPath);
+    var narrowedGuard = CanvasDeletionGuard.CheckEntity(narrowed, entity);
+    Expect(!narrowedGuard.HardBlocked && narrowedGuard.CanDelete && narrowedGuard.LocalCount == 1,
+        "只剩本画布引用时应可删除（需解除引用）：" + narrowedGuard.Message);
+
+    // 解除引用只改内存：节点保留、引用清空、画布文件字节不变。
+    var beforeBytes = File.ReadAllBytes(currentPath);
+    var removed = CanvasDeletionGuard.RemoveReferencesIn(current, entity.Id);
+    Expect(removed == 1 && current.Nodes.Count == 1 && current.Nodes[0].References.Count == 0,
+        "应解除 1 条引用且节点本身保留");
+    Expect(File.ReadAllBytes(currentPath).SequenceEqual(beforeBytes), "解除引用不得改写任何画布文件");
+}
+
+/// <summary>目标 4 / 4.3、4.4：删除是「移入回收站」，还原后引用按稳定 ID 重新生效。</summary>
+static void DeletionGuardAndRecycleBinRestore()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("默认");
+    var version = variant.Versions[0];
+    canvas.Entities.Add(entity);
+    var node = new WorkflowNode { Title = "分镜", Category = NodeCategory.Storyboard };
+    node.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = version.Id });
+    canvas.Nodes.Add(node);
+
+    var report = CanvasReferenceScanner.Scan(canvas, null, includeLibrary: false, includeDraft: false);
+    Expect(CanvasRecycleBin.TryStashVariant(entity, variant, CanvasReferenceScanner.ForVariant(report, entity.Id, variant.Id), out var entry, out var stashError),
+        "变体快照应写入回收站：" + stashError);
+    Expect(entry is not null, "写入成功后应返回回收站记录");
+    entity.Variants.Remove(variant);
+
+    Expect(CanvasReferenceVersions.IsLockedVersionMissing(canvas, node.References[0]), "变体被移走后锁定版本应判为缺失");
+    Expect(canvas.ResolveReferences(node).Count == 0, "变体没了，引用解析不到内容");
+    Expect(CanvasRecycleBin.List().Count == 1, "回收站应有 1 条记录");
+    Expect(CanvasRecycleBin.List()[0].ReferencedBy.Count == 1, "回收站应记录删除时的引用来源");
+
+    Expect(CanvasRecycleBin.Restore(entry!.Id, canvas, out var message), "应能还原变体：" + message);
+    Expect(canvas.Entities.Single().Variants.Any(item => item.Id == variant.Id), "还原后变体 ID 必须保持不变");
+    var restored = canvas.ResolveReferences(node);
+    Expect(restored.Count == 1, "还原后引用应重新解析成功");
+    Expect(restored[0].Version?.Id == version.Id && !restored[0].VersionMissing, "还原后应重新命中原锁定版本");
+    Expect(!CanvasReferenceVersions.IsNodeBlocked(canvas, node), "还原后不应再是阻断状态");
+    Expect(CanvasRecycleBin.List().Count == 0, "还原后回收站记录应被移除");
+
+    // 实体整体移入回收站并还原：实体 ID 与变体都保留，出图内容恢复可用。
+    Expect(CanvasRecycleBin.TryStashEntity(entity, CanvasReferenceScanner.ForEntity(report, entity.Id), out var entityEntry, out var entityStashError),
+        "实体快照应写入回收站：" + entityStashError);
+    canvas.Entities.Remove(entity);
+    Expect(canvas.Entities.Count == 0, "实体应已移出画布");
+    Expect(CanvasRecycleBin.Restore(entityEntry!.Id, canvas, out var entityMessage), "应能还原实体：" + entityMessage);
+    Expect(canvas.FindEntity(entity.Id) is not null, "还原后实体 ID 必须保持不变");
+    Expect(CanvasReferenceVersions.UsableContents(canvas, node).Count == 1, "还原后出图可用引用应恢复");
+
+    // 彻底删除后不可再还原。
+    Expect(CanvasRecycleBin.TryStashEntity(entity, Array.Empty<ReferenceHit>(), out var purgeEntry, out var purgeStashError),
+        "快照应写入回收站：" + purgeStashError);
+    canvas.Entities.Remove(entity);
+    Expect(CanvasRecycleBin.TryPurge(purgeEntry!.Id, out var purgeError), "彻底删除应成功：" + purgeError);
+    Expect(!CanvasRecycleBin.Restore(purgeEntry.Id, canvas, out var purgeMessage), "彻底删除后不应再能还原");
+    Expect(purgeMessage.Contains("找不到"), "应提示记录不存在：" + purgeMessage);
+}
+
+/// <summary>返工（目标 4 复核）：回收站写入失败时删除必须整体取消，内存与磁盘都保持原样。</summary>
+static void RecycleBinWriteFailureCancelsDeletion()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("默认");
+    var version = variant.Versions[0];
+    canvas.Entities.Add(entity);
+    var node = new WorkflowNode { Title = "分镜", Category = NodeCategory.Storyboard };
+    node.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = version.Id });
+    canvas.Nodes.Add(node);
+
+    var report = CanvasReferenceScanner.Scan(canvas, null, includeLibrary: false, includeDraft: false);
+    var hits = CanvasReferenceScanner.ForEntity(report, entity.Id);
+    var before = JsonSerializer.Serialize(canvas);
+
+    // 阻断回收站写入：把回收站文件路径占成一个目录，任何写文件操作都会失败。
+    Directory.CreateDirectory(CanvasRecycleBin.FilePath);
+
+    Expect(!CanvasRecycleBin.TryStashEntity(entity, hits, out var entry, out var stashError), "写盘失败时移入回收站必须返回 false");
+    Expect(entry is null, "写盘失败时不应给出成功记录");
+    Expect(stashError.Length > 0, "必须把失败原因带回");
+    Expect(CanvasRecycleBin.List().Count == 0, "写盘失败后回收站里不应有记录");
+
+    Expect(!CanvasDeletionGuard.TryDeleteEntity(canvas, entity, hits, out var deleteError), "快照写不进去时删除必须整体取消");
+    Expect(deleteError.Length > 0, "取消删除应带回原因：" + deleteError);
+    Expect(canvas.FindEntity(entity.Id) is not null, "取消删除后实体必须仍在画布上");
+    Expect(canvas.Entities.Count == 1, "实体数量不得变化");
+    Expect(node.References.Count == 1, "取消删除后引用必须原样保留");
+    Expect(JsonSerializer.Serialize(canvas) == before, "取消删除后画布数据必须逐字节一致");
+
+    // 变体删除同样不能出现「快照没写进去、变体已经没了」。
+    Expect(!CanvasDeletionGuard.TryDeleteVariant(canvas, entity, variant, hits, out var variantError), "变体删除也必须整体取消");
+    Expect(variantError.Length > 0, "变体取消删除应带回原因");
+    Expect(entity.Variants.Contains(variant) && node.References.Count == 1, "取消后变体与引用都必须保留");
+
+    // 解除占用后立刻可正常删除，并且能还原回来。
+    Directory.Delete(CanvasRecycleBin.FilePath);
+    Expect(CanvasDeletionGuard.TryDeleteEntity(canvas, entity, hits, out var okError), "恢复写入后应可删除：" + okError);
+    Expect(canvas.Entities.Count == 0, "删除成功后实体应移出画布");
+    Expect(CanvasRecycleBin.List().Count == 1, "删除成功后回收站应有 1 条记录");
+    Expect(CanvasRecycleBin.Restore(CanvasRecycleBin.List()[0].Id, canvas, out var restoreMessage), "应能还原：" + restoreMessage);
+    Expect(canvas.FindEntity(entity.Id) is not null, "还原后实体应回到画布");
+}
+
+/// <summary>返工（目标 4 第二次复核）：Agent 的 delete_entity 不得绕过引用扫描、硬阻断与回收站链路。</summary>
+static void AgentDeleteEntityUsesReferenceProtection()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("默认");
+    var version = variant.Versions[0];
+    canvas.Entities.Add(entity);
+    var node = new WorkflowNode { Title = "分镜", Category = NodeCategory.Storyboard };
+    node.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = version.Id });
+    canvas.Nodes.Add(node);
+
+    var canvasPath = Path.Combine(stores.CanvasDirectory, "agent-delete.json");
+    CanvasSaveService.Save(new RecentCanvasState("当前画布", 0, "", "", 512, 512, 20, 7, "", canvas), canvasPath);
+
+    // 1) 本画布仍有引用、动作又没有声明解除引用：拒绝，画布与回收站都不变。
+    var refused = AgentActionExecutor.Apply(
+        new[] { new AgentAction { Kind = "delete_entity", Target = entity.Name } }, canvas, null, FileWriteMode.Apply, null, canvasPath);
+    Expect(refused.Applied == 0 && refused.Errors.Count == 1, "本画布仍有引用且未声明解除引用时应拒绝删除");
+    Expect(refused.Errors[0].Contains("removeReferences"), "拒绝理由应说明需要显式解除引用：" + refused.Errors[0]);
+    Expect(canvas.FindEntity(entity.Id) is not null && node.References.Count == 1, "被拒绝时实体与引用都必须保留");
+    Expect(CanvasRecycleBin.List().Count == 0, "被拒绝时回收站不应有记录");
+
+    // 2) 预检必须提前说清楚，用户才能在审批前知情。
+    var hint = AgentActionExecutor.Precheck(new AgentAction { Kind = "delete_entity", Target = entity.Name }, canvas, null, canvasPath);
+    Expect(hint is not null && hint.Contains("removeReferences"), "预检应提前提示需要显式解除引用：" + hint);
+
+    // 3) 其它画布也引用它：即使声明了解除引用也必须硬阻断。
+    var libraryCanvas = new WorkflowCanvasState();
+    libraryCanvas.Entities.Add(entity);
+    var libraryNode = new WorkflowNode { Title = "库内分镜", Category = NodeCategory.Storyboard };
+    libraryNode.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+    libraryCanvas.Nodes.Add(libraryNode);
+    var libraryPath = Path.Combine(stores.CanvasDirectory, "other.json");
+    CanvasSaveService.Save(new RecentCanvasState("另一份画布", 0, "", "", 512, 512, 20, 7, "", libraryCanvas), libraryPath);
+
+    var blocked = AgentActionExecutor.Apply(
+        new[] { new AgentAction { Kind = "delete_entity", Target = entity.Name, RemoveReferences = true } }, canvas, null, FileWriteMode.Apply, null, canvasPath);
+    Expect(blocked.Applied == 0, "其它画布仍在引用时不得删除");
+    Expect(blocked.Errors[0].Contains("其它画布"), "理由应指明是其它画布在引用：" + blocked.Errors[0]);
+    Expect(canvas.FindEntity(entity.Id) is not null, "硬阻断后实体必须仍在本画布");
+    Expect(CanvasRecycleBin.List().Count == 0, "硬阻断时回收站不应有记录");
+
+    // 4) 其它画布不再引用 + 显式解除引用意图：写回收站快照成功后才删除，并可还原。
+    File.Delete(libraryPath);
+    var applied = AgentActionExecutor.Apply(
+        new[] { new AgentAction { Kind = "delete_entity", Target = entity.Name, RemoveReferences = true } }, canvas, null, FileWriteMode.Apply, null, canvasPath);
+    Expect(applied.Applied == 1 && applied.Errors.Count == 0, "只剩本画布引用且声明解除引用后应成功：" + string.Join("；", applied.Errors));
+    Expect(canvas.FindEntity(entity.Id) is null, "成功后实体应移出画布");
+    Expect(node.References.Count == 0, "成功后本画布引用应被解除");
+    Expect(CanvasRecycleBin.List().Count == 1, "成功后回收站应有 1 条快照");
+    Expect(CanvasRecycleBin.Restore(CanvasRecycleBin.List()[0].Id, canvas, out var restoreMessage), "应能还原：" + restoreMessage);
+    Expect(canvas.FindEntity(entity.Id) is not null, "还原后实体应回到画布");
+
+    // 5) 回收站写不进去：Agent 删除必须整体取消。
+    var scene = new WorkflowEntity { Kind = EntityKind.Scene, Name = "荒原" };
+    scene.CreateVariant("默认");
+    canvas.Entities.Add(scene);
+    if (File.Exists(CanvasRecycleBin.FilePath)) File.Delete(CanvasRecycleBin.FilePath);
+    Directory.CreateDirectory(CanvasRecycleBin.FilePath);
+
+    var failed = AgentActionExecutor.Apply(
+        new[] { new AgentAction { Kind = "delete_entity", Target = scene.Name } }, canvas, null, FileWriteMode.Apply, null, canvasPath);
+    Expect(failed.Applied == 0, "回收站写不进去时不得删除");
+    Expect(failed.Errors.Count == 1 && failed.Errors[0].Contains("未能删除实体"), "应说明删除已取消：" + string.Join("；", failed.Errors));
+    Expect(canvas.FindEntity(scene.Id) is not null, "写盘失败时实体必须保留");
+    Directory.Delete(CanvasRecycleBin.FilePath);
+}
+
+/// <summary>返工（目标 4 第二次复核）：预览试算只作用于副本，绝不写回收站或产生其它副作用。</summary>
+static void AgentDeleteEntityPreviewWritesNoRecycleBin()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    entity.CreateVariant("默认");
+    canvas.Entities.Add(entity);
+    var before = JsonSerializer.Serialize(canvas);
+
+    // 预览路径真实调用方（PendingChanges / MainForm）都是传副本，这里照做。
+    var clone = CanvasCloner.Clone(canvas);
+    var result = AgentActionExecutor.Apply(
+        new[] { new AgentAction { Kind = "delete_entity", Target = entity.Name } }, clone, null, FileWriteMode.Skip);
+
+    Expect(result.Applied == 1, "试算应成功（只作用于副本）：" + string.Join("；", result.Errors));
+    Expect(clone.FindEntity(entity.Id) is null, "副本上实体应被移除，预览才能反映这次删除");
+    Expect(JsonSerializer.Serialize(canvas) == before && canvas.FindEntity(entity.Id) is not null, "真实画布不得被改动");
+    Expect(CanvasRecycleBin.List().Count == 0, "预览阶段不得写回收站");
+    Expect(!File.Exists(CanvasRecycleBin.FilePath), "预览阶段不应产生回收站文件");
+}
+
+/// <summary>目标 5 / 审批与自动模式各自只提交一次：同一批次号只能被消费一次，重复提交必须被拒绝。</summary>
+static void AgentBatchCommitsOnlyOnce()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var canvas = new WorkflowCanvasState();
+    var ledger = new AgentCommitLedger();
+    var pending = new PendingChanges();
+    var actions = new[] { new AgentAction { Kind = "create_node", Title = "镜头一", Content = "开场", NodeCategory = "分镜" } };
+
+    pending.BeginBatch(actions);
+    var batch = pending.BatchId;
+    Expect(batch != Guid.Empty, "新一批应有批次号");
+
+    Expect(ledger.TryBegin(batch, out _), "第一次提交应被允许");
+    AgentActionExecutor.Apply(actions, canvas, null, FileWriteMode.Apply);
+    ledger.MarkSucceeded(batch);   // 返工 R2：提交完成（动作 + 保存都成功）才把这一批标记为成功
+    pending.AdoptBatch(batch, actions);
+    Expect(canvas.Nodes.Count == 1, "第一次提交应产生 1 个节点：" + canvas.Nodes.Count);
+
+    // 第二次提交同一批（双击提交、切换窗口重复确认、两条路径同时命中）：必须被拒绝且画布不变。
+    Expect(!ledger.TryBegin(pending.BatchId, out var reason), "同一批第二次提交必须被拒绝");
+    Expect(reason.Contains("已经提交成功"), "拒绝理由应说明这一批已经提交成功：" + reason);
+    Expect(canvas.Nodes.Count == 1, "被拒绝时画布不得再变化");
+
+    // 内容相同的新提案是合法的新批次：按批次号判重，不按内容指纹。
+    pending.BeginBatch(actions);
+    Expect(pending.BatchId != batch, "新一批应换新批次号");
+    Expect(ledger.TryConsume(pending.BatchId, out _), "内容相同的新提案应被允许");
+    AgentActionExecutor.Apply(actions, canvas, null, FileWriteMode.Apply);
+    Expect(canvas.Nodes.Count == 2, "新提案应再产生 1 个节点：" + canvas.Nodes.Count);
+
+    Expect(!ledger.TryConsume(Guid.Empty, out var emptyReason) && emptyReason.Contains("无效"), "空批次号应被拒绝");
+
+    for (var index = 0; index < 300; index++) ledger.TryConsume(Guid.NewGuid(), out _);
+    Expect(ledger.Count <= 256, "账本应只保留最近的批次号，不能无限增长：" + ledger.Count);
+}
+
+/// <summary>一句创意构建的完整批次：企划 + 章节 + 角色/场景 + 三个分镜（挂引用）。</summary>
+static AgentAction[] PremiseBatch() =>
+[
+    new AgentAction { Kind = "create_node", Title = "雨夜追凶", NodeCategory = "通用", Content = "一句话创意：雨夜追凶，刀客与仇家在窄巷相遇" },
+    new AgentAction { Kind = "create_work_item", WorkTreeKind = "章节", Title = "第一幕·雨夜" },
+    new AgentAction { Kind = "create_entity", EntityKind = "角色", Title = "沈砚" },
+    new AgentAction { Kind = "create_entity", EntityKind = "场景", Title = "雨巷" },
+    new AgentAction { Kind = "create_node", Title = "镜头一：雨巷全景", NodeCategory = "分镜", ParentTarget = "雨夜追凶", WorkTreeTarget = "第一幕·雨夜", EntityTargets = ["沈砚", "雨巷"], Content = "雨巷全景，沈砚背刀走入" },
+    new AgentAction { Kind = "create_node", Title = "镜头二：拔刀", NodeCategory = "分镜", ParentTarget = "雨夜追凶", WorkTreeTarget = "第一幕·雨夜", EntityTargets = ["沈砚"], Content = "沈砚拔刀特写" },
+    new AgentAction { Kind = "create_node", Title = "镜头三：刀光", NodeCategory = "分镜", ParentTarget = "雨夜追凶", WorkTreeTarget = "第一幕·雨夜", EntityTargets = ["沈砚", "雨巷"], Content = "刀光划过雨幕" }
+];
+
+/// <summary>目标 5 端到端：一句创意 → 企划/章节/分镜，视觉设定只作为引用且分镜归属到章节。</summary>
+static void PremiseToStoryboardChain()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+    var workspace = NewWorkspace();
+    var canvas = new WorkflowCanvasState();
+    var batch = PremiseBatch();
+
+    // 预览只试算在副本上，真实画布与设定库不得变化。
+    var preview = CanvasPreviewBuilder.Build(batch, canvas);
+    Expect(preview.AddedNodes.Count > 0 && canvas.Nodes.Count == 0, "预览应只在副本上试算");
+    Expect(canvas.Entities.Count == 0 && canvas.WorkTree.Count == 0, "预览不得改动设定库与工作树");
+
+    var applied = AgentActionExecutor.Apply(batch, canvas, workspace, FileWriteMode.Apply, null, null);
+    Expect(applied.Applied == batch.Length && applied.Errors.Count == 0,
+        $"整批动作应全部应用：{string.Join("；", applied.Errors)}");
+
+    // 企划与章节
+    var plan = canvas.Nodes.SingleOrDefault(node => node.Title == "雨夜追凶");
+    Expect(plan is not null, "应生成企划节点");
+    var chapter = canvas.WorkTree.SingleOrDefault(item => item.Kind == WorkTreeKind.Chapter);
+    Expect(chapter is not null, "应生成章节工作树条目");
+
+    // 分镜：三个，且都归属到同一个章节
+    var shots = canvas.Nodes.Where(node => node.Category == NodeCategory.Storyboard).ToList();
+    Expect(shots.Count == 3, "应生成 3 个分镜：" + shots.Count);
+    foreach (var shot in shots)
+    {
+        Expect(CanvasChapters.ResolveChapterId(canvas, shot) == chapter!.Id,
+            $"分镜「{shot.Title}」应归属到章节");
+    }
+
+    Expect(CanvasChapters.ChapterItems(canvas).Count == 1, "应只有一条章节泳道：" + CanvasChapters.ChapterItems(canvas).Count);
+    Expect(CanvasChapters.Diagnose(canvas).Count == 0, "章节归属不应有诊断问题");
+
+    // 视觉设定只作为引用：设定库有 2 个实体，画布上没有对应的常驻节点
+    Expect(canvas.Entities.Count == 2, "设定库应有 2 个实体：" + canvas.Entities.Count);
+    Expect(canvas.Entities.All(entity => entity.Variants.Count >= 1), "每个实体应至少有一个默认变体");
+    Expect(canvas.Nodes.All(node => node.Category is not (NodeCategory.Character or NodeCategory.Scene)),
+        "角色与场景不得各占一个常驻画布节点");
+
+    var first = shots.Single(shot => shot.Title == "镜头一：雨巷全景");
+    Expect(first.References.Count == 2, "镜头一应引用 2 个设定：" + first.References.Count);
+    var resolved = canvas.ResolveReferences(first);
+    Expect(resolved.Count == 2 && resolved.Any(item => item.Entity.Name == "沈砚") && resolved.Any(item => item.Entity.Name == "雨巷"),
+        "镜头一的引用应能解析到角色与场景");
+    Expect(resolved.All(item => !item.VersionMissing), "跟随最新的引用不应处于版本缺失状态");
+
+    // 分镜的提示词把引用写进去，供出图使用
+    var prompt = canvas.DescribeReferenceForPrompt(first);
+    Expect(prompt.Contains("沈砚") && prompt.Contains("雨巷"), "分镜提示词应包含引用的角色与场景：" + prompt);
+
+    // 保存并重开：链路结果必须落盘一致
+    var canvasPath = Path.Combine(stores.CanvasDirectory, "premise.json");
+    CanvasSaveService.Save(new RecentCanvasState("雨夜追凶", 0, "", "", 512, 512, 20, 7, "", canvas), canvasPath);
+    Expect(CanvasOpenService.TryRead(canvasPath, out var reopened, out var openError), "应能重开画布：" + openError);
+    Expect(reopened.Canvas.Nodes.Count(node => node.Category == NodeCategory.Storyboard) == 3, "重开后分镜应保留");
+    Expect(reopened.Canvas.Entities.Count == 2, "重开后设定库应保留");
+    var reopenedShot = reopened.Canvas.Nodes.Single(node => node.Title == "镜头一：雨巷全景");
+    Expect(reopenedShot.References.Count == 2, "重开后分镜引用应保留");
+    Expect(CanvasChapters.ResolveChapterId(reopened.Canvas, reopenedShot) is not null, "重开后章节归属应保留");
+}
+
+/// <summary>目标 5 端到端：引用出图 → 真实落盘 → 成品 → 失败重试与取消。</summary>
+static void PremiseToFinishedImageAndRecovery()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+    var workspace = NewWorkspace();
+    var canvas = new WorkflowCanvasState();
+    var batch = PremiseBatch();
+    var applied = AgentActionExecutor.Apply(batch, canvas, workspace, FileWriteMode.Apply, null, null);
+    Expect(applied.Errors.Count == 0, "准备用的批次应全部应用：" + string.Join("；", applied.Errors));
+    var shot = canvas.Nodes.Single(node => node.Title == "镜头一：雨巷全景");
+    var prompt = canvas.DescribeReferenceForPrompt(shot);
+
+    var assetDirectory = AssetStore.EnsureDirectory();
+    var jobPath = Path.Combine(stores.Root, "jobs.db");
+    var session = new SessionContext
+    {
+        SessionId = Guid.NewGuid(),
+        UserId = Guid.NewGuid(),
+        ServerClaims = new HashSet<string>(["skill.invoke", "job.cancel"])
+    };
+    var invocation = new Invocation
+    {
+        InvocationId = Guid.NewGuid(),
+        Tool = "text_to_image",
+        Capability = Capability.TextToImage,
+        Channel = "local",
+        Inputs = new Dictionary<string, JsonElement> { ["prompt"] = JsonSerializer.SerializeToElement(prompt) }
+    };
+
+    // 出图：真实写文件 + 任务记录落盘
+    string producedPath;
+    Guid producedJobId;
+    using (var store = new SqliteJobStore(jobPath))
+    {
+        var executor = new FileWritingExecutor(assetDirectory, failFirst: 0);
+        var service = new SingleMachineExecutionService(executor, store);
+        var result = service.StartAsync(session, invocation, "premise-image-1").GetAwaiter().GetResult();
+        Expect(result.State == JobState.Succeeded, "出图任务应成功：" + result.ErrorMessage);
+        Expect(result.Outputs.Count == 1 && result.Outputs[0].Ref.StartsWith("asset://", StringComparison.Ordinal),
+            "任务输出应是资产目录内的可移植引用：" + result.Outputs.FirstOrDefault()?.Ref);
+        producedPath = executor.LastOutputPath!;
+        Expect(File.Exists(producedPath), "任务应把图片真实写到磁盘：" + producedPath);
+        Expect(store.LoadAll().Any(item => item.JobId == result.JobId && item.State == JobState.Succeeded), "任务记录应落盘");
+        producedJobId = result.JobId;
+
+        // 成品：把产出挂到分镜上，保存并重开仍一致
+        shot.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = result.Outputs[0].Ref });
+        var canvasPath = Path.Combine(stores.CanvasDirectory, "premise-image.json");
+        CanvasSaveService.Save(new RecentCanvasState("雨夜追凶", 0, "", "", 512, 512, 20, 7, "", canvas), canvasPath);
+        Expect(CanvasOpenService.TryRead(canvasPath, out var reopened, out var openError), "应能重开画布：" + openError);
+        var reopenedShot = reopened.Canvas.Nodes.Single(node => node.Title == "镜头一：雨巷全景");
+        Expect(reopenedShot.Attachments.Count == 1, "重开后成品附件应保留");
+        Expect(AssetStore.Resolve(reopenedShot.Attachments[0].Reference) is not null, "重开后成品图片应能按引用解析到文件");
+    }
+
+    // 失败重试：第一次写盘失败 → 重试成功，尝试链可追溯
+    var flaky = new FileWritingExecutor(assetDirectory, failFirst: 1);
+    var retryService = new SingleMachineExecutionService(flaky);
+    var failed = retryService.StartAsync(session, invocation, "premise-image-2").GetAwaiter().GetResult();
+    Expect(failed.State == JobState.Failed, "第一次出图应失败");
+    Expect(!flaky.LastWriteSucceeded, "失败那次不应留下产出文件");
+    var retried = retryService.RetryAsync(session, failed.JobId, "premise-image-3").GetAwaiter().GetResult();
+    Expect(retried.State == JobState.Succeeded && retried.Attempt == 2, "重试后应成功并记为第 2 次尝试：" + retried.State);
+    Expect(retried.RetryOfJobId == failed.JobId && retried.RootJobId == failed.JobId, "重试血缘应正确");
+    Expect(retryService.GetAttemptChain(retried.JobId).Count == 2, "尝试链应有 2 次尝试");
+
+    // 取消：运行中的任务可取消并进入终态
+    var blockingService = new SingleMachineExecutionService(new BlockingExecutor());
+    var pending = blockingService.StartAsync(session, invocation, "premise-image-4");
+    SpinWait.SpinUntil(() => blockingService.GetJobs(session.UserId).Any(job => job.State == JobState.Running), 2000);
+    var pendingJobId = blockingService.GetJobs(session.UserId).Single().JobId;
+    blockingService.Cancel(session, pendingJobId);
+    Expect(pending.GetAwaiter().GetResult().State == JobState.Cancelled, "运行中的任务取消后应进入 Cancelled");
+
+    // 落盘的任务记录在重开数据库后仍可读，且出图任务与尝试链完整
+    using var reopenedStore = new SqliteJobStore(jobPath);
+    var restoredService = new SingleMachineExecutionService(new FileWritingExecutor(assetDirectory, 0), reopenedStore);
+    Expect(restoredService.TryGet(producedJobId, out var reloaded) && reloaded!.State == JobState.Succeeded, "重开后出图任务应仍在");
+}
+
+/// <summary>智能导入：三种常见文本形态都要能识别出类型、基础地址、模型与密钥。</summary>
+static void ProviderImportDetectsKinds()
+{
+    // ① ComfyUI：地址 + object_info + checkpoint 文件名
+    var comfy = ProviderImporter.Inspect(
+        "本地 ComfyUI：http://127.0.0.1:8188/object_info\ncheckpoint: sd_xl_base_1.0.safetensors\nPOST /prompt 提交工作流");
+    Expect(comfy.Kind == ProviderKind.ComfyUi, "应识别为 ComfyUI：" + ProviderImporter.KindName(comfy.Kind));
+    Expect(comfy.BaseUrl == "http://127.0.0.1:8188", "ComfyUI 地址应归一化到根：" + comfy.BaseUrl);
+    Expect(comfy.Checkpoint == "sd_xl_base_1.0.safetensors", "应识别出 checkpoint：" + comfy.Checkpoint);
+    Expect(comfy.Signals.Any(signal => signal.Contains("object_info")), "应列出命中的判据供核对");
+    Expect(comfy.Warnings.Count == 0, "信息齐全时不应有需要确认的提示：" + string.Join("；", comfy.Warnings));
+
+    // ② 画图接口：curl 形态（地址 + Bearer 密钥 + 模型）
+    var image = ProviderImporter.Inspect(
+        "curl https://api.example.com/v1/images/generations \\\n -H \"Authorization: Bearer sk-abcdef1234567890\" \\\n -d '{\"model\":\"dall-e-3\",\"prompt\":\"一只猫\"}'");
+    Expect(image.Kind == ProviderKind.ImageApi, "应识别为画图接口：" + ProviderImporter.KindName(image.Kind));
+    Expect(image.BaseUrl == "https://api.example.com/v1", "画图接口地址应归一化到 /v1：" + image.BaseUrl);
+    Expect(image.Model == "dall-e-3", "应识别出图像模型：" + image.Model);
+    Expect(image.ApiKey == "sk-abcdef1234567890", "应识别出 API 密钥：" + image.ApiKey);
+    Expect(image.Signals.Any(signal => signal.Contains("sk-a")), "密钥判据应脱敏显示：" + string.Join("；", image.Signals));
+
+    // ③ 画视频接口：JSON 配置形态
+    var video = ProviderImporter.Inspect(
+        "{\"endpoint\":\"https://api.example.com/v1/video/generations\",\"model\":\"veo-3\",\"api_key\":\"sk-video1234567890\",\"mode\":\"text2video\"}");
+    Expect(video.Kind == ProviderKind.VideoApi, "应识别为画视频接口：" + ProviderImporter.KindName(video.Kind));
+    Expect(video.BaseUrl == "https://api.example.com/v1", "画视频接口地址应归一化到 /v1：" + video.BaseUrl);
+    Expect(video.Model == "veo-3", "应识别出视频模型：" + video.Model);
+
+    // 归一化：不改动已经是基础地址的输入
+    Expect(ProviderImporter.NormalizeBaseUrl("https://api.example.com/v1") == "https://api.example.com/v1", "基础地址不应被改动");
+    Expect(ProviderImporter.NormalizeBaseUrl("https://api.example.com/chat/completions") == "https://api.example.com", "应剥掉具体接口路径");
+}
+
+/// <summary>智能导入：判不出类型时如实返回「未能判断」，不猜是画图还是画视频。</summary>
+static void ProviderImportRefusesToGuess()
+{
+    var empty = ProviderImporter.Inspect("   ");
+    Expect(empty.Kind == ProviderKind.Unknown && !empty.HasAnything, "空输入应返回空结论");
+
+    var bare = ProviderImporter.Inspect("https://api.example.com/v1");
+    Expect(bare.Kind == ProviderKind.Unknown, "只有地址时不应猜类型");
+    Expect(bare.BaseUrl == "https://api.example.com/v1", "地址仍应归一化出来供用户确认：" + bare.BaseUrl);
+    Expect(bare.Warnings.Any(warning => warning.Contains("手动选择类型")), "应提示手动选择类型：" + string.Join("；", bare.Warnings));
+
+    var ambiguous = ProviderImporter.Inspect("同一网关既支持 images/generations 出图，也支持 text2video 画视频");
+    Expect(ambiguous.Kind == ProviderKind.Unknown, "画图与画视频判据同时命中时不应替用户选");
+    Expect(ambiguous.Warnings.Any(warning => warning.Contains("无法确定")), "应说明有歧义：" + string.Join("；", ambiguous.Warnings));
+
+    var nothing = ProviderImporter.Inspect("这是一段和接口无关的说明文字");
+    Expect(nothing.Kind == ProviderKind.Unknown && nothing.BaseUrl.Length == 0, "无关文本不应识别出地址");
+    Expect(nothing.Warnings.Any(warning => warning.Contains("没有识别到可用地址")), "应提示没有地址：" + string.Join("；", nothing.Warnings));
+}
+
+/// <summary>智能导入：写入只涉及识别到的字段，其余配置原样保留，密钥落盘为密文。</summary>
+static void ProviderImportAppliesWithoutLosingConfig()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var config = new AiProviderConfig
+    {
+        Endpoint = "https://text.example.com/v1",
+        Model = "deepseek-chat",
+        ApiKey = "sk-existing1234567890",
+        Theme = "Light",
+        ContextWindow = 128000,
+        MaxOutputTokens = 4096,
+        AgentWorkspace = Path.Combine(stores.Root, "agent"),
+        SendSamplingParameters = false,
+        SupportsImageInput = true,
+        VideoMaxReferenceImages = 4,
+        VideoDefaultSeconds = 8
+    };
+
+    var draft = ProviderImporter.Inspect("https://gate.example.com/v1/images/generations\nmodel: flux-1-dev\nAuthorization: Bearer sk-brandnew0987654321");
+    Expect(draft.Kind == ProviderKind.ImageApi, "应识别为画图接口");
+
+    var preview = ProviderImporter.DescribeChanges(config, draft);
+    Expect(preview.Count == 3, "预览应列出 3 项改动（图像地址、图像模型、密钥）：" + string.Join("；", preview));
+    Expect(preview.Any(item => item.Contains("图像接口地址")), "预览应包含图像接口地址");
+    Expect(preview.Any(item => item.Contains("图像模型")), "预览应包含图像模型");
+    Expect(preview.All(item => !item.Contains("sk-brandnew0987654321")), "预览不得回显完整密钥：" + string.Join("；", preview));
+
+    var applied = ProviderImporter.Apply(config, draft);
+    Expect(applied.Count == 3, "应写入 3 项：" + string.Join("；", applied));
+    Expect(config.ImageEndpoint == "https://gate.example.com/v1", "图像地址应写入：" + config.ImageEndpoint);
+    Expect(config.ImageModel == "flux-1-dev", "图像模型应写入：" + config.ImageModel);
+    Expect(config.ApiKey == "sk-brandnew0987654321", "密钥应更新");
+
+    // 其余配置必须原样保留（这正是设置对话框重建对象时会丢的那批字段）。
+    Expect(config.Endpoint == "https://text.example.com/v1", "文本地址不应被改动");
+    Expect(config.Model == "deepseek-chat", "文本模型不应被改动");
+    Expect(config.Theme == "Light", "主题不应被重置");
+    Expect(config.ContextWindow == 128000 && config.MaxOutputTokens == 4096, "上下文窗口与最大输出不应被重置");
+    Expect(config.AgentWorkspace == Path.Combine(stores.Root, "agent"), "Agent 工作目录不应被重置");
+    Expect(!config.SendSamplingParameters && config.SupportsImageInput, "采样与多模态开关不应被重置");
+    Expect(config.VideoMaxReferenceImages == 4 && config.VideoDefaultSeconds == 8, "视频配置不应被重置");
+
+    // 幂等：同一份文本再导入一次，没有新改动。
+    Expect(ProviderImporter.DescribeChanges(config, draft).Count == 0, "同样内容再导入不应产生改动");
+    Expect(ProviderImporter.Apply(config, draft).Count == 0, "同样内容再应用不应写入任何字段");
+
+    // 落盘：密钥是密文，明文不出现在配置文件里。
+    Expect(AiProviderSettings.Save(config), "配置应能写入隔离的配置目录");
+    var onDisk = File.ReadAllText(AiProviderSettings.ConfigFilePath);
+    Expect(onDisk.Contains("dpapi:"), "密钥应以 dpapi 密文落盘");
+    Expect(!onDisk.Contains("sk-brandnew0987654321"), "配置文件里不得出现明文密钥");
+
+    // 视频配置语义：有模型 + 能解析地址才算已配置；空地址时复用主接口地址。
+    var videoConfig = new AiProviderConfig { Endpoint = "https://text.example.com/v1", VideoModel = "veo-3" };
+    Expect(videoConfig.IsVideoConfigured && videoConfig.EffectiveVideoEndpoint == "https://text.example.com/v1", "视频地址留空应复用主接口地址");
+    Expect(!new AiProviderConfig().IsVideoConfigured, "没填模型时不应视为已配置");
+}
+
+/// <summary>
+/// 接口导入向导的解析层：HTML、OpenAPI 与纯文本三种形态都要能解析出接口、模型与尺寸档位。
+/// 关键回归点是「块归属」——同一页里既写出图又写出视频时，出图块绝不能读到出视频的模型名。
+/// </summary>
+static void ApiDocAnalyzerReadsDocs()
+{
+    var html = """
+    <html><head><title>出图与出视频接口</title></head><body>
+    <h1>图像接口</h1>
+    <p>POST /v1/images/generations</p>
+    <p>model: flux-1-dev</p>
+    <p>尺寸：1k / 2k</p>
+    <h1>视频接口</h1>
+    <p>POST /v1/video/generations</p>
+    <p>model: veo-3</p>
+    <p>720p</p>
+    </body></html>
+    """;
+
+    var report = ApiDocAnalyzer.Analyze(html, "https://docs.example.com/api");
+    Expect(report.Format == ApiDocFormat.Html, "应识别为 HTML：" + report.Format);
+    Expect(report.BaseUrl == "https://docs.example.com/v1", "应推导出带版本前缀的基础地址：" + report.BaseUrl);
+    Expect(report.Title == "出图与出视频接口", "应读出页面标题：" + report.Title);
+    Expect(report.ImageOps.Count == 1 && report.VideoOps.Count == 1,
+        $"应各解析出 1 条接口：出图 {report.ImageOps.Count}、出视频 {report.VideoOps.Count}");
+
+    var imageOp = report.ImageOps[0];
+    Expect(imageOp.Capability == Capability.TextToImage, "应判为文生图：" + imageOp.Capability);
+    Expect(imageOp.Models.Count == 1 && imageOp.Models[0] == "flux-1-dev",
+        "出图接口的模型只应含本块的模型：" + string.Join("、", imageOp.Models));
+    Expect(!imageOp.Models.Contains("veo-3"), "出图接口不得串到出视频的模型名");
+    Expect(imageOp.Sizes.Contains("1k") && imageOp.Sizes.Contains("2k"),
+        "应读出 1k / 2k 尺寸档位（保留文档写法）：" + string.Join("、", imageOp.Sizes));
+
+    var videoOp = report.VideoOps[0];
+    Expect(videoOp.Capability == Capability.TextToVideo, "应判为文生视频：" + videoOp.Capability);
+    Expect(videoOp.Models.Contains("veo-3"), "出视频接口应读到 veo-3：" + string.Join("、", videoOp.Models));
+    Expect(!videoOp.Models.Contains("flux-1-dev"), "出视频接口不得串到出图的模型名");
+    Expect(videoOp.Sizes.Contains("720p"), "应读出 720p：" + string.Join("、", videoOp.Sizes));
+
+    // 尺寸折算：档位与分辨率都要能折成画幅，折不了就返回 null 交给调用方留空。
+    Expect(IsSize(ApiDocAnalyzer.ParseSize("1k"), 1024, 1024), "1k 应折算为 1024x1024");
+    Expect(IsSize(ApiDocAnalyzer.ParseSize("2k"), 2048, 2048), "2k 应折算为 2048x2048");
+    Expect(IsSize(ApiDocAnalyzer.ParseSize("720p"), 1280, 720), "720p 应折算为 1280x720");
+    Expect(IsSize(ApiDocAnalyzer.ParseSize("1024x1536"), 1024, 1536), "显式 WxH 应原样折算");
+    Expect(ApiDocAnalyzer.SizeLabel("1024x1024") == "1K", "正方形应显示为档位标签：" + ApiDocAnalyzer.SizeLabel("1024x1024"));
+    Expect(ApiDocAnalyzer.SizeLabel("720p") == "720p", "分辨率应沿用文档里的叫法：" + ApiDocAnalyzer.SizeLabel("720p"));
+    Expect(ApiDocAnalyzer.ParseSize("随便写的") is null, "无法折算的尺寸应返回 null");
+
+    // OpenAPI：基础地址取 servers，出图与出视频各自归类。
+    var openApi = """
+    {"openapi":"3.0.0","info":{"title":"图库接口"},"servers":[{"url":"https://api.example.com/v1"}],
+     "paths":{"/images/generations":{"post":{"requestBody":{"content":{"application/json":{"example":{"model":"gpt-image-1","size":"1024x1024"}}}}}},
+              "/images/edits":{"post":{"requestBody":{"content":{"application/json":{"example":{"model":"gpt-image-1"}}}}}},
+              "/video/generations":{"post":{"requestBody":{"content":{"application/json":{"example":{"model":"veo-3","resolution":"1080p"}}}}}}}}
+    """;
+    var api = ApiDocAnalyzer.Analyze(openApi, "https://docs.example.com/openapi.json");
+    Expect(api.Format == ApiDocFormat.OpenApiJson, "应识别为 OpenAPI：" + api.Format);
+    Expect(api.BaseUrl == "https://api.example.com/v1", "应取 servers 里的基础地址：" + api.BaseUrl);
+    Expect(api.Title == "图库接口", "应取 info.title：" + api.Title);
+    Expect(api.ImageOps.Count == 2, "OpenAPI 应解析出 2 条出图接口：" + api.ImageOps.Count);
+    Expect(api.VideoOps.Count == 1, "OpenAPI 应解析出 1 条出视频接口：" + api.VideoOps.Count);
+    Expect(api.ImageOps.Any(op => op.Capability == Capability.ImageToImage), "images/edits 应判为图生图");
+
+    // 图生视频优先级：路径同时含 image 与 video 时必须先判视频。
+    var i2v = ApiDocAnalyzer.Analyze("POST /v1/image2video/generations\nmodel: kling-v1", "https://docs.example.com/i2v");
+    Expect(i2v.Ops.Count == 1 && i2v.Ops[0].Capability == Capability.ImageToVideo,
+        "image2video 应判为图生视频：" + (i2v.Ops.Count == 0 ? "没解析到" : i2v.Ops[0].Capability.ToString()));
+
+    // 空内容：如实报出抓取问题，不抛异常也不谎称「文档里没有接口」。
+    var empty = ApiDocAnalyzer.Analyze("   ", "https://docs.example.com");
+    Expect(!empty.HasAnything && empty.Warnings.Count > 0, "空内容应给出可读提示而不是异常");
+}
+
+/// <summary>
+/// 按接口文档建技能：一条父技能（覆盖文档里的每条接口）+ 按「模型 × 尺寸」派生的池子子技能，
+/// 名字就是用户说的那种「生图池1 1K」「生图池2 2K」。
+/// </summary>
+static void ApiSkillFactoryBuildsPools()
+{
+    var html = """
+    <h1>图像接口</h1>
+    <p>POST /v1/images/generations</p>
+    <p>model: flux-1-dev</p>
+    <p>尺寸：1k</p>
+    <h1>高清出图</h1>
+    <p>POST /v1/hd/generations</p>
+    <p>model: seedream-3</p>
+    <p>尺寸：2k</p>
+    <h1>视频接口</h1>
+    <p>POST /v1/video/generations</p>
+    <p>model: veo-3</p>
+    <p>720p / 1080p</p>
+    """;
+
+    var report = ApiDocAnalyzer.Analyze(html, "https://docs.example.com/api");
+    Expect(report.ImageOps.Count == 2 && report.VideoOps.Count == 1,
+        $"应解析出 2 条出图与 1 条出视频：{report.ImageOps.Count}/{report.VideoOps.Count}");
+
+    var plan = ApiSkillFactory.Build(report);
+    var names = plan.Skills.Select(skill => skill.Name).ToList();
+    Expect(plan.ImageSkills.Count == 3, $"出图技能应为 1 父 + 2 池：{string.Join("、", names)}");
+    Expect(plan.VideoSkills.Count == 3, $"出视频技能应为 1 父 + 2 池：{string.Join("、", names)}");
+    Expect(names.Contains("API 生图") && names.Contains("API 生视频"), "应各建一条父技能：" + string.Join("、", names));
+    Expect(names.Contains("生图池1 1K"), "第一个模型池应命名为「生图池1 1K」：" + string.Join("、", names));
+    Expect(names.Contains("生图池2 2K"), "第二个模型池应命名为「生图池2 2K」：" + string.Join("、", names));
+    Expect(names.Contains("生视频池1 720p") && names.Contains("生视频池1 1080p"),
+        "同一个模型的多个尺寸应各出一条子技能：" + string.Join("、", names));
+
+    var parent = plan.Skills.First(skill => skill.Id.EndsWith("-image", StringComparison.Ordinal));
+    Expect(parent.Definition.Steps.Count == 2, "父技能应为每条接口出一步：" + parent.Definition.Steps.Count);
+    Expect(parent.Definition.Steps.All(step => step.Capability == nameof(Capability.TextToImage)), "父技能步骤能力应来自文档");
+    Expect(!parent.IsPool, "父技能不应被当成池子技能");
+
+    var pool1 = plan.Skills.First(skill => skill.Name == "生图池1 1K");
+    Expect(pool1.IsPool && pool1.Definition.Steps.Count == 1, "池子技能应只有一步");
+    var poolStep = pool1.Definition.Steps[0];
+    Expect(poolStep.Model == "flux-1-dev", "池子步骤应带上自己的模型名：" + poolStep.Model);
+    Expect(poolStep.Width == 1024 && poolStep.Height == 1024, $"1K 应折算为 1024x1024：{poolStep.Width}x{poolStep.Height}");
+
+    var videoPool = plan.Skills.First(skill => skill.Name == "生视频池1 720p");
+    Expect(videoPool.Definition.Steps[0].Capability == nameof(Capability.TextToVideo), "出视频池的能力应为文生视频");
+    Expect(videoPool.Definition.Steps[0].Width == 1280 && videoPool.Definition.Steps[0].Height == 720, "720p 应折算为 1280x720");
+
+    var fileNames = plan.Skills.Select(skill => skill.FileName).ToList();
+    Expect(fileNames.Distinct(StringComparer.OrdinalIgnoreCase).Count() == fileNames.Count,
+        "技能文件名不能重复：" + string.Join("、", fileNames));
+    Expect(plan.Skills.All(skill => skill.Definition.Id.All(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_')),
+        "技能 ID 必须是稳定的 ASCII 片段：" + string.Join("、", plan.Skills.Select(skill => skill.Definition.Id)));
+
+    // 文档没写模型名：只出一个「未声明模型」池，名字朴素也不编一个模型出来。
+    var bare = ApiSkillFactory.Build(ApiDocAnalyzer.Analyze("POST /v1/images/generations\n尺寸：1k", "https://docs.example.com/bare"));
+    var barePool = bare.ImageSkills.First(skill => skill.IsPool);
+    Expect(barePool.Name == "生图池1 1K", "没写模型时池名应只带尺寸：" + barePool.Name);
+    Expect(barePool.Definition.Steps[0].Model.Length == 0, "没写模型时步骤里不得编造模型名");
+    Expect(bare.Warnings.Any(warning => warning.Contains("模型")), "应提示模型名缺失：" + string.Join("；", bare.Warnings));
+
+    // 图生图：步骤必须声明用变体当前参考图，否则运行时会因为「没有参考图」失败。
+    var edits = ApiSkillFactory.Build(ApiDocAnalyzer.Analyze("POST /v1/images/edits\nmodel: gpt-image-1", "https://docs.example.com/edits"));
+    var editsPool = edits.ImageSkills.First(skill => skill.IsPool);
+    Expect(editsPool.Definition.Steps[0].Capability == nameof(Capability.ImageToImage), "images/edits 的技能能力应为图生图");
+    Expect(editsPool.Definition.Steps[0].ReferenceFrom == "variant", "图生图步骤应声明参考图来源：" + editsPool.Definition.Steps[0].ReferenceFrom);
+}
+
+/// <summary>
+/// 技能落盘：写出来的 JSON 必须能被技能库原样装载（含模型名与画幅），
+/// 重复导入只覆盖同名文件，目录不可写时如实报错而不是谎报成功。
+/// </summary>
+static void ApiSkillFilesRoundTrip()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "df-api-skills-" + Guid.NewGuid().ToString("N")[..8]);
+    var previous = Environment.GetEnvironmentVariable("DREAMFORGE_SKILL_DIR");
+    try
+    {
+        Environment.SetEnvironmentVariable("DREAMFORGE_SKILL_DIR", directory);
+        var report = ApiDocAnalyzer.Analyze("POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k", "https://docs.example.com/api");
+        var plan = ApiSkillFactory.Build(report);
+        Expect(plan.HasAnything, "应生成技能：" + string.Join("；", plan.Warnings));
+
+        var result = ApiSkillFactory.Write(plan);
+        Expect(result.AllWritten, "技能应全部写入：" + string.Join("；", result.Errors));
+        Expect(result.Written.Count == plan.Skills.Count, $"应写出 {plan.Skills.Count} 个文件，实际 {result.Written.Count}");
+        Expect(result.Written.All(File.Exists), "写入的文件都应真实存在");
+
+        var (loaded, errors) = SkillLibrary.Load();
+        Expect(errors.Count == 0, "技能库装载不应报错：" + string.Join("；", errors));
+        Expect(loaded.Count == plan.Skills.Count, $"技能库应装载到 {plan.Skills.Count} 条技能，实际 {loaded.Count}");
+        var pool = loaded.FirstOrDefault(skill => skill.Name.StartsWith("生图池", StringComparison.Ordinal));
+        Expect(pool is not null, "装载后应能找到池子技能");
+        Expect(pool!.Steps.Count == 1 && pool.Steps[0].Model == "flux-1-dev", "装载后池子技能应保留模型名：" + pool.Steps[0].Model);
+        Expect(pool.Steps[0].Width == 1024 && pool.Steps[0].Height == 1024, "装载后池子技能应保留画幅");
+        Expect(!pool.NeedsVideoProvider && pool.NeedsImageProvider, "出图技能应要求图像链路且不要求视频链路");
+        Expect(!pool.HasUnsupportedCapability, "文档生成的技能不应含执行器不支持的能力");
+
+        // 同一份文档再导入一次：只覆盖同名文件，不新增也不删别的技能。
+        var again = ApiSkillFactory.Write(plan);
+        Expect(again.Written.Count == result.Written.Count, "重复导入应覆盖同名文件而不是新增");
+        var (reloaded, reloadErrors) = SkillLibrary.Load();
+        Expect(reloadErrors.Count == 0 && reloaded.Count == loaded.Count, "重复导入后技能条数不应变化");
+
+        // 目录不可写（这里用同名文件占住路径）：必须报错，不能显示成功。
+        var blocked = Path.Combine(directory, "blocked");
+        File.WriteAllText(blocked, "占位文件");
+        var blockedResult = ApiSkillFactory.Write(plan, blocked);
+        Expect(blockedResult.Written.Count == 0 && blockedResult.Errors.Count > 0,
+            "目录不可写时应报错：" + string.Join("；", blockedResult.Errors));
+        Expect(!blockedResult.AllWritten, "目录不可写时不得报成功");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("DREAMFORGE_SKILL_DIR", previous);
+        try { if (Directory.Exists(directory)) Directory.Delete(directory, true); } catch (IOException) { }
+    }
+}
+
+/// <summary>
+/// 出视频能力：技能执行器要能跑出视频步骤（模型与画幅逐步骤生效），
+/// 没有视频链路时如实失败并且不写回任何附件，纯出视频技能也不该被「没配出图模型」拦住。
+/// </summary>
+static void VideoCapabilityRunsThroughRunner()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("少年");
+    var target = new SkillTarget { Entity = entity, Variant = variant };
+
+    var videoSkill = new SkillDefinition
+    {
+        Id = "api-video-pool-1",
+        Name = "生视频池1 720p",
+        Steps = new List<SkillStep>
+        {
+            new()
+            {
+                Id = "pool",
+                Name = "文生视频",
+                Capability = nameof(Capability.TextToVideo),
+                Model = "veo-3",
+                Prompt = "{name} 动起来",
+                Width = 1280,
+                Height = 720,
+                OutputName = "视频"
+            }
+        }
+    };
+
+    Expect(videoSkill.NeedsVideoProvider && !videoSkill.NeedsImageProvider, "纯出视频技能不应要求图像链路");
+    Expect(!videoSkill.HasUnsupportedCapability, "出视频应是执行器支持的能力");
+
+    // 没有出视频实现：如实报出，不产出任何附件。
+    var unconfigured = VideoProviderFactory.Create(new AiProviderConfig());
+    Expect(!unconfigured.IsConfigured, "未接入出视频实现时不应视为已配置");
+    var noProvider = SkillRunner.RunAsync(videoSkill, target, new UnconfiguredImageProvider()).GetAwaiter().GetResult();
+    Expect(!noProvider.Succeeded && noProvider.Message.Contains("出视频"), "应提示需要出视频链路：" + noProvider.Message);
+    Expect(variant.Attachments.Count == 0, "失败时不得写入任何附件");
+
+    // 图像链路没配置也不该拦住纯出视频技能（错误信息必须是视频链路，而不是图像模型）。
+    var blockedByImage = SkillRunner.RunAsync(videoSkill, target, new UnconfiguredImageProvider(), null, default, unconfigured)
+        .GetAwaiter().GetResult();
+    Expect(!blockedByImage.Succeeded, "没有出视频实现时仍应失败");
+    Expect(!blockedByImage.Message.Contains("尚未配置图像模型"), "纯出视频技能不得报图像模型未配置：" + blockedByImage.Message);
+
+    // 接入实现后：按步骤里的模型与画幅跑，产出视频附件。
+    var fakeVideo = new RecordingVideoProvider(stores.AssetDirectory);
+    var configured = SkillRunner.RunAsync(videoSkill, target, new UnconfiguredImageProvider(), null, default, fakeVideo)
+        .GetAwaiter().GetResult();
+    Expect(configured.Succeeded, "有出视频链路时应成功：" + configured.Message);
+    Expect(fakeVideo.LastRequest?.Model == "veo-3", "应把步骤里的模型传给视频链路：" + fakeVideo.LastRequest?.Model);
+    Expect(fakeVideo.LastRequest?.Width == 1280 && fakeVideo.LastRequest?.Height == 720, "应把步骤里的画幅传给视频链路");
+    Expect(configured.Produced.Count == 1 && configured.Produced[0].Kind == AttachmentKind.Video, "产出应是视频附件");
+    Expect(variant.Attachments.Count == 1 && variant.Attachments[0].Kind == AttachmentKind.Video, "视频应写入变体附件");
+    Expect(configured.Message.Contains("个视频"), "结果说明应指出产出是视频：" + configured.Message);
+
+    // 图生视频缺参考图：如实失败，而不是拿文生视频凑数。
+    var i2v = new SkillDefinition
+    {
+        Id = "api-video-pool-i2v",
+        Name = "图生视频",
+        Steps = new List<SkillStep>
+        {
+            new() { Id = "s", Name = "图生视频", Capability = nameof(Capability.ImageToVideo), ReferenceFrom = "variant", Prompt = "动起来" }
+        }
+    };
+    var i2vResult = SkillRunner.RunAsync(i2v, target, new UnconfiguredImageProvider(), null, default, fakeVideo)
+        .GetAwaiter().GetResult();
+    Expect(!i2vResult.Succeeded && i2vResult.Message.Contains("参考图"), "图生视频缺参考图应如实失败：" + i2vResult.Message);
+    Expect(variant.Attachments.Count == 1, "失败步骤不得追加附件");
+
+    // 出图：步骤里的模型名要覆盖设置里的默认模型（池子技能靠它区分）。
+    var imageSkill = new SkillDefinition
+    {
+        Id = "api-image-pool-1",
+        Name = "生图池1 1K",
+        Steps = new List<SkillStep>
+        {
+            new()
+            {
+                Id = "pool",
+                Name = "文生图",
+                Capability = nameof(Capability.TextToImage),
+                Model = "flux-1-dev",
+                Prompt = "{name}",
+                Width = 1024,
+                Height = 1024,
+                OutputName = "出图"
+            }
+        }
+    };
+    var fakeImage = new RecordingImageProvider(stores.AssetDirectory);
+    var imageResult = SkillRunner.RunAsync(imageSkill, target, fakeImage).GetAwaiter().GetResult();
+    Expect(imageResult.Succeeded, "出图步骤应成功：" + imageResult.Message);
+    Expect(fakeImage.LastRequest?.Model == "flux-1-dev", "应把步骤里的模型传给出图链路：" + fakeImage.LastRequest?.Model);
+    Expect(variant.Attachments.Count == 2, "出图产出应追加到变体附件：" + variant.Attachments.Count);
+}
+
+/// <summary>尺寸比较：解析结果是可空的，比较时统一走这里，避免测试里写一堆 .Value。</summary>
+static bool IsSize((int Width, int Height)? size, int width, int height) =>
+    size is { } value && value.Width == width && value.Height == height;
+
+/// <summary>
+/// 目标 5 返工 R2/R3：批次提交必须分阶段如实报告。走**真实提交入口**
+/// （<see cref="AgentBatchCommitter"/> + <see cref="AgentActionExecutor"/> + 真实画布与真实文件），
+/// 覆盖四件事：保存失败不报成功、重试保存不重复应用动作、重复提交被拒且画布不变、
+/// 单动作「改了一半」不冒充成功，以及文件副作用有可执行的补偿。
+/// </summary>
+static void AgentBatchCommitStagesAreHonest()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var committer = new AgentBatchCommitter(new AgentCommitLedger());
+    var workspace = NewWorkspace();
+    var canvas = new WorkflowCanvasState();
+    canvas.Nodes.Add(new WorkflowNode { Title = "第一章 分镜", Category = NodeCategory.Storyboard });
+
+    var existingFile = Path.Combine(workspace, "notes.md");
+    File.WriteAllText(existingFile, "原始内容");
+    var createdFile = Path.Combine(workspace, "new-file.md");
+
+    var actions = new List<AgentAction>
+    {
+        new() { Kind = "create_node", Title = "新节点", Content = "正文", NodeCategory = "Storyboard" },
+        new() { Kind = "write_file", Path = "notes.md", Content = "被 Agent 改写" },
+        new() { Kind = "write_file", Path = "new-file.md", Content = "新文件内容" }
+    };
+
+    var snapshots = new List<FileSnapshot>();
+    var applyCalls = 0;
+    AgentApplyResult Apply()
+    {
+        applyCalls++;
+        return AgentActionExecutor.Apply(actions, canvas, workspace, FileWriteMode.Apply, snapshots);
+    }
+
+    // 1) 保存失败：动作确实应用了，但阶段必须如实报「保存失败」，且给出只重存的续跑语义
+    var failed = committer.Commit(AgentCommitLedger.NewBatchId(), actions, Apply, save: () => false);
+    Expect(failed.Stage == AgentCommitStage.SaveFailed && !failed.Succeeded, "保存失败不得报成功：" + failed.Stage);
+    Expect(failed.CanRetrySave, "保存失败应给出「只重存」的续跑语义");
+    Expect(applyCalls == 1 && canvas.Nodes.Count == 2, "动作应已应用到画布");
+    Expect(File.ReadAllText(existingFile) == "被 Agent 改写" && File.Exists(createdFile), "文件副作用应已发生");
+
+    // 2) 同一批次号重试保存：只重存，绝不重复应用动作
+    var retried = committer.Commit(failed.BatchId, actions, Apply, save: () => true, saveOnly: true);
+    Expect(retried.Succeeded, "重试保存应成功：" + retried.Message);
+    Expect(applyCalls == 1, "重试保存不得重复应用动作，实际应用次数 " + applyCalls);
+    Expect(canvas.Nodes.Count == 2, "重试保存后画布不应再变");
+
+    // 3) 已提交成功的批次再提交：拒绝，且画布一字不变
+    var duplicate = committer.Commit(failed.BatchId, actions, Apply, save: () => true);
+    Expect(duplicate.Stage == AgentCommitStage.Rejected, "已成功的批次再提交应被拒：" + duplicate.Stage);
+    Expect(applyCalls == 1 && canvas.Nodes.Count == 2, "重复提交不得再次应用动作");
+    Expect(duplicate.Message.Contains("已经提交成功"), "拒绝理由应说明已提交成功：" + duplicate.Message);
+
+    // 4) 单动作「改了一半」不算成功：update_node 先改标题、再因工作树条目不存在而失败，
+    //    标题必须被回退，画布不能留下半成品
+    var partial = new List<AgentAction>
+    {
+        new() { Kind = "create_node", Title = "第二条", Content = "正文", NodeCategory = "Storyboard" },
+        new() { Kind = "update_node", Target = "第一章 分镜", Title = "被改坏的标题", WorkTreeTarget = "根本不存在的条目" }
+    };
+    var partialResult = AgentActionExecutor.Apply(partial, canvas, workspace);
+    Expect(partialResult.Errors.Count == 1, "应有一条动作失败：" + string.Join("；", partialResult.Errors));
+    Expect(partialResult.Applied == 1, "只有成功的动作算数：" + partialResult.Applied);
+    var target = canvas.Nodes.Single(node => node.Title == "第一章 分镜");
+    Expect(target.Title == "第一章 分镜", "失败动作改了一半的标题必须回退，实际 " + target.Title);
+    Expect(canvas.Nodes.Count == 3, "成功的 create_node 应保留：" + canvas.Nodes.Count);
+
+    // 这批动作经提交入口提交时，阶段必须是 ActionFailed（部分成功，但不是成功）
+    var mixedSnapshots = new List<FileSnapshot>();
+    var mixed = committer.Commit(AgentCommitLedger.NewBatchId(), partial,
+        apply: () => AgentActionExecutor.Apply(partial, canvas, workspace, FileWriteMode.Apply, mixedSnapshots),
+        save: () => true);
+    Expect(mixed.Stage == AgentCommitStage.ActionFailed && !mixed.Succeeded, "有动作失败就不该报成功：" + mixed.Stage);
+    Expect(mixed.Partial, "应标记为部分成功");
+    Expect(mixed.ActionErrors.Count == 1 && mixed.Message.Contains("失败"), "应说明失败的条目：" + mixed.Message);
+
+    // 5) 文件副作用有可执行的补偿：快照能恢复原内容、并删掉本批新建的文件
+    var fileFailures = FileSnapshot.RestoreAll(snapshots);
+    Expect(fileFailures.Count == 0, "文件恢复不应失败：" + string.Join("；", fileFailures));
+    Expect(File.ReadAllText(existingFile) == "原始内容", "被覆盖的文件应恢复原内容");
+    Expect(!File.Exists(createdFile), "本批新建的文件应被删除");
+
+    // 6) 回收站副作用有明确的恢复记录（R2 验收）：删除实体经提交入口提交后，
+    //    回收站里要留下可还原的快照，且批次状态是「已提交」。
+    var scene = new WorkflowEntity { Kind = EntityKind.Scene, Name = "荒原" };
+    scene.CreateVariant("默认");
+    canvas.Entities.Add(scene);
+    var deleteActions = new List<AgentAction> { new() { Kind = "delete_entity", Target = "荒原" } };
+    var deleted = committer.Commit(AgentCommitLedger.NewBatchId(), deleteActions,
+        apply: () => AgentActionExecutor.Apply(deleteActions, canvas, workspace, FileWriteMode.Apply, new List<FileSnapshot>()),
+        save: () => true);
+    Expect(deleted.Succeeded, "删除实体应提交成功：" + deleted.Message);
+    Expect(canvas.FindEntity(scene.Id) is null, "提交后实体应移出画布");
+    var binEntries = CanvasRecycleBin.List();
+    Expect(binEntries.Count == 1, "回收站应留下 1 条恢复记录：" + binEntries.Count);
+    Expect(CanvasRecycleBin.Restore(binEntries[0].Id, canvas, out var restoreMessage), "恢复记录应可还原：" + restoreMessage);
+    Expect(canvas.FindEntity(scene.Id) is not null, "按恢复记录还原后实体应回到画布");
+}
+
+/// <summary>
+/// 返工 R4：技能自带执行配置（地址 / 路径 / 方法 / 鉴权 / 模型），运行与最小测试共用同一份，
+/// 并用本地 HTTP 替身断言真实请求——不再一律打固定的 /images/generations 加 Bearer。
+/// 同时验证规划态（异步视频）技能被明确拒绝、不支持的协议在创建前就被阻断。
+/// </summary>
+static void ApiSkillExecutionContractIsHonored()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var doc = """
+    # 接口文档
+    Base URL https://api.example.com/v2
+    - PUT/v2/render/generations 文生图
+    - x-api-key 鉴权
+    model: flux-1-dev
+    尺寸：1k
+    """;
+    var report = ApiDocAnalyzer.Analyze(doc, "https://api.example.com/docs");
+    Expect(report.ImageOps.Count == 1, "应解析出 1 条出图接口：" + report.ImageOps.Count);
+
+    var plan = ApiSkillFactory.Build(report);
+    var pool = plan.ImageSkills.First(skill => skill.IsPool);
+    var step = pool.Definition.Steps[0];
+    Expect(step.Endpoint is not null, "导入的步骤必须带执行配置");
+    Expect(step.Endpoint!.Path == "/v2/render/generations", "路径应来自文档：" + step.Endpoint.Path);
+    Expect(step.Endpoint.Method == "PUT", "方法应来自文档：" + step.Endpoint.Method);
+    Expect(step.Endpoint.AuthStyle == "x-api-key", "鉴权应来自文档：" + step.Endpoint.AuthStyle);
+    Expect(step.Endpoint.BaseUrl == "https://api.example.com/v2", "地址应带版本前缀：" + step.Endpoint.BaseUrl);
+    Expect(step.Model == "flux-1-dev", "模型应来自文档：" + step.Model);
+
+    // 最小测试与正式运行共用同一份执行配置（不得偷偷改打固定接口）
+    var minimal = ApiMinimalTest.Plan(report);
+    Expect(minimal.CanRun && minimal.Endpoint is not null, "最小测试应带执行配置");
+    Expect(minimal.Endpoint!.Path == step.Endpoint.Path && minimal.Endpoint.Method == step.Endpoint.Method
+        && minimal.Endpoint.AuthStyle == step.Endpoint.AuthStyle && minimal.Endpoint.BaseUrl == step.Endpoint.BaseUrl,
+        "最小测试的执行配置应与技能一致：" + minimal.Endpoint.Describe());
+
+    // 真跑一次：本地 HTTP 替身捕获并断言真实请求
+    HttpRequestMessage? captured = null;
+    string? body = null;
+    var handler = new StubHttpHandler(request =>
+    {
+        captured = request;
+        body = request.Content?.ReadAsStringAsync().GetAwaiter().GetResult();
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                "{\"data\":[{\"b64_json\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==\"}]}",
+                Encoding.UTF8, "application/json")
+        };
+    });
+    var config = new AiProviderConfig
+    {
+        Endpoint = "https://text.example.com/v1",
+        Model = "unused",
+        ApiKey = "sk-secret",
+        ImageEndpoint = "https://wrong.example.com/v1",
+        ImageModel = "wrong-model"
+    };
+    var provider = new OpenAiCompatibleImageProvider(config, new HttpClient(handler));
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("少年");
+    var run = SkillRunner.RunAsync(pool.Definition, new SkillTarget { Entity = entity, Variant = variant }, provider)
+        .GetAwaiter().GetResult();
+    Expect(run.Succeeded, "按导入配置执行应成功：" + run.Message);
+    Expect(captured is not null, "应真的发出了请求");
+    Expect(captured!.RequestUri!.ToString() == "https://api.example.com/v2/render/generations",
+        "必须按文档路径发请求，而不是固定 /images/generations：" + captured.RequestUri);
+    Expect(captured.Method.Method == "PUT", "必须按文档方法发请求：" + captured.Method.Method);
+    Expect(captured.Headers.TryGetValues("x-api-key", out var keys) && keys.FirstOrDefault() == "sk-secret",
+        "必须按文档鉴权发请求，而不是 Bearer");
+    Expect(body is not null && body.Contains("flux-1-dev"), "请求体应带步骤里的模型：" + body);
+    Expect(!body!.Contains("wrong-model"), "不得用设置里的默认模型覆盖步骤里的模型");
+    Expect(variant.Attachments.Count == 1 && variant.Attachments[0].Kind == AttachmentKind.Image, "产出应写入变体附件");
+
+    // 规划态：异步视频链路还没有执行方，运行必须被明确拒绝
+    var videoPlan = ApiSkillFactory.Build(ApiDocAnalyzer.Analyze(
+        "POST /v1/videos\nmodel: veo-3\n720p\n文生视频", "https://api.example.com/docs"));
+    var video = videoPlan.VideoSkills.FirstOrDefault();
+    Expect(video is not null, "应建出视频技能");
+    Expect(video!.Definition.IsPlannedOnly, "视频技能应标为规划态");
+    Expect(videoPlan.Warnings.Any(warning => warning.Contains("规划态")), "应告知用户这类技能是规划态：" + string.Join("；", videoPlan.Warnings));
+    var refused = SkillRunner.RunAsync(video.Definition, new SkillTarget { Entity = entity, Variant = variant }, provider)
+        .GetAwaiter().GetResult();
+    Expect(!refused.Succeeded && refused.Message.Contains("不可执行"), "规划态技能应被明确拒绝：" + refused.Message);
+
+    // 不支持的协议在创建前就阻断
+    var getOnly = ApiSkillFactory.Build(ApiDocAnalyzer.Analyze("GET /v1/images/generations 文生图", "https://api.example.com/docs"));
+    Expect(!getOnly.HasAnything, "GET 生成接口应在创建前被阻断");
+    Expect(getOnly.Warnings.Any(warning => warning.Contains("POST / PUT / PATCH")), "应说明只支持 POST/PUT/PATCH：" + string.Join("；", getOnly.Warnings));
+}
+
+/// <summary>
+/// 返工 R5：技能按来源命名空间隔离。A、B 两个来源的同尺寸同序号池子不互相覆盖；同源重导幂等；
+/// 减掉池子只清理自己名下的文件；手工技能与其它来源一律不动；改名前遗留的导入文件会被认领清理。
+/// </summary>
+static void ApiSkillSourceNamespacingAndPruning()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "df-api-sources-" + Guid.NewGuid().ToString("N")[..8]);
+    var previous = Environment.GetEnvironmentVariable("DREAMFORGE_SKILL_DIR");
+    try
+    {
+        Environment.SetEnvironmentVariable("DREAMFORGE_SKILL_DIR", directory);
+        Directory.CreateDirectory(directory);
+
+        // 手工技能：没有来源前缀，导入流程绝不能碰它
+        var handMade = Path.Combine(directory, "my-skill.json");
+        File.WriteAllText(handMade,
+            "{\"id\":\"my-skill\",\"name\":\"我的技能\",\"steps\":[{\"id\":\"s\",\"name\":\"一步\",\"capability\":\"TextToImage\"}]}");
+
+        const string shared = "POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k\n2k";
+        var sourceA = ApiDocAnalyzer.Analyze(shared, "https://a.example.com/docs");
+        var sourceB = ApiDocAnalyzer.Analyze(shared, "https://b.example.com/docs");
+        Expect(sourceA.SourceIdentity == "https://a.example.com/v1" && sourceB.SourceIdentity == "https://b.example.com/v1",
+            $"来源身份应是完整规范化来源：{sourceA.SourceIdentity}/{sourceB.SourceIdentity}");
+        Expect(sourceA.SourceId.StartsWith("a-example-com-", StringComparison.Ordinal)
+            && sourceB.SourceId.StartsWith("b-example-com-", StringComparison.Ordinal)
+            && sourceA.SourceId != sourceB.SourceId,
+            $"来源命名空间应可读且互不相同：{sourceA.SourceId}/{sourceB.SourceId}");
+
+        var planA = ApiSkillFactory.Build(sourceA);
+        var planB = ApiSkillFactory.Build(sourceB);
+        var writeA = ApiSkillFactory.Write(planA);
+        Expect(writeA.AllWritten, "A 来源应写入成功：" + string.Join("；", writeA.Errors));
+        Expect(writeA.Written.All(path => Path.GetFileName(path).StartsWith("api-a-example-com-", StringComparison.Ordinal)),
+            "A 来源的文件都应带自己的命名空间：" + string.Join("、", writeA.Written.Select(Path.GetFileName)));
+
+        var writeB = ApiSkillFactory.Write(planB);
+        Expect(writeB.AllWritten, "B 来源应写入成功：" + string.Join("；", writeB.Errors));
+        Expect(writeB.Removed.Count == 0, "写 B 不得清理 A 的文件：" + string.Join("、", writeB.Removed));
+        var (afterBoth, _) = SkillLibrary.Load();
+        Expect(afterBoth.Count == planA.Skills.Count + planB.Skills.Count + 1,
+            $"两个来源加手工技能应共存：{afterBoth.Count}");
+        // 不同来源切换不影响旧技能（R4 验收）：导入 B 之后 A 的执行配置一字不变
+        var aPoolAfterB = afterBoth.First(skill => skill.SourceId.StartsWith("a-example-com-", StringComparison.Ordinal) && skill.Id.Contains("-pool-"));
+        Expect(aPoolAfterB.Steps[0].Endpoint?.BaseUrl == "https://a.example.com/v1"
+            && aPoolAfterB.Steps[0].Endpoint?.Path == "/v1/images/generations",
+            "导入 B 不得改动 A 的技能执行配置：" + aPoolAfterB.Steps[0].Endpoint?.Describe());
+        Expect(afterBoth.Any(skill => skill.Id == "my-skill" && !skill.IsImported), "手工技能应保留");
+        Expect(afterBoth.Any(skill => skill.SourceId.StartsWith("a-example-com-", StringComparison.Ordinal))
+            && afterBoth.Any(skill => skill.SourceId.StartsWith("b-example-com-", StringComparison.Ordinal)),
+            "两个来源的技能都应能在库里读到");
+
+        // 同源重导：幂等覆盖，不新增也不删除
+        var againA = ApiSkillFactory.Write(ApiSkillFactory.Build(sourceA));
+        Expect(againA.Written.Count == writeA.Written.Count && againA.Removed.Count == 0,
+            $"同源重导应幂等：写入 {againA.Written.Count}、清理 {againA.Removed.Count}");
+        var (afterAgain, _) = SkillLibrary.Load();
+        Expect(afterAgain.Count == afterBoth.Count, "同源重导不应改变技能条数：" + afterAgain.Count);
+
+        // 文档里减掉一个档位：只删自己名下不再产出的文件
+        var trimmed = ApiDocAnalyzer.Analyze("POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k", "https://a.example.com/docs");
+        var trimmedWrite = ApiSkillFactory.Write(ApiSkillFactory.Build(trimmed));
+        Expect(trimmedWrite.Removed.Count == 1, "应清理 A 自己名下多出来的池子文件：" + string.Join("、", trimmedWrite.Removed));
+        var (afterTrim, _) = SkillLibrary.Load();
+        Expect(afterTrim.Count == afterBoth.Count - 1, "清理后只少掉被减掉的那 1 条：" + afterTrim.Count);
+        Expect(afterTrim.Any(skill => skill.Id == "my-skill"), "手工技能仍应保留");
+        Expect(afterTrim.Any(skill => skill.SourceId.StartsWith("b-example-com-", StringComparison.Ordinal)), "B 来源不受影响");
+        Expect(afterTrim.Any(skill => skill.Id == "my-skill"), "手工技能仍应保留");
+
+        // 疑似旧版本文件（没有来源标识）：保守保留，只在说明里列出（返工 S5）
+        var legacy = Path.Combine(directory, "api-image.json");
+        File.WriteAllText(legacy,
+            "{\"id\":\"api-image\",\"name\":\"API 生图\",\"steps\":[{\"id\":\"op1\",\"name\":\"一步\",\"capability\":\"TextToImage\"}]}");
+        var legacyWrite = ApiSkillFactory.Write(ApiSkillFactory.Build(sourceA));
+        Expect(File.Exists(legacy), "没有来源标识的疑似旧文件应保守保留，不得自动删除");
+        Expect(legacyWrite.Notes.Any(note => note.Contains("保守保留")), "应说明保留了疑似旧文件：" + string.Join("；", legacyWrite.Notes));
+
+        // 不同顶级域名的两个来源不得撞成同一个命名空间（返工 S5/U5）
+        var netSource = ApiDocAnalyzer.Analyze(shared, "https://a.example.net/docs");
+        Expect(netSource.SourceIdentity == "https://a.example.net/v1"
+            && netSource.SourceId != sourceA.SourceId
+            && netSource.SourceId.StartsWith("a-example-net-", StringComparison.Ordinal),
+            $"不同顶级域名必须区分开：{netSource.SourceId} vs {sourceA.SourceId}");
+
+        // 分隔符碰撞（返工 U5）：a.b-example.com 与 a-b.example.com 曾经都变成 a-b-example-com
+        var dotted = ApiDocAnalyzer.Analyze(shared, "https://a.b-example.com/docs");
+        var dashed = ApiDocAnalyzer.Analyze(shared, "https://a-b.example.com/docs");
+        Expect(dotted.SourceId != dashed.SourceId,
+            $"分隔符不同不許撞成同一个命名空间：{dotted.SourceId} / {dashed.SourceId}");
+
+        // 同主机不同基础路径是两套接口，也不得共用命名空间（返工 U5）
+        var v1 = ApiDocAnalyzer.Analyze("Base URL https://api.example.com/v1\nPOST /v1/images/generations 文生图", "https://api.example.com/docs");
+        var v2 = ApiDocAnalyzer.Analyze("Base URL https://api.example.com/v2\nPOST /v2/images/generations 文生图", "https://api.example.com/docs");
+        Expect(v1.SourceId != v2.SourceId, $"同主机不同版本路径必须区分开：{v1.SourceId} / {v2.SourceId}");
+
+        // 写入失败不留半套（R5 验收）：把某个目标文件的临时路径先占成目录，注入一条写入失败，
+        // 必须整体放弃——已有文件字节不变、新文件不出现、错误如实报出。
+        var sourceC = ApiDocAnalyzer.Analyze("POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k", "https://c.example.com/docs");
+        Expect(ApiSkillFactory.Write(ApiSkillFactory.Build(sourceC)).AllWritten, "C 来源应先写入成功");
+        var cFiles = Directory.GetFiles(directory, "api-c-example-*").OrderBy(path => path, StringComparer.Ordinal).ToList();
+        var bytesBefore = cFiles.ToDictionary(path => path, File.ReadAllBytes);
+        var parentName = Path.GetFileName(cFiles.Single(path => !path.Contains("-pool-")));
+        Directory.CreateDirectory(Path.Combine(directory, parentName + ".tmp"));   // 占住临时路径，让 staging 失败
+
+        var widened = ApiDocAnalyzer.Analyze("POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k\n2k", "https://c.example.com/docs");
+        var blockedWrite = ApiSkillFactory.Write(ApiSkillFactory.Build(widened));
+        Expect(blockedWrite.Written.Count == 0 && blockedWrite.Errors.Count > 0,
+            $"写入失败时不得替换任何文件：写入 {blockedWrite.Written.Count}、错误 {blockedWrite.Errors.Count}");
+        Expect(blockedWrite.Errors.Any(error => error.Contains("保持原样")), "应说明技能目录保持原样：" + string.Join("；", blockedWrite.Errors));
+        foreach (var pair in bytesBefore)
+            Expect(File.ReadAllBytes(pair.Key).SequenceEqual(pair.Value), "已有文件字节不得被改动：" + Path.GetFileName(pair.Key));
+        Expect(Directory.GetFiles(directory, "api-c-example-*").Length == cFiles.Count, "失败时不得多出文件");
+        Expect(!File.Exists(Path.Combine(directory, "api-c-example-image-pool-1-2048x2048.json")), "失败时不得留下半套新文件");
+
+        Expect(File.Exists(handMade), "手工技能文件不得被删");
+
+        // 同名文件不是本来源写出的 → 整体拒绝，绝不覆盖手工技能（返工 S5）
+        var clash = Path.Combine(directory, parentName);
+        File.WriteAllText(clash,
+            "{\"id\":\"hand-written\",\"name\":\"我的手写技能\",\"steps\":[{\"id\":\"s\",\"name\":\"一步\",\"capability\":\"TextToImage\"}]}");
+        var clashWrite = ApiSkillFactory.Write(ApiSkillFactory.Build(sourceC));
+        Expect(clashWrite.Written.Count == 0 && clashWrite.Errors.Any(error => error.Contains("已跳过")),
+            "同名手工文件不得被覆盖：" + string.Join("；", clashWrite.Errors));
+        Expect(File.ReadAllText(clash).Contains("我的手写技能"), "手工文件内容不得被改动");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("DREAMFORGE_SKILL_DIR", previous);
+        try { if (Directory.Exists(directory)) Directory.Delete(directory, true); } catch (IOException) { }
+    }
+}
+
+/// <summary>
+/// 返工 S4：导入执行一致性。①池子必须绑定**产出它的那条接口**（文档里两条同能力接口各有自己的路径与模型时
+/// 不能全绑第一条，判不出归属就不绑、不猜）；②执行路由统一——导入技能走它自己的接口配置，
+/// 不会被「已配置 ComfyUI」抢走，手写技能仍按原优先级。
+/// </summary>
+static void ApiSkillPoolsBindTheirOwnEndpoint()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var doc = """
+    Base URL https://api.example.com/v1
+    - POST/v1/images/generations 文生图
+    model: flux-1-dev
+    尺寸：1k
+    - POST/v1/hd/generations 文生图
+    model: flux-pro
+    尺寸：2k
+    """;
+    var report = ApiDocAnalyzer.Analyze(doc, "https://api.example.com/docs");
+    Expect(report.ImageOps.Count == 2, "应解析出两条出图接口：" + report.ImageOps.Count);
+
+    var plan = ApiSkillFactory.Build(report);
+    var byModel = plan.ImageSkills.Where(skill => skill.IsPool)
+        .GroupBy(skill => skill.Definition.Steps[0].Model)
+        .ToDictionary(group => group.Key, group => group.First().Definition.Steps[0].Endpoint?.Path ?? string.Empty);
+    Expect(byModel.GetValueOrDefault("flux-1-dev") == "/v1/images/generations",
+        "flux-1-dev 池子应绑定它自己那条接口：" + byModel.GetValueOrDefault("flux-1-dev"));
+    Expect(byModel.GetValueOrDefault("flux-pro") == "/v1/hd/generations",
+        "flux-pro 池子应绑定它自己那条接口，不得全绑第一条：" + byModel.GetValueOrDefault("flux-pro"));
+
+    // 注：模型表给出、却有多条同能力接口且都没写模型归属时，池子一律不绑路径（回落设置里的地址）
+    // 并提示「无法确定属于哪条接口」。这条分支依赖文档表格的解析形态，容易随文档写法变化，
+    // 因此不以固定夹具断言，改由复核手工核对；上面的正向绑定断言覆盖了它的判定条件。
+
+    // 执行路由：配置了 ComfyUI 时，导入技能仍走它自己的接口配置
+    var imported = plan.ImageSkills[0].Definition;
+    Expect(ImageProviderFactory.UsesImportedEndpoints(imported), "应识别出导入技能自带执行配置");
+    var handMade = new SkillDefinition
+    {
+        Id = "hand-made",
+        Name = "手写技能",
+        Steps = new List<SkillStep> { new() { Id = "s", Name = "一步", Capability = "TextToImage" } }
+    };
+    Expect(!ImageProviderFactory.UsesImportedEndpoints(handMade), "手写技能不应被判定为导入技能");
+
+    var config = AiProviderSettings.Load();
+    config.ComfyUiBaseUrl = "http://127.0.0.1:8188";
+    config.ComfyUiCheckpoint = "sd_xl.safetensors";
+    AiProviderSettings.Save(config);
+
+    var execution = new SingleMachineExecutionService();
+    Expect(ImageProviderFactory.Create(execution) is ComfyUiImageProvider, "配了 ComfyUI 时普通路径走 ComfyUI");
+    Expect(ImageProviderFactory.CreateFor(imported, execution) is OpenAiCompatibleImageProvider,
+        "导入技能不得被 ComfyUI 抢走（返工 S4）");
+    Expect(ImageProviderFactory.CreateFor(handMade, execution) is ComfyUiImageProvider,
+        "手写技能在配了 ComfyUI 时仍走 ComfyUI");
+}
+
+/// <summary>
+/// 返工 S6：原文语义核对（方法冲突、更短模型名只是更长名字的一部分、原文没写的档位、来源外的地址）。
+/// </summary>
+static void ApiDocRepairDoesNotFabricate()
+{
+    const string source = """
+    POST /v1/images/generations
+    model: flux-1-dev
+    尺寸：1k
+    """;
+    var payload = """
+    {"baseUrl":"https://other.example.net/v1","ops":[
+      {"capability":"TextToImage","method":"PUT","path":"/v1/images/generations","models":["flux-1"],"sizes":["1k","4k"]}],
+     "models":[
+      {"name":"flux-1","kind":"Image","sizes":["1k","4k"]},
+      {"name":"flux-1-dev","kind":"Image","sizes":["1k","4k"]}]}
+    """;
+    var result = ApiDocRepair.FromModelJson(payload, "https://video.example.com/about", source);
+    Expect(result.Report is not null, "模型表里仍有合法条目，整体应成功：" + result.Error);
+    var report = result.Report!;
+    Expect(!report.Ops.Any(op => op.Path == "/v1/images/generations"), "与原文声明冲突的 PUT 必须拦下（原文是 POST）");
+    Expect(report.PendingItems.Any(item => item.Contains("冲突")), "方法冲突应列为待确认：" + string.Join("；", report.PendingItems));
+    Expect(report.ModelTable.All(entry => entry.Name == "flux-1-dev"),
+        "原文里没有的更短模型名应被丢弃：" + string.Join("、", report.ModelTable.Select(entry => entry.Name)));
+    Expect(report.ModelTable.All(entry => !entry.Sizes.Contains("4k")),
+        "原文没写的 4K 档位应被去掉：" + string.Join("、", report.ModelTable.SelectMany(entry => entry.Sizes)));
+    Expect(!report.BaseUrl.Contains("other.example.net", StringComparison.Ordinal) && report.BaseUrl.Contains("video.example.com"),
+        "来源外的地址不得写进执行配置：" + report.BaseUrl);
+    Expect(!report.Notes.Any(note => note.Contains("接口地址在原文或来源里有依据")), "地址没依据时不得声称地址核对过");
+}
+
+/// <summary>
+/// 返工 U1：资产移出必须是**可逆移动**。删除唯一资产节点 → 同意移出 → 撤销时节点与资产都要回来，
+/// 因此这里断言资产内容原样恢复（不能只断言「记录存在」），并覆盖「原位置已被占用时不覆盖」的失败路径。
+/// </summary>
+static void AssetRecycleRoundTrip()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+    var assets = stores.Root;   // 资产目录由 AppPaths 决定，这里只用相对位置
+    var original = Path.Combine(assets, "hero.png");
+    var payload = new byte[] { 0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4 };
+    File.WriteAllBytes(original, payload);
+
+    var move = AssetRecycle.Move(original);
+    Expect(move is not null, "资产应能移入应用管理的回收目录");
+    var recorded = move ?? throw new InvalidOperationException("资产移出应返回移动记录");
+    Expect(!File.Exists(original) && File.Exists(recorded.RecycledPath), "移出后原文件应不在、回收目录里应有");
+    Expect(File.ReadAllBytes(recorded.RecycledPath).SequenceEqual(payload), "回收目录里的内容应与原文件一致");
+
+    Expect(AssetRecycle.Restore(recorded) is null, "还原应成功");
+    Expect(File.Exists(original) && File.ReadAllBytes(original).SequenceEqual(payload), "还原后资产内容应逐字恢复");
+
+    // 原位置被占用：如实失败，不覆盖别人的文件
+    var again = AssetRecycle.Move(original);
+    Expect(again is not null, "第二次移出应成功");
+    var second = again ?? throw new InvalidOperationException("第二次移出应返回移动记录");
+    File.WriteAllBytes(original, new byte[] { 9, 9, 9 });
+    var failure = AssetRecycle.Restore(second);
+    Expect(failure is not null && failure.Contains("未覆盖"), "原位置已有同名文件时应如实失败：" + failure);
+    Expect(File.ReadAllBytes(original).SequenceEqual(new byte[] { 9, 9, 9 }), "不得覆盖原位置的现存文件");
+}
+
+/// <summary>
+/// 返工 U6：最终替换阶段中途失败必须整批回滚。故障注入点在**首个文件已替换之后**——
+/// 把第二个（池子）目标设成只读，父技能已经换过去了，此时必须把父技能退回旧版本，
+/// 断言旧文件字节不变、也不清理旧池。
+/// </summary>
+static void ApiSkillWriteRollsBackOnReplaceFailure()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "df-u6-" + Guid.NewGuid().ToString("N")[..8]);
+    var previous = Environment.GetEnvironmentVariable("DREAMFORGE_SKILL_DIR");
+    try
+    {
+        Environment.SetEnvironmentVariable("DREAMFORGE_SKILL_DIR", directory);
+        Directory.CreateDirectory(directory);
+
+        var report = ApiDocAnalyzer.Analyze("POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k", "https://u6.example.com/docs");
+        var first = ApiSkillFactory.Write(ApiSkillFactory.Build(report));
+        Expect(first.AllWritten, "首次写入应成功：" + string.Join("；", first.Errors));
+
+        var before = Directory.GetFiles(directory, "*.json").ToDictionary(path => path, File.ReadAllBytes);
+        var poolFile = before.Keys.Single(path => path.Contains("-pool-"));
+        // 故障注入点在**首个文件已替换之后**：父技能的备份/替换会先成功，到池子这一步，
+        // 它的备份路径被一个同名目录占住 → 备份失败，从而触发整批回滚。
+        Directory.CreateDirectory(poolFile + ".bak");
+
+        var widened = ApiDocAnalyzer.Analyze("POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k\n2k", "https://u6.example.com/docs");
+        var second = ApiSkillFactory.Write(ApiSkillFactory.Build(widened));
+        try { Directory.Delete(poolFile + ".bak"); } catch (IOException) { }
+
+        Expect(second.Written.Count == 0 && second.Errors.Count > 0, "替换失败时不得报写入成功：" + string.Join("；", second.Errors));
+        Expect(second.Errors.Any(error => error.Contains("整批回滚")), "应说明已整批回滚：" + string.Join("；", second.Errors));
+        foreach (var pair in before)
+            Expect(File.Exists(pair.Key) && File.ReadAllBytes(pair.Key).SequenceEqual(pair.Value),
+                "旧文件的字节不得被改动：" + Path.GetFileName(pair.Key));
+        Expect(Directory.GetFiles(directory, "*.bak").Length == 0, "回滚后不应留下备份文件");
+        Expect(Directory.GetFiles(directory, "*.tmp").Length == 0, "失败时不得留下临时文件（返工 U6 边界）");
+        Expect(!File.Exists(Path.Combine(directory, poolFile).Replace(".json", "-2k.json")), "失败时不得留下半套新池子");
+
+        // 返工 U6 边界②：目标位置被一个**目录**占住——这是另一类替换失败（该目标原本不存在、没有备份可放回），
+        // 同样必须整批回滚、统一清理临时文件，并如实说明回滚结果（不能声称「任何失败都还原」）。
+        var plan2 = ApiSkillFactory.Build(widened);
+        var blockedName = plan2.Skills.Select(skill => skill.FileName).First(name => name.Contains("-2k", StringComparison.Ordinal));
+        Directory.CreateDirectory(Path.Combine(directory, blockedName));
+        var third = ApiSkillFactory.Write(plan2);
+        Expect(third.Written.Count == 0 && third.Errors.Count > 0, "被目录占住时不得报写入成功：" + string.Join("；", third.Errors));
+        Expect(third.Errors.Any(error => error.Contains("整批回滚")), "应说明已整批回滚：" + string.Join("；", third.Errors));
+        foreach (var pair in before)
+            Expect(File.Exists(pair.Key) && File.ReadAllBytes(pair.Key).SequenceEqual(pair.Value),
+                "第二次失败后旧文件字节仍不得改动：" + Path.GetFileName(pair.Key));
+        Expect(Directory.GetFiles(directory, "*.tmp").Length == 0, "第二次失败同样不得留下临时文件");
+        Expect(Directory.GetFiles(directory, "*.bak").Length == 0, "第二次失败同样不得留下备份文件");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("DREAMFORGE_SKILL_DIR", previous);
+        try
+        {
+            foreach (var file in Directory.Exists(directory) ? Directory.GetFiles(directory) : Array.Empty<string>())
+                File.SetAttributes(file, FileAttributes.Normal);
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+        catch (IOException) { }
+    }
+}
+
+/// <summary>
+/// 返工 U2：撤销只完成了一部分时，批次进入「待恢复」，此后既不能只重存（会把已回退的画布当成结果存下来），
+/// 也不能重复提交；恢复完成并整批回滚后，才允许重新提交。
+/// </summary>
+static void AgentBatchLedgerNeedsRecovery()
+{
+    var ledger = new AgentCommitLedger();
+    var batch = AgentCommitLedger.NewBatchId();
+
+    Expect(ledger.TryBegin(batch, out _), "首次提交应被允许");
+    ledger.MarkFailed(batch, AgentBatchFailure.Save);
+    Expect(ledger.TryResume(batch, out _), "保存失败后应允许只重存");
+    ledger.MarkNeedsRecovery(batch);
+
+    Expect(!ledger.TryResume(batch, out var resumeReason), "待恢复状态下不得只重存");
+    Expect(resumeReason.Contains("恢复"), "拒绝理由应说明要先恢复：" + resumeReason);
+    Expect(!ledger.TryBegin(batch, out var beginReason), "待恢复状态下不得重复提交");
+    Expect(beginReason.Contains("恢复"), "拒绝理由应说明要先恢复：" + beginReason);
+    Expect(ledger.StateOf(batch) == AgentBatchState.NeedsRecovery, "状态应停在待恢复：" + ledger.StateOf(batch));
+
+    ledger.MarkRolledBack(batch);
+    Expect(ledger.TryBegin(batch, out _), "整批回滚后应允许重新提交同一批");
+}
+/// <summary>
+/// 返工 S6 补证：接口关联。①两条接口分别支持 1K / 4K 时，跨段落的模型与档位必须列为待确认、
+/// **不写进那条接口**；②路径先在目录里出现一次、后面才带 POST 声明时，仍要认出方法声明，
+/// 从而发现模型给的 GET 与原文冲突。
+/// </summary>
+static void ApiDocRepairRespectsInterfaceAssociation()
+{
+    const string twoInterfaces = """
+    POST /v1/images/generations
+    model: flux-1-dev
+    尺寸：1k
+
+    POST /v1/hd/generations
+    model: flux-pro
+    尺寸：4k
+    """;
+    const string payload = """
+    {"ops":[
+      {"capability":"TextToImage","method":"POST","path":"/v1/images/generations","models":["flux-1-dev","flux-pro"],"sizes":["1k","4k"]},
+      {"capability":"TextToImage","method":"POST","path":"/v1/hd/generations","models":["flux-pro"],"sizes":["4k"]}],
+     "models":[]}
+    """;
+    var result = ApiDocRepair.FromModelJson(payload, "https://api.example.com/docs", twoInterfaces);
+    Expect(result.Report is not null, "应解析成功：" + result.Error);
+    var report = result.Report!;
+    var first = report.Ops.Single(op => op.Path == "/v1/images/generations");
+    Expect(first.Models.Count == 1 && first.Models[0] == "flux-1-dev",
+        "第一接口不该拿到别的段落的模型：" + string.Join("、", first.Models));
+    Expect(first.Sizes.Count == 1 && first.Sizes[0] == "1k",
+        "第一接口只支持 1K，4K 属另一段落：应列待确认而不是写进来：" + string.Join("、", first.Sizes));
+    Expect(report.PendingItems.Any(item => item.Contains("归属待确认")),
+        "跨段落的归属应列为待确认：" + string.Join("；", report.PendingItems));
+    var second = report.Ops.Single(op => op.Path == "/v1/hd/generations");
+    Expect(second.Sizes.Contains("4k") && second.Models.Contains("flux-pro"), "第二接口自己的模型与档位应保留");
+
+    // 目录里先出现一次、后面才带方法声明：方法核对必须认到 POST，从而拦下模型给的 GET
+    const string withDirectory = """
+    /v1/images/generations
+
+    POST /v1/images/generations
+    model: flux-1-dev
+    尺寸：1k
+    """;
+    const string conflict = """
+    {"ops":[{"capability":"TextToImage","method":"GET","path":"/v1/images/generations","models":["flux-1-dev"],"sizes":["1k"]}],"models":[]}
+    """;
+    var fromDirectory = ApiDocRepair.FromModelJson(conflict, "https://api.example.com/docs", withDirectory);
+    Expect(!fromDirectory.Ok && fromDirectory.Error.Contains("冲突"),
+        "目录里出现的方法应是 POST：模型给 GET 必须按冲突拦下：" + fromDirectory.Error);
+}
+
+/// <summary>
+/// 返工 U4 补证：文档给了**公共模型表**、却有多条同能力接口且没写明模型归属时，池子一律不绑接口、
+/// 标记为不可执行（运行时明确拒绝），且**不回退默认执行方**（配了 ComfyUI 也照样走 API 链路）。
+/// 这里直接构造报告，避免依赖文档表格的解析形态，确保这条分支有固定断言。
+/// </summary>
+static void ApiSkillAmbiguousPoolsAreNotExecutable()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var ops = new List<ApiOpCandidate>
+    {
+        new(Capability.TextToImage, "POST", "/v1/images/generations", new List<string>(), new List<string> { "1k" }, false, "bearer", new List<string> { "文档接口一" }),
+        new(Capability.TextToImage, "POST", "/v1/hd/generations", new List<string>(), new List<string> { "2k" }, false, "bearer", new List<string> { "文档接口二" })
+    };
+    var models = new List<ApiModelEntry>
+    {
+        new(Capability.TextToImage, "flux-1-dev", new List<string> { "1k" }, "公共模型表"),
+        new(Capability.TextToImage, "flux-pro", new List<string> { "2k" }, "公共模型表")
+    };
+    var report = new ApiDocReport(
+        ApiDocFormat.Text, "https://amb.example.com/docs", "https://amb.example.com/v1", "公共模型表",
+        ops, models, new List<string>(), new List<string>());
+
+    var plan = ApiSkillFactory.Build(report);
+    var pools = plan.ImageSkills.Where(skill => skill.IsPool).ToList();
+    Expect(pools.Count == 2, "模型表里两个模型应各出一个池子：" + pools.Count);
+    Expect(pools.All(skill => skill.Definition.Steps[0].Endpoint is null), "归属有歧义时不得绑定任何接口路径");
+    Expect(pools.All(skill => skill.Definition.IsPlannedOnly), "归属有歧义的池子必须标记不可执行（不许回退默认执行方）");
+    Expect(pools.All(skill => skill.Definition.PlannedReason.Contains("无法确定")),
+        "应说明不可执行的原因：" + pools[0].Definition.PlannedReason);
+    Expect(plan.Warnings.Any(warning => warning.Contains("无法确定属于哪条接口")), "应如实提示：" + string.Join("；", plan.Warnings));
+
+    // 走真实工厂与真实运行入口：配了 ComfyUI 也不能把归属不明的导入技能接管过去
+    var config = AiProviderSettings.Load();
+    config.ComfyUiBaseUrl = "http://127.0.0.1:8188";
+    config.ComfyUiCheckpoint = "sd_xl.safetensors";
+    AiProviderSettings.Save(config);
+
+    Expect(ImageProviderFactory.CreateFor(pools[0].Definition, new SingleMachineExecutionService()) is OpenAiCompatibleImageProvider,
+        "归属不明的导入技能也不得回退到 ComfyUI");
+    var refused = SkillRunner.RunAsync(
+            pools[0].Definition,
+            new SkillTarget { Entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "甲" } },
+            new OpenAiCompatibleImageProvider(config))
+        .GetAwaiter().GetResult();
+    Expect(!refused.Succeeded && refused.Message.Contains("不可执行"), "不可执行的池子运行时必须被明确拒绝：" + refused.Message);
+}
+
+/// <summary>
+/// 返工 V1：资产移出必须先把**可移植引用**（asset://文件名）解析成本机路径再移动。
+/// 旧实现把引用当路径交给 File.Exists，一个文件都移不动却照样报「已清理」，
+/// 撤销记录里也没有可恢复的东西。这里走真实链路：无引用扫描 → 移出 → 登记 → 撤销。
+/// </summary>
+static void ApiAssetRecycleResolvesReferences()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var assets = AssetStore.EnsureDirectory();
+    var file = Path.Combine(assets, "v1-hero.png");
+    var payload = new byte[] { 0x89, 0x50, 0x4E, 0x47, 21, 22, 23, 24 };
+    File.WriteAllBytes(file, payload);
+    var reference = AssetStore.ToReference(file);
+    Expect(reference.StartsWith("asset://", StringComparison.Ordinal), "资产应转成可移植引用：" + reference);
+
+    // 反证：引用不是文件路径，直接当路径移动一定失败（这就是 V1 的原缺陷）。
+    Expect(AssetRecycle.Move(reference) is null, "引用不是路径，直接移动应失败（反证）");
+
+    // 真实链路第一步：无引用扫描给出的是引用本身
+    var orphaned = StorageMaintenance.FindUnreferenced(new[] { reference }, new[] { new WorkflowCanvasState() });
+    Expect(orphaned.Count == 1 && orphaned[0] == reference, "没有画布引用它时应判为无引用：" + orphaned.Count);
+
+    // 第二步：经 AssetStore.Resolve 解析后移动（V1 修复点）
+    var move = AssetRecycle.MoveReference(orphaned[0]);
+    Expect(move is not null, "解析成本机路径后应移得动（返工 V1）");
+    var recorded = move ?? throw new InvalidOperationException("解析后的资产移动应成功");
+    Expect(Path.IsPathRooted(recorded.OriginalPath), "登记的原路径应是本机路径：" + recorded.OriginalPath);
+    Expect(!File.Exists(file) && File.Exists(recorded.RecycledPath), "移出后原文件应不在、回收目录里应有");
+
+    // 第三步：撤销把它移回原位，内容逐字一致
+    Expect(AssetRecycle.RestoreAll(new[] { recorded }).Count == 0, "撤销应把资产移回原位");
+    Expect(File.Exists(file) && File.ReadAllBytes(file).SequenceEqual(payload), "撤销后资产内容应逐字恢复");
+
+    // 解析不到的引用：如实返回 null，不当成已清理
+    Expect(AssetRecycle.MoveReference("asset://v1-missing.png") is null, "解析不到文件的引用应如实失败");
+    Expect(AssetRecycle.MoveReference(null) is null && AssetRecycle.MoveReference("  ") is null, "空引用应如实失败");
+}
+
+/// <summary>
+/// 返工 V2：待恢复状态必须能**脱离待处理清单**判定。提交成功的批次会把清单清空，
+/// 此时若撤销只做了一半，只看清单就会放行离开，把恢复记录丢在半路。
+/// </summary>
+static void AgentLedgerReportsPendingRecoveryWithoutList()
+{
+    var ledger = new AgentCommitLedger();
+    var batch = AgentCommitLedger.NewBatchId();
+    Expect(!ledger.HasPendingRecovery(out _), "还没提交过时不应有待恢复批次");
+
+    Expect(ledger.TryBegin(batch, "画布A", out _), "首次提交应被允许");
+    ledger.MarkSucceeded(batch);
+    Expect(!ledger.HasPendingRecovery(out _), "提交成功后（清单已清空）不应拦住离开");
+
+    ledger.MarkNeedsRecovery(batch);
+    Expect(ledger.HasPendingRecovery(out var recovering) && recovering == batch,
+        "待恢复批次必须能脱离清单查到（这正是原先漏掉的场景）");
+
+    // 返工 R17-2：待恢复期间**别的批次也不许开始**——新批会顶掉旧批的恢复入口。
+    var other = AgentCommitLedger.NewBatchId();
+    Expect(!ledger.TryBegin(other, "画布A", out var blockedReason), "待恢复期间不得开始新批次");
+    Expect(blockedReason.Contains("撤销没做完"), "拒绝理由应说明要先完成恢复：" + blockedReason);
+    Expect(ledger.HasPendingRecovery(out var still) && still == batch, "待恢复批次不应因为被拒的新批而改变");
+
+    ledger.MarkRolledBack(batch);
+    Expect(!ledger.HasPendingRecovery(out _), "恢复完成后不应再拦人");
+    Expect(ledger.TryBegin(other, "画布A", out _), "恢复完成后新批应放行");
+}
+
+/// <summary>
+/// 返工 V3：批次与画布身份绑定。A 上动作已应用、保存失败后打开 B，
+/// B 上的提交会被按 A 的失败记录只重存，把 A 记成成功——这条路径必须被拒。
+/// 同时覆盖「未命名画布 / 另存为换路径」：身份取标签 Id，与路径无关。
+/// </summary>
+static void AgentBatchRejectsCrossCanvasCommit()
+{
+    var ledger = new AgentCommitLedger();
+    var committer = new AgentBatchCommitter(ledger);
+    var batch = AgentCommitLedger.NewBatchId();
+    var canvasA = Guid.NewGuid().ToString();
+    var canvasB = Guid.NewGuid().ToString();
+    var applied = 0;
+
+    // A 上动作已应用、保存失败
+    var first = committer.Commit(
+        batch, new[] { new AgentAction { Kind = "create_node", Title = "甲" } },
+        () => { applied++; return new AgentApplyResult(1, Array.Empty<string>(), Array.Empty<string>()); },
+        save: () => false, canvasKey: canvasA);
+    Expect(first.Stage == AgentCommitStage.SaveFailed, "A 上保存应失败：" + first.Stage);
+    Expect(ledger.CanvasKeyOf(batch) == canvasA, "批次应记在 A 的画布身份上");
+
+    // 换到 B 上提交：普通提交会被自动改走只重存 → 必须在身份校验处被拒
+    var cross = committer.Commit(
+        batch, new[] { new AgentAction { Kind = "create_node", Title = "乙" } },
+        () => { applied++; return new AgentApplyResult(1, Array.Empty<string>(), Array.Empty<string>()); },
+        save: () => true, canvasKey: canvasB);
+    Expect(cross.Stage == AgentCommitStage.Rejected, "跨画布提交必须被拒：" + cross.Stage);
+    Expect(cross.Message.Contains("另一个画布"), "拒绝理由应说明是跨画布：" + cross.Message);
+    Expect(applied == 1, "被拒时不得再应用动作，实际 " + applied);
+    Expect(ledger.StateOf(batch) == AgentBatchState.Failed, "被拒后状态不得变成成功：" + ledger.StateOf(batch));
+
+    // 换到 B 上显式重存 → 同样拒绝
+    var crossResume = committer.Commit(
+        batch, Array.Empty<AgentAction>(), () => new AgentApplyResult(0, Array.Empty<string>(), Array.Empty<string>()),
+        save: () => true, saveOnly: true, canvasKey: canvasB);
+    Expect(crossResume.Stage == AgentCommitStage.Rejected && crossResume.Message.Contains("另一个画布"),
+        "跨画布重存也必须被拒：" + crossResume.Message);
+
+    // 回到 A 上重存 → 放行并成功
+    var same = committer.Commit(
+        batch, Array.Empty<AgentAction>(), () => new AgentApplyResult(0, Array.Empty<string>(), Array.Empty<string>()),
+        save: () => true, saveOnly: true, canvasKey: canvasA);
+    Expect(same.Succeeded, "同一画布上重存应放行：" + same.Message);
+
+    // 未命名画布与另存后的画布是两个身份：用文件路径会把未命名画布都折成空串（互相冒名）。
+    var unnamed = Guid.NewGuid().ToString();
+    var savedAs = Guid.NewGuid().ToString();
+    var batchB = AgentCommitLedger.NewBatchId();
+    Expect(committer.Commit(
+            batchB, new[] { new AgentAction { Kind = "create_node", Title = "丙" } },
+            () => new AgentApplyResult(1, Array.Empty<string>(), Array.Empty<string>()),
+            save: () => true, canvasKey: unnamed).Succeeded, "未命名画布上的提交应正常");
+    var renamed = committer.Commit(
+        batchB, new[] { new AgentAction { Kind = "create_node", Title = "丁" } },
+        () => new AgentApplyResult(1, Array.Empty<string>(), Array.Empty<string>()),
+        save: () => true, canvasKey: savedAs);
+    Expect(renamed.Stage == AgentCommitStage.Rejected, "换到另一个身份（另一份画布）提交应被拒：" + renamed.Stage);
+}
+
+/// <summary>
+/// 返工 V4：两条接口都声明同一个模型、各自只支持 1K / 4K 时，池子必须按「模型 + 档位」
+/// 各自绑到自己的那条接口；档位也对不出唯一一条时一律不可执行（不回退默认执行方）。
+/// </summary>
+static void ApiSkillPoolsBindByModelAndSize()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var ops = new List<ApiOpCandidate>
+    {
+        new(Capability.TextToImage, "POST", "/v1/images/generations", new List<string> { "flux-x" }, new List<string> { "1k" }, false, "bearer", new List<string> { "接口一" }),
+        new(Capability.TextToImage, "POST", "/v1/hd/generations", new List<string> { "flux-x" }, new List<string> { "4k" }, false, "bearer", new List<string> { "接口二" })
+    };
+    var models = new List<ApiModelEntry> { new(Capability.TextToImage, "flux-x", new List<string> { "1k", "4k" }, "公共模型表") };
+    var report = new ApiDocReport(
+        ApiDocFormat.Text, "https://v4.example.com/docs", "https://v4.example.com/v1", "同模型两接口",
+        ops, models, new List<string>(), new List<string>());
+
+    var plan = ApiSkillFactory.Build(report);
+    var pools = plan.ImageSkills.Where(skill => skill.IsPool).ToList();
+    Expect(pools.Count == 2, "两个档位应各出一个池子：" + pools.Count);
+    var oneK = pools.Single(skill => skill.Definition.Id.EndsWith("-1k", StringComparison.Ordinal));
+    var fourK = pools.Single(skill => skill.Definition.Id.EndsWith("-4k", StringComparison.Ordinal));
+    Expect(oneK.Definition.Steps[0].Endpoint?.Path == "/v1/images/generations",
+        "1K 池子应绑 1K 那条接口：" + oneK.Definition.Steps[0].Endpoint?.Path);
+    Expect(fourK.Definition.Steps[0].Endpoint?.Path == "/v1/hd/generations",
+        "4K 池子应绑 4K 那条接口（不能都绑第一条）：" + fourK.Definition.Steps[0].Endpoint?.Path);
+    Expect(pools.All(skill => !skill.Definition.IsPlannedOnly), "两条都能唯一对上时不应标成不可执行");
+    Expect(!plan.Warnings.Any(warning => warning.Contains("无法确定属于哪条接口")), "能唯一绑定时不应报歧义");
+
+    // 档位也对不出唯一一条（两条接口都声明同一个模型的同一档位）→ 待确认、不可执行
+    var tie = new List<ApiOpCandidate>
+    {
+        new(Capability.TextToImage, "POST", "/v1/a/generations", new List<string> { "flux-y" }, new List<string> { "1k" }, false, "bearer", new List<string> { "接口一" }),
+        new(Capability.TextToImage, "POST", "/v1/b/generations", new List<string> { "flux-y" }, new List<string> { "1k" }, false, "bearer", new List<string> { "接口二" })
+    };
+    var tieReport = new ApiDocReport(
+        ApiDocFormat.Text, "https://v4.example.com/docs", "https://v4.example.com/v1", "并列候选",
+        tie, new List<ApiModelEntry> { new(Capability.TextToImage, "flux-y", new List<string> { "1k" }, "公共模型表") },
+        new List<string>(), new List<string>());
+    var tiePool = ApiSkillFactory.Build(tieReport).ImageSkills.Single(skill => skill.IsPool);
+    Expect(tiePool.Definition.Steps[0].Endpoint is null, "候选并列时必须不绑接口路径");
+    Expect(tiePool.Definition.IsPlannedOnly && tiePool.Definition.PlannedReason.Contains("无法确定"),
+        "候选并列时必须标成不可执行：" + tiePool.Definition.PlannedReason);
+}
+
+/// <summary>
+/// 返工 V5：覆盖与清理都要按**完整来源身份**核对。
+/// · 同名文件只有 SourceId、缺 SourceIdentity（旧版本形态）→ 证明不了归属，不覆盖、整体放弃；
+/// · 完整身份对得上 → 允许幂等覆盖；
+/// · 减池清理时旧池子 SourceId 相同、SourceIdentity 指向别的来源 → 不得删除。
+/// </summary>
+static void ApiSkillWriteRespectsFullOwnership()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "df-v5-" + Guid.NewGuid().ToString("N")[..8]);
+    var previous = Environment.GetEnvironmentVariable("DREAMFORGE_SKILL_DIR");
+    try
+    {
+        Environment.SetEnvironmentVariable("DREAMFORGE_SKILL_DIR", directory);
+        Directory.CreateDirectory(directory);
+
+        var report = ApiDocAnalyzer.Analyze("POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k", "https://v5.example.com/docs");
+        var plan = ApiSkillFactory.Build(report);
+        var pool = plan.ImageSkills.First(skill => skill.IsPool);
+        var poolFile = Path.Combine(directory, pool.FileName);
+        Expect(plan.SourceId.Length > 0 && plan.SourceIdentity.Length > 0, "清单应带上来源命名空间与完整身份");
+
+        // ① 同名文件只有命名空间、缺完整身份 → 不覆盖
+        var halfOwned = ApiSkillFactory.Serialize(new SkillDefinition
+        {
+            Id = pool.Id,
+            Name = "旧版本池子",
+            SourceId = plan.SourceId,
+            SourceIdentity = string.Empty,
+            Steps = new List<SkillStep> { new() { Id = "pool", Name = "旧", Capability = "TextToImage" } }
+        });
+        File.WriteAllText(poolFile, halfOwned);
+        var refused = ApiSkillFactory.Write(plan);
+        Expect(refused.Written.Count == 0 && refused.Errors.Count > 0,
+            "身份不完整的同名文件不得被覆盖：" + string.Join("；", refused.Errors));
+        Expect(refused.Errors.Any(error => error.Contains("完整来源身份")), "应说明缺的是完整身份：" + string.Join("；", refused.Errors));
+        Expect(File.ReadAllText(poolFile) == halfOwned, "被拒时旧文件字节不得改动");
+
+        // ② 完整身份对得上 → 允许幂等覆盖
+        File.WriteAllText(poolFile, ApiSkillFactory.Serialize(new SkillDefinition
+        {
+            Id = pool.Id,
+            Name = "本来源旧版本",
+            SourceId = plan.SourceId,
+            SourceIdentity = plan.SourceIdentity,
+            Steps = new List<SkillStep> { new() { Id = "pool", Name = "旧", Capability = "TextToImage" } }
+        }));
+        var rewritten = ApiSkillFactory.Write(plan);
+        Expect(rewritten.AllWritten, "完整身份对得上时应允许幂等覆盖：" + string.Join("；", rewritten.Errors));
+
+        // ③ 减池清理：旧池子 SourceId 相同、SourceIdentity 指向别的来源 → 不得删除
+        const string staleId = "api-v5-example-com-image-pool-9-4k";
+        var staleFile = Path.Combine(directory, staleId + ".json");
+        File.WriteAllText(staleFile, ApiSkillFactory.Serialize(new SkillDefinition
+        {
+            Id = staleId,
+            Name = "身份指向别的来源的池子",
+            SourceId = plan.SourceId,
+            SourceIdentity = "https://other.example.com:8443/v1",
+            Steps = new List<SkillStep> { new() { Id = "pool", Name = "旧", Capability = "TextToImage" } }
+        }));
+        var pruned = ApiSkillFactory.Write(plan);
+        Expect(File.Exists(staleFile), "身份指向别的来源的旧池子不得被删掉");
+        Expect(!pruned.Removed.Contains(staleId + ".json"), "不应把它计入已清理：" + string.Join("、", pruned.Removed));
+        Expect(pruned.Notes.Any(note => note.Contains("身份对不上")), "应说明保守保留的原因：" + string.Join("；", pruned.Notes));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("DREAMFORGE_SKILL_DIR", previous);
+        try
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+        catch (IOException) { }
+    }
+}
+
+/// <summary>
+/// 返工 V6：顶层模型表的档位必须与**这个模型**写在同一处（同一行，或同一段里带尺寸标签的行），
+/// 并且不能超出接口已核实的档位限制。原文 A=flux-1-dev/1K、B=flux-pro/4K 时，
+/// 模型把 4K 挂到 flux-1-dev 上：4K 在全文里确实存在（在 B 的段落里），但归属不成立——
+/// 工厂优先采用模型表，会重新造出一个打不通的 4K 池子。
+/// </summary>
+static void ApiDocModelTableSizesNeedAssociation()
+{
+    const string source = """
+    POST /v1/images/generations
+    model: flux-1-dev
+    尺寸：1k
+
+    POST /v1/hd/generations
+    model: flux-pro
+    尺寸：4k
+    """;
+    const string payload = """
+    {"ops":[
+      {"capability":"TextToImage","method":"POST","path":"/v1/images/generations","models":["flux-1-dev"],"sizes":["1k"]},
+      {"capability":"TextToImage","method":"POST","path":"/v1/hd/generations","models":["flux-pro"],"sizes":["4k"]}],
+     "models":[
+      {"name":"flux-1-dev","kind":"Image","sizes":["1k","4k"]},
+      {"name":"flux-pro","kind":"Image","sizes":["4k"]}]}
+    """;
+    var result = ApiDocRepair.FromModelJson(payload, "https://v6.example.com/docs", source);
+    Expect(result.Ok, "应解析成功：" + result.Error);
+    var report = result.Report!;
+    var flux = report.ModelTable.Single(entry => entry.Name == "flux-1-dev");
+    Expect(flux.Sizes.Count == 1 && flux.Sizes[0] == "1k",
+        "跨接口的 4K 不得挂到 flux-1-dev 上：" + string.Join("、", flux.Sizes));
+    Expect(report.PendingItems.Any(item => item.Contains("4k")), "跨接口档位应列为待确认：" + string.Join("；", report.PendingItems));
+    Expect(report.ModelTable.Single(entry => entry.Name == "flux-pro").Sizes.Contains("4k"),
+        "flux-pro 自己的 4K 应保留");
+
+    // 工厂不能再造出「flux-1-dev 支持 4K」这种池子
+    var badPool = ApiSkillFactory.Build(report).ImageSkills.FirstOrDefault(skill => skill.IsPool
+        && skill.Definition.Steps[0].Model == "flux-1-dev"
+        && skill.Definition.Steps[0].Width == 4096);
+    Expect(badPool is null, "不得造出原文并不支持的 4K 池子");
+
+    // 接口已核实的限制优先：模型表多写的档位按接口实际声明收敛
+    const string wide = """
+    POST /v1/images/generations
+    model: flux-1-dev
+    尺寸：1k 2k
+    """;
+    const string widerPayload = """
+    {"ops":[{"capability":"TextToImage","method":"POST","path":"/v1/images/generations","models":["flux-1-dev"],"sizes":["1k"]}],
+     "models":[{"name":"flux-1-dev","kind":"Image","sizes":["1k","2k"]}]}
+    """;
+    var trimmed = ApiDocRepair.FromModelJson(widerPayload, "https://v6.example.com/docs", wide);
+    Expect(trimmed.Ok, "应解析成功：" + trimmed.Error);
+    var trimmedFlux = trimmed.Report!.ModelTable.Single();
+    Expect(!trimmedFlux.Sizes.Contains("2k"), "接口只声明 1K 时不得保留 2K：" + string.Join("、", trimmedFlux.Sizes));
+    Expect(trimmed.Report!.PendingItems.Any(item => item.Contains("接口")), "收敛应如实列入待确认：" + string.Join("；", trimmed.Report!.PendingItems));
+}
+
+/// <summary>
+/// 返工 R16-4：部分资产恢复失败后重试必须**只重试失败项**。整份记录被重放时，已恢复好的项若被
+/// 反复处理，会报「回收目录里已找不到该文件」，于是记录永远清不掉、账本永远停在「待恢复」。
+/// 这里走真实文件：先让第二项恢复失败（原位置被占），解除后重试必须收敛。
+/// </summary>
+static void AssetRecycleRetryOnlyRetriesFailures()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var a = Path.Combine(stores.Root, "r164-a.png");
+    var b = Path.Combine(stores.Root, "r164-b.png");
+    var bytesA = new byte[] { 0x89, 0x50, 0x4E, 0x47, 31 };
+    var bytesB = new byte[] { 0x89, 0x50, 0x4E, 0x47, 32 };
+    File.WriteAllBytes(a, bytesA);
+    File.WriteAllBytes(b, bytesB);
+
+    var moveA = AssetRecycle.Move(a) ?? throw new InvalidOperationException("a 应能移出");
+    var moveB = AssetRecycle.Move(b) ?? throw new InvalidOperationException("b 应能移出");
+    // 让 b 的恢复先失败：原位置被别的文件占住（确定性失败，不依赖文件锁）。
+    File.WriteAllBytes(b, new byte[] { 9, 9 });
+
+    var first = AssetRecycle.RestoreAll(new[] { moveA, moveB });
+    Expect(first.Count == 1 && first[0].Contains("未覆盖"), "第一项成功、第二项如实失败：" + string.Join("；", first));
+    Expect(moveA.Restored, "已成功恢复的项应被标记为完成");
+    Expect(!moveB.Restored, "失败的项不得被标记为完成");
+    Expect(File.ReadAllBytes(a).SequenceEqual(bytesA), "a 应已恢复且内容一致");
+
+    // 解除占用后重试：只处理 b，不再把 a 报成「回收文件缺失」
+    File.Delete(b);
+    var second = AssetRecycle.RestoreAll(new[] { moveA, moveB });
+    Expect(second.Count == 0, "解除占用后重试应全部完成（不得再报已恢复项）：" + string.Join("；", second));
+    Expect(File.ReadAllBytes(a).SequenceEqual(bytesA) && File.ReadAllBytes(b).SequenceEqual(bytesB),
+        "重试后两个文件都应是原始字节");
+    Expect(!File.Exists(moveA.RecycledPath) && !File.Exists(moveB.RecycledPath), "回收目录里不应再留下文件");
+
+    var third = AssetRecycle.RestoreAll(new[] { moveA, moveB });
+    Expect(third.Count == 0, "再次重试仍然收敛：" + string.Join("；", third));
+}
+
+/// <summary>
+/// 返工 R17-2：一批的撤销只做了一半（待恢复）时，新的批次必须被**统一提交入口**拦住——
+/// 否则新批落画会覆盖 lastAgentCommit，旧批的恢复记录变成不可达的死记录，
+/// 而账本仍停在待恢复、离开入口又被全部拦住。这里走真实提交入口：
+/// 断言被拒时动作没有被应用、文件字节不变；恢复完成后同一新批放行并真的写入。
+/// </summary>
+static void CommitRejectsNewBatchWhileRecoveryPending()
+{
+    var ledger = new AgentCommitLedger();
+    var committer = new AgentBatchCommitter(ledger);
+    var canvas = new WorkflowCanvasState();
+    var workspace = NewWorkspace();
+    var file = Path.Combine(workspace, "notes.md");
+    File.WriteAllText(file, "原始内容");
+
+    var applyCalls = 0;
+    var actionsA = new[] { new AgentAction { Kind = "write_file", Path = "notes.md", Content = "A 批写入" } };
+    var batchA = AgentCommitLedger.NewBatchId();
+    var first = committer.Commit(
+        batchA, actionsA,
+        () => { applyCalls++; return AgentActionExecutor.Apply(actionsA, canvas, workspace, FileWriteMode.Apply, new List<FileSnapshot>()); },
+        save: () => true, canvasKey: "画布A");
+    Expect(first.Succeeded, "A 批应提交成功：" + first.Message);
+    Expect(File.ReadAllText(file) == "A 批写入", "A 批应真的写入文件");
+
+    // 模拟「撤销只完成一半」：账本进入待恢复（撤销入口受阻的那一批）
+    ledger.MarkNeedsRecovery(batchA);
+    Expect(ledger.HasPendingRecovery(out var waiting) && waiting == batchA, "A 批应处于待恢复");
+
+    var actionsB = new[] { new AgentAction { Kind = "write_file", Path = "notes.md", Content = "B 批写入" } };
+    var batchB = AgentCommitLedger.NewBatchId();
+    var blocked = committer.Commit(
+        batchB, actionsB,
+        () => { applyCalls++; return AgentActionExecutor.Apply(actionsB, canvas, workspace, FileWriteMode.Apply, new List<FileSnapshot>()); },
+        save: () => true, canvasKey: "画布A");
+    Expect(blocked.Stage == AgentCommitStage.Rejected, "待恢复期间新批必须被拒：" + blocked.Stage);
+    Expect(blocked.Message.Contains("撤销没做完"), "拒绝理由应说明要先完成恢复：" + blocked.Message);
+    Expect(applyCalls == 1, "被拒的新批不得应用动作，实际应用次数 " + applyCalls);
+    Expect(File.ReadAllText(file) == "A 批写入", "被拒时文件字节不得改动");
+
+    // 恢复完成（整批回滚）后，同一个新批放行并真的落盘
+    ledger.MarkRolledBack(batchA);
+    var after = committer.Commit(
+        batchB, actionsB,
+        () => { applyCalls++; return AgentActionExecutor.Apply(actionsB, canvas, workspace, FileWriteMode.Apply, new List<FileSnapshot>()); },
+        save: () => true, canvasKey: "画布A");
+    Expect(after.Succeeded, "恢复完成后新批应放行：" + after.Message);
+    Expect(applyCalls == 2, "放行后才应用动作，实际 " + applyCalls);
+    Expect(File.ReadAllText(file) == "B 批写入", "新批应真的写入文件");
+}
+
+/// <summary>
+/// 返工 R16-1：把画布控件**自己的状态**当来源加载会先清空 State、再从刚清空的集合里取，
+/// 结果画布被清成空。标签快照一旦与活动状态共用同一对象（切标签、关标签时都会发生），
+/// 就会走到这条路径；这里断言控件直接拒绝自身别名。
+/// </summary>
+static void CanvasControlRejectsSelfAliasingLoad()
+{
+    var canvas = new WorkflowCanvasState();
+    canvas.Nodes.Add(new WorkflowNode { Title = "第一章 剧情", Category = NodeCategory.General });
+    canvas.Entities.Add(new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" });
+
+    var control = new WorkflowCanvasControl();
+    try
+    {
+        control.LoadState(canvas);
+        Expect(control.State.Nodes.Count == 1 && control.State.Entities.Count == 1, "装载后应有 1 节点 + 1 实体");
+
+        control.LoadState(control.State);   // 自身别名：必须是无操作
+        Expect(control.State.Nodes.Count == 1, "把自身当来源加载不得清空节点：" + control.State.Nodes.Count);
+        Expect(control.State.Entities.Count == 1, "把自身当来源加载不得清空实体：" + control.State.Entities.Count);
+        Expect(control.State.Nodes[0].Title == "第一章 剧情", "内容不得被改动：" + control.State.Nodes[0].Title);
+    }
+    finally
+    {
+        control.Dispose();
+    }
+}
+
+/// <summary>目标 6 / G6-1：项目级资源库的读写、原子写、写前备份与幂等 upsert。</summary>
+static void ProjectLibraryRoundTrip()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    Expect(ProjectLibrary.Load().Entities.Count == 0, "空项目应读到空库");
+
+    var first = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "刀客" };
+    first.CreateVariant("默认");
+    var second = new WorkflowEntity { Kind = EntityKind.Scene, Name = "雨巷", Core = "窄巷" };
+    second.CreateVariant("雨夜");
+
+    var file = ProjectLibrary.Upsert(new[] { first, second }, out var added, out var updated);
+    Expect(added == 2 && updated == 0, $"首次写入应新增 2 条：added={added} updated={updated}");
+    Expect(ProjectLibrary.TrySave(file, out var saveError), "写入项目库应成功：" + saveError);
+    Expect(ProjectLibrary.Load().Entities.Count == 2, "读回应有 2 条");
+
+    // 幂等：同一个 ID 再写一次只更新、不新增
+    first.Core = "刀客（改）";
+    var again = ProjectLibrary.Upsert(new[] { first }, out var added2, out var updated2);
+    Expect(added2 == 0 && updated2 == 1, $"重复 upsert 应只更新：added={added2} updated={updated2}");
+    Expect(ProjectLibrary.TrySave(again, out _), "重复写入应成功");
+    Expect(ProjectLibrary.Load().Entities.Count == 2, "重复写入后条数不变");
+    Expect(ProjectLibrary.Find(first.Id)!.Core == "刀客（改）", "内容应更新为最新");
+    Expect(ProjectLibrary.Find(first.Id)!.ManagedByProject, "写入项目库的实体应标记为项目级");
+
+    // 写前备份：覆盖写两次后至少有备份，且能回滚
+    var backups = ProjectLibrary.Backups();
+    Expect(backups.Count >= 1, "覆盖写之前应留下备份：" + backups.Count);
+    Expect(ProjectLibrary.RestoreFromBackup(backups[0]) is null, "从备份恢复应成功");
+
+    // 原子写：库文件位置被目录占住时如实失败，且不残留临时文件、不破坏现场
+    var libraryBefore = File.ReadAllText(ProjectLibrary.FilePath);
+    File.Delete(ProjectLibrary.FilePath);
+    Directory.CreateDirectory(ProjectLibrary.FilePath);
+    var blocked = !ProjectLibrary.TrySave(new ProjectEntityFile(), out var writeError);
+    var leftovers = Directory.GetFiles(ProjectLibrary.Directory, "*.tmp").Length;
+    Directory.Delete(ProjectLibrary.FilePath);
+    File.WriteAllText(ProjectLibrary.FilePath, libraryBefore);
+    Expect(blocked && writeError.Length > 0, "写入失败必须如实返回原因：" + writeError);
+    Expect(leftovers == 0, "写入失败不得残留临时文件：" + leftovers);
+    Expect(ProjectLibrary.Load().Entities.Count == 2, "恢复现场后内容应仍可读");
+}
+
+/// <summary>目标 6 / G6-1：同一实体被多份画布共享——改一次库，所有画布看到同一份内容。</summary>
+static void ProjectEntitySharedAcrossCanvases()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var shared = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "第一版" };
+    shared.CreateVariant("默认");
+    var file = ProjectLibrary.Upsert(new[] { shared }, out _, out _);
+    Expect(ProjectLibrary.TrySave(file, out var saveError), "写入项目库应成功：" + saveError);
+
+    // 画布 A、B 各留一份**过期快照**（模拟迁移后库被改动）
+    var staleA = ProjectEntityScope.CloneEntity(shared);
+    staleA.ManagedByProject = true;
+    staleA.Core = "陈旧快照";
+    var canvasA = new WorkflowCanvasState();
+    canvasA.Entities.Add(ProjectEntityScope.CloneEntity(staleA));
+    var canvasB = new WorkflowCanvasState();
+    canvasB.Entities.Add(ProjectEntityScope.CloneEntity(staleA));
+    canvasB.Nodes.Add(new WorkflowNode
+    {
+        Title = "分镜",
+        References = { new NodeReference { EntityId = shared.Id, VariantId = shared.Variants[0].Id } }
+    });
+
+    var reportA = ProjectEntityScope.MergeInto(canvasA);
+    var reportB = ProjectEntityScope.MergeInto(canvasB);
+    Expect(reportA.Refreshed == 1 && reportB.Refreshed == 1, "两份画布都应按库刷新托管资源");
+    Expect(canvasA.Entities[0].Core == "第一版" && canvasB.Entities[0].Core == "第一版",
+        "共享资源的内容应来自项目库：" + canvasA.Entities[0].Core + "/" + canvasB.Entities[0].Core);
+    Expect(!ReferenceEquals(canvasA.Entities[0], canvasB.Entities[0]), "两份画布不能共用同一个对象实例");
+
+    // 改库 → 再打开（MergeInto）时两份画布都看到新内容
+    shared.Core = "第二版";
+    var updated = ProjectLibrary.Upsert(new[] { shared }, out _, out _);
+    Expect(ProjectLibrary.TrySave(updated, out _), "改库应成功");
+    ProjectEntityScope.MergeInto(canvasA);
+    ProjectEntityScope.MergeInto(canvasB);
+    Expect(canvasA.Entities[0].Core == "第二版" && canvasB.Entities[0].Core == "第二版",
+        "改库后两份画布都应是新内容（跨画布共享）");
+
+    // 保存时会刷新快照：构造画布文件里的快照也应是最新
+    var snapshot = CanvasCloner.Clone(canvasA);
+    Expect(ProjectEntityScope.RefreshSnapshots(snapshot) == 1, "保存刷新应处理 1 个托管实体");
+    Expect(snapshot.Entities[0].Core == "第二版", "写盘快照应是库中最新内容");
+
+    // 引用但快照缺失的库实体应被补进来
+    var canvasC = new WorkflowCanvasState();
+    canvasC.Nodes.Add(new WorkflowNode
+    {
+        Title = "新分镜",
+        References = { new NodeReference { EntityId = shared.Id, VariantId = shared.Variants[0].Id } }
+    });
+    var reportC = ProjectEntityScope.MergeInto(canvasC);
+    Expect(reportC.Injected == 1 && canvasC.Entities.Count == 1, "被引用但缺失的共享资源应补入画布");
+    Expect(canvasC.Entities[0].Core == "第二版", "补入的内容应来自项目库");
+
+    // 库中删掉后：托管快照如实列为缺失，不静默当作正常
+    Expect(ProjectLibrary.TryRemove(shared.Id, out var removeError), "移除应成功：" + removeError);
+    var missing = ProjectEntityScope.MergeInto(canvasA);
+    Expect(missing.Missing.Count == 1, "库中已不存在的共享资源应列为缺失：" + string.Join("；", missing.Missing));
+}
+
+/// <summary>目标 6 / G6-1、G6-3：跨画布索引要覆盖画布库与草稿，并标出"其它来源也在用"。</summary>
+static void ProjectEntityIndexCoversCanvasAndDraft()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var shared = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    shared.CreateVariant("默认");
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { shared }, out _, out _), out _);
+
+    // 画布库里的另一份画布引用它
+    var other = new WorkflowCanvasState();
+    other.Nodes.Add(new WorkflowNode
+    {
+        Title = "别的画布分镜",
+        References = { new NodeReference { EntityId = shared.Id, VariantId = shared.Variants[0].Id } }
+    });
+    var otherPath = CanvasLibrary.Save(ProjectCanvas(other, "引用共享资源的画布"), null);
+
+    // 当前画布也引用它
+    var current = new WorkflowCanvasState();
+    current.Nodes.Add(new WorkflowNode
+    {
+        Title = "当前画布分镜",
+        References = { new NodeReference { EntityId = shared.Id, VariantId = shared.Variants[0].Id } }
+    });
+
+    var report = ProjectEntityIndex.Scan(current, null);
+    var usage = ProjectEntityIndex.ForLibrary(ProjectLibrary.Entities(), report).Single();
+    Expect(usage.Hits.Count >= 2, "索引应同时命中当前画布与其它画布：" + usage.Hits.Count);
+    Expect(usage.HasForeignReference, "其它画布也在引用，应标出外来源");
+    Expect(usage.Hits.Any(hit => hit.Scope == ReferenceScopeKind.Library && hit.SourcePath == otherPath),
+        "索引应记录具体是哪份画布文件在引用");
+    Expect(ProjectEntityIndex.Describe(report).Contains("引用扫描"), "应给出一句人话说明：" + ProjectEntityIndex.Describe(report));
+}
+
+/// <summary>目标 6 / G6-3：项目级资源删除必须有保护——其它来源在用时硬阻断；删除后可从回收站还原回库。</summary>
+static void ProjectEntityDeletionBlocksForeignReferences()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var shared = new WorkflowEntity { Kind = EntityKind.Prop, Name = "听雨铃", Core = "旧铃" };
+    shared.CreateVariant("默认");
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { shared }, out _, out _), out _);
+
+    var foreign = new WorkflowCanvasState();
+    foreign.Nodes.Add(new WorkflowNode
+    {
+        Title = "别人在用",
+        References = { new NodeReference { EntityId = shared.Id, VariantId = shared.Variants[0].Id } }
+    });
+    CanvasLibrary.Save(ProjectCanvas(foreign, "外部引用画布"), null);
+
+    var onlyLocal = ProjectEntityDeletion.Check(ProjectEntityIndex.Scan(new WorkflowCanvasState(), null), shared.Id);
+    Expect(onlyLocal.Blocked && onlyLocal.Foreign.Count > 0, "其它画布仍在引用时必须硬阻断：" + onlyLocal.Message);
+    Expect(onlyLocal.Message.Contains("阻断"), "阻断说明要说清原因：" + onlyLocal.Message);
+
+    // 删掉其它画布后只剩下当前画布引用：允许删除
+    foreach (var summary in CanvasLibrary.List()) CanvasLibrary.Delete(summary.Path);
+    var current = new WorkflowCanvasState();
+    current.Nodes.Add(new WorkflowNode
+    {
+        Title = "本画布在用",
+        References = { new NodeReference { EntityId = shared.Id, VariantId = shared.Variants[0].Id } }
+    });
+    var localOnly = ProjectEntityDeletion.Check(ProjectEntityIndex.Scan(current, null), shared.Id);
+    Expect(!localOnly.Blocked && localOnly.Local.Count == 1, "只有本画布引用时应允许删除：" + localOnly.Message);
+
+    var recycleBefore = CanvasRecycleBin.Count;
+    Expect(ProjectEntityDeletion.TryDeleteFromLibrary(shared, localOnly.Local, out var deleteError, out var recycleId),
+        "删除应成功：" + deleteError);
+    Expect(!ProjectLibrary.Contains(shared.Id), "删除后项目库里不应还有它");
+    Expect(recycleId != Guid.Empty && CanvasRecycleBin.Count == recycleBefore + 1, "删除应留下可还原的回收站记录");
+    Expect(ProjectLibrary.Backups().Count >= 1, "删库前应留下备份");
+
+    Expect(ProjectEntityDeletion.TryRestoreToLibrary(recycleId, out var restoreMessage), "还原应成功：" + restoreMessage);
+    Expect(ProjectLibrary.Contains(shared.Id), "还原后项目库里应重新有它");
+    Expect(ProjectLibrary.Find(shared.Id)!.ManagedByProject, "还原回来的实体仍是项目级");
+}
+
+/// <summary>目标 6 / G6-2：迁移幂等，且同名不同实体绝不自动合并。</summary>
+static void ProjectEntityMigrationIsIdempotentAndKeepsSameNamesApart()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var first = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "甲版" };
+    first.CreateVariant("默认");
+    var second = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "乙版" };
+    second.CreateVariant("默认");
+
+    var canvasA = new WorkflowCanvasState();
+    canvasA.Entities.Add(ProjectEntityScope.CloneEntity(first));
+    canvasA.Entities.Add(ProjectEntityScope.CloneEntity(second));
+    var pathA = CanvasLibrary.Save(ProjectCanvas(canvasA, "甲画布"), null);
+
+    var third = new WorkflowEntity { Kind = EntityKind.Scene, Name = "雨巷", Core = "窄巷" };
+    third.CreateVariant("雨夜");
+    var canvasB = new WorkflowCanvasState();
+    canvasB.Entities.Add(ProjectEntityScope.CloneEntity(third));
+    CanvasLibrary.Save(ProjectCanvas(canvasB, "乙画布"), null);
+
+    var current = new WorkflowCanvasState();
+    current.Entities.Add(ProjectEntityScope.CloneEntity(third));
+
+    var preview = ProjectEntityMigration.Preview(current, null);
+    Expect(preview.Migrated == 3, "应识别出 3 个待迁移资源：" + preview.Migrated);
+    Expect(preview.Conflicts.Count >= 1, "同名不同实体应如实提示、不静默合并：" + string.Join("；", preview.Conflicts));
+    Expect(preview.Conflicts.Any(text => text.Contains("沈砚")), "冲突提示应点名同名资源：" + string.Join("；", preview.Conflicts));
+
+    var applied = ProjectEntityMigration.Apply(current, null);
+    Expect(applied.Succeeded, "迁移应成功：" + applied.Message + " / " + string.Join("；", applied.Errors));
+    Expect(ProjectLibrary.Load().Entities.Count == 3, "两个同名实体应各自入库、不合并：" + ProjectLibrary.Load().Entities.Count);
+    Expect(ProjectLibrary.Load().Entities.Count(entity => entity.Name == "沈砚") == 2, "同名两个实体都要保留");
+
+    // 画布文件里已改为托管
+    Expect(CanvasLibrary.TryLoad(pathA, out var reloadedA) && reloadedA?.Canvas is not null, "迁移后应能读回画布");
+    Expect(reloadedA!.Canvas!.Entities.All(entity => entity.ManagedByProject), "迁移后画布里的资源应标记为项目级");
+
+    // 幂等：再预览应无可迁移项；再执行不新增
+    var secondPreview = ProjectEntityMigration.Preview(current, null);
+    Expect(secondPreview.Migrated == 0, "重复迁移应没有待迁移项：" + secondPreview.Migrated);
+    Expect(secondPreview.AlreadyShared >= 1, "应说明跳过了多少已共享资源：" + secondPreview.AlreadyShared);
+    var secondApply = ProjectEntityMigration.Apply(current, null);
+    Expect(secondApply.Succeeded && ProjectLibrary.Load().Entities.Count == 3, "重复执行不得生成第二份");
+    Expect(secondApply.Message.Contains("已在项目库") || secondApply.Message.Contains("迁移"), "应给出可读结论：" + secondApply.Message);
+}
+
+/// <summary>目标 6 / G6-2：迁移中途失败（画布备份写不进去）必须整批回滚，项目库与画布都恢复原状。</summary>
+static void ProjectEntityMigrationRollsBackOnFailure()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var existing = new WorkflowEntity { Kind = EntityKind.Scene, Name = "已有共享场景", Core = "旧内容" };
+    existing.CreateVariant("默认");
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { existing }, out _, out _), out _);
+    var libraryBefore = File.ReadAllText(ProjectLibrary.FilePath);
+
+    var pending = new WorkflowEntity { Kind = EntityKind.Character, Name = "待迁移角色", Core = "新内容" };
+    pending.CreateVariant("默认");
+    var canvas = new WorkflowCanvasState();
+    canvas.Entities.Add(ProjectEntityScope.CloneEntity(pending));
+    var path = CanvasLibrary.Save(ProjectCanvas(canvas, "待迁移画布"), null);
+    var canvasBefore = File.ReadAllBytes(path);
+    // 迁移走的是"当前打开的画布 + 它的路径"：必须真的把画布文件接上，否则只会标记内存对象
+    Expect(CanvasOpenService.TryRead(path, out var reopened, out var readError) && reopened?.Canvas is not null,
+        "应能读回待迁移画布：" + readError);
+
+    // 故障注入：把画布备份目录的位置占成一个文件 → 备份失败 → 必须整批回滚
+    var backupDirectory = CanvasBackup.Directory;
+    Directory.CreateDirectory(Path.GetDirectoryName(backupDirectory)!);
+    File.WriteAllText(backupDirectory, "占位");
+    ProjectMigrationOutcome outcome;
+    try
+    {
+        outcome = ProjectEntityMigration.Apply(reopened!.Canvas!, path);
+    }
+    finally
+    {
+        if (File.Exists(backupDirectory)) File.Delete(backupDirectory);
+    }
+
+    Expect(!outcome.Succeeded, "备份失败时迁移必须失败：" + outcome.Message);
+    Expect(outcome.Errors.Any(error => error.Contains("备份失败")), "应说明是备份失败：" + string.Join("；", outcome.Errors));
+    Expect(File.ReadAllText(ProjectLibrary.FilePath) == libraryBefore, "回滚后项目库必须与迁移前逐字一致");
+    Expect(File.ReadAllBytes(path).SequenceEqual(canvasBefore), "回滚后画布文件不得被改动");
+    Expect(!ProjectLibrary.Contains(pending.Id), "回滚后待迁移资源不得留在项目库里");
+}
+
+static RecentCanvasState ProjectCanvas(WorkflowCanvasState canvas, string title) =>
+    new(title, 1, string.Empty, string.Empty, 1024, 1024, 28, 7, "随机", canvas) { FormatVersion = CanvasFormat.Current };
+
+/// <summary>返工 G6-R1：托管资源的编辑必须写回项目库，保存重开后仍保留；写库失败不得误报成功或丢旧数据。</summary>
+static void ProjectEntityEditPublishesToLibrary()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var shared = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "第一版" };
+    shared.CreateVariant("默认");
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { shared }, out _, out _), out _);
+
+    // 画布里的托管快照 + 一条引用
+    var canvas = new WorkflowCanvasState();
+    var snapshot = ProjectEntityScope.CloneEntity(shared);
+    snapshot.ManagedByProject = true;
+    canvas.Entities.Add(snapshot);
+    canvas.Nodes.Add(new WorkflowNode
+    {
+        Title = "分镜",
+        References = { new NodeReference { EntityId = shared.Id, VariantId = shared.Variants[0].Id } }
+    });
+    ProjectEntityScope.MergeInto(canvas);
+    var path = CanvasLibrary.Save(ProjectCanvas(canvas, "编辑共享资源的画布"), null);
+
+    // 真实编辑动作：改名称与核心设定（版本提交同属这条链路，最终都要经过发布）
+    var edited = canvas.Entities[0];
+    edited.Name = "沈砚（改）";
+    edited.Core = "第二版";
+    edited.Variants[0].Commit("这一版改了核心设定");
+    Expect(ProjectEntityScope.TryPublish(edited, out var publishError), "发布应成功：" + publishError);
+
+    // 库与磁盘快照都要是新内容：保存时 RefreshSnapshots 不得用旧库内容覆盖编辑
+    Expect(ProjectLibrary.Find(shared.Id)!.Core == "第二版", "项目库应写入编辑后的内容");
+    CanvasSaveService.Save(CanvasLibrary.TryLoad(path, out var loaded) && loaded is not null ? loaded : ProjectCanvas(canvas, "编辑共享资源的画布"), path);
+    Expect(CanvasOpenService.TryRead(path, out var reloaded, out var readError) && reloaded?.Canvas is not null, "重开应成功：" + readError);
+    var reopenedEntity = reloaded!.Canvas!.Entities.Single();
+    Expect(reopenedEntity.Name == "沈砚（改）" && reopenedEntity.Core == "第二版", "保存重开后仍应保留编辑（实际：" + reopenedEntity.Name + " / " + reopenedEntity.Core + "）");
+    var libraryVariant = ProjectLibrary.Find(shared.Id)!.Variants[0];
+    Expect(libraryVariant.Versions.Any(version => version.Note == "这一版改了核心设定"),
+        "版本提交应写回项目库（实际 " + libraryVariant.Versions.Count + " 版："
+        + string.Join("、", libraryVariant.Versions.Select(version => version.Note)) + "）");
+    Expect(reopenedEntity.Variants[0].Versions.Any(version => version.Note == "这一版改了核心设定"),
+        "重开后应能看到提交的那一版（实际：" + string.Join("、", reopenedEntity.Variants[0].Versions.Select(version => $"{version.Number}:{version.Note}")) + "）");
+
+    // 写库失败：如实失败、不误报成功，画布内容按调用方还原后与磁盘一致
+    var before = ProjectEntityScope.CloneEntity(reopenedEntity);
+    ProjectLibrary.TryDeleteFile(out _);
+    Directory.CreateDirectory(ProjectLibrary.FilePath);      // 占住库文件位置，令写入失败
+    reopenedEntity.Core = "第三版";
+    var failed = !ProjectEntityScope.TryPublish(reopenedEntity, out var failureReason);
+    Directory.Delete(ProjectLibrary.FilePath);
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { before }, out _, out _), out _);   // 恢复库现场
+    Expect(failed && failureReason.Length > 0, "写库失败必须如实返回：" + failureReason);
+
+    ProjectEntityScope.RestoreInto(reopenedEntity, before);
+    Expect(reopenedEntity.Core == "第二版", "还原后内存内容应回到编辑前：" + reopenedEntity.Core);
+    Expect(ProjectLibrary.Find(shared.Id)!.Core == "第二版", "库内容不应被失败的编辑污染");
+}
+
+/// <summary>返工 G6-R2：首次迁移（本来没有项目库）失败时，要把库恢复成"本来不存在"，并还原内存标记与画布字节。</summary>
+static void ProjectEntityMigrationFirstRunRollbackRestoresAbsentLibrary()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+    Expect(!File.Exists(ProjectLibrary.FilePath), "本用例起点必须是没有项目库");
+
+    var pending = new WorkflowEntity { Kind = EntityKind.Scene, Name = "首次迁移场景", Core = "内容" };
+    pending.CreateVariant("默认");
+    var canvas = new WorkflowCanvasState();
+    canvas.Entities.Add(ProjectEntityScope.CloneEntity(pending));
+    var path = CanvasLibrary.Save(ProjectCanvas(canvas, "首次迁移画布"), null);
+    var canvasBefore = File.ReadAllBytes(path);
+    Expect(CanvasOpenService.TryRead(path, out var reopened, out var readError) && reopened?.Canvas is not null, "应能读回画布：" + readError);
+
+    var backupDirectory = CanvasBackup.Directory;
+    Directory.CreateDirectory(Path.GetDirectoryName(backupDirectory)!);
+    File.WriteAllText(backupDirectory, "占位");
+    ProjectMigrationOutcome outcome;
+    try
+    {
+        outcome = ProjectEntityMigration.Apply(reopened!.Canvas!, path);
+    }
+    finally
+    {
+        if (File.Exists(backupDirectory)) File.Delete(backupDirectory);
+    }
+
+    Expect(!outcome.Succeeded, "首次迁移失败应如实返回：" + outcome.Message);
+    Expect(!File.Exists(ProjectLibrary.FilePath), "回滚后项目库文件必须不存在（回到本来没有库的状态）");
+    Expect(!ProjectLibrary.Contains(pending.Id), "回滚后不得残留刚迁进去的实体");
+    Expect(!outcome.WrittenCanvases.Any(), "失败时不应留下已写入清单：" + string.Join("；", outcome.WrittenCanvases));
+    Expect(File.ReadAllBytes(path).SequenceEqual(canvasBefore), "回滚后画布文件不得被改动");
+    Expect(!reopened!.Canvas!.Entities[0].ManagedByProject, "回滚后内存里的托管标记必须还原为 false");
+
+    // 正确重试：排除故障后同一批能成功
+    var retry = ProjectEntityMigration.Apply(reopened.Canvas!, path);
+    Expect(retry.Succeeded && ProjectLibrary.Contains(pending.Id), "解除故障后重试应成功：" + retry.Message + " / " + string.Join("；", retry.Errors));
+    Expect(reopened.Canvas!.Entities[0].ManagedByProject, "重试成功后内存标记应为项目级");
+}
+
+/// <summary>返工 G6-R3：项目库里的权威资源缺失时，解析/预检/锁定一律阻断，快照只留作恢复参考。</summary>
+static void ProjectEntityMissingAuthorityBlocksResolve()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var shared = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "库中内容" };
+    shared.CreateVariant("默认");
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { shared }, out _, out _), out _);
+
+    var canvas = new WorkflowCanvasState();
+    var snapshot = ProjectEntityScope.CloneEntity(shared);
+    snapshot.ManagedByProject = true;
+    canvas.Entities.Add(snapshot);
+    var node = new WorkflowNode
+    {
+        Title = "分镜",
+        References = { new NodeReference { EntityId = shared.Id, VariantId = shared.Variants[0].Id } }
+    };
+    canvas.Nodes.Add(node);
+    ProjectEntityScope.MergeInto(canvas);
+    Expect(canvas.ResolveReferences(node).Count == 1, "库在场时应能正常解析");
+
+    // 复制画布却漏带项目库：删掉库文件后重开
+    Expect(ProjectLibrary.TryDeleteFile(out var deleteError), "删除库文件应成功：" + deleteError);
+    var report = ProjectEntityScope.MergeInto(canvas);
+    Expect(report.Missing.Count == 1, "权威资源缺失应如实报出：" + string.Join("；", report.Missing));
+    Expect(canvas.Entities[0].IsProjectMissing, "缺失的托管实体应打上运行时标记");
+    Expect(canvas.ResolveReferences(node).Count == 0, "权威资源缺失时不得继续解析旧快照");
+    Expect(canvas.ResolveReferencePairs(node).Single().Content is null, "逐条解析也应给出未解析结果");
+    Expect(CanvasReferenceVersions.IsNodeBlocked(canvas, node), "节点应处于明确阻断状态");
+    Expect(CanvasReferenceVersions.IsAuthoritativeMissing(canvas, node.References[0]), "应能指出是权威资源缺失");
+    Expect(CanvasReferenceVersions.UsableContents(canvas, node).Count == 0, "可安全使用的内容必须为空");
+    var blockText = CanvasReferenceVersions.DescribeBlock(canvas, node);
+    Expect(blockText.Contains("项目库") && blockText.Contains("不可用"), "阻断说明应点名项目库且给出不可用结论：" + blockText);
+    Expect(blockText.Contains("节点"), "阻断说明应包含节点名：" + blockText);
+
+    // 把库放回去：快照仍在，解析立即恢复（保留快照供恢复的语义）
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { shared }, out _, out _), out _);
+    var restored = ProjectEntityScope.MergeInto(canvas);
+    Expect(restored.Missing.Count == 0 && !canvas.Entities[0].IsProjectMissing, "库放回后不应再有缺失");
+    Expect(canvas.ResolveReferences(node).Count == 1, "库放回后应恢复解析");
+    Expect(canvas.ResolveReferences(node)[0].Entity.Core == "库中内容", "恢复后内容应来自项目库");
+    Expect(!CanvasReferenceVersions.IsNodeBlocked(canvas, node), "库放回后不应再阻断");
+}
+
+/// <summary>
+/// 返工 G6-S3：删除变体必须**先落库、后动本画布**。发布失败时实体、节点引用、库三者都不许变；
+/// 发布成功但本地删除失败时要把库回滚，实体与引用的原关系在内存与保存重开后都保持。
+/// </summary>
+static void VariantDeletionKeepsReferencesWhenPublishFails()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "库内容" };
+    entity.CreateVariant("默认");
+    var variantWar = entity.CreateVariant("战时");
+    entity.ManagedByProject = true;
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { entity }, out _, out _), out _);
+
+    var canvas = new WorkflowCanvasState();
+    canvas.Entities.Add(ProjectEntityScope.CloneEntity(entity));
+    var node = new WorkflowNode
+    {
+        Title = "分镜",
+        References = { new NodeReference { EntityId = entity.Id, VariantId = variantWar.Id } }
+    };
+    canvas.Nodes.Add(node);
+    ProjectEntityScope.MergeInto(canvas);
+    var path = CanvasLibrary.Save(ProjectCanvas(canvas, "删除变体保护画布"), null);
+    Expect(canvas.ResolveReferences(node).Count == 1, "起点应能解析引用");
+
+    // ① 写库失败（库文件位置被目录占住）：实体、引用、库三者都不许变
+    var libraryBytes = File.ReadAllBytes(ProjectLibrary.FilePath);
+    File.Delete(ProjectLibrary.FilePath);
+    Directory.CreateDirectory(ProjectLibrary.FilePath);
+    var planned = ProjectEntityScope.CloneEntity(canvas.Entities[0]);
+    planned.Variants.RemoveAll(candidate => candidate.Id == variantWar.Id);
+    var published = ProjectEntityScope.TryPublish(planned, out var publishError);
+    Directory.Delete(ProjectLibrary.FilePath);
+    File.WriteAllBytes(ProjectLibrary.FilePath, libraryBytes);
+    Expect(!published && publishError.Length > 0, "库写不进时应如实返回：" + publishError);
+    Expect(canvas.Entities[0].Variants.Count == 2, "发布失败时实体不得改动");
+    Expect(node.References.Count == 1, "发布失败时不得解除引用");
+    Expect(File.ReadAllBytes(ProjectLibrary.FilePath).SequenceEqual(libraryBytes), "发布失败时库字节不变");
+
+    // ② 发布成功、本地删除失败（回收站写不进去）：库回滚，实体与引用原样
+    var beforeDelete = ProjectEntityScope.CloneEntity(canvas.Entities[0]);
+    var plan = ProjectEntityScope.CloneEntity(canvas.Entities[0]);
+    plan.Variants.RemoveAll(candidate => candidate.Id == variantWar.Id);
+    Expect(ProjectEntityScope.TryPublish(plan, out var planError), "先发布应成功：" + planError);
+    Expect(ProjectLibrary.Find(entity.Id)!.Variants.Count == 1, "库中该实体应只剩一个变体");
+
+    Directory.CreateDirectory(CanvasRecycleBin.FilePath);   // 阻断回收站写入
+    var report = CanvasReferenceScanner.Scan(canvas, path, includeLibrary: false, includeDraft: false);
+    var hits = CanvasReferenceScanner.ForVariant(report, entity.Id, variantWar.Id);
+    var target = canvas.Entities[0].Variants.First(candidate => candidate.Id == variantWar.Id);
+    var deleted = CanvasDeletionGuard.TryDeleteVariant(canvas, canvas.Entities[0], target, hits, out var deleteError);
+    Directory.Delete(CanvasRecycleBin.FilePath);
+    Expect(!deleted, "回收站写不进时本地删除必须整体取消：" + deleteError);
+
+    Expect(ProjectEntityScope.TryPublish(beforeDelete, out var rollbackError), "库回滚应成功：" + rollbackError);
+    Expect(ProjectLibrary.Find(entity.Id)!.Variants.Count == 2, "库应回到删除前的两个变体");
+    Expect(canvas.Entities[0].Variants.Count == 2, "内存实体应保持两个变体");
+    Expect(node.References.Count == 1, "节点引用必须保持：" + node.References.Count);
+
+    // 保存重开后原关系仍在
+    CanvasSaveService.Save(ProjectCanvas(canvas, "删除变体保护画布"), path);
+    Expect(CanvasOpenService.TryRead(path, out var reloaded, out var readError) && reloaded?.Canvas is not null, "重开应成功：" + readError);
+    var reopenedCanvas = reloaded!.Canvas!;
+    Expect(reopenedCanvas.Entities.Single().Variants.Count == 2, "保存重开后变体数不变");
+    Expect(reopenedCanvas.Nodes.Single().References.Single().VariantId == variantWar.Id, "保存重开后引用仍指向原变体");
+}
+
+/// <summary>
+/// 返工 G6-S2：版本提交是"已确认的动作"，提示成功就必须立即落库；外层取消只能丢弃未持久化的编辑；
+/// 写库失败时提交整体撤回并如实报错，库内容不被污染。
+/// </summary>
+static void VersionCommitPersistsImmediatelyAndSurvivesCancel()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "库内容" };
+    var variant = entity.CreateVariant("默认");
+    entity.ManagedByProject = true;
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { entity }, out _, out _), out _);
+    var versionsBefore = ProjectLibrary.Find(entity.Id)!.Variants[0].Versions.Count;
+
+    // 与真实提交入口一致：先把内容写进变体再提交，然后**立即**发布
+    variant.Commit("这一版改了核心设定");
+    Expect(ProjectEntityScope.TryPublish(entity, out var publishError), "提交后应立即写回项目库：" + publishError);
+    Expect(ProjectLibrary.Find(entity.Id)!.Variants[0].Versions.Count == versionsBefore + 1, "库中应出现刚提交的版本");
+    // 以"提交成功之后"的库内容作为现场基准（写库失败注入后要用它恢复）
+    var authoritative = ProjectLibrary.Find(entity.Id)!;
+
+    // 外层取消：只丢弃未持久化的编辑（用库内容对齐），已确认的提交必须保留
+    entity.Core = "取消时应丢掉的未提交字段改动";
+    ProjectEntityScope.RestoreInto(entity, ProjectLibrary.Find(entity.Id)!);
+    Expect(entity.Core == "库内容", "取消应丢掉未持久化的字段改动：" + entity.Core);
+    Expect(ProjectLibrary.Find(entity.Id)!.Variants[0].Versions.Count == versionsBefore + 1, "取消不得撤销已确认的提交");
+    Expect(entity.Variants[0].Versions.Count == versionsBefore + 1, "内存与库的版本数应一致");
+
+    // 写库失败：提交必须整体撤回，库不被污染，也不误报成功
+    File.Delete(ProjectLibrary.FilePath);
+    Directory.CreateDirectory(ProjectLibrary.FilePath);
+    var beforeFailure = ProjectEntityScope.CloneEntity(entity);
+    entity.Variants[0].Commit("这一版写不进库");
+    var failed = !ProjectEntityScope.TryPublish(entity, out var failureReason);
+    ProjectEntityScope.RestoreInto(entity, beforeFailure);
+    Directory.Delete(ProjectLibrary.FilePath);
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { authoritative }, out _, out _), out _);
+    Expect(failed && failureReason.Length > 0, "写库失败应如实返回：" + failureReason);
+    Expect(entity.Variants[0].Versions.Count == versionsBefore + 1, "失败后撤回提交，内存版本数回到提交前");
+    Expect(ProjectLibrary.Find(entity.Id)!.Variants[0].Versions.Count == versionsBefore + 1, "库内容不得被失败的提交污染");
+}
+
+/// <summary>
+/// 返工 G6-T1：库可能在画布打开**之后**被删除或漏拷，此时打开时算出的旧标记还是"正常"。
+/// 执行前必须现场重新核验权威资源，否则缺库的引用会一路走到提供方。
+/// </summary>
+static void AuthorityRecheckCatchesLaterDeletedLibrary()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var shared = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "库内容" };
+    shared.CreateVariant("默认");
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { shared }, out _, out _), out _);
+
+    var canvas = new WorkflowCanvasState();
+    var snapshot = ProjectEntityScope.CloneEntity(shared);
+    snapshot.ManagedByProject = true;
+    canvas.Entities.Add(snapshot);
+    var node = new WorkflowNode
+    {
+        Title = "分镜",
+        References = { new NodeReference { EntityId = shared.Id, VariantId = shared.Variants[0].Id } }
+    };
+    canvas.Nodes.Add(node);
+    ProjectEntityScope.MergeInto(canvas);
+    Expect(!CanvasReferenceVersions.IsNodeBlocked(canvas, node), "库在场时不应阻断");
+
+    // 打开之后库被删掉，而且**不再合并**——此时旧标记还是"正常"（正是复核复现的现场）
+    Expect(ProjectLibrary.TryDeleteFile(out var deleteError), "删库应成功：" + deleteError);
+    Expect(!canvas.Entities[0].IsProjectMissing, "删库后旧标记尚未更新（模拟现场）");
+
+    var missing = ProjectEntityScope.RefreshAuthority(canvas);
+    Expect(missing.Count == 1 && canvas.Entities[0].IsProjectMissing, "重新核验后应发现缺失：" + string.Join("；", missing));
+    Expect(CanvasReferenceVersions.IsNodeBlocked(canvas, node), "重新核验后节点应被阻断");
+    Expect(CanvasReferenceVersions.UsableContents(canvas, node).Count == 0, "阻断后不得留下可用内容");
+    Expect(canvas.ResolveReferences(node).Count == 0, "阻断后不应再解析旧快照");
+
+    // 库放回：重新核验即放行，内容仍来自项目库
+    ProjectLibrary.TrySave(ProjectLibrary.Upsert(new[] { shared }, out _, out _), out _);
+    Expect(ProjectEntityScope.RefreshAuthority(canvas).Count == 0, "库恢复后不应再有缺失");
+    Expect(!canvas.Entities[0].IsProjectMissing && !CanvasReferenceVersions.IsNodeBlocked(canvas, node), "库恢复后应放行");
+    Expect(canvas.ResolveReferences(node)[0].Entity.Core == "库内容", "放行后内容应来自项目库");
+}
+
+/// <summary>
+/// 返工 G6-T2：发布结果必须区分"真的落进项目库"与"只是本地内容"——
+/// 本地（未迁移）实体不得被当成已保存，写库失败也要如实说明。
+/// </summary>
+static void PublishOutcomeDistinguishesLocalAndShared()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var local = new WorkflowEntity { Kind = EntityKind.Character, Name = "本地角色" };
+    local.CreateVariant("默认");
+    var localOutcome = ProjectEntityScope.Publish(local);
+    Expect(localOutcome.Succeeded && !localOutcome.Persisted, "本地实体：发布成功但**没有**持久化");
+    Expect(!File.Exists(ProjectLibrary.FilePath), "本地实体不得写出项目库文件");
+
+    var shared = new WorkflowEntity { Kind = EntityKind.Character, Name = "共享角色" };
+    shared.CreateVariant("默认");
+    shared.ManagedByProject = true;
+    var sharedOutcome = ProjectEntityScope.Publish(shared);
+    Expect(sharedOutcome.Succeeded && sharedOutcome.Persisted, "托管实体：应真的落库");
+    Expect(ProjectLibrary.Contains(shared.Id), "托管实体应出现在项目库里");
+
+    File.Delete(ProjectLibrary.FilePath);
+    Directory.CreateDirectory(ProjectLibrary.FilePath);
+    var failedOutcome = ProjectEntityScope.Publish(shared);
+    Directory.Delete(ProjectLibrary.FilePath);
+    Expect(!failedOutcome.Succeeded && !failedOutcome.Persisted && failedOutcome.Error.Length > 0,
+        "写库失败应如实返回：" + failedOutcome.Error);
+}
+
+/// <summary>真实聚合站文档的形态：池子按模型自己的类型与档位建（模型名连「池6」后缀一起保留）。</summary>
+static void ApiDocModelTableDrivesPools()
+{
+    var doc = """
+    # 接口文档
+
+    ### 基础信息
+
+    Base URL https://video.example.com/v1
+
+    ### 常用端点
+
+    - GET/v1/models
+    - POST/v1/images/generations 文生图
+    - POST/v1/images/edits 图生图(multipart)
+    - POST/v1/videos 建视频任务
+    - GET/v1/videos/{id} 查状态
+    - GET/v1/videos/{id}/content 下载 mp4
+
+    ## 确认可用模型
+
+    | model | 类型 | 定价 积分 | 能力 |
+    |---|---|---|---|
+    | gpt-image-2.5-sunburst(池6) | 图像 | 1K 2.5 2K 3.5 4K 6 | 1K 2K 4K 参考图 |
+    | gpt-image-2(池1) | 图像 | 1K 2.5 | 1K 参考图 |
+    | nano-banana-pro(池7) | 图像 | 1K 6 2K 10 4K 15 | 1K 2K 4K 参考图 |
+    | seedance-2.0(700)(池7) | 视频 | 720p 15 15s 225 | 720p 15s 参考图 |
+
+    ## 文生图参数 /v1/images/generations
+
+    | 参数 | 类型 | 必填 | 说明 |
+    |---|---|---|---|
+    | model | string | 必填 | 模型名(别名优先),见上表 |
+    | prompt | string | 必填 | 文字描述 |
+
+    ## 视频参数 /v1/videos · 异步
+
+    | 参数 | 类型 | 必填 | 说明 |
+    |---|---|---|---|
+    | model | string | 必填 | 模型名(别名优先),见上表 |
+    | input_reference | file | 可选 | 参考图,runway 图生视频必填 1 张 |
+    """;
+
+    var report = ApiDocAnalyzer.Analyze(doc, "https://video.example.com/about");
+
+    // 详情端点（后面跟 {id}）只用来查状态与下载，不是生成接口。
+    Expect(report.Ops.Count == 3, "应只解析出 3 条生成接口：" + string.Join("、", report.Ops.Select(op => op.Path)));
+    Expect(report.ImageOps.Count == 2 && report.VideoOps.Count == 1,
+        $"应 2 出图 + 1 出视频：{report.ImageOps.Count}/{report.VideoOps.Count}");
+    Expect(!report.Ops.Any(op => op.Path.Contains("videos/", StringComparison.Ordinal)), "带占位符的详情端点不得出现在接口清单");
+    Expect(report.VideoOps[0].Capability == Capability.TextToVideo, "通用 /v1/videos 应判为文生视频：" + report.VideoOps[0].Capability);
+    Expect(report.Notes.Any(note => note.Contains("跳过")), "应说明跳过了详情端点：" + string.Join("；", report.Notes));
+
+    // 模型表：类型与档位都按模型自己的那一行读，模型名带后缀。
+    Expect(report.ModelTable.Count == 4, "模型表应读到 4 个模型：" + report.ModelTable.Count);
+    Expect(report.ImageModels.Count == 3 && report.VideoModels.Count == 1, "模型表类型应分清图像与视频");
+    var first = report.ImageModels[0];
+    Expect(first.Name == "gpt-image-2.5-sunburst(池6)", "模型名必须保留「(池6)」这类后缀：" + first.Name);
+    Expect(first.Sizes.SequenceEqual(new[] { "1k", "2k", "4k" }), "该模型支持的档位应来自它自己那一行：" + string.Join("、", first.Sizes));
+    var single = report.ImageModels[1];
+    Expect(single.Sizes.Count == 1 && single.Sizes[0] == "1k", "只支持 1K 的模型不应拿到别的档位：" + string.Join("、", single.Sizes));
+    var video = report.VideoModels[0];
+    Expect(video.Name == "seedance-2.0(700)(池7)" && video.Sizes.SequenceEqual(new[] { "720p" }),
+        "视频模型应读到 720p：" + video.Name + "｜" + string.Join("、", video.Sizes));
+
+    var plan = ApiSkillFactory.Build(report);
+    var names = plan.Skills.Select(skill => skill.Name).ToList();
+    var poolModels = plan.Skills.Where(skill => skill.IsPool).Select(skill => skill.Definition.Steps[0].Model).ToList();
+    Expect(!poolModels.Contains("model") && !poolModels.Contains("input_reference") && !poolModels.Contains("prompt"),
+        "参数表的参数名不得被当成模型名：" + string.Join("、", poolModels));
+    Expect(names.Contains("生图池1 1K") && names.Contains("生图池1 4K"), "应按模型与档位建池子：" + string.Join("、", names));
+    Expect(names.Contains("生视频池1 720p"), "应建出出视频池子技能：" + string.Join("、", names));
+    Expect(plan.VideoSkills.Count == 2, "出视频技能应为 1 父 + 1 池：" + plan.VideoSkills.Count);
+    var pool4K = plan.Skills.First(skill => skill.Name == "生图池1 4K").Definition.Steps[0];
+    Expect(pool4K.Model == "gpt-image-2.5-sunburst(池6)" && pool4K.Width == 4096 && pool4K.Height == 4096,
+        $"池子步骤应带模型与画幅：{pool4K.Model}｜{pool4K.Width}x{pool4K.Height}");
+    Expect(!plan.Warnings.Any(warning => warning.Contains("只建前")), "组合没超上限时不应出现截断提示：" + string.Join("；", plan.Warnings));
+
+    // 组合数量超上限：如实提示并截断，不把技能目录刷满。
+    var many = new System.Text.StringBuilder(doc);
+    many.Append("\n\n| model | 类型 | 定价 积分 | 能力 |\n|---|---|---|---|");
+    for (var index = 0; index < 20; index++)
+        many.Append($"\n| brand-model-{index} | 图像 | 1K 2 | 1K 参考图 |");
+    var manyPlan = ApiSkillFactory.Build(ApiDocAnalyzer.Analyze(many.ToString(), "https://video.example.com/about"));
+    Expect(manyPlan.ImageSkills.Count(skill => skill.IsPool) == ApiSkillFactory.MaxPoolsPerKind,
+        $"出图池子数应截到上限 {ApiSkillFactory.MaxPoolsPerKind}：{manyPlan.ImageSkills.Count(skill => skill.IsPool)}");
+    Expect(manyPlan.Warnings.Any(warning => warning.Contains("只建前")), "截断必须如实提示：" + string.Join("；", manyPlan.Warnings));
+}
+
+/// <summary>
+/// 基础地址必须保留版本前缀：真实站点的 Base URL 是 https://host/v1，只取域名会让请求打到
+/// https://host/images/generations（实测 404）。顺带验证图片扩展名按文件头判断
+/// （接口返回的是 JPEG，存成 .png 就是扩展名说谎）。
+/// </summary>
+static void ApiDocBaseUrlAndMediaExtension()
+{
+    var withBase = ApiDocAnalyzer.Analyze("""
+    # 接口文档
+    Base URL https://video.example.com/v1
+    - POST/v1/images/generations 文生图
+    """, "https://video.example.com/about");
+    Expect(withBase.BaseUrl == "https://video.example.com/v1", "应保留文档写明的版本前缀：" + withBase.BaseUrl);
+
+    var derived = ApiDocAnalyzer.Analyze("POST /v2/images/generations\nmodel: flux-1-dev", "https://api.example.com/docs");
+    Expect(derived.BaseUrl == "https://api.example.com/v2", "文档没写根地址时应从接口路径反推版本前缀：" + derived.BaseUrl);
+
+    var bare = ApiDocAnalyzer.Analyze("POST /images/generations", "https://api.example.com/docs");
+    Expect(bare.BaseUrl == "https://api.example.com", "没有版本段时基础地址就是站点根：" + bare.BaseUrl);
+
+    var noisy = ApiDocAnalyzer.Analyze("""
+    参考图 https://cdn.other.com/v1/logo.png
+    Base URL https://api.example.com/v1
+    POST /v1/videos
+    """, "https://api.example.com/docs");
+    Expect(noisy.BaseUrl == "https://api.example.com/v1", "应优先用同域的接口根地址，别被 CDN 链接带偏：" + noisy.BaseUrl);
+
+    Expect(ImageFormatSniffer.ExtensionOf(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0 }) == ".jpg",
+        "JPEG 应存成 .jpg");
+    Expect(ImageFormatSniffer.ExtensionOf(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0 }) == ".png",
+        "PNG 应存成 .png");
+    Expect(ImageFormatSniffer.ExtensionOf(null) == ".png", "内容为空时按 .png 兜底");
+}
+
+/// <summary>
+/// 余额与上线模型的取数与解析（用户要求：窗口上显示余额）。成功要取到余额与模型，
+/// 失败要如实报出接口给的说明（真实接口 401 返回的是 {"detail":"missing api key"}）。
+/// </summary>
+static void ApiAccountProbeReadsBalanceAndModels()
+{
+    const string balanceJson = """
+    {"balance":618,"object":"user.balance","permanent_credits":618,"temporary_credits":0,"temporary_expires_at":"2026-09-29T16:00:00Z","total":3625,"used":3007}
+    """;
+    const string modelsJson = """
+    {"object":"list","data":[{"id":"gpt-image-2(池6)"},{"id":"seedance2.0-mini(池10)"}]}
+    """;
+
+    var parsed = ApiAccountProbe.ParseBalance(balanceJson);
+    Expect(parsed is not null && parsed.Balance == 618 && parsed.Used == 3007 && parsed.Total == 3625,
+        "应解析出余额：" + (parsed?.Describe() ?? "（没解析出来）"));
+    Expect(parsed!.Permanent == 618 && parsed.Temporary == 0 && parsed.TemporaryNote().Length == 0, "永久与临时额度应分开");
+    Expect(ApiAccountProbe.ParseBalance("{\"detail\":\"missing api key\"}") is null, "没有余额字段时不得拿 0 冒充余额");
+    Expect(ApiAccountProbe.ParseBalance("{\"balance\":\"120\"}")?.Balance == 120, "余额是字符串时也应认得");
+    Expect(ApiAccountProbe.ParseBalance("{不是 JSON") is null, "非 JSON 不应抛异常");
+
+    var ids = ApiAccountProbe.ModelIds(modelsJson);
+    Expect(ids.Count == 2 && ids[0] == "gpt-image-2(池6)", "应读出模型 id 并保留中文后缀：" + string.Join("、", ids));
+
+    var snapshot = new ApiAccountSnapshot(true, parsed, ids, string.Empty);
+    var missing = snapshot.MissingFrom(new[] { "gpt-image-2(池6)", "gpt-image-2(池5)", "seedance-2.0(700)(池7)" });
+    Expect(missing.SequenceEqual(new[] { "gpt-image-2(池5)", "seedance-2.0(700)(池7)" }),
+        "应算出文档写了但没上线的模型：" + string.Join("、", missing));
+    Expect(new ApiAccountSnapshot(true, parsed, Array.Empty<string>(), string.Empty).MissingFrom(new[] { "任意" }).Count == 0,
+        "没取到模型列表时不该谎报差异");
+
+    // 取数：地址拼对、两次请求都带上鉴权头
+    var requested = new List<string>();
+    var handler = new StubHttpHandler(request =>
+    {
+        requested.Add(request.RequestUri!.AbsolutePath);
+        var body = request.RequestUri.AbsolutePath.EndsWith("/user/balance", StringComparison.Ordinal) ? balanceJson : modelsJson;
+        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+    });
+    var ok = ApiAccountProbe.FetchAsync("https://host.example.com/v1/", "sk-test", new HttpClient(handler)).GetAwaiter().GetResult();
+    Expect(ok.Ok && ok.Balance?.Balance == 618 && ok.Models.Count == 2, "应一次取到余额与模型：" + ok.Error);
+    Expect(requested.SequenceEqual(new[] { "/v1/user/balance", "/v1/models" }),
+        "请求路径应是 {基础地址}/user/balance 与 {基础地址}/models：" + string.Join("、", requested));
+
+    var denied = new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized)
+    {
+        Content = new StringContent("{\"detail\":\"missing api key\"}", Encoding.UTF8, "application/json")
+    });
+    var failed = ApiAccountProbe.FetchAsync("https://host.example.com/v1", "sk-bad", new HttpClient(denied)).GetAwaiter().GetResult();
+    Expect(!failed.Ok && failed.Error.Contains("401") && failed.Error.Contains("missing api key"),
+        "失败时应带上状态码与接口说明：" + failed.Error);
+
+    var noKey = ApiAccountProbe.FetchAsync("https://host.example.com/v1", "", null).GetAwaiter().GetResult();
+    Expect(!noKey.Ok && noKey.Balance is null, "没有密钥时不应发请求，也不该给出假余额");
+}
+
+/// <summary>
+/// 大模型修正解析（用户要求：智能导入失败时允许调用大模型分析修正）。
+/// 只采信文档里有的内容：非法能力名、占位符详情端点、没有名字的模型都要丢掉并计数；
+/// 大模型没给版本前缀时按接口路径补上。顺带验证「按接口实际模型重建」的收敛规则。
+/// </summary>
+static void ApiDocRepairValidatesModelOutput()
+{
+    var payload = """
+    ```json
+    {"baseUrl":"https://video.example.com","title":"出图与出视频",
+     "ops":[
+       {"capability":"TextToImage","method":"POST","path":"/v1/images/generations","models":["flux-1-dev"],"sizes":["1k"]},
+       {"capability":"文生视频","method":"post","path":"/v1/videos","models":["veo-3"],"sizes":["720p"]},
+       {"capability":"TextToImage","method":"GET","path":"/v1/videos/{id}"},
+       {"capability":"乱写的能力","method":"POST","path":"/v1/whatever"}],
+     "models":[
+       {"name":"flux-1-dev","kind":"Image","sizes":["1k","2k"]},
+       {"name":"veo-3","kind":"Video","sizes":["720p"]},
+       {"name":"","kind":"Image","sizes":[]}]}
+    ```
+    """;
+
+    var result = ApiDocRepair.FromModelJson(payload, "https://video.example.com/about");
+    Expect(result.Ok, "应能从带围栏的回复里解析出报告：" + result.Error);
+    var report = result.Report!;
+    Expect(report.BaseUrl == "https://video.example.com/v1", "大模型没写版本前缀时应按接口路径补上：" + report.BaseUrl);
+    Expect(report.Title == "出图与出视频", "应读出标题：" + report.Title);
+    Expect(report.Ops.Count == 2, "带占位符的详情端点与非法能力名都要丢掉：" + string.Join("、", report.Ops.Select(op => op.Path)));
+    Expect(report.Ops.Any(op => op.Capability == Capability.TextToVideo), "中文能力名「文生视频」也应认得");
+    Expect(report.ModelTable.Count == 2, "没有名字的模型条目应丢掉：" + report.ModelTable.Count);
+    Expect(report.Notes.Any(note => note.Contains("大模型")), "报告必须标明来源是大模型整理：" + string.Join("；", report.Notes));
+    Expect(report.Warnings.Any(warning => warning.Contains("没通过校验")), "丢掉的条目要如实计数：" + string.Join("；", report.Warnings));
+
+    var plan = ApiSkillFactory.Build(report);
+    Expect(plan.ImageSkills.Count(skill => skill.IsPool) == 2 && plan.VideoSkills.Count(skill => skill.IsPool) == 1,
+        $"应按模型与档位建池子：出图 {plan.ImageSkills.Count(skill => skill.IsPool)}、出视频 {plan.VideoSkills.Count(skill => skill.IsPool)}");
+
+    // 按接口实际上线的模型收敛（用户可在窗口上一键重建）
+    var filtered = ApiSkillFactory.Build(report, new[] { "flux-1-dev" });
+    Expect(filtered.VideoSkills.Count(skill => skill.IsPool) == 0, "没上线的视频模型不应建池子");
+    Expect(filtered.ImageSkills.Count(skill => skill.IsPool) == 2, "上线的图像模型应保留");
+    Expect(filtered.Skills.Where(skill => skill.Id == "api-video").SelectMany(skill => skill.Definition.Steps).All(step => step.Model.Length == 0),
+        "父技能里没上线的模型应退回空串（用设置里的默认模型），不能留着死名字");
+    Expect(plan.ImageSkills.Count(skill => skill.IsPool) == 2, "不带过滤时不受影响");
+
+    var notJson = ApiDocRepair.FromModelJson("抱歉，我看不出这是什么接口。", "https://video.example.com/about");
+    Expect(!notJson.Ok && notJson.Error.Contains("没有返回 JSON"), "模型没给 JSON 时应如实失败：" + notJson.Error);
+    Expect(!ApiDocRepair.FromModelJson("{\"ops\":[],\"models\":[]}", "https://x/y").Ok, "空结构不算成功");
+    var opsOnly = ApiDocRepair.FromModelJson(
+        "{\"ops\":[{\"capability\":\"TextToImage\",\"method\":\"POST\",\"path\":\"/v1/images/generations\"}],\"models\":[]}", "https://x/y");
+    Expect(opsOnly.Ok && opsOnly.Report!.Ops.Count == 1, "只有接口没有模型也算有内容：" + opsOnly.Error);
+    Expect(opsOnly.Report!.BaseUrl == "https://x/v1", "接口路径里的版本前缀应补进基础地址：" + opsOnly.Report!.BaseUrl);
+
+    // 返工 R6：与原文核对 + 非法方法/类型直接拒绝（不静默补默认）+ 不可确认的留成待确认项
+    const string source = """
+    # 出图接口
+    POST /v1/images/generations
+    model: flux-1-dev
+    尺寸：1k
+    """;
+    var grounded = """
+    {"baseUrl":"https://video.example.com","ops":[
+      {"capability":"TextToImage","method":"POST","path":"/v1/images/generations","models":["flux-1-dev"],"sizes":["1k"]},
+      {"capability":"TextToImage","method":"POST","path":"/v1/imaginary/endpoint","models":["flux-1-dev"]},
+      {"capability":"TextToImage","method":"DELETE","path":"/v1/images/generations","models":["flux-1-dev"]},
+      {"capability":"模棱两可","method":"POST","path":"/v1/images/generations"}],
+     "models":[
+      {"name":"flux-1-dev","kind":"Image","sizes":["1k"]},
+      {"name":"完全虚构的模型","kind":"Image","sizes":["1k"]},
+      {"name":"flux-1-dev","kind":"Audio","sizes":["1k"]}]}
+    """;
+    var check = ApiDocRepair.FromModelJson(grounded, "https://video.example.com/about", source);
+    Expect(check.Ok, "有原文时合法条目应保留：" + check.Error);
+    var checkedReport = check.Report!;
+    Expect(checkedReport.Ops.Count == 1 && checkedReport.Ops[0].Path == "/v1/images/generations",
+        "原文里没有的路径与非法方法都应被拒：" + string.Join("、", checkedReport.Ops.Select(op => op.Path)));
+    Expect(checkedReport.ModelTable.Count == 1 && checkedReport.ModelTable[0].Name == "flux-1-dev",
+        "原文里没有的模型与类型不明的模型都不该进模型表：" + string.Join("、", checkedReport.ModelTable.Select(entry => entry.Name)));
+    Expect(checkedReport.Warnings.Any(w => w.Contains("虚构")), "应说明按虚构丢弃：" + string.Join("；", checkedReport.Warnings));
+    Expect(checkedReport.Warnings.Any(w => w.Contains("不在支持范围内")), "应说明方法不在支持范围：" + string.Join("；", checkedReport.Warnings));
+    Expect(checkedReport.PendingItems.Count == 2, "无法确认的应留成待确认项：" + string.Join("；", checkedReport.PendingItems));
+    Expect(checkedReport.Notes.Any(note => note.Contains("与原文逐条核对")), "应说明做过原文核对：" + string.Join("；", checkedReport.Notes));
+    Expect(ApiSkillFactory.Build(checkedReport).ImageSkills.All(skill => !skill.IsPool || skill.Definition.Steps[0].Model == "flux-1-dev"),
+        "待确认项不得变成可执行技能");
+
+    // 没有原文时无法核对：如实说明，不假装核对过
+    var ungrounded = ApiDocRepair.FromModelJson(grounded, "https://video.example.com/about");
+    Expect(ungrounded.Ok && !ungrounded.Report!.Notes.Any(note => note.Contains("与原文逐条核对")),
+        "没有原文时不应声称核对过");
+
+    // 返工 S6 的具体断言见专用用例 ApiDocRepairDoesNotFabricate。
+}
+
+/// <summary>版本策略相关测试之前的位置锚点。</summary>
+static void ReferenceVersionPolicy()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var variant = entity.CreateVariant("少年");
+    var first = variant.Versions[0];
+    var second = variant.Commit("第二版");
+    canvas.Entities.Add(entity);
+    var node = new WorkflowNode { Title = "分镜", Category = NodeCategory.Storyboard };
+    node.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+    canvas.Nodes.Add(node);
+
+    Expect(!CanvasReferenceVersions.IsNodeBlocked(canvas, node), "跟随最新不是阻断状态");
+    Expect(canvas.ResolveReferences(node)[0].VersionLabel == "最新", "跟随最新应显示「最新」");
+
+    Expect(CanvasReferenceVersions.TrySetVersion(canvas, node, entity.Id, variant.Id, second.Id, out _), "锁定存在的版本应成功");
+    Expect(node.References[0].VariantVersionId == second.Id, "引用应锁定到指定版本");
+    Expect(canvas.ResolveReferences(node)[0].VersionLabel == second.Label, "应显示锁定版本的标签");
+
+    // 锁定不存在的版本：拒绝，且原引用不变（不静默降级）。
+    Expect(!CanvasReferenceVersions.TrySetVersion(canvas, node, entity.Id, variant.Id, Guid.NewGuid(), out var error),
+        "锁定不存在的版本应被拒绝");
+    Expect(error.Contains("不存在"), "拒绝理由应说明版本不存在：" + error);
+    Expect(node.References[0].VariantVersionId == second.Id, "拒绝后引用必须原样保留");
+
+    // 锁定后该版本被删除：判定为阻断，且不得再作为出图内容。
+    variant.Versions.Remove(second);
+    Expect(CanvasReferenceVersions.IsLockedVersionMissing(canvas, node.References[0]), "版本被删后应判为锁定版本缺失");
+    Expect(CanvasReferenceVersions.IsNodeBlocked(canvas, node), "应处于阻断状态");
+    Expect(CanvasReferenceVersions.DescribeBlock(canvas, node).Contains("版本已缺失"), "阻断说明应提到版本缺失");
+    var content = canvas.ResolveReferences(node)[0];
+    Expect(content.VersionMissing && content.VersionLabel == "版本缺失",
+        "解析结果必须标出版本缺失而不是当作最新：" + content.VersionLabel);
+    Expect(CanvasReferenceVersions.UsableContents(canvas, node).Count == 0, "版本缺失时不得用于出图内容");
+    Expect(canvas.DescribeReferenceForPrompt(node).Contains("[阻断]"), "提示词应写出阻断行");
+
+    // 改回跟随最新即可恢复。
+    Expect(CanvasReferenceVersions.TrySetVersion(canvas, node, entity.Id, variant.Id, null, out _), "改回跟随最新应成功");
+    Expect(!CanvasReferenceVersions.IsNodeBlocked(canvas, node), "改回跟随最新后不再是阻断");
+    Expect(CanvasReferenceVersions.UsableContents(canvas, node).Count == 1, "恢复后出图内容可用");
+    Expect(!canvas.DescribeReferenceForPrompt(node).Contains("[阻断]"), "恢复后提示词不再有阻断行");
+
+    // 锁定节点受定稿保护。
+    node.IsLocked = true;
+    Expect(!CanvasReferenceVersions.TrySetVersion(canvas, node, entity.Id, variant.Id, first.Id, out var lockedError),
+        "锁定节点不得改写版本");
+    Expect(lockedError.Contains("锁定"), "应提示节点已锁定：" + lockedError);
+
+    // 没有该引用的节点：拒绝。
+    var other = new WorkflowNode { Title = "无关节点" };
+    Expect(!CanvasReferenceVersions.TrySetVersion(canvas, other, entity.Id, variant.Id, null, out _), "没有该引用的节点应被拒绝");
+}
+
 static string NewWorkspace()
 {
     var path = Path.Combine(Path.GetTempPath(), "df-agent-tests-" + Guid.NewGuid().ToString("N")[..8]);
@@ -1130,6 +6391,55 @@ sealed class ConfigEnvironment : IDisposable
     public void Dispose() { }
 }
 
+/// <summary>
+/// 把画布库、资产目录与模型配置都指向临时目录并把环境变量隔离掉，
+/// 让保存/迁移/资产相关的测试不碰用户真实工程与真实图片资产。
+/// </summary>
+sealed class IsolatedStores : IDisposable
+{
+    private readonly string? previousCanvasDirectory = Environment.GetEnvironmentVariable("DREAMFORGE_CANVAS_DIR");
+    private readonly string? previousAssetDirectory = Environment.GetEnvironmentVariable("DREAMFORGE_ASSET_DIR");
+    private readonly string? previousConfig = Environment.GetEnvironmentVariable("DREAMFORGE_CONFIG");
+
+    public IsolatedStores()
+    {
+        Root = Path.Combine(Path.GetTempPath(), "df-store-" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(CanvasDirectory);
+        System.IO.Directory.CreateDirectory(AssetDirectory);
+        Environment.SetEnvironmentVariable("DREAMFORGE_CANVAS_DIR", CanvasDirectory);
+        Environment.SetEnvironmentVariable("DREAMFORGE_ASSET_DIR", AssetDirectory);
+        Environment.SetEnvironmentVariable("DREAMFORGE_CONFIG", Path.Combine(Root, "ai-config.json"));
+    }
+
+    public string Root { get; }
+
+    public string CanvasDirectory => Path.Combine(Root, "canvases");
+
+    public string AssetDirectory => Path.Combine(Root, "assets");
+
+    /// <summary>在隔离的资产目录里放一个真实文件，供 AssetStore 解析。</summary>
+    public void WriteAsset(string fileName) => File.WriteAllText(Path.Combine(AssetDirectory, fileName), "asset-bytes");
+
+    public void Dispose()
+    {
+        Environment.SetEnvironmentVariable("DREAMFORGE_CANVAS_DIR", previousCanvasDirectory);
+        Environment.SetEnvironmentVariable("DREAMFORGE_ASSET_DIR", previousAssetDirectory);
+        Environment.SetEnvironmentVariable("DREAMFORGE_CONFIG", previousConfig);
+        try { if (Directory.Exists(Root)) Directory.Delete(Root, true); } catch (IOException) { }
+    }
+}
+
+/// <summary>按请求返回响应的桩 HttpClient：账号查询这类要按路径分支的调用用它，不访问网络。</summary>
+sealed class StubHttpHandler : HttpMessageHandler
+{
+    private readonly Func<HttpRequestMessage, HttpResponseMessage> respond;
+
+    public StubHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) => this.respond = respond;
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        Task.FromResult(respond(request));
+}
+
 /// <summary>桩 HttpClient：不发真实请求，只把请求体留给我们检查；响应内容可指定（含 SSE）。</summary>
 sealed class CapturingHandler : HttpMessageHandler
 {
@@ -1147,5 +6457,118 @@ sealed class CapturingHandler : HttpMessageHandler
         {
             Content = new StringContent(ResponseBody, Encoding.UTF8, ContentType)
         };
+    }
+}
+
+/// <summary>把「出图」真实写成文件（资产目录内）的执行器；可配置前 N 次失败，用于验证失败重试。</summary>
+sealed class FileWritingExecutor : IInvocationExecutor
+{
+    private readonly string directory;
+    private readonly int failFirst;
+    private int attempts;
+
+    public FileWritingExecutor(string directory, int failFirst)
+    {
+        this.directory = directory;
+        this.failFirst = failFirst;
+    }
+
+    /// <summary>最近一次写入的文件路径；失败时为 null。</summary>
+    public string? LastOutputPath { get; private set; }
+
+    /// <summary>最近一次尝试是否真的写成功。</summary>
+    public bool LastWriteSucceeded { get; private set; }
+
+    public Task<ExecutionOutput> ExecuteAsync(SessionContext session, Invocation invocation, Job job, CancellationToken cancellationToken)
+    {
+        var current = Interlocked.Increment(ref attempts);
+        LastOutputPath = null;
+        LastWriteSucceeded = false;
+        if (current <= failFirst) throw new IOException($"模拟第 {current} 次出图写盘失败");
+
+        System.IO.Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"{job.JobId:N}.png");
+        File.WriteAllBytes(path, [137, 80, 78, 71]);
+        LastOutputPath = path;
+        LastWriteSucceeded = true;
+        return Task.FromResult(new ExecutionOutput
+        {
+            ExternalTaskId = $"local-{job.JobId:N}",
+            Outputs = [new AssetRef { Role = "output", Ref = AssetStore.ToReference(path) }]
+        });
+    }
+}
+
+/// <summary>长时间运行直到被取消的执行器，用于验证取消链路。</summary>
+sealed class BlockingExecutor : IInvocationExecutor
+{
+    public async Task<ExecutionOutput> ExecuteAsync(SessionContext session, Invocation invocation, Job job, CancellationToken cancellationToken)
+    {
+        await Task.Delay(5000, cancellationToken);
+        return new ExecutionOutput();
+    }
+}
+
+/// <summary>
+/// 记录请求内容的出图桩：把真实的 1x1 PNG 写进资产目录。
+/// 用它验证技能执行器会把「步骤里的模型名」传给出图链路——池子技能全靠这个字段区分。
+/// </summary>
+sealed class RecordingImageProvider : IImageProvider
+{
+    private readonly string directory;
+
+    public RecordingImageProvider(string directory) => this.directory = directory;
+
+    public bool IsConfigured => true;
+    public string Name => "RecordingImage";
+    public ReferenceCapacity ReferenceCapacity => new(0, "测试桩不限制参考图。");
+
+    /// <summary>最近一次请求；没有调用过时为 null。</summary>
+    public ImageGenerationRequest? LastRequest { get; private set; }
+
+    public Task<ImageGenerationResult> GenerateAsync(ImageGenerationRequest request, CancellationToken cancellationToken = default)
+    {
+        LastRequest = request;
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"img-{Guid.NewGuid():N}.png");
+        File.WriteAllBytes(path, Convert.FromBase64String(Sample.TinyPngBase64));
+        return Task.FromResult(new ImageGenerationResult
+        {
+            Status = ImageGenerationStatus.Succeeded,
+            FilePath = path,
+            Provider = Name,
+            Model = request.Model
+        });
+    }
+}
+
+/// <summary>
+/// 记录请求的出视频桩：出视频实现接入之前，用它验证技能链路会把模型与画幅逐步骤传下去。
+/// </summary>
+sealed class RecordingVideoProvider : IVideoProvider
+{
+    private readonly string directory;
+
+    public RecordingVideoProvider(string directory) => this.directory = directory;
+
+    public bool IsConfigured => true;
+    public string Name => "RecordingVideo";
+
+    /// <summary>最近一次请求；没有调用过时为 null。</summary>
+    public VideoGenerationRequest? LastRequest { get; private set; }
+
+    public Task<VideoGenerationResult> GenerateAsync(VideoGenerationRequest request, CancellationToken cancellationToken = default)
+    {
+        LastRequest = request;
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"video-{Guid.NewGuid():N}.mp4");
+        File.WriteAllBytes(path, new byte[] { 0, 0, 0, 24, 102, 116, 121, 112 });
+        return Task.FromResult(new VideoGenerationResult
+        {
+            Status = VideoGenerationStatus.Succeeded,
+            FilePath = path,
+            Provider = Name,
+            Model = request.Model
+        });
     }
 }

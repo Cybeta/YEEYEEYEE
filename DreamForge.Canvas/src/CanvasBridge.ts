@@ -1,6 +1,6 @@
 import { validateCapabilities, validateHostInit } from './Protocol/Capabilities'
 import { decode, encode, ProtocolViolationError } from './Protocol/CanvasMessageCodec'
-import { CANVAS_VERSION, PROTOCOL_VERSION, type CanvasBridgeTransport, type Envelope, type HostInit, type HostError, type HostOpBatch, type CapabilitySet, type MessageType, type ResourceReplaceResult } from './Protocol/VersionedMessages'
+import { CANVAS_VERSION, PROTOCOL_VERSION, type CanvasBridgeTransport, type Envelope, type HostInit, type HostError, type HostOpBatch, type CapabilitySet, type MessageType, type ResourceReplaceResult, type JobUpdate } from './Protocol/VersionedMessages'
 
 type BridgeState = 'created' | 'handshaking' | 'ready' | 'fatal'
 export type CanvasBridgeEvents = {
@@ -8,6 +8,8 @@ export type CanvasBridgeEvents = {
   onSceneReset?: (scene: HostInit['scene']) => void
   onHostOps?: (batch: HostOpBatch) => void
   onResourceReplaceResult?: (result: ResourceReplaceResult) => void
+  /** 任务状态推送（目标 5）：Web 与桌面显示同一条尝试链。 */
+  onJobUpdate?: (update: JobUpdate) => void
 }
 
 export class CanvasBridge {
@@ -31,6 +33,7 @@ export class CanvasBridge {
       else if (message.type === 'host/scene.reset') this.events.onSceneReset?.((message.payload as { scene: HostInit['scene'] }).scene)
       else if (message.type === 'host/resource.replace.result') this.events.onResourceReplaceResult?.(message.payload as ResourceReplaceResult)
       else if (message.type === 'host/capabilities') this.capabilities = validateCapabilities(message.payload as CapabilitySet)
+      else if (message.type === 'host/job.update') this.events.onJobUpdate?.(message.payload as JobUpdate)
       else if (message.type === 'host/error' && (message.payload as HostError).severity === 'fatal') this.state = 'fatal'
     } catch (error) {
       if (error instanceof ProtocolViolationError && error.severity === 'fatal') this.state = 'fatal'

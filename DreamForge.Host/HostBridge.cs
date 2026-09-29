@@ -113,6 +113,10 @@ public sealed class HostBridge
         });
     }
 
+    /// <summary>
+    /// 把任务状态推给 Web。除状态与进度外，还带上尝试次数与重试血缘（目标 5 / 桌面与 Web 状态一致）：
+    /// 这样浏览器与桌面看到的是同一条尝试链，能显示「第 N 次尝试 / 重试自哪个任务」。
+    /// </summary>
     public void SendJobUpdate(ExecutionResult result)
     {
         EnsureSession();
@@ -125,7 +129,10 @@ public sealed class HostBridge
             errorCode = result.ErrorCode,
             errorMessage = result.ErrorMessage,
             externalTaskId = result.ExternalTaskId,
-            outputs = result.Outputs
+            outputs = result.Outputs,
+            attempt = result.Attempt < 1 ? 1 : result.Attempt,
+            retryOfJobId = result.RetryOfJobId,
+            rootJobId = result.RootJobId == Guid.Empty ? result.JobId : result.RootJobId
         });
     }
 

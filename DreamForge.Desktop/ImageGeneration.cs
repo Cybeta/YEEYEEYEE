@@ -13,6 +13,25 @@ public sealed class ImageGenerationRequest
 {
     public string Prompt { get; init; } = string.Empty;
     public string NegativePrompt { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 本次请求使用的模型名；留空表示用设置里的默认图像模型。
+    /// 由接口文档生成的池子技能会给每一步指定模型，因此模型名必须能逐次覆盖。
+    /// </summary>
+    public string Model { get; init; } = string.Empty;
+
+    /// <summary>本次请求使用的接口根地址（返工 R4）；留空用设置里的图像接口地址。</summary>
+    public string BaseUrl { get; init; } = string.Empty;
+
+    /// <summary>本次请求使用的接口路径（返工 R4），例如 /v1/images/generations；留空按能力走默认路径。</summary>
+    public string EndpointPath { get; init; } = string.Empty;
+
+    /// <summary>HTTP 方法（返工 R4）；留空按 POST。</summary>
+    public string Method { get; init; } = string.Empty;
+
+    /// <summary>鉴权方式（返工 R4）：bearer / x-api-key / query；留空按 bearer。</summary>
+    public string AuthStyle { get; init; } = string.Empty;
+
     public int Width { get; init; } = 1024;
     public int Height { get; init; } = 1024;
     public int? Steps { get; init; }
@@ -143,10 +162,42 @@ public interface IImageProvider
 public static class ImageProviderFactory
 {
     /// <summary>
+    /// 自动化回归用的执行方注入点（生产代码从不设置）：非空时 <see cref="CreateFor"/> 与 <see cref="Create"/>
+    /// 一律返回它，便于用计数桩证明「被阻断时一次请求都没发出去」（复核 G6-S1）。
+    /// </summary>
+    internal static IImageProvider? Override { get; set; }
+
+    /// <summary>
+    /// 按技能选执行方（返工 S4）：**导入的 API 技能带着自己的执行配置（Endpoint）**，
+    /// 必须走 OpenAI 兼容链路去打它记下来的地址与模型，不能被「已配置 ComfyUI」抢过去——
+    /// 否则界面上写的是「按导入的接口执行」，实际却打到本地 ComfyUI，导入结果等于没生效。
+    /// 没有执行配置的技能保持原有优先级（ComfyUI 优先）。
+    /// 技能运行与导入向导的最小测试都走这一个入口，保证「测过的就是会跑的」。
+    /// </summary>
+    public static IImageProvider CreateFor(SkillDefinition? skill, SingleMachineExecutionService? execution = null)
+    {
+        if (Override is { } injected) return injected;
+        var config = AiProviderSettings.Load();
+        // 导入技能（带来源标识）一律走 API 链路：即使它因为归属不明而没有写死路径，
+        // 也不能回退到默认执行方去跑（返工 U4）。
+        if (skill is not null && (skill.IsImported || UsesImportedEndpoints(skill)))
+            return new OpenAiCompatibleImageProvider(config);
+        return Create(execution);
+    }
+
+    /// <summary>该技能的步骤里是否带导入的接口执行配置（有就说明它按文档里的接口执行）。</summary>
+    public static bool UsesImportedEndpoints(SkillDefinition skill)
+    {
+        ArgumentNullException.ThrowIfNull(skill);
+        return skill.Steps.Any(step => step.Endpoint is { IsEmpty: false });
+    }
+
+    /// <summary>
     /// 优先使用本地 ComfyUI 执行链路（需要传入共享执行服务），其次使用 OpenAI 兼容图像接口。
     /// </summary>
     public static IImageProvider Create(SingleMachineExecutionService? execution = null)
     {
+        if (Override is { } injected) return injected;
         var config = AiProviderSettings.Load();
         if (config.IsComfyUiConfigured && execution is not null)
             return new ComfyUiImageProvider(execution, config, new SessionContext
@@ -214,12 +265,25 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
             .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
             .ToList();
         var useReference = references.Count > 0;
-        var url = $"{config.EffectiveImageEndpoint.TrimEnd('/')}/images/{(useReference ? "edits" : "generations")}";
+        // 每次请求的模型名优先于设置里的默认模型：池子技能靠它把「生图池1 / 生图池2」区分开。
+        var model = string.IsNullOrWhiteSpace(request.Model) ? config.ImageModel : request.Model;
+        // 来源、路径、方法、鉴权都可以逐次覆盖（返工 R4）：导入的自定义接口按技能里记的配置打，
+        // 不再一律去打 /images/generations 加 Bearer，否则导入的接口根本证明不了可用。
+        var baseUrl = string.IsNullOrWhiteSpace(request.BaseUrl) ? config.EffectiveImageEndpoint : request.BaseUrl.Trim();
+        var endpointPath = string.IsNullOrWhiteSpace(request.EndpointPath)
+            ? $"/images/{(useReference ? "edits" : "generations")}"
+            : NormalizePath(request.EndpointPath);
+        var method = string.IsNullOrWhiteSpace(request.Method) ? "POST" : request.Method.Trim().ToUpperInvariant();
+        var authStyle = NormalizeAuthStyle(request.AuthStyle);
+        var url = $"{baseUrl.TrimEnd('/')}{AvoidDuplicatedPrefix(baseUrl, endpointPath)}";
+        var apiKey = config.ApiKey ?? string.Empty;
+        if (authStyle == "query" && apiKey.Length > 0)
+            url += (url.Contains('?') ? "&" : "?") + "api_key=" + Uri.EscapeDataString(apiKey);
+
         try
         {
-            using var message = new HttpRequestMessage(HttpMethod.Post, url);
-            if (!string.IsNullOrWhiteSpace(config.ApiKey))
-                message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", config.ApiKey);
+            using var message = new HttpRequestMessage(new HttpMethod(method), url);
+            ApplyAuth(message, apiKey, authStyle);
 
             if (useReference)
             {
@@ -234,7 +298,7 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
                     file.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
                     form.Add(file, field, Path.GetFileName(referencePath));
                 }
-                form.Add(new StringContent(config.ImageModel), "model");
+                form.Add(new StringContent(model), "model");
                 form.Add(new StringContent(ComposePrompt(request.Prompt, request.NegativePrompt)), "prompt");
                 form.Add(new StringContent(request.SizeText), "size");
                 form.Add(new StringContent("1"), "n");
@@ -244,7 +308,7 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
             {
                 var payload = new
                 {
-                    model = config.ImageModel,
+                    model,
                     prompt = ComposePrompt(request.Prompt, request.NegativePrompt),
                     size = request.SizeText,
                     n = 1
@@ -255,11 +319,11 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
             using var response = await http.SendAsync(message, cancellationToken);
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
             if (!response.IsSuccessStatusCode)
-                return Failed($"图像接口返回 {(int)response.StatusCode}：{Trim(body, 300)}");
+                return Failed($"图像接口返回 {(int)response.StatusCode}：{Trim(body, 300)}", model);
 
             var bytes = await ReadImageBytesAsync(body, cancellationToken);
             if (bytes is null || bytes.Length == 0)
-                return Failed("图像接口没有返回可用的图片数据。");
+                return Failed("图像接口没有返回可用的图片数据。", model);
 
             var path = SaveAssets(bytes);
             return new ImageGenerationResult
@@ -267,15 +331,15 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
                 Status = ImageGenerationStatus.Succeeded,
                 FilePath = path,
                 Provider = Name,
-                Model = config.ImageModel,
+                Model = model,
                 ReferenceNote = references.Count > 1
                     ? $"已按 image[] 提交 {references.Count} 张参考图；能否全部生效取决于所用模型（多数模型只使用第一张）。"
                     : string.Empty
             };
         }
-        catch (HttpRequestException error) { return Failed($"图像接口请求失败：{error.Message}"); }
-        catch (TaskCanceledException) { return Failed("图像接口请求超时。"); }
-        catch (IOException error) { return Failed($"保存图片失败：{error.Message}"); }
+        catch (HttpRequestException error) { return Failed($"图像接口请求失败：{error.Message}", model); }
+        catch (TaskCanceledException) { return Failed("图像接口请求超时。", model); }
+        catch (IOException error) { return Failed($"保存图片失败：{error.Message}", model); }
     }
 
     private static string ComposePrompt(string prompt, string negativePrompt) =>
@@ -295,21 +359,93 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
 
     private static string SaveAssets(byte[] bytes)
     {
-        var path = Path.Combine(AssetStore.EnsureDirectory(), $"{Guid.NewGuid():N}.png");
+        var path = Path.Combine(AssetStore.EnsureDirectory(), $"{Guid.NewGuid():N}{ImageFormatSniffer.ExtensionOf(bytes)}");
         File.WriteAllBytes(path, bytes);
         return path;
     }
 
-    private ImageGenerationResult Failed(string error) => new()
+    private ImageGenerationResult Failed(string error, string? model = null) => new()
     {
         Status = ImageGenerationStatus.Failed,
         Provider = Name,
-        Model = config.ImageModel,
+        Model = model ?? config.ImageModel,
         Error = error
     };
 
+    /// <summary>把接口路径规整成以 / 开头（返工 R4）。</summary>
+    internal static string NormalizePath(string path)
+    {
+        var trimmed = path.Trim();
+        return trimmed.StartsWith('/') ? trimmed : "/" + trimmed;
+    }
+
+    /// <summary>
+    /// 基础地址已经带了版本段（例如 https://host/v2）而接口路径也以它开头时，去掉路径里的重复段，
+    /// 免得拼出 https://host/v2/v2/render/generations。文档里写的是绝对路径，很容易两边都带 /v2。
+    /// </summary>
+    internal static string AvoidDuplicatedPrefix(string baseUrl, string path)
+    {
+        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)) return path;
+        var basePath = uri.AbsolutePath.TrimEnd('/');
+        if (basePath.Length <= 1) return path;
+        return path.StartsWith(basePath + "/", StringComparison.OrdinalIgnoreCase)
+            ? path[basePath.Length..]
+            : path;
+    }
+
+    /// <summary>
+    /// 鉴权方式规整（返工 R4）：只认 bearer / x-api-key / query，其余（含空）按 bearer。
+    /// 用包含匹配而不是全等：文档里抽出来的写法五花八门（"X-Api-Key"、"api_key 参数"、"Authorization: Bearer"）。
+    /// </summary>
+    internal static string NormalizeAuthStyle(string? style)
+    {
+        var value = (style ?? string.Empty).Trim().ToLowerInvariant();
+        if (value.Contains("x-api-key", StringComparison.Ordinal) || value.Contains("xapikey", StringComparison.Ordinal)
+            || value.Contains("api-key header", StringComparison.Ordinal))
+            return "x-api-key";
+        if (value.Contains("api_key", StringComparison.Ordinal) || value.Contains("query", StringComparison.Ordinal))
+            return "query";
+        return "bearer";
+    }
+
+    /// <summary>按鉴权方式把密钥带上（返工 R4）；query 方式在拼 URL 时已附加，这里只处理头。</summary>
+    internal static void ApplyAuth(HttpRequestMessage message, string apiKey, string authStyle)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey)) return;
+        switch (authStyle)
+        {
+            case "x-api-key":
+                message.Headers.TryAddWithoutValidation("x-api-key", apiKey);
+                break;
+            case "query":
+                break;   // 已经拼在 URL 上
+            default:
+                message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+                break;
+        }
+    }
+
     private static string Trim(string text, int length) =>
         string.IsNullOrEmpty(text) || text.Length <= length ? text : text[..length] + "…";
+}
+
+/// <summary>
+/// 按文件头判断图片类型。接口返回的不一定是 PNG——真实站点实测返回的是 JPEG，
+/// 这时候存成 <c>.png</c> 就是扩展名说谎，会让缩略图、外部打开、后续转码判错格式。
+/// </summary>
+public static class ImageFormatSniffer
+{
+    public static string ExtensionOf(byte[]? bytes)
+    {
+        if (bytes is null || bytes.Length < 12) return ".png";
+        if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) return ".png";
+        if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) return ".jpg";
+        if (bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46) return ".gif";
+        if (bytes[0] == 0x42 && bytes[1] == 0x4D) return ".bmp";
+        if (bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46
+            && bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) return ".webp";
+        return ".png";
+    }
 }
 
 /// <summary>

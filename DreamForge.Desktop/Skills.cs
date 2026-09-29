@@ -15,8 +15,14 @@ public sealed class SkillStep
     /// <summary>步骤名，用于进度提示与失败信息。</summary>
     public string Name { get; set; } = string.Empty;
 
-    /// <summary>要调用的能力，取值来自 Capability 枚举，例如 TextToImage / ImageToImage。</summary>
+    /// <summary>要调用的能力，取值来自 Capability 枚举，例如 TextToImage / ImageToImage / TextToVideo。</summary>
     public string Capability { get; set; } = "TextToImage";
+
+    /// <summary>
+    /// 本步使用的模型名；留空表示用设置里的默认模型。
+    /// 由接口文档生成的池子技能会给每一步指定自己的模型（例如 flux-1-dev / veo-3）。
+    /// </summary>
+    public string Model { get; set; } = string.Empty;
 
     /// <summary>提示词模板，支持 {kind} {name} {variant} {core} {description} {layout} 占位符。</summary>
     public string Prompt { get; set; } = string.Empty;
@@ -38,6 +44,40 @@ public sealed class SkillStep
 
     /// <summary>产出名称，用于附件命名，例如「正面」。</summary>
     public string OutputName { get; set; } = string.Empty;
+
+    /// <summary>本步的接口执行配置（来源路径 / 方法 / 鉴权）；由接口文档导入时写入（返工 R4）。</summary>
+    public SkillEndpoint? Endpoint { get; set; }
+}
+
+/// <summary>
+/// 一个步骤的接口执行配置（返工 R4）。导入时把**来源、路径、方法、鉴权**一起记进技能，
+/// 执行时按它发请求，而不是一律去打 <c>/images/generations</c> 加 Bearer——
+/// 否则导入的自定义路径 / PUT / x-api-key 接口永远跑不通，最小测试也证明不了「导入的这个接口」可用。
+/// 字段留空表示按能力走默认（默认路径 + 配置里的地址与 Bearer 鉴权）。
+/// </summary>
+public sealed class SkillEndpoint
+{
+    /// <summary>接口根地址（含版本前缀，例如 https://host/v1）；留空用设置里的地址。</summary>
+    public string BaseUrl { get; set; } = string.Empty;
+
+    /// <summary>请求路径，例如 /v1/images/generations；留空按能力取默认路径。</summary>
+    public string Path { get; set; } = string.Empty;
+
+    /// <summary>HTTP 方法，默认 POST。</summary>
+    public string Method { get; set; } = "POST";
+
+    /// <summary>鉴权方式：bearer（默认）/ x-api-key / query。</summary>
+    public string AuthStyle { get; set; } = "bearer";
+
+    public bool IsEmpty =>
+        BaseUrl.Length == 0 && Path.Length == 0
+        && string.Equals(Method, "POST", StringComparison.OrdinalIgnoreCase)
+        && (AuthStyle.Length == 0 || string.Equals(AuthStyle, "bearer", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>给界面看的一行摘要。</summary>
+    public string Describe() =>
+        $"{Method.ToUpperInvariant()} {(BaseUrl.Length == 0 ? string.Empty : BaseUrl)}{(Path.Length == 0 ? "（默认路径）" : Path)}"
+        + $"｜鉴权 {AuthStyle}";
 }
 
 /// <summary>技能清单：一个可复用的内容生产流程，由若干模型调用步骤组成。</summary>
@@ -55,6 +95,55 @@ public sealed class SkillDefinition
     public string OutputTarget { get; set; } = "variant";
 
     public List<SkillStep> Steps { get; set; } = new();
+
+    /// <summary>
+    /// 来源命名空间（返工 R5）：同一个接口文档来源导入的技能共用它，文件名与技能 Id 都带这段前缀，
+    /// 于是 A、B 两个来源的同名池子不会互相覆盖，重导时也只需更新自己写过的文件。
+    /// 手工创建的技能这里是空串（视为「手写技能」，导入流程一律不碰）。
+    /// </summary>
+    public string SourceId { get; set; } = string.Empty;
+
+    /// <summary>来源文档地址，便于回看这条技能的出处。</summary>
+    public string SourceUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 完整规范化来源身份（返工 U5），例如 <c>https://api.example.com:8443/v1</c>。
+    /// 与 <see cref="SourceId"/> 一起用于覆盖前的归属核对：Id 是给人看的短名，身份是判定依据。
+    /// </summary>
+    public string SourceIdentity { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 本技能历次导入写出的文件清单（更新清单）。减掉池子时只删这份清单里、本次不再产出的文件，
+    /// 不动其它来源与手工技能的文件。
+    /// </summary>
+    public List<string> OwnedFiles { get; set; } = new();
+
+    /// <summary>是否为某个来源导入出来的技能（手写技能不参与导入的覆盖与清理）。</summary>
+    public bool IsImported => SourceId.Length > 0;
+
+    /// <summary>
+    /// 规划态（返工 R4）：技能已按接口文档建好，但当前执行方还不能真跑（例如异步视频链路尚未接入）。
+    /// 界面要显示「不可执行」，运行入口要直接拒绝并说明原因——不能让它失败得莫名其妙，更不能标成可用。
+    /// </summary>
+    public bool IsPlannedOnly { get; set; }
+
+    /// <summary>规划态的原因（为什么现在不能跑）。</summary>
+    public string PlannedReason { get; set; } = string.Empty;
+
+    /// <summary>步骤里是否含出图能力：含则运行前必须先有可用的图像链路。</summary>
+    public bool NeedsImageProvider =>
+        Steps.Any(step => CapabilityOf(step) is Capability.TextToImage or Capability.ImageToImage);
+
+    /// <summary>步骤里是否含出视频能力。</summary>
+    public bool NeedsVideoProvider =>
+        Steps.Any(step => CapabilityOf(step) is Capability.TextToVideo or Capability.ImageToVideo);
+
+    /// <summary>技能里是否存在执行器不支持的能力（能力名拼错，或用了还没接入的能力）。</summary>
+    public bool HasUnsupportedCapability =>
+        Steps.Any(step => CapabilityOf(step) is not (Capability.TextToImage or Capability.ImageToImage or Capability.TextToVideo or Capability.ImageToVideo));
+
+    private static Capability? CapabilityOf(SkillStep step) =>
+        Enum.TryParse<Capability>(step.Capability, ignoreCase: true, out var capability) ? capability : null;
 
     /// <summary>运行前的可用性说明；返回 null 表示可以运行。</summary>
     public string? Validate(WorkflowEntity entity)
@@ -264,7 +353,7 @@ public sealed class SkillRunResult
 }
 
 /// <summary>
-/// 技能执行器：按步骤顺序调用图像模型，把每一步的产出作为下一步可能的参考图。
+/// 技能执行器：按步骤顺序调用出图 / 出视频能力，把每一步的产出作为下一步可能的参考图。
 /// 任何一步失败都不会写回任何产出，避免半成品混进变体参考图。
 /// </summary>
 public static class SkillRunner
@@ -274,9 +363,21 @@ public static class SkillRunner
         SkillTarget target,
         IImageProvider provider,
         Action<string>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IVideoProvider? videoProvider = null)
     {
-        if (!provider.IsConfigured)
+        // 规划态技能（例如异步视频链路还没接执行方）：直接拒绝并说明原因，
+        // 不让它跑到一半报一个莫名其妙的错误，也不让它看起来可用（返工 R4）。
+        if (skill.IsPlannedOnly)
+            return new SkillRunResult
+            {
+                Succeeded = false,
+                Message = $"技能「{skill.Name}」目前不可执行："
+                    + (skill.PlannedReason.Length == 0 ? "该接口的执行方尚未接入。" : skill.PlannedReason)
+            };
+
+        // 只有含出图步骤的技能才要求图像链路：纯出视频技能不该因为没配出图模型就跑不起来。
+        if (skill.NeedsImageProvider && !provider.IsConfigured)
             return new SkillRunResult { Succeeded = false, Message = "尚未配置图像模型，无法运行技能。" };
 
         var scope = (skill.OutputTarget ?? "variant").Trim();
@@ -296,35 +397,73 @@ public static class SkillRunner
 
             if (!Enum.TryParse<Capability>(step.Capability, ignoreCase: true, out var capability))
                 return new SkillRunResult { Succeeded = false, Message = $"步骤「{step.Name}」的能力名 {step.Capability} 无法识别。" };
-            if (capability is not (Capability.TextToImage or Capability.ImageToImage))
-                return new SkillRunResult { Succeeded = false, Message = $"步骤「{step.Name}」使用了不支持的能力 {capability}。技能目前只能调用出图能力。" };
+            if (capability is not (Capability.TextToImage or Capability.ImageToImage or Capability.TextToVideo or Capability.ImageToVideo))
+                return new SkillRunResult { Succeeded = false, Message = $"步骤「{step.Name}」使用了不支持的能力 {capability}。技能目前只能调用出图与出视频能力。" };
+
+            var isVideo = capability is Capability.TextToVideo or Capability.ImageToVideo;
+            var needsReference = capability is Capability.ImageToImage or Capability.ImageToVideo;
+            if (isVideo && (videoProvider is null || !videoProvider.IsConfigured))
+                return new SkillRunResult
+                {
+                    Succeeded = false,
+                    Message = $"步骤「{step.Name}」需要出视频链路，但当前没有可用的出视频实现：技能已保存，接入出视频执行方后即可直接运行。"
+                };
 
             var referencePaths = ResolveReferences(step, target, produced);
-            if (capability == Capability.ImageToImage && referencePaths.Count == 0)
+            if (needsReference && referencePaths.Count == 0)
                 return new SkillRunResult { Succeeded = false, Message = $"步骤「{step.Name}」需要参考图，但没有找到可用的参考图。" };
 
             var config = AiProviderSettings.Load();
             var (defaultWidth, defaultHeight) = ParseSize(config.ImageSize);
-            var request = new ImageGenerationRequest
+            var prompt = SkillTemplates.Render(step.Prompt, target);
+            var negativePrompt = SkillTemplates.Render(step.NegativePrompt, target);
+            string filePath;
+            if (isVideo)
             {
-                Prompt = SkillTemplates.Render(step.Prompt, target),
-                NegativePrompt = SkillTemplates.Render(step.NegativePrompt, target),
-                Width = step.Width is > 0 ? step.Width.Value : defaultWidth,
-                Height = step.Height is > 0 ? step.Height.Value : defaultHeight,
-                ReferenceImages = capability == Capability.ImageToImage ? referencePaths : Array.Empty<string>(),
-                Denoise = step.Denoise
-            };
-
-            var result = await provider.GenerateAsync(request, cancellationToken).ConfigureAwait(false);
-            if (result.Status != ImageGenerationStatus.Succeeded)
-                return new SkillRunResult { Succeeded = false, Message = $"步骤「{step.Name}」失败：{result.Error}" };
+                var videoRequest = new VideoGenerationRequest
+                {
+                    Prompt = prompt,
+                    NegativePrompt = negativePrompt,
+                    Model = step.Model,
+                    Width = step.Width is > 0 ? step.Width.Value : 0,
+                    Height = step.Height is > 0 ? step.Height.Value : 0,
+                    Seconds = config.VideoDefaultSeconds,
+                    ReferenceImages = referencePaths
+                };
+                var videoResult = await videoProvider!.GenerateAsync(videoRequest, cancellationToken).ConfigureAwait(false);
+                if (videoResult.Status != VideoGenerationStatus.Succeeded)
+                    return new SkillRunResult { Succeeded = false, Message = $"步骤「{step.Name}」失败：{videoResult.Error}" };
+                filePath = videoResult.FilePath;
+            }
+            else
+            {
+                var request = new ImageGenerationRequest
+                {
+                    Prompt = prompt,
+                    NegativePrompt = negativePrompt,
+                    Model = step.Model,
+                    // 技能自带的执行配置（返工 R4）：来源、路径、方法、鉴权逐步骤生效。
+                    BaseUrl = step.Endpoint?.BaseUrl ?? string.Empty,
+                    EndpointPath = step.Endpoint?.Path ?? string.Empty,
+                    Method = step.Endpoint?.Method ?? string.Empty,
+                    AuthStyle = step.Endpoint?.AuthStyle ?? string.Empty,
+                    Width = step.Width is > 0 ? step.Width.Value : defaultWidth,
+                    Height = step.Height is > 0 ? step.Height.Value : defaultHeight,
+                    ReferenceImages = needsReference ? referencePaths : Array.Empty<string>(),
+                    Denoise = step.Denoise
+                };
+                var result = await provider.GenerateAsync(request, cancellationToken).ConfigureAwait(false);
+                if (result.Status != ImageGenerationStatus.Succeeded)
+                    return new SkillRunResult { Succeeded = false, Message = $"步骤「{step.Name}」失败：{result.Error}" };
+                filePath = result.FilePath;
+            }
 
             var name = string.IsNullOrWhiteSpace(step.OutputName) ? step.Name : step.OutputName;
             var attachment = new WorkflowAttachment
             {
-                Kind = AttachmentKind.Image,
-                Reference = AssetStore.ToReference(result.FilePath),
-                Name = $"{skill.Name}-{name}{Path.GetExtension(result.FilePath)}",
+                Kind = isVideo ? AttachmentKind.Video : AttachmentKind.Image,
+                Reference = AssetStore.ToReference(filePath),
+                Name = $"{skill.Name}-{name}{Path.GetExtension(filePath)}",
                 Source = $"技能 {skill.Name}"
             };
             produced[string.IsNullOrWhiteSpace(step.Id) ? step.Name : step.Id] = attachment;
@@ -344,8 +483,19 @@ public static class SkillRunner
         {
             Succeeded = true,
             Produced = list,
-            Message = $"技能「{skill.Name}」完成，生成 {list.Count} 张图。"
+            Message = $"技能「{skill.Name}」完成，生成 {DescribeProduced(list)}。"
         };
+    }
+
+    /// <summary>按产出类型报数：出图技能说「张图」，出视频技能说「个视频」，混合技能两样都报。</summary>
+    private static string DescribeProduced(IReadOnlyList<WorkflowAttachment> produced)
+    {
+        var images = produced.Count(attachment => attachment.Kind == AttachmentKind.Image);
+        var videos = produced.Count(attachment => attachment.Kind == AttachmentKind.Video);
+        var parts = new List<string>();
+        if (images > 0) parts.Add($"{images} 张图");
+        if (videos > 0) parts.Add($"{videos} 个视频");
+        return parts.Count == 0 ? $"{produced.Count} 个产物" : string.Join("、", parts);
     }
 
     /// <summary>

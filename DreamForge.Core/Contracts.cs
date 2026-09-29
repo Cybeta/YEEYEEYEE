@@ -75,6 +75,15 @@ public sealed record ExecutionResult
     public string Tool { get; init; } = string.Empty;
     public Capability Capability { get; init; }
     public string Channel { get; init; } = string.Empty;
+
+    /// <summary>第几次尝试：首次为 1，重试逐次递增（目标 5 / 失败重试）。</summary>
+    public int Attempt { get; init; } = 1;
+
+    /// <summary>本次尝试所重试的那个 Job；首次尝试为 null。</summary>
+    public Guid? RetryOfJobId { get; init; }
+
+    /// <summary>同一次输入的反复尝试共享的根 Job；首次尝试的根就是自己。</summary>
+    public Guid RootJobId { get; init; }
 }
 
 public sealed record Channel
