@@ -20,18 +20,35 @@ public sealed class Job
     public Capability Capability { get; private set; }
     public string Channel { get; private set; } = string.Empty;
 
-    public Job(Guid invocationId, Guid userId, string idempotencyKey, Guid? jobId = null)
+    /// <summary>第几次尝试：首次为 1，重试逐次递增。</summary>
+    public int Attempt { get; private set; } = 1;
+
+    /// <summary>本次尝试重试的 Job；首次尝试为 null。</summary>
+    public Guid? RetryOfJobId { get; private set; }
+
+    /// <summary>同一次输入的反复尝试共享的根 Job。</summary>
+    public Guid RootJobId { get; private set; }
+
+    public Job(Guid invocationId, Guid userId, string idempotencyKey, Guid? jobId = null,
+        int attempt = 1, Guid? retryOfJobId = null, Guid? rootJobId = null)
     {
         if (invocationId == Guid.Empty || userId == Guid.Empty || string.IsNullOrWhiteSpace(idempotencyKey)) throw new ArgumentException("Job 标识和幂等键不能为空");
+        if (attempt < 1) throw new ArgumentOutOfRangeException(nameof(attempt), "尝试次数从 1 开始");
         JobId = jobId ?? Guid.NewGuid();
         InvocationId = invocationId; UserId = userId; IdempotencyKey = idempotencyKey;
+        Attempt = attempt; RetryOfJobId = retryOfJobId; RootJobId = rootJobId ?? JobId;
+        if (retryOfJobId is not null && rootJobId is null) throw new ArgumentException("重试任务必须带上根任务标识");
     }
 
     public static Job Restore(ExecutionResult snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         if (snapshot.JobId == Guid.Empty || snapshot.UserId == Guid.Empty) throw new ArgumentException("Job 快照标识不能为空");
-        var job = new Job(snapshot.InvocationId, snapshot.UserId, snapshot.IdempotencyKey, snapshot.JobId);
+        var job = new Job(
+            snapshot.InvocationId, snapshot.UserId, snapshot.IdempotencyKey, snapshot.JobId,
+            snapshot.Attempt < 1 ? 1 : snapshot.Attempt,
+            snapshot.RetryOfJobId,
+            snapshot.RootJobId == Guid.Empty ? snapshot.JobId : snapshot.RootJobId);
         job.ProgressPercent = snapshot.ProgressPercent;
         job.ErrorCode = snapshot.ErrorCode;
         job.ErrorMessage = snapshot.ErrorMessage;
@@ -158,7 +175,7 @@ public sealed class Job
 
     public ExecutionResult ToResult()
     {
-        lock (gate) return new() { UserId = UserId, InvocationId = InvocationId, JobId = JobId, State = State, ProgressPercent = ProgressPercent, ErrorCode = ErrorCode, ErrorMessage = ErrorMessage, ExternalTaskId = ExternalTaskId, IdempotencyKey = IdempotencyKey, Outputs = Outputs.ToArray(), Inputs = Inputs, Tool = Tool, Capability = Capability, Channel = Channel };
+        lock (gate) return new() { UserId = UserId, InvocationId = InvocationId, JobId = JobId, State = State, ProgressPercent = ProgressPercent, ErrorCode = ErrorCode, ErrorMessage = ErrorMessage, ExternalTaskId = ExternalTaskId, IdempotencyKey = IdempotencyKey, Outputs = Outputs.ToArray(), Inputs = Inputs, Tool = Tool, Capability = Capability, Channel = Channel, Attempt = Attempt, RetryOfJobId = RetryOfJobId, RootJobId = RootJobId };
     }
 }
 

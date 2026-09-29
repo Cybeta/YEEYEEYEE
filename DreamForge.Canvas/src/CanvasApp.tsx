@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './workflow.css'
 import { CanvasBridge } from './CanvasBridge'
-import type { CanvasBridgeTransport, HostInit, HostOpBatch, OperationRecord, Scene } from './Protocol/VersionedMessages'
+import type { CanvasBridgeTransport, HostInit, HostOpBatch, JobUpdate, OperationRecord, Scene } from './Protocol/VersionedMessages'
 import { layerOf, isLayerPill, type NodeReferenceThumb, type NodeReferenceVersion } from './Protocol/VersionedMessages'
+import { ALL_CHAPTERS_ID, chapterEntries, chapterIdOf, chapterLabelOf, filterByChapter, sortWithinChapters, type ChapterEntry } from './ChapterView'
+import { hasBlockedReference, isLockedVersionMissing, referenceVersionLabel } from './ReferenceView'
+import { describeJobAttempt, describeJobStatus, isRetryableJobState } from './JobView'
 
 type ViewRecord = OperationRecord & { record: Record<string, unknown> }
 
@@ -60,10 +63,6 @@ function parentIdOf(record: ViewRecord): string {
   return text(record.parentId, text(record.record.parentId, text((record as unknown as { parentId?: unknown }).parentId)))
 }
 
-function chapterOf(record: ViewRecord): string {
-  return text(record.chapterId, text(record.record.chapterId, text(record.record.chapter, '未归档')))
-}
-
 function computeEdges(records: ViewRecord[], positions: Map<string, NodePosition>, collapsed: Set<string>): NodeEdge[] {
   const byId = new Map(records.map((record) => [record.recordId, record]))
   return records.flatMap((record) => {
@@ -116,17 +115,19 @@ function resetView(scene: Scene): CanvasView {
 const ENTITY_LABELS: Record<string, string> = { Character: '角色', Scene: '场景', Prop: '道具' }
 const CANVAS_STATE_KEY = 'dreamforge.canvas.view-state'
 
-type CanvasState = { displayMode: DisplayMode; chapterFilter: string; collapsedIds: string[] }
+// 视图状态只用于界面偏好（C-4）：存的是稳定章节 ID，不是章节名文本。
+// 旧版本存过章节名（chapterFilter），名称不能当作身份，读到时一律丢弃并回到「全部章节」。
+type CanvasState = { displayMode: DisplayMode; chapterFilterId: string; collapsedIds: string[] }
 
 function readCanvasState(): CanvasState {
-  const fallback: CanvasState = { displayMode: 'chapter', chapterFilter: '全部章节', collapsedIds: [] }
+  const fallback: CanvasState = { displayMode: 'chapter', chapterFilterId: ALL_CHAPTERS_ID, collapsedIds: [] }
   try {
     const raw = localStorage.getItem(CANVAS_STATE_KEY)
     if (!raw) return fallback
     const parsed = JSON.parse(raw) as Partial<CanvasState>
     return {
       displayMode: parsed.displayMode === 'overview' ? 'overview' : 'chapter',
-      chapterFilter: typeof parsed.chapterFilter === 'string' ? parsed.chapterFilter : fallback.chapterFilter,
+      chapterFilterId: typeof parsed.chapterFilterId === 'string' ? parsed.chapterFilterId : ALL_CHAPTERS_ID,
       collapsedIds: Array.isArray(parsed.collapsedIds) ? parsed.collapsedIds.filter((id): id is string => typeof id === 'string') : []
     }
   } catch {
@@ -140,13 +141,15 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
   const [selected, setSelected] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(readCanvasState().collapsedIds))
   const [displayMode, setDisplayMode] = useState<DisplayMode>(() => readCanvasState().displayMode)
-  const [chapterFilter, setChapterFilter] = useState(() => readCanvasState().chapterFilter)
+  const [chapterFilterId, setChapterFilterId] = useState(() => readCanvasState().chapterFilterId)
   const [resourceSelection, setResourceSelection] = useState<NodeReferenceThumb | null>(null)
   const [selectedVersionId, setSelectedVersionId] = useState<string>('latest')
   const [capabilities, setCapabilities] = useState<HostInit['capabilities']>({
     serverClaims: [], canEditCanvas: false, canInvokeSkill: false, canCancelJob: false, canUndo: false, reason: '等待宿主初始化'
   })
   const [status, setStatus] = useState('等待宿主初始化')
+  // 最近一次任务状态（目标 5）：与桌面显示同一条尝试链（第几次尝试、重试自哪个任务）。
+  const [job, setJob] = useState<JobUpdate | null>(null)
 
   useEffect(() => {
     const instance = new CanvasBridge(transport, {
@@ -171,6 +174,10 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
         setStatus(result.ok
           ? `${result.message}${result.revision ? ` · 修订 ${result.revision}` : ''}`
           : `资源版本替换失败：${result.message}`)
+      },
+      onJobUpdate: (update) => {
+        setJob(update)
+        setStatus(describeJobStatus(update))
       }
     })
     bridge.current = instance
@@ -178,11 +185,12 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
     return () => instance.dispose()
   }, [transport])
 
-  const chapterOptions = useMemo(() => ['全部章节', ...new Set(view.records.map(chapterOf))], [view.records])
+  // 章节选项来自稳定 ID + 显式顺序；同名不同 ID 的章节是两条，不会合并（C-4）。
+  const chapters = useMemo<ChapterEntry[]>(() => chapterEntries(view.records), [view.records])
   const displayedRecords = useMemo(() => {
-    if (displayMode === 'overview' || chapterFilter === '全部章节') return view.records
-    return view.records.filter((record) => chapterOf(record) === chapterFilter || layerOf(record.recordType) <= 2)
-  }, [displayMode, chapterFilter, view.records])
+    if (displayMode === 'overview') return sortWithinChapters(view.records)
+    return sortWithinChapters(filterByChapter(view.records, chapterFilterId))
+  }, [displayMode, chapterFilterId, view.records])
   const positions = useMemo(() => computeLayout(displayedRecords, collapsed), [displayedRecords, collapsed])
   const edges = useMemo(() => computeEdges(displayedRecords, positions, collapsed), [displayedRecords, positions, collapsed])
   const selectedRecord = useMemo(() => view.records.find((record) => record.recordId === selected) ?? null, [selected, view.records])
@@ -199,22 +207,22 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
   }, [displayedRecords, selected])
 
   useEffect(() => {
-    if (chapterFilter !== '全部章节' && !chapterOptions.includes(chapterFilter)) {
-      setChapterFilter('全部章节')
+    if (chapterFilterId !== ALL_CHAPTERS_ID && !chapters.some((chapter) => chapter.id === chapterFilterId)) {
+      setChapterFilterId(ALL_CHAPTERS_ID)
     }
-  }, [chapterFilter, chapterOptions])
+  }, [chapterFilterId, chapters])
 
   useEffect(() => {
     try {
       localStorage.setItem(CANVAS_STATE_KEY, JSON.stringify({
         displayMode,
-        chapterFilter,
+        chapterFilterId,
         collapsedIds: [...collapsed]
       } satisfies CanvasState))
     } catch {
       // 宿主 WebView 可能禁用本地存储，不影响画布使用。
     }
-  }, [collapsed, displayMode, chapterFilter])
+  }, [collapsed, displayMode, chapterFilterId])
 
   const layers = useMemo(() => {
     const map = new Map<number, ViewRecord[]>()
@@ -260,6 +268,12 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
           <span className={capabilities.canCancelJob ? 'available' : ''}>任务取消</span>
           <span className={capabilities.canUndo ? 'available' : ''}>本地撤销</span>
         </div>
+        {job && (
+          <div className={`job-status ${isRetryableJobState(job.state) ? 'retryable' : ''}`} title={describeJobAttempt(job)}>
+            <span className="job-title">任务 {job.jobId.slice(0, 8)}</span>
+            <span className="job-detail">{describeJobStatus(job)}</span>
+          </div>
+        )}
       </aside>
       <main className="workflow-canvas">
         <div className="canvas-toolbar">
@@ -268,11 +282,17 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
             <button className={displayMode === 'overview' ? 'active' : ''} onClick={() => setDisplayMode('overview')}>概览视图</button>
           </div>
           <label className="chapter-picker">当前章节
-            <select value={chapterFilter} onChange={(event) => setChapterFilter(event.target.value)}>
-              {chapterOptions.map((chapter) => <option key={chapter} value={chapter}>{chapter}</option>)}
+            <select value={chapterFilterId} onChange={(event) => setChapterFilterId(event.target.value)}>
+              <option value={ALL_CHAPTERS_ID}>全部章节</option>
+              {chapters.map((chapter) => (
+                <option key={chapter.id} value={chapter.id}>
+                  {chapter.order === Number.MAX_SAFE_INTEGER ? chapter.label : `#${chapter.order} ${chapter.label}`}
+                </option>
+              ))}
             </select>
           </label>
           <span className="toolbar-count">显示 {displayedRecords.length} / {view.records.length}</span>
+          <span className="toolbar-count">章节 {chapters.length} 条（按稳定 ID 与显式顺序）</span>
         </div>
         <div className="canvas-grid" />
         {layers.map(([layer, items]) => (
@@ -299,7 +319,7 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
           return (
             <article
               key={record.recordId}
-              className={`workflow-node ${selected === record.recordId ? 'selected' : ''} ${pill ? 'pill-node' : ''} ${refs.length > 0 ? 'has-refs' : ''}`}
+              className={`workflow-node ${selected === record.recordId ? 'selected' : ''} ${pill ? 'pill-node' : ''} ${refs.length > 0 ? 'has-refs' : ''} ${hasBlockedReference(refs) ? 'ref-blocked' : ''}`}
               style={pos}
               onClick={() => setSelected(record.recordId)}
             >
@@ -307,12 +327,16 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
                 <span>{record.recordType || '记录'}</span>
                 <span className="node-id">{record.recordId.slice(0, 8)}</span>
               </div>
+              <div className="node-chapter">
+                章节：{chapterLabelOf(record)}{chapterIdOf(record) ? ` · ${chapterIdOf(record).slice(0, 8)}` : ' · 无稳定 ID'}
+              </div>
               <h3>{recordTitle(record)}</h3>
               <p>{recordSummary(record)}</p>
               {refs.length > 0 && (
                 <div className="ref-strip">
                   <div className="ref-strip-header" onClick={(e) => { e.stopPropagation(); toggleCollapse(record.recordId) }}>
                     <span>引用 ({refs.length})</span>
+                    {hasBlockedReference(refs) && <span className="ref-blocked-tag">锁定版本缺失</span>}
                     <span className="ref-toggle">{isCollapsed ? '▾ 展开' : '▴ 折叠'}</span>
                   </div>
                   {!isCollapsed && (
@@ -326,7 +350,7 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
                           </div>
                           <span className={`ref-kind-tag ${ref.kind.toLowerCase()}`}>{ENTITY_LABELS[ref.kind] ?? ref.kind}</span>
                           <span className="ref-name">{ref.name}</span>
-                          {ref.variantLabel && <span className="ref-variant">{ref.variantLabel}</span>}
+                          <span className={`ref-variant ${isLockedVersionMissing(ref) ? 'blocked' : ''}`}>{referenceVersionLabel(ref)}</span>
                         </div>
                       ))}
                     </div>
@@ -353,6 +377,11 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
           <div className="detail-row"><span>类型</span><b>{selectedRecord.recordType || '记录'}</b></div>
           <div className="detail-row"><span>记录 ID</span><code>{selectedRecord.recordId}</code></div>
           <div className="detail-row"><span>层级</span><b>{LAYER_LABELS[layerOf(selectedRecord.recordType)] ?? '其他'}</b></div>
+          <div className="detail-row"><span>章节</span><b>{chapterLabelOf(selectedRecord)}</b></div>
+          <div className="detail-row"><span>章节 ID</span><code>{chapterIdOf(selectedRecord) || '无稳定 ID（不参与章节绑定）'}</code></div>
+          {chapterIdOf(selectedRecord) && (
+            <button className="inspector-locate" onClick={() => setChapterFilterId(chapterIdOf(selectedRecord))}>定位到该章节</button>
+          )}
           <label>标题<input value={recordTitle(selectedRecord)} readOnly /></label>
           <label>内容<textarea value={recordSummary(selectedRecord)} readOnly /></label>
           {recordReferences(selectedRecord).length > 0 && (
@@ -372,7 +401,13 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
               <div className="resource-detail-heading"><strong>资源库引用</strong><span>{ENTITY_LABELS[resourceSelection.kind]}</span></div>
               <div className="resource-detail-name">{resourceSelection.name}</div>
               <div className="detail-row"><span>资源 ID</span><code>{resourceSelection.entityId}</code></div>
-              {resourceSelection.variantLabel && <div className="detail-row"><span>当前版本</span><b>{resourceSelection.variantLabel}</b></div>}
+              <div className="detail-row">
+                <span>引用版本</span>
+                <b className={isLockedVersionMissing(resourceSelection) ? 'blocked-version' : ''}>{referenceVersionLabel(resourceSelection)}</b>
+              </div>
+              {isLockedVersionMissing(resourceSelection) && (
+                <div className="version-blocked-note">锁定的版本已不存在：请改回「跟随最新」或重新锁定一个存在的版本，不要按当前内容继续使用。</div>
+              )}
               {resourceSelection.versions && resourceSelection.versions.length > 0 && (
                 <label className="version-picker-label">引用版本
                   <select

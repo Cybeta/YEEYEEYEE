@@ -14,6 +14,10 @@ var tests = new (string Name, Action Run)[]
     ("幂等结果和单人撤销", IdempotencyAndUndo),
     ("Canvas invoke 到 Job 回传", HostInvokeEndToEnd),
     ("Job 取消和失败终态", JobCancellationAndFailure),
+    ("任务重试与尝试链", JobRetryLifecycle),
+    ("任务重试的权限与归属", JobRetryAuthorization),
+    ("任务重试血缘的持久化与恢复", JobRetryPersistence),
+    ("返工 R1：重试上限按整条尝试链判定，历史源与并发都绕不过", JobRetryCapCannotBeBypassed),
     ("协议字段严格校验", StrictProtocolFields),
     ("资源版本替换协议", ResourceReplaceProtocol),
     ("资源版本替换状态", ResourceReplaceState),
@@ -124,6 +128,227 @@ static void JobCancellationAndFailure()
 
     var failed = new SingleMachineExecutionService(new FailingExecutor()).StartAsync(session, new Invocation { InvocationId = Guid.NewGuid(), Tool = "fail" }, "fail-key").GetAwaiter().GetResult();
     Expect(failed.State == JobState.Failed && failed.ErrorCode == "JOB_EXECUTION_FAILED", "Job 失败终态错误");
+}
+
+/// <summary>目标 5 / 失败重试：终态任务可重试，尝试次数有上限，并记录完整的尝试链。</summary>
+static void JobRetryLifecycle()
+{
+    var session = new SessionContext { SessionId = Guid.NewGuid(), UserId = Guid.NewGuid(), ServerClaims = new HashSet<string>(["skill.invoke", "job.cancel"]) };
+    var service = new SingleMachineExecutionService(new FlakyExecutor(failFirst: 2));
+    var invocation = new Invocation
+    {
+        InvocationId = Guid.NewGuid(),
+        Tool = "flaky",
+        Capability = Capability.TextToImage,
+        Channel = "local",
+        Inputs = new Dictionary<string, JsonElement> { ["prompt"] = JsonSerializer.SerializeToElement("一只猫走进雨里") }
+    };
+
+    var first = service.StartAsync(session, invocation, "retry-key-1").GetAwaiter().GetResult();
+    Expect(first.State == JobState.Failed, "第一次尝试应失败");
+    Expect(first.Attempt == 1 && first.RetryOfJobId is null && first.RootJobId == first.JobId,
+        "首次尝试应记为第 1 次、无重试来源、根任务是自己");
+
+    var second = service.RetryAsync(session, first.JobId, "retry-key-2").GetAwaiter().GetResult();
+    Expect(second.State == JobState.Failed, "第二次尝试在模拟器里仍应失败");
+    Expect(second.Attempt == 2, "重试后尝试次数应为 2：" + second.Attempt);
+    Expect(second.JobId != first.JobId, "重试应发起新的 Job，而不是复用失败的 Job");
+    Expect(second.RetryOfJobId == first.JobId, "重试应记录来源 Job");
+    Expect(second.RootJobId == first.JobId, "重试应沿用同一个根任务");
+    Expect(second.Tool == invocation.Tool && second.Capability == Capability.TextToImage && second.Channel == "local",
+        "重试应沿用工具、能力与通道");
+    Expect(second.Inputs.TryGetValue("prompt", out var carried) && carried.GetString() == "一只猫走进雨里", "重试应沿用输入参数");
+
+    var third = service.RetryAsync(session, second.JobId, "retry-key-3").GetAwaiter().GetResult();
+    Expect(third.State == JobState.Succeeded, "第三次尝试应成功：" + third.State);
+    Expect(third.Attempt == 3, "第三次尝试次数应为 3：" + third.Attempt);
+    Expect(third.RetryOfJobId == second.JobId && third.RootJobId == first.JobId, "第三次尝试的血缘应正确");
+
+    // 已达上限：显式给 1 次上限时，第 1 次尝试就不再允许重试。
+    ExpectThrows<ProtocolViolationException>(
+        () => service.RetryAsync(session, first.JobId, "retry-key-4", maxAttempts: 1).GetAwaiter().GetResult(),
+        "JOB_NOT_RETRYABLE");
+    // 成功的任务不能再重试。
+    ExpectThrows<ProtocolViolationException>(
+        () => service.RetryAsync(session, third.JobId, "retry-key-5").GetAwaiter().GetResult(),
+        "JOB_NOT_RETRYABLE");
+    // 缺少幂等键：拒绝。
+    ExpectThrows<ProtocolViolationException>(
+        () => service.RetryAsync(session, first.JobId, "  ").GetAwaiter().GetResult(),
+        "PROTOCOL_MALFORMED");
+
+    var chain = service.GetAttemptChain(third.JobId);
+    Expect(chain.Count == 3, "尝试链应有 3 次尝试：" + chain.Count);
+    Expect(chain.Select(job => job.Attempt).SequenceEqual([1, 2, 3]), "尝试链应按尝试次数排序");
+    Expect(chain.All(job => job.RootJobId == first.JobId), "尝试链应共享同一个根任务");
+    Expect(JobRetryPolicy.DescribeAttempt(chain[1], JobRetryPolicy.DefaultMaxAttempts).Contains("第 2 次尝试"), "尝试描述应可读");
+    Expect(JobRetryPolicy.CanRetry(chain[2], JobRetryPolicy.DefaultMaxAttempts, out var reason) == false && reason.Contains("失败或已取消"),
+        "成功的任务应被判为不可重试并给出原因：" + reason);
+}
+
+/// <summary>目标 5 / 权限：重试与取消都必须经过会话声明与归属校验。</summary>
+static void JobRetryAuthorization()
+{
+    var owner = new SessionContext { SessionId = Guid.NewGuid(), UserId = Guid.NewGuid(), ServerClaims = new HashSet<string>(["skill.invoke", "job.cancel"]) };
+    var service = new SingleMachineExecutionService(new FailingExecutor());
+    var failed = service.StartAsync(owner, new Invocation { InvocationId = Guid.NewGuid(), Tool = "fail" }, "auth-key-1").GetAwaiter().GetResult();
+    Expect(failed.State == JobState.Failed, "准备用的任务应失败");
+
+    var noInvoke = owner with { ServerClaims = new HashSet<string>(["job.cancel"]) };
+    ExpectThrows<ProtocolViolationException>(
+        () => service.RetryAsync(noInvoke, failed.JobId, "auth-key-2").GetAwaiter().GetResult(),
+        "PROTOCOL_UNAUTHORIZED");
+
+    var stranger = new SessionContext { SessionId = Guid.NewGuid(), UserId = Guid.NewGuid(), ServerClaims = new HashSet<string>(["skill.invoke"]) };
+    ExpectThrows<ProtocolViolationException>(
+        () => service.RetryAsync(stranger, failed.JobId, "auth-key-3").GetAwaiter().GetResult(),
+        "JOB_FORBIDDEN");
+
+    ExpectThrows<ProtocolViolationException>(
+        () => service.RetryAsync(owner, Guid.NewGuid(), "auth-key-4").GetAwaiter().GetResult(),
+        "JOB_NOT_FOUND");
+
+    // 取消同样受声明约束：没有 job.cancel 的会话不能取消别人（或自己）的任务。
+    var blocking = new SingleMachineExecutionService(new BlockingExecutor());
+    var running = blocking.StartAsync(owner, new Invocation { InvocationId = Guid.NewGuid(), Tool = "slow" }, "auth-key-5");
+    SpinWait.SpinUntil(() => blocking.GetJobs(owner.UserId).Any(job => job.State == JobState.Running), 1000);
+    var runningJobId = blocking.GetJobs(owner.UserId).Single().JobId;
+    var noCancel = owner with { ServerClaims = new HashSet<string>(["skill.invoke"]) };
+    ExpectThrows<ProtocolViolationException>(() => blocking.Cancel(noCancel, runningJobId), "PROTOCOL_UNAUTHORIZED");
+    var strangerWithCancel = stranger with { ServerClaims = new HashSet<string>(["skill.invoke", "job.cancel"]) };
+    ExpectThrows<ProtocolViolationException>(() => blocking.Cancel(strangerWithCancel, runningJobId), "JOB_FORBIDDEN");
+    blocking.Cancel(owner, runningJobId);
+    Expect(running.GetAwaiter().GetResult().State == JobState.Cancelled, "有权限的会话取消后应进入 Cancelled");
+}
+
+/// <summary>目标 5 / 任务状态落盘：尝试次数与重试血缘必须能跨重启读回。</summary>
+static void JobRetryPersistence()
+{
+    var path = Path.Combine(Path.GetTempPath(), $"dreamforge-retry-{Guid.NewGuid():N}.db");
+    var session = new SessionContext { SessionId = Guid.NewGuid(), UserId = Guid.NewGuid(), ServerClaims = new HashSet<string>(["skill.invoke"]) };
+    try
+    {
+        Guid rootJobId;
+        Guid secondJobId;
+        using (var store = new SqliteJobStore(path))
+        {
+            var service = new SingleMachineExecutionService(new FlakyExecutor(failFirst: 1), store);
+            var first = service.StartAsync(session, new Invocation { InvocationId = Guid.NewGuid(), Tool = "flaky" }, "persist-key-1").GetAwaiter().GetResult();
+            var second = service.RetryAsync(session, first.JobId, "persist-key-2").GetAwaiter().GetResult();
+            Expect(second.State == JobState.Succeeded && second.Attempt == 2, "重试应成功并记为第 2 次尝试");
+            rootJobId = first.JobId;
+            secondJobId = second.JobId;
+        }
+
+        using var reopened = new SqliteJobStore(path);
+        var restoredService = new SingleMachineExecutionService(new FlakyExecutor(failFirst: 0), reopened);
+        Expect(restoredService.TryGet(secondJobId, out var reloaded) && reloaded is not null, "重启后应能读回任务");
+        Expect(reloaded!.Attempt == 2, "重启后尝试次数应保留：" + reloaded.Attempt);
+        Expect(reloaded.RetryOfJobId == rootJobId, "重启后重试来源应保留");
+        Expect(reloaded.RootJobId == rootJobId, "重启后根任务应保留");
+        Expect(reloaded.IdempotencyKey == "persist-key-2", "重启后幂等键应保留");
+        Expect(restoredService.GetAttemptChain(secondJobId).Count == 2, "重启后尝试链应保留");
+    }
+    finally
+    {
+        if (File.Exists(path)) File.Delete(path);
+    }
+}
+
+/// <summary>
+/// 目标 5 返工 R1：重试上限必须按**整条尝试链**判定。返工前的绕过路径是
+/// 「每次都拿最初那个失败任务去重试、每次换新幂等键」，因为旧实现取的是 source.Attempt + 1，
+/// 于是永远只产生第 2 次尝试，上限形同虚设。这里逐条覆盖：历史源连续重试、同根已有成功尝试、
+/// 同根已有进行中的尝试、以及宿主重启后规则是否仍然成立。
+/// </summary>
+static void JobRetryCapCannotBeBypassed()
+{
+    var session = new SessionContext
+    {
+        SessionId = Guid.NewGuid(),
+        UserId = Guid.NewGuid(),
+        ServerClaims = new HashSet<string>(["skill.invoke", "job.cancel"])
+    };
+    const int max = JobRetryPolicy.DefaultMaxAttempts;
+
+    // 1) 反复重试同一个失败的历史源（每次换新幂等键）：尝试号要一路涨到上限，然后被拒
+    var service = new SingleMachineExecutionService(new FailingExecutor());
+    var first = service.StartAsync(session, new Invocation { InvocationId = Guid.NewGuid(), Tool = "fail" }, "cap-1").GetAwaiter().GetResult();
+    Expect(first.State == JobState.Failed && first.Attempt == 1, "准备用任务应失败且是第 1 次尝试");
+
+    var second = service.RetryAsync(session, first.JobId, "cap-2").GetAwaiter().GetResult();
+    Expect(second.Attempt == 2, "第一次重试应给第 2 次尝试：" + second.Attempt);
+    var third = service.RetryAsync(session, first.JobId, "cap-3").GetAwaiter().GetResult();
+    Expect(third.Attempt == 3, "从历史源再重试应递增到第 3 次（返工前会停在第 2 次）：" + third.Attempt);
+    Expect(third.RetryOfJobId == first.JobId && third.RootJobId == first.JobId, "血缘应指向被重试的历史源与同一根任务");
+
+    ExpectThrows<ProtocolViolationException>(
+        () => service.RetryAsync(session, first.JobId, "cap-4").GetAwaiter().GetResult(),
+        "JOB_NOT_RETRYABLE");
+    var chain = service.GetAttemptChain(first.JobId);
+    Expect(chain.Count == max, $"尝试链应停在上限 {max} 次：" + chain.Count);
+    Expect(chain.Select(job => job.Attempt).Distinct().Count() == max, "尝试号不得重复");
+    Expect(!service.CanRetryJob(first.JobId, session.UserId, max, out var capped) && capped.Contains("上限"),
+        "界面预检也应给出上限原因：" + capped);
+
+    // 2) 同根已有成功尝试：重试等于重复执行同一次输入，直接拒绝
+    var success = new SingleMachineExecutionService(new FlakyExecutor(failFirst: 1));
+    var successFirst = success.StartAsync(session, new Invocation { InvocationId = Guid.NewGuid(), Tool = "flaky" }, "suc-1").GetAwaiter().GetResult();
+    var successSecond = success.RetryAsync(session, successFirst.JobId, "suc-2").GetAwaiter().GetResult();
+    Expect(successSecond.State == JobState.Succeeded, "第二次尝试应成功");
+    ExpectThrows<ProtocolViolationException>(
+        () => success.RetryAsync(session, successFirst.JobId, "suc-3").GetAwaiter().GetResult(),
+        "JOB_NOT_RETRYABLE");
+    Expect(success.GetAttemptChain(successFirst.JobId).Count == 2, "被拒后不得新增尝试");
+    Expect(!success.CanRetryJob(successFirst.JobId, session.UserId, max, out var succeeded) && succeeded.Contains("成功"),
+        "应说明同根已有成功尝试：" + succeeded);
+
+    // 3) 同根已有进行中的尝试：并发重试会让同一次输入同时跑两份，必须拒绝
+    var gate = new GateExecutor();
+    var concurrent = new SingleMachineExecutionService(gate);
+    var failed = concurrent.StartAsync(session, new Invocation { InvocationId = Guid.NewGuid(), Tool = "gate" }, "con-1").GetAwaiter().GetResult();
+    Expect(failed.State == JobState.Failed, "首次应失败（模拟器设定）");
+    var retryTask = concurrent.RetryAsync(session, failed.JobId, "con-2");
+    SpinWait.SpinUntil(() => concurrent.GetJobs(session.UserId).Any(job => job.State == JobState.Running), 3000);
+    Expect(concurrent.GetJobs(session.UserId).Any(job => job.State == JobState.Running), "第 2 次尝试应处于进行中");
+    ExpectThrows<ProtocolViolationException>(
+        () => concurrent.RetryAsync(session, failed.JobId, "con-3").GetAwaiter().GetResult(),
+        "JOB_NOT_RETRYABLE");
+    Expect(!concurrent.CanRetryJob(failed.JobId, session.UserId, max, out var running) && running.Contains("进行中"),
+        "应说明已有进行中的尝试：" + running);
+    gate.Release();
+    Expect(retryTask.GetAwaiter().GetResult().State == JobState.Succeeded, "放行后第 2 次尝试应成功");
+    Expect(concurrent.GetAttemptChain(failed.JobId).Count == 2, "并发重试被拒后只应有 2 次尝试");
+
+    // 4) 重启后规则不变：尝试号与血缘从 SQLite 读回后仍能拦住第 4 次
+    var path = Path.Combine(Path.GetTempPath(), $"dreamforge-retry-cap-{Guid.NewGuid():N}.db");
+    try
+    {
+        Guid rootId;
+        using (var store = new SqliteJobStore(path))
+        {
+            var hosted = new SingleMachineExecutionService(new FailingExecutor(), store);
+            var start = hosted.StartAsync(session, new Invocation { InvocationId = Guid.NewGuid(), Tool = "fail" }, "db-1").GetAwaiter().GetResult();
+            hosted.RetryAsync(session, start.JobId, "db-2").GetAwaiter().GetResult();
+            hosted.RetryAsync(session, start.JobId, "db-3").GetAwaiter().GetResult();
+            rootId = start.JobId;
+            ExpectThrows<ProtocolViolationException>(
+                () => hosted.RetryAsync(session, start.JobId, "db-4").GetAwaiter().GetResult(),
+                "JOB_NOT_RETRYABLE");
+        }
+
+        using var reopened = new SqliteJobStore(path);
+        var restored = new SingleMachineExecutionService(new FailingExecutor(), reopened);
+        Expect(restored.GetAttemptChain(rootId).Count == max, "重启后尝试链应保留：" + restored.GetAttemptChain(rootId).Count);
+        Expect(restored.GetAttemptChain(rootId).Max(job => job.Attempt) == max, "重启后最大尝试号应保留");
+        ExpectThrows<ProtocolViolationException>(
+            () => restored.RetryAsync(session, rootId, "db-5").GetAwaiter().GetResult(),
+            "JOB_NOT_RETRYABLE");
+    }
+    finally
+    {
+        if (File.Exists(path)) File.Delete(path);
+    }
 }
 
 static void StrictProtocolFields()
@@ -441,6 +666,55 @@ sealed class BlockingExecutor : IInvocationExecutor
 sealed class FailingExecutor : IInvocationExecutor
 {
     public Task<ExecutionOutput> ExecuteAsync(SessionContext session, Invocation invocation, Job job, CancellationToken cancellationToken) => throw new InvalidOperationException("模拟执行器失败");
+}
+
+/// <summary>前 N 次尝试失败、之后成功的执行器，用于验证重试链路。</summary>
+sealed class FlakyExecutor : IInvocationExecutor
+{
+    private readonly int failFirst;
+    private int attempts;
+
+    public FlakyExecutor(int failFirst) => this.failFirst = failFirst;
+
+    public int Attempts => Volatile.Read(ref attempts);
+
+    public Task<ExecutionOutput> ExecuteAsync(SessionContext session, Invocation invocation, Job job, CancellationToken cancellationToken)
+    {
+        var current = Interlocked.Increment(ref attempts);
+        if (current <= failFirst) throw new InvalidOperationException($"模拟第 {current} 次尝试失败");
+        return Task.FromResult(new ExecutionOutput
+        {
+            ExternalTaskId = $"local-{job.JobId:N}",
+            Outputs = [new AssetRef { Role = "output", Ref = $"local://jobs/{job.JobId:N}/{invocation.Tool}" }]
+        });
+    }
+}
+
+/// <summary>
+/// 第一次调用直接失败、之后挂住直到放行的执行器：用来制造「同根任务已有进行中的尝试」这一状态，
+/// 验证并发重试会被拒（返工 R1）。挂住而不是睡死，是为了让测试能在放行后立刻收敛。
+/// </summary>
+sealed class GateExecutor : IInvocationExecutor
+{
+    private readonly TaskCompletionSource<object?> gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int calls;
+
+    public int Calls => Volatile.Read(ref calls);
+
+    /// <summary>放行被挂住的调用。</summary>
+    public void Release() => gate.TrySetResult(null);
+
+    public async Task<ExecutionOutput> ExecuteAsync(SessionContext session, Invocation invocation, Job job, CancellationToken cancellationToken)
+    {
+        var current = Interlocked.Increment(ref calls);
+        if (current == 1) throw new InvalidOperationException("模拟首次尝试失败");
+        await gate.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return new ExecutionOutput
+        {
+            ExternalTaskId = $"gate-{job.JobId:N}",
+            Outputs = [new AssetRef { Role = "output", Ref = $"local://jobs/{job.JobId:N}/{invocation.Tool}" }]
+        };
+    }
 }
 
 sealed class ExternalTaskExecutor : IInvocationExecutor

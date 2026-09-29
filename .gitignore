@@ -29,3 +29,10 @@ agent-diagnostics.log
 last-canvas.json
 canvas-tabs.json
 workspace.json
+# 项目级资源库（目标 6）：共享资源与备份属于用户数据
+/project/
+# 交接文档与分享包只在本机维护
+LOCAL_HANDOFF*.html
+.trae-html-share-packages/
+# 联调/冒烟产生的测试图
+anyai-test-*.jpg

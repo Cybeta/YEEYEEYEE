@@ -44,16 +44,25 @@ public static class CanvasLibrary
         catch (UnauthorizedAccessException) { return Array.Empty<CanvasSummary>(); }
     }
 
-    /// <summary>保存画布；existingPath 为空时按标题命名写入库目录，返回最终文件路径。</summary>
+    /// <summary>
+    /// 保存画布；existingPath 为空时按标题命名写入库目录，返回最终文件路径。
+    /// 这是画布库的真实保存入口，统一走 <see cref="CanvasSaveService.Save"/>：
+    /// 深拷贝 → 迁移 → 校验 → 目标已存在则先备份（备份失败抛 <see cref="CanvasSaveAbortedException"/> 并中止，不覆盖原文件）
+    /// → 临时文件原子替换。标签切换、关闭写回、重命名与命令服务都复用这里，不存在旁路的写盘路径。
+    /// </summary>
     public static string Save(RecentCanvasState state, string? existingPath)
     {
+        ArgumentNullException.ThrowIfNull(state);
         System.IO.Directory.CreateDirectory(Directory);
         var path = string.IsNullOrWhiteSpace(existingPath)
-            ? Path.Combine(Directory, SanitizeFileName(state.Title) + ".json")
+            ? PathForTitle(state.Title)
             : existingPath;
-        File.WriteAllText(path, JsonSerializer.Serialize(state, Options));
-        return path;
+        return CanvasSaveService.Save(state, path).Path;
     }
+
+    /// <summary>标题对应的画布库文件路径（与保存、重命名、同名检查共用同一套命名规则）。</summary>
+    public static string PathForTitle(string title) =>
+        Path.Combine(Directory, SanitizeFileName(title) + ".json");
 
     public static bool TryLoad(string path, out RecentCanvasState? state)
     {
@@ -71,7 +80,7 @@ public static class CanvasLibrary
     /// <summary>按标题查找已存在的画布文件；excludePath 用于排除自身，返回冲突文件路径。</summary>
     public static string? FindByTitle(string title, string? excludePath = null)
     {
-        var target = Path.Combine(Directory, SanitizeFileName(title) + ".json");
+        var target = PathForTitle(title);
         if (!File.Exists(target)) return null;
         return string.IsNullOrWhiteSpace(excludePath) || !string.Equals(target, excludePath, StringComparison.OrdinalIgnoreCase)
             ? target
@@ -81,18 +90,34 @@ public static class CanvasLibrary
     /// <summary>
     /// 修改画布标题并把文件同步重命名为标题，返回新的文件路径。
     /// 目标已存在同名画布且不允许覆盖时抛出 <see cref="IOException"/>。
+    /// 覆盖目标前先备份（失败即中止、不覆盖），写入走统一的保存服务（迁移 + 校验 + 原子替换），
+    /// 新文件写成功后才删除源文件；任何一步失败都不会让内容丢失。
     /// </summary>
     public static string? Rename(string path, string newTitle, bool overwrite = false)
     {
         if (!TryLoad(path, out var state) || state is null) return null;
         var updated = state with { Title = newTitle };
-        var target = Path.Combine(Directory, SanitizeFileName(newTitle) + ".json");
+        var target = PathForTitle(newTitle);
         var isSameFile = string.Equals(target, path, StringComparison.OrdinalIgnoreCase);
         if (!isSameFile && File.Exists(target) && !overwrite)
             throw new IOException($"画布库中已存在同名画布：{Path.GetFileName(target)}");
-        File.WriteAllText(target, JsonSerializer.Serialize(updated, Options));
+
+        // 统一保存链：写前备份 + 迁移 + 原子替换；失败时目标文件保持原样。
+        CanvasSaveService.Save(updated, target);
+
         if (!isSameFile && File.Exists(path))
-            File.Delete(path);
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                throw new IOException(
+                    $"新文件已写入 {Path.GetFileName(target)}，但旧文件 {Path.GetFileName(path)} 无法删除，请手工清理。原因：{error.Message}", error);
+            }
+        }
+
         return target;
     }
 

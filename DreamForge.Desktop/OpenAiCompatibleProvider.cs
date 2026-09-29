@@ -14,13 +14,24 @@ public static class AiProviderFactory
         if (config.UseLocalProvider || !config.IsConfigured) return new LocalAiProvider();
         return new OpenAiCompatibleProvider(config);
     }
+
+    /// <summary>
+    /// 要一份结构化 JSON 的能力。**未接入大模型时返回 null**，调用方据此决定是否给出「让大模型分析」入口，
+    /// 而不是给出一个点下去必然失败的按钮。
+    /// </summary>
+    public static IAiJsonCompleter? CreateJsonCompleter()
+    {
+        var config = AiProviderSettings.Load();
+        if (config.UseLocalProvider || !config.IsConfigured) return null;
+        return new OpenAiCompatibleProvider(config);
+    }
 }
 
 /// <summary>
 /// 通过 OpenAI 兼容的 /chat/completions 接口生成节点内容与下游节点建议。
 /// 仅在用户显式配置 endpoint 与 model 后启用，密钥只从本地配置文件或环境变量读取。
 /// </summary>
-public sealed class OpenAiCompatibleProvider : IAiProvider, ICompositionPlanner, IAiChatProvider
+public sealed class OpenAiCompatibleProvider : IAiProvider, ICompositionPlanner, IAiChatProvider, IAiJsonCompleter
 {
     private const string SystemPrompt =
         "你是 AI 创作工作流助手，服务于小说与短剧的分镜生产流程。只输出 JSON，不要输出解释、Markdown 代码块或多余文字。";
@@ -60,6 +71,13 @@ public sealed class OpenAiCompatibleProvider : IAiProvider, ICompositionPlanner,
     /// </summary>
     public Task<string> ChatAsync(IReadOnlyList<AiChatMessage> messages, CancellationToken cancellationToken = default) =>
         SendAsync(ChatSystemPrompt, messages, cancellationToken);
+
+    /// <summary>
+    /// 结构化补全：用调用方给的系统提示换一份 JSON 回来（不套用创作助手的系统提示，
+    /// 否则模型会按「改动块 / 反问块」那套协议输出，与本次的 JSON 要求打架）。
+    /// </summary>
+    public Task<string> CompleteJsonAsync(string systemPrompt, string userPrompt, CancellationToken cancellationToken = default) =>
+        SendAsync(systemPrompt, new[] { new AiChatMessage { Role = "user", Content = userPrompt } }, cancellationToken);
 
     /// <summary>
     /// 一条请求走两种协议格式：OpenAI 兼容的 /chat/completions 与 Anthropic 兼容的 /v1/messages。

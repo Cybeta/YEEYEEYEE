@@ -30,6 +30,12 @@ public sealed class WorkTreeItem
     /// <summary>来源章节，例如「第10章」。能力与设定的剧情进度版本靠它对齐。</summary>
     public string Chapter { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 同级兄弟的显式顺序（新增字段，只追加）。章节靠它稳定排序，不再依赖名称里的数字或列表位置；
+    /// 0 表示尚未指定，由 <see cref="CanvasChapters.EnsureExplicitOrder"/> 按现有顺序确定性补齐。
+    /// </summary>
+    public int Order { get; set; }
+
     public string Version { get; set; } = string.Empty;
 
     /// <summary>

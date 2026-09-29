@@ -14,7 +14,34 @@ public sealed class PendingChanges
     public int Count => actions.Count;
     public bool IsEmpty => actions.Count == 0;
 
+    /// <summary>
+    /// 本批动作的批次号（目标 5）：提交时由 <see cref="AgentCommitLedger"/> 消费，
+    /// 保证同一批动作只提交一次。新的一批会换新批次号。
+    /// </summary>
+    public Guid BatchId { get; private set; } = AgentCommitLedger.NewBatchId();
+
     public void AddRange(IEnumerable<AgentAction> items) => actions.AddRange(items);
+
+    /// <summary>开始一批新的待审批动作：换新批次号，上一批的提交记录不再影响这一批。</summary>
+    public void BeginBatch(IEnumerable<AgentAction> items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        BatchId = AgentCommitLedger.NewBatchId();
+        actions.Clear();
+        actions.AddRange(items);
+    }
+
+    /// <summary>
+    /// 提交成功后沿用同一个批次号（供撤销预览展示这批动作，但不换号，
+    /// 这样同一批再被提交时会被账本拒绝）。
+    /// </summary>
+    public void AdoptBatch(Guid batchId, IEnumerable<AgentAction> items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        BatchId = batchId;
+        actions.Clear();
+        actions.AddRange(items);
+    }
 
     public bool UpdateCreatedNode(string oldTitle, string title, string content)
     {
@@ -114,7 +141,45 @@ public static class CanvasPreviewBuilder
 }
 
 /// <summary>被 Agent 覆盖或新建的文件快照，撤销时用于恢复原内容或删除新文件。</summary>
-public sealed record FileSnapshot(string Path, string? OriginalContent);
+public sealed record FileSnapshot(string Path, string? OriginalContent)
+{
+    /// <summary>
+    /// 按快照把文件恢复回去：原本不存在就删除，原本有内容就写回。
+    /// 返回未能恢复的说明（空表示全部恢复）。**撤销与补偿只用这一份实现**，
+    /// 免得界面路径和测试路径出现两套语义。
+    ///
+    /// 返工 S3：同一个路径可能被同一批动作写过多次（原始 → A → B），正序回写会停在中间态（最终变成 A）。
+    /// 因此**按路径只认最早的快照**——最早那份才是提交前的状态；新建文件的第一个快照是 null，
+    /// 于是“恢复”就等于把它删掉，语义也对得上。
+    /// </summary>
+    public static IReadOnlyList<string> RestoreAll(IEnumerable<FileSnapshot> snapshots)
+    {
+        ArgumentNullException.ThrowIfNull(snapshots);
+        var earliest = new Dictionary<string, FileSnapshot>(StringComparer.OrdinalIgnoreCase);
+        foreach (var snapshot in snapshots)
+            if (!earliest.ContainsKey(snapshot.Path)) earliest[snapshot.Path] = snapshot;
+
+        var failures = new List<string>();
+        foreach (var snapshot in earliest.Values)
+        {
+            try
+            {
+                if (snapshot.OriginalContent is null)
+                {
+                    if (File.Exists(snapshot.Path)) File.Delete(snapshot.Path);
+                    continue;
+                }
+
+                File.WriteAllText(snapshot.Path, snapshot.OriginalContent);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                failures.Add($"{snapshot.Path}：{error.Message}");
+            }
+        }
+        return failures;
+    }
+}
 
 /// <summary>
 /// 一次 Agent 提交的记录，用于撤销。
@@ -126,6 +191,12 @@ public sealed class AgentCommitRecord
     public int AppliedCount { get; init; }
     public string Summary { get; init; } = string.Empty;
 
+    /// <summary>
+    /// 这次提交属于哪一批（返工 R3）：撤销本批时要判断「当前待处理清单」与「已落画的记录」是不是同一批，
+    /// 免得把别的批次的改动当成这一批回退掉。
+    /// </summary>
+    public Guid BatchId { get; init; }
+
     /// <summary>提交前的画布快照（含标题、修订号与出图参数）。</summary>
     public string SnapshotBefore { get; init; } = string.Empty;
 
@@ -133,4 +204,25 @@ public sealed class AgentCommitRecord
     public int RevisionAtCommit { get; init; }
 
     public List<FileSnapshot> FileSnapshots { get; init; } = new();
+
+    /// <summary>
+    /// 本批提交时被移出的资产（返工 U1）：走应用管理的回收目录，撤销时按记录原样移回。
+    /// 系统回收站不可控（用户清空即永久丢失、也拿不到目标路径），因此不再使用。
+    /// </summary>
+    public List<AssetMove> AssetMoves { get; init; } = new();
+
+    /// <summary>
+    /// 这批改动属于哪个画布（返工 U3/V3）。撤销与提交都必须作用在同一个画布上：
+    /// 否则在 A 画布提交、切到 B 再撤销，会把 A 的快照套到 B 上。
+    /// 取的是**标签的稳定 Id**（不是文件路径）：未命名画布没有路径、另存为之后路径又会变，
+    /// 用路径当身份会让「同一个画布」看起来是两个、或两个未命名画布看起来是同一个。
+    /// </summary>
+    public string CanvasKey { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 这份记录的**画布部分**是否已经回退过（返工 R16-3）。
+    /// 恢复失败后用户重试撤销时，画布不能再套一次提交前快照——那会把用户在两次尝试之间做的编辑
+    /// 一起回退掉；置为 true 之后重试只继续恢复剩余的文件与资产。
+    /// </summary>
+    public bool CanvasRestored { get; set; }
 }

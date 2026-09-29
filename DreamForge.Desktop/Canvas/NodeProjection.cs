@@ -32,6 +32,9 @@ public static class NodeProjection
                 ["chapter"] = node.Chapter,
                 ["status"] = node.ExecutionStatus.ToString(),
             };
+            // 稳定章节 ID（C-4）：Web 端按 ID 筛选与排序，不按 Chapter 文本绑定。
+            if (CanvasChapters.ResolveChapterId(canvas, node) is { } chapterId)
+                record["chapterId"] = chapterId.ToString();
             if (node.ParentNodeId.HasValue)
                 record["parentId"] = node.ParentNodeId.Value.ToString();
             if (references.Count > 0)
@@ -53,12 +56,18 @@ public static class NodeProjection
         return records;
     }
 
-    /// <summary>把 WorkTree 中的章节条目投影为 L3 层 record，跳过已有同 ID 的。</summary>
+    /// <summary>把 WorkTree 中的章节条目投影为 L3 层 record，跳过已有同 ID 的；顺序用章节的显式顺序。</summary>
     private static void ProjectWorkTreeChapters(WorkflowCanvasState canvas, List<object> records, HashSet<string> seenIds)
     {
-        foreach (var item in canvas.WorkTree)
+        var orderedIds = CanvasChapters.List(canvas).Select(chapter => chapter.Id).ToList();
+        var ordered = orderedIds
+            .Select(id => canvas.WorkTree.FirstOrDefault(item => item.Id == id))
+            .Where(item => item is not null)
+            .Select(item => item!)
+            .ToList();
+
+        foreach (var item in ordered)
         {
-            if (item.Kind != WorkTreeKind.Chapter) continue;
             var key = item.Id.ToString();
             if (seenIds.Contains(key)) continue;
             seenIds.Add(key);
@@ -72,7 +81,9 @@ public static class NodeProjection
                     ["title"] = item.Name,
                     ["content"] = item.Prompt ?? string.Empty,
                     ["chapter"] = item.Chapter,
+                    ["chapterId"] = item.Id.ToString(),
                     ["workTreeItemId"] = item.Id.ToString(),
+                    ["order"] = item.Order,
                     ["status"] = "Draft"
                 }
             });
