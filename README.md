@@ -2,6 +2,8 @@
 
 > 版本 0.1.1 · 基线 2026-10-02 · YES 工程师 · YES 艺术家
 
+[![构建与测试](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/build.yml/badge.svg)](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/build.yml)
+
 面向 AI 创作的 Windows 桌面工作区。主线是 **企划 → 章节 → 分镜 → 成品**：先把设定整理成条目，把分镜挂到章节上，出图之后挑一张收进节点，最后串成成品。Agent 可以把一句创意铺成整条链路，也可以只在某一步上手。
 
 角色、道具、场景不占画布节点——分镜通过引用指向它们，需要看时再临时展开。一份设定改了图，所有引用它的分镜会被标出来。项目就是一个文件夹，画布、资产、技能都在里面；密钥按平台加密后存在用户配置目录，不上传任何地方。
@@ -131,19 +133,31 @@ dotnet run --project YEEYEEYEE.Web
 
 ## 构建与验证
 
-2026-10-02 基线：解决方案构建 0 错误；Agent 203 项、Core 29 项、Migration `8/8`、G6V1、Canvas TS 49 项、Web HTTP 回归 + Web 认证回归全部通过。
+2026-10-02 基线：解决方案构建 0 错误；Agent 203 项、Core 29 项、Migration `8/8`、G6V1、Canvas TS 49 项、Web HTTP 回归 + Web 认证回归全部通过；容器镜像在 GitHub 的干净机器上构建通过。
+
+提交与 PR 会触发 [CI](.github/workflows/build.yml)，三个互相独立的 job——哪个红了就能直接看出是哪一层出的问题：
+
+| job | 跑什么 | 为什么用这台机器 |
+|---|---|---|
+| `dotnet` | 构建解决方案，再逐个跑五个测试项目 | 必须是 Windows：桌面端与其中四个测试项目的目标框架是 `net10.0-windows` |
+| `canvas` | `npm ci`、单元测试、类型检查与打包 | Node 22，与 `Dockerfile` 里的 `node:22-alpine` 对齐，免得本机过、镜像里不过 |
+| `image` | `docker build` | 只验证镜像能不能构建出来；运行期行为靠 Web 回归与本机冒烟覆盖 |
+
+同样的命令在本机这样跑：
 
 ```powershell
+dotnet build YEEYEEYEE.slnx
 dotnet run --project YEEYEEYEE.Agent.Tests
 dotnet run --project YEEYEEYEE.Core.Tests
 dotnet run --project YEEYEEYEE.Migration.Tests
 dotnet run --project YEEYEEYEE.G6V1.Tests
 dotnet run --project YEEYEEYEE.Web.Tests
-npm.cmd --prefix YEEYEEYEE.Canvas test -- --run
+npm.cmd --prefix YEEYEEYEE.Canvas test
+npm.cmd --prefix YEEYEEYEE.Canvas run build
 docker compose up -d --build   # 起容器，浏览器开 http://localhost:8080
 ```
 
-`YEEYEEYEE.slnx` 只包含 6 个生产项目，测试项目要单独运行——所以「解决方案构建通过」覆盖的是生产代码，测试项目的编译错误不会被它拦到。
+`YEEYEEYEE.slnx` 只包含 6 个生产项目，测试项目要单独运行——所以「解决方案构建通过」覆盖的是生产代码，测试项目自身的编译错误不会被它拦到（CI 里那五条 `dotnet run` 会拦到）。
 
 发版用 `tools/publish-release.ps1`：按项目文件里的版本号打出一个便携 zip，默认框架依赖（约 12 MB，目标机器需要 .NET 10 运行时），加 `-SelfContained` 则把运行时一起打进去。把 zip 上传到对应的 GitHub 发行版，应用内升级下载的就是它。
 

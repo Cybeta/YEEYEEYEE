@@ -39,8 +39,7 @@
 2. **两处覆盖损失**，要在共享层重写才能找回：版本状态的三种文案（`GetNodeVersionStatusSummary`）、画布控件「拒绝把自身状态当来源加载」。
 3. **前端 `dist` 要手工构建**，不参与解决方案。这是有意的（不该把 Node 工具链拖进 `dotnet build`），写在这里是免得被当成漏做。
 4. **`ProviderAvatarStudio` 的提示词表与 `provider-art/_generation.json` 是两份**：前者给应用内生成形象用，后者记批量生成时的原话。两边要一起改，否则同一家会画出两种角色。
-5. **没有 CI**：所有测试都靠本地手跑，`YEEYEEYEE.slnx` 又不含测试项目，所以「clone 下来能不能构建」这件事没有自动答案。
-6. **`YEEYEEYEE.Web` 的目标框架是 `net10.0`（不是 `net10.0-windows`）**，这是为了让 Linux 容器能跑。它引用的 `Host` 与 `Desktop.Core` 本来就是这个框架，但**以后往这条链上加代码时要留意别引入 Windows-only 的 API**（DPAPI 那一类只能留在桌面端的 `SecretProtector` 里），否则容器会在运行时报错、而本机构建照样通过——这正是最难查的那种坏法。
+5. **`YEEYEEYEE.Web` 的目标框架是 `net10.0`（不是 `net10.0-windows`）**，这是为了让 Linux 容器能跑。它引用的 `Host` 与 `Desktop.Core` 本来就是这个框架，但**以后往这条链上加代码时要留意别引入 Windows-only 的 API**（DPAPI 那一类只能留在桌面端的 `SecretProtector` 里），否则容器会在运行时报错、而本机构建照样通过——这正是最难查的那种坏法。
 
 ---
 
