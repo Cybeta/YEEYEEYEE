@@ -2,8 +2,9 @@
 
 - 协议版本：`1`
 - 状态：信封、方向和基础载荷校验已在 C# 与 TS 两侧实现，资源替换桥接和控制台用例已存在；两侧的细粒度校验仍有差异，跨语言夹具尚未覆盖资源替换，当前只有部分宿主在用它，见下方适用范围
-- 适用范围：**任何画布侧实现与其 C# 宿主之间**。当前实际使用方为 `DreamForge.Host`（测试与桥接）、`DreamForge.Web`（作业服务，并以 WebSocket 承载 `DreamForge.Canvas` 的 TS 画布）与 `DreamForge.Canvas`（TS 侧同构实现）；**桌面端 `DreamForge.Desktop` 的 WinForms 自绘画布不使用本协议**，其 Agent 使用独立 JSON actions 协议；桌面通过 HTTP 推送 records 并轮询引用替换请求（见 [桌面与 Web 数据通路](../02_Architecture.md#桌面与-web-数据通路)）
+- 适用范围：**任何画布侧实现与其 C# 宿主之间**。当前实际使用方为 `DreamForge.Host`（测试与桥接）、`DreamForge.Web`（作业服务及保留的 WebSocket 画布桥接；普通浏览器现走第 8 节 HTTP 路径）与 `DreamForge.Canvas`（TS 侧同构实现）；**桌面端 `DreamForge.Desktop` 的 WinForms 自绘画布不使用本协议**，其 Agent 使用独立 JSON actions 协议；桌面通过 HTTP 推送 records 并轮询引用替换请求（见 [桌面与 Web 数据通路](../02_Architecture.md#桌面与-web-数据通路)）
 - 不适用范围：C# 宿主之间、服务端内部调用、Yjs 房间内部同步（协作未实现）
+- **Goal7 待复核补充**：下方第 8 节记录现有 `/api/web` JSON/HTTP 接口；它不是此处版本 `v: 1` 的消息信封，也不继承 `canvas/*`、`host/*` 消息的校验/权限承诺。不要把 HTTP 状态码与 `host/error` 混用。
 
 ## 1. 设计约束
 
@@ -123,3 +124,23 @@
 任何新增消息类型必须先加夹具再改两端实现，禁止只改一端。
 
 > **当前偏差（待补）**：`canvas/resource.replace.request` 与 `host/resource.replace.result` 已在 C#（`DreamForge.Core\Protocol.cs`、`DreamForge.Host\HostBridge.cs`）与 TS（`VersionedMessages.ts`、`CanvasMessageCodec.ts`、`CanvasBridge.ts`）两侧落地，并有 C# 控制台用例覆盖，但 `protocol/fixtures/` 里**还没有对应的夹具与 manifest 条目**。此外，TS 尚未复现 C# 对资源 ID、Job 状态等字段的全部细粒度校验。下一步先补两条共享夹具和跨语言断言，再决定是否统一校验深度。
+
+## 8. Goal7 本机 Web HTTP 契约（现有实现，待独立复核）
+
+本节只描述 `DreamForge.Web/WebSceneApi.cs`、`WebSkillJobApi.cs`、`ProjectCanvasSceneStore.cs` 当前路由；不属于上文 v1 信封及跨语言夹具。`/api/canvas/*` 和 `/ws/canvas` 是保留的桌面桥接路径，亦非 `/api/web` 的别名。所有三类路径目前由同一中间件先验证回环来源和配置的 `DreamForge:WebToken`：非回环 `403 LOCAL_ONLY`，令牌未配置 `503 TOKEN_NOT_CONFIGURED`，缺失/错误 Bearer `401 UNAUTHORIZED`。这只是一台机器的共享令牌边界，不是多用户身份体系；`/health` 和静态资源不在此中间件保护范围。成功体直接是 JSON，无 `v/id/type/ts/payload`；失败体为 `{ "code": "...", "message": "..." }`，以 HTTP 状态判定，而非 `host/error`。
+
+| 方法与路径 | 输入 | 成功响应与约束 |
+| --- | --- | --- |
+| `GET /api/web/scene` | 无 | `{revision,records}`；项目模式另有 `readOnly,formatVersion,migration,validation`。records 为投影项 `{recordId,recordType,record,...}`，只读获取不迁移写盘。 |
+| `PUT /api/web/records/{recordId}` | JSON `{baseRevision,title,content}` | 每次请求由服务端配置 `DreamForge:WebClaims` 重验 `canvas.edit`；仅 Bearer 不足以写入。通过后返回 `{revision,record}`；仅更新已有节点标题/内容，不改引用。独立模式 revision 为递增整数；项目模式为画布原始字节 SHA-256 前 6 字节的非负数值，保存后返回新字节对应值，不能混用两种修订。 |
+| `GET /api/web/assets` | 无 | `{entities:[...]}`，读取配置的 `ProjectEntitiesPath` 中 `entities.json`；只读，当前服务端返回原实体数组，不提供创建、替换或删除端点。 |
+| `GET /api/web/skills` | 无 | `{skills:[...]}`；仅当服务端配置 `preapproved-local-image`、ComfyUI checkpoint 和 `skill.invoke` 声明同时满足时列出固定 `comfyui.text-to-image`。 |
+| `POST /api/web/skills/{skillId}/invoke` | 仅 `{prompt,idempotencyKey}`，非空且分别最多 4000/128 字符 | 返回任务视图；不接受客户端自选 tool/能力，键与既有调用输入冲突报 409；返回任务并不等于执行成功。 |
+| `GET /api/web/jobs`、`GET /api/web/jobs/{jobId:guid}` | 无 | `{jobs:[...]}` 或单任务视图；限当前令牌派生用户及固定技能；视图含 `jobId,invocationId,state,progressPercent,errorCode,errorMessage,externalTaskId,outputs,attempt,retryOfJobId,rootJobId,tool,canRetry`。 |
+| `POST /api/web/jobs/{jobId:guid}/cancel`、`/retry` | 无 | 返回任务视图；取消要求 `job.cancel` 且排队/运行，重试要求预授权与 `skill.invoke`、符合既有尝试链限制。 |
+
+稳定 ID：项目画布 `recordId` 对应桌面节点 GUID，写入按该 ID 寻找节点；`record.references[].entityId/variantId/variantVersionId` 对应项目库的 `entities[].id/variants[].id/versions[].id`，名称仅用于显示，同名不能作键；版本 ID 存在为锁定，空值为跟随。Web 资产面板目前只读、按实体 ID 定位，不修改引用、不建常驻设定节点。独立 JSON 场景允许非空字符串 `recordId`，不能宣称所有模式均强制 GUID。项目画布在 `canvases` 目录且与 `project.json`、配置的同项目 `project/entities.json` 对应才启用；否则不回退到独立场景。独立模式须显式 `AllowStandaloneWebScene` 和绝对 `WebScenePath`。项目读取验证权威资源，保存重新检查原字节、项目库和租约并备份后替换；高版本/校验错误只读。
+
+权限和错误反例（拒绝不得算成功）：匿名 PUT → `401 UNAUTHORIZED`，非回环 → `403 LOCAL_ONLY`；项目及独立场景的 PUT 缺少服务端 `canvas.edit` 声明 → `403 CANVAS_EDIT_FORBIDDEN`（拒绝不改盘，GET 仍只读可用）；未预授权/无 `skill.invoke` 调用或重试 → `403 SKILL_NOT_APPROVED`，无 `job.cancel` → `403 JOB_FORBIDDEN`；客户端附带 `tool` 的调用 → `400 INVALID_REQUEST`；旧 `baseRevision` → `409 SCENE_REVISION_CONFLICT`，缺失记录 → `404 RECORD_NOT_FOUND`，锁定节点 → `409 NODE_LOCKED`；未知技能/任务分别 `404 SKILL_NOT_FOUND`/`JOB_NOT_FOUND`（他人的任务同样隐藏为 404）；终态取消 → `409 JOB_NOT_CANCELLABLE`，不可重试 → `409 JOB_NOT_RETRYABLE`；项目上下文不可信 → `503 PROJECT_CANVAS_UNAVAILABLE`，项目读写不安全 → `503 PROJECT_CANVAS_READ_FAILED`/`PROJECT_CANVAS_WRITE_FAILED`，高版本 → `409 CANVAS_READ_ONLY`。独立模式还会有 `SCENE_MODE_NOT_CONFIGURED`、`SCENE_PATH_NOT_CONFIGURED`、`SCENE_INVALID`、`SCENE_READ_FAILED`/`SCENE_WRITE_FAILED`；资产端点可能返回 `ASSETS_NOT_CONFIGURED`、`ASSETS_INVALID`、`ASSETS_READ_FAILED`。写入提交后出错另有 `PROJECT_CANVAS_COMMITTED`，不能把它当成“未落盘”盲目重试。
+
+已知边界：HTTP 项目/独立场景 PUT 已按每次请求的服务端声明重验 `canvas.edit`，但这仍是单机共享令牌与配置声明，不是多用户身份/角色体系；旧 `/api/canvas/*` 桌面桥接路径不属于此 PUT 授权结论。项目资源端点对配置路径直接读文件，未与场景读取一样验证项目归属；前端参考解析与同名/缺失单测不是浏览器交互证据。技能只有本地预授权 ComfyUI 文生图，不是通用技能审批与注册表；真实提供方成功出图、完整浏览器点击及多端并发/断电未验证。旧 WebSocket v1 与 HTTP 路径并存，不据此宣称双向实时协作已实现。

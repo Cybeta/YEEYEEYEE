@@ -1,8 +1,12 @@
 # YEEYEEYEE
 
-> 当前基线：2026-09-29
+> 当前基线：2026-10-02
 
-YEEYEEYEE 寓意 YES 工程师 · YES 艺术家。工程、程序集和协议标识仍为 `DreamForge`。当前主端是 Windows WinForms 自绘无限画布，支持文本、图像生成与项目文件管理；Web 提供作业服务、桌面画布镜像及引用版本回写，尚不能独立完成创作。
+YEEYEEYEE 寓意 YES 工程师 · YES 艺术家。工程、程序集和协议标识仍为 `DreamForge`。当前主端是 Windows 优先的 Avalonia 桌面工作区：支持文本与图像生成、出图批次、技能与接口站池子、Agent 协作与项目文件管理。旧 WinForms 端已**归档**到 `_legacy_winforms/`（不在 `DreamForge.slnx` 里，也不参与构建）。Web 提供作业服务、桌面画布镜像及引用版本回写，尚不能独立完成创作。
+
+共享代码只有一份来源：`DreamForge.Desktop.Core`（画布模型与画布基础设施）与 `DreamForge.Desktop.Shared`（无界面逻辑），界面只调用它们。详见 [架构](02_Architecture.md)。
+
+最近一轮（第 114–127 轮）做了什么、每轮的验证与遗留，见 [PROGRESS](PROGRESS.md)；还没做的记在 [TODO](TODO.md)。
 
 产品主线固定为：企划 → 章节 → 分镜 → 成品。角色、道具、场景不建常驻画布节点；分镜通过 `References`/`entityTargets` 引用设定，用户需要查看时再临时展开可视化。`ParentNodeId` 只负责画布布局，`WorkTreeItemId` 是叙事锚点，`References` 是视觉引用，三者不能互相替代。
 
@@ -15,21 +19,26 @@ YEEYEEYEE 寓意 YES 工程师 · YES 艺术家。工程、程序集和协议标
 | 入口 | [README](README.md) | 启动、当前边界、故障案例 |
 | 01 | [产品决策](01_Project_Plan.md) | 产品目标、两轴分工与待实现方案 |
 | 02 | [架构](02_Architecture.md) | 源码事实、架构图、数据与迁移边界 |
-| 03 | [技能](03_Skill_System.md) | 生成技能、角色能力与插件 |
+| 03 | [技能](03_Skill_System.md) | 生成技能、站点与池子、角色能力与插件 |
+| 04 | [架构导图](04_Architecture_Mindmap_Mermaid.md) | 模块关系的 Mermaid 图 |
 | 进度 | [PROGRESS](PROGRESS.md) | 按依赖推进的小目标、验收和验证基线 |
+| 待办 | [TODO](TODO.md) | 还没做的、拍不下的、以及需要决策的问题 |
 | 协议 | [protocol/PROTOCOL](protocol/PROTOCOL.md) | Canvas ⇄ Host v1 消息契约与实现缺口 |
 
 ## 当前可用与尚缺能力
 
 | 范围 | 核实后的状态 |
 |---|---|
-| 桌面画布 | 节点、连线、拖动、缩放平移、章节网格分块、Agent 虚影预览已存在 |
-| Agent | Ask / AutoStage / ReadOnly；13 种 action；审批、保存与有条件的提交快照回滚 |
-| 两轴数据 | 工作树保存叙事条目；资源库（界面称设定库）保存实体、变体和视觉版本；两者均保留 |
-| 文本与图像 | OpenAI 兼容、Anthropic 文本/多模态调用；OpenAI 兼容图像与 ComfyUI 图像链路、任务持久化 |
+| 桌面画布 | 节点、连线、拖动、缩放平移、章节网格与泳道布局、泳道局部重排、Agent 虚影预览 |
+| Agent | Ask / AutoStage / ReadOnly；13 种 action；审批、保存与有条件的提交快照回滚；模型选择与用量显示；面板收起后右下角有常驻入口（自绘厂家字母徽标） |
+| 两轴数据 | 工作树保存叙事条目；设定库保存实体、变体和视觉版本；项目级资源库（`ProjectLibrary`）已落地；两者均保留 |
+| 文本与图像 | OpenAI 兼容 / Anthropic 文本与多模态；OpenAI 兼容图像与 ComfyUI 链路、任务持久化 |
+| 接口站与池子 | 站点是一级实体（一家站有哪些能用的池子），调用前三级选池子并记住上次；清单探测全程只读 |
+| 出图批次 | 数量 1–6 与预估花费；候选图以**节点上方的虚影窗口**实时显示进度，选中一张保存、其余进回收站；失败格可单独删除或重做 |
+| 智能导入 | 说明网页 → 自动建 api 生图 / 生视频技能 → 输密钥（加密落盘）→ 最小测试 → 查余额；ComfyUI 走独立分支 |
+| 提示与自检 | 生成中节点的呼吸光效；「引用的设定改了图」的下游提示（指纹比对）；生成链自检（设定图 → 分镜图 → 分镜视频 → 成品视频，报缺口数与预估花费） |
 | Web | React/Vite div 卡片；桌面推全量投影，浏览器可请求换/锁引用版本；缺独立创作、资产 HTTP 端点与完整交互联动 |
-| 新方案 | 企划→章节→分镜→成品、章节泳道、保留手动位置的局部布局、资源临时展开、自动同步及项目级资源迁移均待实现 |
-| 其他 | 视频生成、账号、房间协同、配额和审计未实现；MCP 为独立只读服务，未接入桌面端 |
+| 其他 | 视频生成的**执行方未接入**（池子可登记，选了会明确拒绝而非偷偷起任务）；账号、房间协同、配额和审计未实现；MCP 为独立只读服务，未接入桌面端 |
 
 现有 `Entities` 随每张画布保存，并非项目级共享资源库。已有 `SourceEntityId`、`WorkTreeItemId` 等字段也不等于自动同步已经完成。具体边界以 [架构](02_Architecture.md) 为准。
 
@@ -39,10 +48,10 @@ YEEYEEYEE 寓意 YES 工程师 · YES 艺术家。工程、程序集和协议标
 
 ```powershell
 dotnet build DreamForge.slnx
-.\DreamForge.Desktop\bin\Debug\net10.0-windows\DreamForge.Desktop.exe
+dotnet run --project DreamForge.Desktop.Avalonia
 ```
 
-首次启动选择可写项目目录，在设置中配置 Endpoint、Model 与 ApiKey，再使用设定库、工作树和 Agent。模型密钥以 Windows 当前用户 DPAPI 密文存入程序目录的 `ai-config.json`。
+启动后先在启动页选项目（新建 / 打开 / 最近项目），选定之前不展示画布与设置；进入工作台后会引导接入大模型，配置 Endpoint、Model 与 ApiKey，再使用设定库、工作树和 Agent。密钥按平台加密落盘（Windows 用当前用户 DPAPI，macOS 用钥匙串，都没有时退到本机密钥文件 + AES-GCM），配置文件 `ai-config.json` 在用户配置目录（Windows `%LOCALAPPDATA%\DreamForge`、macOS `~/Library/Application Support/DreamForge`）；旧版本写在程序目录旁的那一份会在首次读取时自动搬过去，也可用 `DREAMFORGE_CONFIG` 指定到别处。加密绑定账户与设备，换机器或换系统要重新填一次密钥。
 
 可选 Web 镜像，先构建前端再启动 Web，随后打开桌面项目：
 
@@ -68,7 +77,7 @@ dotnet run --project DreamForge.Web
 
 原记录中的证据：目标目录 ACL 允许修改、无 Deny ACE，无只读/重解析/加密标记；磁盘为 NTFS 且健康，受控文件夹访问关闭。同盘此前有成功创建的项目；沙箱内同路径写删均被拒绝，工作区内的 `Directory.CreateDirectory` 成功。沙箱允许清单的 104 条路径均在系统盘，没有目标盘路径。这些是历史现场记录，本轮未重新采集。
 
-源码中已保留两项修正：`AppPaths.CanWriteDirectory` 实际创建目录、写入并删除探针；`ProjectStartupForm` 在失败时提示权限或安全策略拦截。该次故障可通过资源管理器直接启动、选择允许写入的目录，或调整 IDE 允许列表绕过。
+源码中已保留两项修正：`AppPaths.CanWriteDirectory` 实际创建目录、写入并删除探针；启动页在失败时提示权限或安全策略拦截（旧端是 `ProjectStartupForm`，该端已归档；现在的启动页是 `DreamForge.Desktop.Avalonia/StartPageView.axaml`）。该次故障可通过资源管理器直接启动、选择允许写入的目录，或调整 IDE 允许列表绕过。
 
 同一错误也可能来自普通目录权限或安全软件，不能把所有拒绝访问都断言为沙箱问题。排查时先确认启动方式及目标目录是否可写，再检查 ACL 与系统策略。
 

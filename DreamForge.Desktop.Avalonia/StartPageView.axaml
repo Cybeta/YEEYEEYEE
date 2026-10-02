@@ -1,0 +1,199 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="DreamForge.Desktop.Avalonia.StartPageView">
+
+  <!-- 启动页：窗口起来后先让用户选项目（新建 / 打开 / 最近）。
+       布局按「上半屏是品牌、下半屏是动作」来分：主视觉占了上面，选择项目与最近项目沉到窗口下方，
+       视线从上往下走一遍就能做完选择。选定之前整块工作台都不显示，看不到画布、工作树、Agent 面板与设置。 -->
+
+  <UserControl.Styles>
+    <!-- 最近项目卡片：悬停时底色与描边轻微提亮，用过渡而不是瞬变，避免一闪一闪 -->
+    <Style Selector="ListBoxItem.recentCard">
+      <Setter Property="Background" Value="{StaticResource DfSurface2}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLine}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Padding" Value="12,10" />
+      <Setter Property="Margin" Value="0,0,10,0" />
+      <Setter Property="MinWidth" Value="240" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.16" />
+          <BrushTransition Property="BorderBrush" Duration="0:0:0.16" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ListBoxItem.recentCard:pointerover">
+      <Setter Property="Background" Value="{StaticResource DfSurface3}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLineGlow}" />
+    </Style>
+    <Style Selector="ListBoxItem.recentCard:selected">
+      <Setter Property="Background" Value="{StaticResource DfPrimarySoft}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfPrimary}" />
+    </Style>
+
+    <!-- 光环旋转：转的是 RenderTransform 里的角度，所以用「限定属性」的写法（RotateTransform.Angle）。
+         选择器必须带控件类型（Ellipse#LogoRing），否则 XAML 编译器找不到 Setter 的目标类型会报 AVLN2200。
+         另外代码里不能这么写——Animation.RunAsync 只接受 Visual，而 RotateTransform 不是 Visual。 -->
+    <Style Selector="Ellipse#LogoRing">
+      <Style.Animations>
+        <Animation Duration="0:0:18" IterationCount="INFINITE">
+          <KeyFrame Cue="0%">
+            <Setter Property="RotateTransform.Angle" Value="0" />
+          </KeyFrame>
+          <KeyFrame Cue="100%">
+            <Setter Property="RotateTransform.Angle" Value="360" />
+          </KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+  </UserControl.Styles>
+
+  <Border Background="{StaticResource DfBg}" CornerRadius="16" ClipToBounds="True">
+    <Panel>
+      <!-- 背景光场：两团冷蓝极光，比工作台那份更靠上，衬托主视觉 -->
+      <Border Background="{StaticResource DfAurora}" IsHitTestVisible="False" />
+
+      <Grid RowDefinitions="58,*,Auto" Margin="10">
+
+        <!-- ==================== 极简标题栏 ==================== -->
+        <Border Grid.Row="0" x:Name="StartTitleBar" Classes="glass" Padding="14,0" Margin="0,0,0,10"
+                PointerPressed="TitleBar_OnPointerPressed">
+          <Panel>
+            <Border Classes="edgeTop" />
+            <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+              <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                <TextBlock Text="◈" Foreground="{StaticResource DfPrimary}" FontSize="14"
+                           VerticalAlignment="Center" />
+                <TextBlock Text="DreamForge" Foreground="{StaticResource DfInk}" FontSize="14"
+                           FontWeight="SemiBold" VerticalAlignment="Center" />
+                <Border Classes="chip" Padding="7,1" VerticalAlignment="Center">
+                  <TextBlock Text="v0.9" Foreground="{StaticResource DfInk2}" FontSize="10" />
+                </Border>
+              </StackPanel>
+
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                <Button Classes="windowButton" Content="—" ToolTip.Tip="最小化" Click="Minimize_OnClick" />
+                <Button Classes="windowButton" Content="□" ToolTip.Tip="最大化/还原" Click="Maximize_OnClick" />
+                <Button Classes="windowButton closeButton" Content="×" ToolTip.Tip="关闭" Click="Close_OnClick" />
+              </StackPanel>
+            </Grid>
+          </Panel>
+        </Border>
+
+        <!-- ==================== 主视觉：LOGO + 品牌 + 标语 ==================== -->
+        <StackPanel x:Name="HeroArea" Grid.Row="1" VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Spacing="22" Opacity="0">
+
+          <!-- LOGO：呼吸光晕 → 旋转光环 → 主体方块。从后往前叠，动效互不干扰 -->
+          <Panel x:Name="LogoArea" Width="176" Height="176" HorizontalAlignment="Center">
+            <Ellipse x:Name="LogoGlow" Width="168" Height="168" HorizontalAlignment="Center"
+                     VerticalAlignment="Center" IsHitTestVisible="False">
+              <Ellipse.Fill>
+                <RadialGradientBrush Center="50%,50%" GradientOrigin="50%,50%">
+                  <GradientStop Offset="0" Color="#8C4D9BFF" />
+                  <GradientStop Offset="0.55" Color="#332F80ED" />
+                  <GradientStop Offset="1" Color="#00070A0F" />
+                </RadialGradientBrush>
+              </Ellipse.Fill>
+            </Ellipse>
+
+            <!-- 旋转光环：一段渐隐的圆弧，转动时像在扫描 -->
+            <Ellipse x:Name="LogoRing" Width="140" Height="140" HorizontalAlignment="Center"
+                     VerticalAlignment="Center" StrokeThickness="1.5" IsHitTestVisible="False">
+              <Ellipse.Stroke>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                  <GradientStop Offset="0" Color="#004D9BFF" />
+                  <GradientStop Offset="0.45" Color="#E64D9BFF" />
+                  <GradientStop Offset="1" Color="#004D9BFF" />
+                </LinearGradientBrush>
+              </Ellipse.Stroke>
+              <Ellipse.RenderTransform>
+                <RotateTransform />
+              </Ellipse.RenderTransform>
+            </Ellipse>
+
+            <Ellipse Width="118" Height="118" HorizontalAlignment="Center" VerticalAlignment="Center"
+                     Stroke="#2C3D52" StrokeThickness="1" Fill="#0D131B" />
+
+            <Border Width="96" Height="96" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    CornerRadius="26" BorderThickness="1" BorderBrush="#594D9BFF"
+                    Background="#131B25" BoxShadow="0 0 34 -6 #7A4D9BFF">
+              <TextBlock Text="◈" Foreground="{StaticResource DfPrimary}" FontSize="42"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+          </Panel>
+
+          <StackPanel Spacing="10" HorizontalAlignment="Center">
+            <TextBlock x:Name="BrandTitle" Text="YES 工程师" FontSize="34" FontWeight="Bold"
+                       HorizontalAlignment="Center" LetterSpacing="1">
+              <TextBlock.Foreground>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                  <GradientStop Offset="0" Color="#E9EFF7" />
+                  <GradientStop Offset="0.55" Color="#BDD6EF" />
+                  <GradientStop Offset="1" Color="#4D9BFF" />
+                </LinearGradientBrush>
+              </TextBlock.Foreground>
+            </TextBlock>
+
+            <!-- 标语里那个 YES 是唯一会呼吸的元素：整屏只有一处动，才看得出它想说哪两个字 -->
+            <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+              <TextBlock Text="在 AI 时代，您只需要" Classes="muted" FontSize="14" VerticalAlignment="Center" />
+              <TextBlock x:Name="BrandYes" Text="YES" FontSize="16" FontWeight="Bold"
+                         Foreground="{StaticResource DfPrimary}" VerticalAlignment="Center" />
+            </StackPanel>
+          </StackPanel>
+
+          <TextBlock Text="新建一个项目，或打开已有的项目文件夹；选定之前不加载画布、工作树与 Agent 设置。"
+                     Classes="dim" FontSize="11" HorizontalAlignment="Center" TextWrapping="Wrap"
+                     MaxWidth="560" TextAlignment="Center" />
+        </StackPanel>
+
+        <!-- ==================== 下方：选择项目 + 最近项目 ==================== -->
+        <Border x:Name="ActionPanel" Grid.Row="2" Classes="glass" CornerRadius="14" Padding="18,16"
+                Margin="24,10,24,20" Opacity="0">
+          <Panel>
+            <Border Classes="edgeTop" />
+            <Grid RowDefinitions="Auto,Auto,Auto" RowSpacing="12">
+
+              <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="10">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                  <TextBlock Text="✦" Foreground="{StaticResource DfPrimary}" FontSize="12"
+                             VerticalAlignment="Center" />
+                  <TextBlock Text="最近项目" Classes="heading" FontSize="13" VerticalAlignment="Center" />
+                </StackPanel>
+
+                <TextBox x:Name="NameBox" Grid.Column="1" Classes="inlineInput" FontSize="12"
+                         Watermark="项目名称（留空则按时间命名）" MaxWidth="320" HorizontalAlignment="Right"
+                         VerticalAlignment="Center" />
+                <Button Grid.Column="2" Classes="primary" Content="新建项目" Padding="18,8"
+                        Click="Create_OnClick" VerticalAlignment="Center" />
+                <Button Grid.Column="3" Classes="miniButton" Content="打开项目…" Padding="18,8"
+                        Click="Open_OnClick" VerticalAlignment="Center" />
+              </Grid>
+
+              <ListBox x:Name="RecentList" Grid.Row="1" Background="Transparent" BorderThickness="0"
+                       Height="96" ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                       ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                       SelectionChanged="Recent_OnSelectionChanged">
+                <ListBox.ItemsPanel>
+                  <ItemsPanelTemplate>
+                    <StackPanel Orientation="Horizontal" />
+                  </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+              </ListBox>
+
+              <StackPanel Grid.Row="2" Spacing="6">
+                <TextBlock x:Name="RecentEmptyText" Classes="dim" FontSize="11" TextWrapping="Wrap"
+                           Text="还没有最近项目：在上面填个名字点「新建项目」，或用「打开项目…」指向已有项目的文件夹。"
+                           IsVisible="False" />
+                <TextBlock x:Name="StatusLine" FontSize="11" TextWrapping="Wrap" IsVisible="False"
+                           Foreground="{StaticResource DfError}" />
+              </StackPanel>
+            </Grid>
+          </Panel>
+        </Border>
+      </Grid>
+    </Panel>
+  </Border>
+</UserControl>

@@ -30,7 +30,7 @@ export type ErrorCode = typeof ERROR_CODES[keyof typeof ERROR_CODES]
 export interface Envelope<T = unknown> { v: number; id: string; replyTo?: string | null; type: MessageType | string; ts: number; payload: T }
 export interface CapabilitySet { serverClaims: string[]; canEditCanvas: boolean; canInvokeSkill: boolean; canCancelJob: boolean; canUndo: boolean; reason?: string | null }
 export interface TypedReference { kind: 'Channel' | 'Tool' | 'Skill' | 'Asset'; targetId: string; versionConstraint: string; dependencies: TypedReference[] }
-export interface OperationRecord { recordId: string; recordType: string; record: Record<string, unknown>; parentId?: string; chapterId?: string }
+export interface OperationRecord { recordId: string; recordType: string; record: Record<string, unknown>; parentId?: string; chapterId?: string; deleted?: boolean }
 
 export type EntityKind = 'Character' | 'Scene' | 'Prop'
 

@@ -2,10 +2,12 @@ using System.Text;
 using System.Text.Json;
 using System.Net.Http.Json;
 using DreamForge.Core;
+using DreamForge.Desktop;
 using DreamForge.Host;
 
 var tests = new (string Name, Action Run)[]
 {
+    ("统一出场：跨章隔离、双向编辑、版本锁定及保存重开", UnifiedAppearances),
     ("协议版本和方向校验", ProtocolValidation),
     ("能力位不能超出服务端声明", CapabilityFailClosed),
     ("TypedReference 循环引用拒绝", ReferenceCycle),
@@ -21,6 +23,11 @@ var tests = new (string Name, Action Run)[]
     ("协议字段严格校验", StrictProtocolFields),
     ("资源版本替换协议", ResourceReplaceProtocol),
     ("资源版本替换状态", ResourceReplaceState),
+    ("引用媒体草稿隔离与定向提交", ReferenceMediaDraftIsolation),
+    ("媒体版本回滚仅影响草稿", MediaVersionRollbackDraftOnly),
+    ("媒体提交当前及全部引用范围", MediaCommitReferenceScopes),
+    ("子引用版本快照和隔离复制", NestedReferenceSnapshots),
+    ("AI 导入自动建立角色技能道具引用", AgentCharacterNestedReferences),
     ("SQLite Job 持久化和恢复", SqliteJobPersistence),
     ("任务快照的调用信息与输入参数持久化", JobSnapshotPersistence),
     ("外部任务 ID 持久化", ExternalTaskIdPersistence),
@@ -29,7 +36,7 @@ var tests = new (string Name, Action Run)[]
     ("WebSocket 进度监听和释放", ExternalTaskProgressListening),
     ("ComfyUI 工作流、队列、取消和文件下载", ComfyUiWorkflowAndDownloadFlow),
 ("HTTP 回调签名防重放", SignedCallbackSecurity),
-};
+    };
 
 var failures = new List<string>();
 foreach (var test in tests)
@@ -40,6 +47,44 @@ foreach (var test in tests)
 
 if (failures.Count > 0) Environment.ExitCode = 1;
 else Console.WriteLine($"全部 {tests.Length} 项 Core 测试通过。");
+
+static void UnifiedAppearances()
+{
+    var state = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Name = "角色" };
+    var variant = entity.CreateVariant("默认");
+    state.Entities.Add(entity);
+    var a = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "一" };
+    var b = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "二" };
+    state.WorkTree.AddRange([a, b]);
+    UnifiedWorkTree.RefreshResources(state);
+    var first = UnifiedWorkTree.AddAppearance(state, entity.Id, a.Id);
+    var second = UnifiedWorkTree.AddAppearance(state, entity.Id, b.Id);
+    var node = UnifiedWorkTree.CreateNode(state, first, 10, 20);
+    var other = UnifiedWorkTree.CreateNode(state, second, 30, 40);
+    UnifiedWorkTree.Edit(state, first, "角色·受伤", "左手受伤");
+    Expect(node.Content == "左手受伤" && other.Content == "" && entity.Core == "", "局部状态泄漏");
+    node.Content = "已包扎";
+    UnifiedWorkTree.FromNode(state, node);
+    Expect(first.LocalState == "已包扎", "节点没有回写树");
+    var version = variant.Commit("锁定");
+    UnifiedWorkTree.SetVersion(state, first, version.Id);
+    variant.Description = "新描述"; variant.Commit("后续版本");
+    Expect(node.References.Single().VariantVersionId == version.Id && other.References.Single().VariantVersionId is null, "锁定或跟随最新失效");
+    node.IsLocked = true;
+    ExpectThrows<InvalidOperationException>(() => UnifiedWorkTree.Edit(state, first, "改名", "改动"));
+    var reopened = JsonSerializer.Deserialize<WorkflowCanvasState>(JsonSerializer.Serialize(state))!;
+    Expect(reopened.WorkTree.Single(x => x.Id == first.Id).LocalState == "已包扎", "本章状态丢失");
+    Expect(reopened.Nodes[0].References[0].VariantVersionId == version.Id, "锁版丢失");
+    var ai = new WorkflowCanvasState();
+    var result = AgentActionExecutor.Apply(new[] {
+        new AgentAction { Kind = "create_node", Title = "投影", WorkTreeTarget = "角色出场" },
+        new AgentAction { Kind = "create_work_item", WorkTreeKind = "Appearance", Title = "角色出场", EntityTarget = "共享角色", ParentTarget = "章节", Content = "雨中" },
+        new AgentAction { Kind = "create_work_item", WorkTreeKind = "Chapter", Title = "章节" },
+        new AgentAction { Kind = "create_entity", Title = "共享角色" }
+    }, ai, null);
+    Expect(result.Errors.Count == 0 && ai.Nodes.Single().Content == "雨中", "AI 未先建资源与树再投影");
+}
 
 static void ProtocolValidation()
 {
@@ -430,6 +475,173 @@ static void ResourceReplaceState()
     node.IsLocked = true;
     Expect(!state.ReplaceReferenceVersion(node.Id, entity.Id, variant.Id, version.Id, out var lockError)
         && lockError.Contains("锁定", StringComparison.Ordinal), "锁定节点仍可替换");
+}
+
+static void MediaVersionRollbackDraftOnly()
+{
+    var variant = new WorkflowEntityVariant { Description = "当前", Attachments = [new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://current.png", Name = "current.png" }] };
+    var previous = variant.EnsureInitialVersion();
+    variant.Description = "修改后";
+    variant.Attachments[0].Name = "changed.png";
+    variant.Commit("第二版");
+    var draft = variant.CloneAsVariant("草稿");
+    draft.RollbackTo(previous);
+    Expect(draft.Description == "当前" && draft.Attachments.Single().Name == "current.png", "回滚没有恢复所选版本快照");
+    Expect(variant.Description == "修改后" && variant.Attachments.Single().Name == "changed.png", "回滚草稿意外改动源变体");
+    Expect(draft.HasUncommittedChanges, "回滚草稿应保留未提交状态");
+}
+
+static void MediaCommitReferenceScopes()
+{
+    var entity = new WorkflowEntity { Name = "主角" };
+    var variant = entity.CreateVariant("默认");
+    var old = variant.Versions.Single();
+    var current = new WorkflowNode();
+    var other = new WorkflowNode();
+    var unrelated = new WorkflowNode();
+    current.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = old.Id });
+    other.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+    unrelated.References.Add(new NodeReference { EntityId = Guid.NewGuid(), VariantId = variant.Id });
+    var draft = variant.CloneAsVariant("草稿");
+    draft.Description = "新版本";
+    variant.Description = draft.Description;
+    var created = variant.Commit("测试");
+    current.References[0].VariantVersionId = created.Id;
+    Expect(current.References[0].VariantVersionId == created.Id, "当前引用没有切换到新版本");
+    Expect(other.References[0].VariantVersionId is null, "仅当前镜头模式修改了其它引用");
+
+    foreach (var reference in new[] { current.References[0], other.References[0], unrelated.References[0] })
+        if (reference.EntityId == entity.Id && reference.VariantId == variant.Id) reference.VariantVersionId = created.Id;
+    Expect(current.References[0].VariantVersionId == created.Id && other.References[0].VariantVersionId == created.Id, "全部引用模式遗漏匹配引用");
+    Expect(unrelated.References[0].VariantVersionId is null, "全部引用模式依赖名称或错误匹配非同 ID 引用");
+}
+
+static void ReferenceMediaDraftIsolation()
+{
+    var entity = new WorkflowEntity { Name = "主角", Core = "核心设定" };
+    var variant = entity.CreateVariant("默认");
+    variant.Description = "共享表现";
+    variant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://shared.png", Name = "shared.png" });
+    variant.Commit("共享初始");
+
+    var followNode = new WorkflowNode { Title = "跟随镜头" };
+    followNode.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+    var lockedVersion = variant.Versions.OrderByDescending(version => version.Number).First();
+    var lockedNode = new WorkflowNode { Title = "锁定镜头" };
+    lockedNode.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = lockedVersion.Id });
+    var state = new WorkflowCanvasState { Entities = [entity], Nodes = [followNode, lockedNode] };
+
+    var effective = state.ResolveReferences(followNode).Single();
+    var draft = variant.CloneAsVariant("草稿");
+    draft.Description = "只对当前镜头的新表现";
+    draft.Attachments[0].Name = "draft.png";
+    Expect(variant.Description == "共享表现" && variant.Attachments[0].Name == "shared.png", "编辑草稿不应污染正式变体");
+    Expect(lockedVersion.Description == "共享表现" && lockedVersion.Attachments[0].Name == "shared.png", "编辑草稿不应污染已锁定版本");
+
+    var isolated = entity.CreateIsolatedVariant(effective, "当前镜头变体", draft.Description, draft.Attachments);
+    var isolatedVersion = isolated.Versions.Single();
+    followNode.References[0].VariantId = isolated.Id;
+    followNode.References[0].VariantVersionId = isolatedVersion.Id;
+
+    Expect(state.ResolveReferences(followNode).Single().Description == "只对当前镜头的新表现", "当前镜头应读取新变体");
+    Expect(state.ResolveReferences(lockedNode).Single().Description == "共享表现", "其他锁定引用不应改变");
+    Expect(state.ResolveReferences(lockedNode).Single().Attachments.Single().Name == "shared.png", "其他锁定引用媒体不应改变");
+    Expect(state.ResolveReferences(followNode).Single().Variant.Id != variant.Id, "定向提交应创建独立变体");
+    draft.Attachments[0].Name = "edited-after-submit.png";
+    Expect(isolated.Attachments[0].Name == "draft.png", "提交后的变体不应与草稿共享附件对象");
+}
+
+static void NestedReferenceSnapshots()
+{
+    var costume = new WorkflowEntity { Name = "战斗服", Kind = EntityKind.Prop };
+    var costumeVariant = costume.CreateVariant("黑色");
+    var character = new WorkflowEntity { Name = "主角" };
+    var characterVariant = new WorkflowEntityVariant { Name = "战斗状态" };
+    character.Variants.Add(characterVariant);
+    characterVariant.References.Add(new NodeReference
+    {
+        EntityId = costume.Id,
+        VariantId = costumeVariant.Id,
+        VariantVersionId = costumeVariant.Versions.Single().Id
+    });
+    var first = characterVariant.EnsureInitialVersion();
+    characterVariant.References.Clear();
+    var second = characterVariant.Commit("移除服装引用");
+    var clone = characterVariant.CloneAsVariant("镜头隔离");
+    clone.RollbackTo(first);
+
+    Expect(first.References.Count == 1, "初始版本未保存子引用");
+    Expect(second.References.Count == 0, "新版本错误继承已移除的子引用");
+    Expect(clone.References.Count == 1, "回滚未恢复历史子引用");
+    clone.References[0].VariantId = Guid.NewGuid();
+    Expect(first.References[0].VariantId == costumeVariant.Id, "版本快照与克隆仍共享子引用对象");
+
+    var content = new ReferenceContent(character, characterVariant, first, first.Description, first.Layout, first.Attachments)
+    {
+        References = first.References
+    };
+    var isolated = character.CreateIsolatedVariant(content, "单镜头", "隔离", Array.Empty<WorkflowAttachment>());
+    Expect(isolated.References.Count == 1, "隔离变体未复制子引用");
+}
+
+static void AgentCharacterNestedReferences()
+{
+    var canvas = new WorkflowCanvasState();
+    var character = new WorkflowEntity { Name = "林晚", Kind = EntityKind.Character };
+    var skill = new WorkflowEntity { Name = "听声辨位", Kind = EntityKind.Prop };
+    var prop = new WorkflowEntity { Name = "旧录音笔", Kind = EntityKind.Prop };
+    character.CreateVariant("默认");
+    skill.CreateVariant("默认");
+    prop.CreateVariant("默认");
+    canvas.Entities.AddRange([character, skill, prop]);
+
+    var characterAction = new AgentAction
+    {
+        Kind = "create_work_item",
+        Title = "林晚",
+        WorkTreeKind = "Character",
+        EntityTarget = "林晚"
+    };
+    var skillAction = new AgentAction
+    {
+        Kind = "create_work_item",
+        Title = "听声辨位",
+        WorkTreeKind = "Ability",
+        ParentTarget = "林晚",
+        EntityTarget = "听声辨位"
+    };
+    var propAction = new AgentAction
+    {
+        Kind = "create_work_item",
+        Title = "旧录音笔",
+        WorkTreeKind = "Prop",
+        ParentTarget = "林晚",
+        EntityTarget = "旧录音笔"
+    };
+
+    var result = AgentActionExecutor.Apply(
+        [characterAction, skillAction, propAction, propAction],
+        canvas,
+        workspaceDirectory: null,
+        fileMode: FileWriteMode.Skip);
+
+    Expect(result.Applied == 4, "AI 工作树动作未全部应用");
+    var characterItem = canvas.WorkTree.Single(item => item.Kind == WorkTreeKind.Character);
+    var characterVariant = character.Variants.Single();
+    Expect(characterItem.SourceEntityId == character.Id, "角色来源实体未建立");
+    Expect(characterVariant.References.Count == 2, "角色未自动获得技能和道具子引用");
+    Expect(characterVariant.References.Count(reference => reference.EntityId == skill.Id) == 1, "技能引用重复或缺失");
+    Expect(characterVariant.References.Count(reference => reference.EntityId == prop.Id) == 1, "道具引用重复或缺失");
+
+    var missingSource = new AgentAction
+    {
+        Kind = "create_work_item",
+        Title = "未绑定能力",
+        WorkTreeKind = "Ability",
+        ParentTarget = "林晚"
+    };
+    AgentActionExecutor.Apply([missingSource], canvas, workspaceDirectory: null, fileMode: FileWriteMode.Skip);
+    Expect(characterVariant.References.Count == 2, "缺少来源实体的工作树项不应生成无效引用");
 }
 
 static void SqliteJobPersistence()

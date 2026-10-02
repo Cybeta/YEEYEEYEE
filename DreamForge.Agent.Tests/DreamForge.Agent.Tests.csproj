@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\DreamForge.Desktop\DreamForge.Desktop.csproj" />
+    <!-- 共享的无界面代码：Agent 服务层、画布逻辑、智能导入、站点池子…（第 127 轮之前它是用
+         <Compile Include> 从旧 WinForms 端「借」的，现在是一个正常的库，来源只有一处）。 -->
+    <ProjectReference Include="..\DreamForge.Desktop.Shared\DreamForge.Desktop.Shared.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
