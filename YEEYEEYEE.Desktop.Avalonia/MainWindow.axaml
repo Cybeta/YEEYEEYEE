@@ -403,7 +403,16 @@
            放在启动页之前：没打开项目时它跟着工作台一起被启动页盖住，不抢注意力。 -->
       <Button x:Name="AgentBadgeButton" HorizontalAlignment="Right" VerticalAlignment="Bottom"
               Width="46" Height="46" Margin="0,0,24,22" Padding="0"
-              Background="Transparent" BorderThickness="0" IsVisible="False" Click="AgentBadge_OnClick">
+              Background="Transparent" BorderThickness="0" IsVisible="False" Click="AgentBadge_OnClick"
+              Opacity="0.5" PointerEntered="AgentBadge_OnPointerEntered" PointerExited="AgentBadge_OnPointerExited">
+        <!-- 平时半透明（它浮在画布上，实心时会挡住底下的节点），鼠标移上来才变实。
+             淡入淡出用一条 0.18 秒的过渡，直接跳会像闪了一下。 -->
+        <Button.Transitions>
+          <Transitions>
+            <DoubleTransition Property="Opacity" Duration="0:0:0.18" />
+          </Transitions>
+        </Button.Transitions>
+
         <!-- 圆环放在按钮**里面**的 Border 上：Avalonia 的 Button 自己没有 BoxShadow，
              而光晕（BoxShadow）正是这枚徽标「亮着」的那一层。 -->
         <Border x:Name="AgentBadgeRing" Width="42" Height="42" CornerRadius="21" BorderThickness="1">

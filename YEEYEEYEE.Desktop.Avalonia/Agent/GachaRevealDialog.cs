@@ -3,6 +3,7 @@ using Avalonia;
 using Avalonia.Animation;
 using Avalonia.Animation.Easings;
 using Avalonia.Controls;
+using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -97,13 +98,18 @@ internal static class GachaRevealDialog
     /// 打开全屏揭晓。返回被选中的那一张的序号；用户没挑就关掉时返回 null
     /// （**不等于失败**：那一排卡还在画布上盖着，可以再点开）。
     /// </summary>
+    /// <param name="avatar">
+    /// 这一家的形象（你自己放进 `provider-art` 的那张图）。**null 就用自绘的 ◈ 徽记**——
+    /// 形象是锦上添花，缺了它开奖照样完整。
+    /// </param>
     public static async Task<int?> ShowAsync(
         Window owner,
         string nodeTitle,
         IReadOnlyList<GachaCard> cards,
         string badgeAbbreviation,
         string badgeColorHex,
-        string sourceLine)
+        string sourceLine,
+        Bitmap? avatar = null)
     {
         if (cards.Count == 0) return null;
 
@@ -132,13 +138,20 @@ internal static class GachaRevealDialog
 
         // 预兆：这一批里**最高的那一档**决定爆发那一下的强弱——它只说「这批里有最好的那一档」，
         // 不说是哪一张，所以不会提前泄露结果。二游就是这么干的，区别是这里的光**有依据**（档位是真判出来的）。
+        // **裂纹卡不参与**：踩中负面提示词的图，分数再高也不该让这一批的入场变成最烈的那种。
+        // 全是裂纹卡时按**白档**给（最弱的预兆），而不是当成「没判过」——一批明确坏掉的图
+        // 与一批没判过的图，不该长得一样。
         // 一格都没判过时（None）用中性的强度与颜色，与以前完全一样。
         QualityTier? omen = null;
+        var gradedAny = false;
         foreach (var card in cards)
         {
             if (card.Quality is not { Source: not QualitySource.None } graded) continue;
+            gradedAny = true;
+            if (graded.IsCracked) continue;
             if (omen is null || graded.Tier > omen.Value) omen = graded.Tier;
         }
+        if (gradedAny && omen is null) omen = QualityTier.White;
         var omenSparks = omen is { } omenTier ? QualityJudgement.SparksFor(omenTier) : UngradedSparks;
         var omenPunch = omen switch
         {
@@ -187,7 +200,7 @@ internal static class GachaRevealDialog
         footer.Children.Add(footerButtons);
 
         // ---- 舞台：许愿区、尘埃、光点、卡片区叠在同一块地方，靠不透明度交接 ----
-        var wishStage = BuildWishStage(nodeTitle, cards.Count, badgeAbbreviation, accent, sourceLine,
+        var wishStage = BuildWishStage(nodeTitle, cards.Count, badgeAbbreviation, accent, sourceLine, avatar,
             out var mark, out var markRing);
         // 爆发时的光点：从中心朝上扇开。数量由**预兆**决定（这一批最高那一档）。
         var sparkField = BuildSparkField(burstLight, omenSparks, out var sparks);
@@ -269,7 +282,7 @@ internal static class GachaRevealDialog
             var tint = tints[i];
             var quality = cards[i].Quality;
             var back = BuildCardBack(i + 1, badgeAbbreviation);
-            var face = BuildCardFace(faceBitmaps[i], i + 1, quality);
+            var face = BuildCardFace(faceBitmaps[i], i + 1, quality, cardWidth, cardHeight);
             faces.Add(face);
 
             // 卡面之外再套一层用于「翻面闪光」：它盖在卡面之上，翻完那一瞬间亮一下再化掉。
@@ -767,8 +780,9 @@ internal static class GachaRevealDialog
 
         // ---- 交互 ----
         /// <summary>
-        /// 选中那一行说明。判过档位的把**名次、档位、谁判的、以及模型自己那句话**一起写出来——
-        /// 只说「金卡」等于把模型的判断当成事实；把原话摆出来，用户才能判断这个判断值不值得信。
+        /// 选中那一行说明。判过档位的把**分数、档位、谁判的、踩中了哪条负面词、以及模型自己那句话**
+        /// 一起写出来——只说「金卡」等于把模型的判断当成事实；把原话与分数摆出来，
+        /// 用户才能判断这个判断值不值得信。
         /// </summary>
         string DescribeSelection(int index)
         {
@@ -777,9 +791,14 @@ internal static class GachaRevealDialog
                 return $"已选中第 {index + 1} 张（共 {cards.Count} 张）";
 
             var who = graded.Source == QualitySource.Model ? "模型判定" : "本地判定";
-            var header = graded.Rank > 0
-                ? $"第 {index + 1} 张 · {QualityJudgement.Label(graded.Tier)}档（这批第 {graded.Rank}/{graded.Ranked} 名，{who}）"
-                : $"第 {index + 1} 张 · {QualityJudgement.Label(graded.Tier)}档（{who}）";
+            var grade = graded.ScoreLabel.Length > 0
+                ? $"{QualityJudgement.Label(graded.Tier)}档 {graded.ScoreLabel}"
+                : $"{QualityJudgement.Label(graded.Tier)}档";
+            var header = $"第 {index + 1} 张 · {grade}（{who}）";
+
+            // 裂纹卡把踩中的负面词**逐条列出来**（卡面那枚小牌只放得下几个字）：
+            // 「踩中负面提示词」是用户自己下的判断标准，所以要说清是踩了哪一条。
+            if (graded.IsCracked) header += $" · 裂纹，踩中负面词：{QualityJudgement.DescribeHits(graded.NegativeHits)}";
             return graded.Reason.Length > 0 ? header + "：" + graded.Reason : header;
         }
 
@@ -934,8 +953,9 @@ internal static class GachaRevealDialog
     ///
     /// 收边一律是灰的，没有一道彩色——图的颜色归图，卡片不跟它抢。
     /// 图读不出来时如实说明，不拿一张空白冒充。
+    /// **踩中负面提示词的那张会裂开**（见 <see cref="BuildCracks"/>），那是这张卡在这一排里最显眼的特征。
     /// </summary>
-    private static Control BuildCardFace(Bitmap? bitmap, int number, SlotQuality? quality)
+    private static Control BuildCardFace(Bitmap? bitmap, int number, SlotQuality? quality, double width, double height)
     {
         var panel = new Panel { IsHitTestVisible = false };
 
@@ -981,6 +1001,18 @@ internal static class GachaRevealDialog
             }
         });
 
+        // 裂纹卡：踩中负面提示词的那张在这里裂开——先压暗一层，再叠几道折线。
+        // 它必须压在图的**上面**、收边与档位牌的**下面**：裂纹要看得见，但不能把序号和档位盖住。
+        if (quality is { IsCracked: true })
+        {
+            panel.Children.Add(new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(58, 6, 8, 12)),
+                IsHitTestVisible = false
+            });
+            panel.Children.Add(BuildCracks(width, height));
+        }
+
         panel.Children.Add(new Border
         {
             Margin = new Thickness(8),
@@ -995,11 +1027,38 @@ internal static class GachaRevealDialog
 
         // 档位小牌：卡面上**唯一带颜色**的东西。
         // 卡片本身保持黑白（颜色归背后那团光），但档位必须一眼看得见，所以这一枚破例；
-        // 写的是「金 第 1/6」——把名次一起写出来，因为档位只是名次的一件外衣，名次才是真信息。
+        // 写的是「金 9/10」——分数一起写出来，因为档位就是分数切出来的带子，分数才是原始信息。
+        // 踩中负面提示词的那张写「裂纹」并换成裂纹色，下面再补一行命中的原词——
+        // 光看一个「裂纹」不知道是哪儿裂的，而「哪一条负面词被踩了」正是用户要的答案。
         if (quality is { Source: not QualitySource.None } graded)
         {
-            var label = QualityJudgement.Label(graded.Tier)
-                + (graded.Rank > 0 ? $" 第 {graded.Rank}/{graded.Ranked}" : string.Empty);
+            var cracked = graded.IsCracked;
+            var label = cracked
+                ? (graded.ScoreLabel.Length > 0 ? $"裂纹 {graded.ScoreLabel}" : "裂纹")
+                : QualityJudgement.Label(graded.Tier)
+                  + (graded.ScoreLabel.Length > 0 ? $" {graded.ScoreLabel}" : string.Empty);
+            var tint = cracked ? CrackColor : TierColor(graded.Tier);
+
+            var lines = new StackPanel { Spacing = 1 };
+            lines.Children.Add(new TextBlock
+            {
+                Text = label,
+                FontSize = 10,
+                FontWeight = FontWeight.SemiBold,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Foreground = new SolidColorBrush(tint)
+            });
+            if (cracked)
+            {
+                lines.Children.Add(new TextBlock
+                {
+                    Text = "命中：" + Trim(QualityJudgement.DescribeHits(graded.NegativeHits), 14),
+                    FontSize = 9,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Foreground = new SolidColorBrush(Color.FromArgb(200, tint.R, tint.G, tint.B))
+                });
+            }
+
             panel.Children.Add(new Border
             {
                 Margin = new Thickness(0, 0, 12, 12),
@@ -1009,19 +1068,56 @@ internal static class GachaRevealDialog
                 VerticalAlignment = VerticalAlignment.Bottom,
                 Background = new SolidColorBrush(Color.FromArgb(190, 8, 10, 14)),
                 BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(150, TierColor(graded.Tier).R,
-                    TierColor(graded.Tier).G, TierColor(graded.Tier).B)),
-                Child = new TextBlock
-                {
-                    Text = label,
-                    FontSize = 10,
-                    FontWeight = FontWeight.SemiBold,
-                    Foreground = new SolidColorBrush(TierColor(graded.Tier))
-                }
+                BorderBrush = new SolidColorBrush(Color.FromArgb(150, tint.R, tint.G, tint.B)),
+                Child = lines
             });
         }
 
         return panel;
+    }
+
+    /// <summary>截断，超了加省略号（小牌上放不下长句）。</summary>
+    private static string Trim(string text, int max) =>
+        text.Length <= max ? text : text[..max] + "…";
+
+    /// <summary>
+    /// 裂纹卡的颜色。与五档的颜色都不一样——它是**另一种状态**，不是「更低的一档」。
+    /// 偏冷的灰蓝：看起来像碎掉的瓷，而不像金/红那种「奖励色」。
+    /// </summary>
+    private static readonly Color CrackColor = Color.Parse("#8FA6BD");
+
+    /// <summary>
+    /// 裂纹卡的那几道裂：三到四条折线，从卡边往中间走，越往中间越细、越淡。
+    ///
+    /// 全用代码画的折线，没有素材；**只有踩中负面提示词的卡才有**。
+    /// 为什么折线而不是贴一张裂纹图：贴图要挑素材、要处理缩放，而「一条折线折几下」看起来已经足够像裂痕了。
+    /// </summary>
+    private static Control BuildCracks(double width, double height)
+    {
+        var canvas = new Canvas { Width = width, Height = height, IsHitTestVisible = false };
+
+        // (起笔粗细, 折点序列)。点用 0–1 的相对坐标写，乘上卡片的宽高才是实际位置。
+        var strokes = new (double Thickness, byte Alpha, (double X, double Y)[] Points)[]
+        {
+            (1.6, 210, new[] { (0.10, -0.02), (0.21, 0.19), (0.12, 0.37), (0.25, 0.55), (0.19, 0.80), (0.26, 1.02) }),
+            (1.3, 170, new[] { (1.02, 0.24), (0.80, 0.33), (0.66, 0.50), (0.47, 0.58), (0.34, 0.72) }),
+            (1.1, 140, new[] { (0.58, 1.02), (0.63, 0.78), (0.50, 0.65), (0.42, 0.47) }),
+            (0.9, 110, new[] { (1.02, 0.62), (0.84, 0.70), (0.72, 0.88) })
+        };
+
+        foreach (var stroke in strokes)
+        {
+            var line = new Polyline
+            {
+                Stroke = new SolidColorBrush(Color.FromArgb(stroke.Alpha, 233, 241, 250)),
+                StrokeThickness = stroke.Thickness,
+                StrokeJoin = PenLineJoin.Miter
+            };
+            foreach (var (x, y) in stroke.Points) line.Points.Add(new Point(x * width, y * height));
+            canvas.Children.Add(line);
+        }
+
+        return canvas;
     }
 
     /// <summary>
@@ -1304,9 +1400,14 @@ internal static class GachaRevealDialog
 
     // ==================== 许愿与光点 ====================
 
-    /// <summary>许愿区：自有形象（那枚 ◈ 标记 + 一圈光）+ 厂家徽标 + 这一批的实情。</summary>
+    /// <summary>
+    /// 许愿区：形象（你自己放的那张图，或者自绘的 ◈ 标记 + 一圈光）+ 厂家徽标 + 这一批的实情。
+    ///
+    /// `avatar` 是这一家的形象图（见 <see cref="ProviderAvatar"/>）；为 null 时退回自绘徽记。
+    /// 有图时**环里换成图**、环本身留着当边框——同一个尺寸、同一圈光晕，所以换不换都不影响构图。
+    /// </summary>
     private static Control BuildWishStage(
-        string nodeTitle, int count, string badgeAbbreviation, Color accent, string sourceLine,
+        string nodeTitle, int count, string badgeAbbreviation, Color accent, string sourceLine, Bitmap? avatar,
         out Border mark, out Border markRing)
     {
         markRing = new Border
@@ -1328,28 +1429,41 @@ internal static class GachaRevealDialog
             }),
             IsHitTestVisible = false
         };
-        // 环里再套一个斜放的小方框，与卡背上的徽记是同一套语言。
+        // 环里放什么：放了形象图就用图，否则用「斜放的小方框 + ◈」——与卡背上的徽记是同一套语言。
         var ringBody = new Grid();
-        ringBody.Children.Add(new Border
+        if (avatar is not null)
         {
-            Width = 62,
-            Height = 62,
-            CornerRadius = new CornerRadius(12),
-            BorderThickness = new Thickness(1.2),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(190, accent.R, accent.G, accent.B)),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            RenderTransformOrigin = RelativePoint.Center,
-            RenderTransform = TransformOperations.Parse("rotate(45deg)")
-        });
-        ringBody.Children.Add(new TextBlock
+            // 圆环要真的裁掉图：ClipToBounds + CornerRadius 让这张图被剪成一个圆。
+            markRing.ClipToBounds = true;
+            ringBody.Children.Add(new Image
+            {
+                Source = avatar,
+                Stretch = Stretch.UniformToFill
+            });
+        }
+        else
         {
-            Text = "◈",
-            FontSize = 42,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = new SolidColorBrush(Color.FromArgb(238, 230, 238, 255))
-        });
+            ringBody.Children.Add(new Border
+            {
+                Width = 62,
+                Height = 62,
+                CornerRadius = new CornerRadius(12),
+                BorderThickness = new Thickness(1.2),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(190, accent.R, accent.G, accent.B)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                RenderTransformOrigin = RelativePoint.Center,
+                RenderTransform = TransformOperations.Parse("rotate(45deg)")
+            });
+            ringBody.Children.Add(new TextBlock
+            {
+                Text = "◈",
+                FontSize = 42,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = new SolidColorBrush(Color.FromArgb(238, 230, 238, 255))
+            });
+        }
         markRing.Child = ringBody;
 
         mark = new Border
