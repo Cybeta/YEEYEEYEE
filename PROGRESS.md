@@ -11,6 +11,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 以及一轮工程收尾：抽出 `DreamForge.Desktop.Shared`、**合并两份分叉的核心**、旧 WinForms 端归档。
 测试基线：Agent **190 项**、Migration `8/8`、G6V1 通过；解决方案 0 错误。细节见下面各轮（倒序）。
 
+**文档汇总与上传**：按「中性描述」原则把文档与示例里的真实站点、域名统一改成中性示例（`example`，如 `video.example.com`），示例密钥改成 `sk-site-secret` 这类明显假值；`.gitignore` 增加 `*.design/`（设计目录含本机绝对路径与工具清单，不入库）。提交前全库扫过 `sk-*` / `Bearer` / `dpapi:` / 绝对路径 / 邮箱等模式，**未发现真实密钥**（命中均为测试假数据）。`README`、`02`、`03`、`04`（Mermaid 图与 Markdown 列表版）、`PROGRESS`、`TODO` 同步到当前架构。已提交并推送 `main`。本轮复核基线：Agent 190、Core 29、Migration `8/8`、G6V1 通过、Canvas TS `44/44`，解决方案 0 错误。
+
 2026-09-30 Goal7 阶段进展（**待独立复核，不是整批完成**）：新增 `/api/web` 本机 Bearer HTTP 场景/资产/技能任务接口，项目模式适配桌面画布权威文件、字节指纹冲突检查及保存备份；独立模式须显式启用，不可信项目不回退。TS 普通浏览器入口改为 WebCanvasApp，按稳定 ID 选择节点/资产、只读展示引用、编辑标题和内容、轮询任务。协议细节见 `protocol/PROTOCOL.md` 第 8 节。**本轮实跑** `dotnet build DreamForge.slnx --no-restore`：6 项目、0 警告 0 错误；`dotnet run --project DreamForge.Web.Tests/DreamForge.Web.Tests.csproj`：HTTP 回归通过（单一控制台用例，未输出断言总数）；`npm.cmd --prefix DreamForge.Canvas test -- --run`：7 文件 43/43；前端 `npm.cmd --prefix DreamForge.Canvas run build` 通过；`git diff --check` 返回 0，仅行尾转换提示。Web HTTP 回归使用隔离临时场景/项目与离线 ComfyUI，验证匿名拒绝不改数据、冲突、项目格式保存、独立场景重启持久化、资源失效拒绝、任务失败及重试；前端资产解析仅 3 条单测。**未验**真实浏览器完整点击链、实际提供方成功出图、跨进程/断电、Web/桌面同时编辑的端到端协作及 Goal7 整批验收；不可将 HTTP 控制台回归等同浏览器验收。下一步由独立复核核对权限、路由/构建部署及真实浏览器保存重开与失败路径，再定目标7结论。
 
 2026-09-30 Goal7 真实浏览器阶段补证（仍待整批复核）：主助手访问隔离项目 Web `http://127.0.0.1:57963/`，在同名异 ID 节点/资产中选中节点 `dce0d6c7-ff9a-4719-8534-c330d14a7001`，编辑标题为“项目画布浏览器验收”和内容并点击保存；服务端修订 `96815015154153` → `161031302757786`。按实体 ID 定位资产 `8fd28d45-bd34-43c7-8c55-6d81ca4dd801`；重新导航后修改保留、第二节点未变。离线技能未预授权，未执行浏览器任务；真实桌面—Web 联动及选择回传未验，Goal7 整批不得放行。下一步补齐上述真实交互与失败路径后统一验收；不记录隔离令牌。
@@ -28,7 +30,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 - 主线为企划 → 章节 → 分镜 → 成品。角色、道具、场景不建常驻画布节点，分镜通过 `References`/`entityTargets` 引用，按需临时展开；旧类别和入口仍在，尚未完成旧数据迁移。
 - `ParentNodeId` 是画布布局关系，`WorkTreeItemId` 是叙事锚点，`References` 是视觉引用；字段存在不等于同步已实现。
 - 工作树和资源库都保留；当前 `Entities` 与 `WorkTree` 随画布保存。项目级资源库迁移必须先完成稳定 ID、引用扫描、删除保护、回收站和版本锁定验证。
-- 桌面为 WinForms 自绘主端；Web 已有 `/api/web` 的阶段性 HTTP 创作路径与旧镜像/引用版本回写并存，尚待独立复核和浏览器验收。TS/React 使用 div 卡片，tldraw 依赖已清理，Canvas 与 Mcp 不在解决方案中。
+- 桌面主端为 Avalonia 自绘（`DreamForge.Desktop.Avalonia`），无界面逻辑在 `DreamForge.Desktop.Shared`，画布模型与存储基础设施在 `DreamForge.Desktop.Core`；旧 WinForms 端已归档到 `_legacy_winforms/`，不参与构建。Web 已有 `/api/web` 的阶段性 HTTP 创作路径与旧镜像/引用版本回写并存，尚待独立复核和浏览器验收。TS/React 使用 div 卡片，tldraw 依赖已清理，Canvas 与 Mcp 不在解决方案中。
 - 宿主消息协议 v1 有 17 种消息，`/api/web` HTTP 不使用该信封；桌面 Agent 使用独立的 13 种 action 协议。基础文本/图像链路已有，视频与多端协同尚未验收；Goal7 不得以接口测试替代整批浏览器验收。
 
 ## 更新规则
