@@ -45,7 +45,11 @@ COPY --from=build /app ./
 # 前端产物放在程序目录旁；服务端靠 YEEYEEYEE__CanvasDistPath 找它（默认那个相对路径在镜像里不成立）。
 COPY --from=canvas /src/dist ./canvas-dist
 
+# ASPNETCORE_URLS 会被 appsettings.json 里的 Kestrel 端点压过（那里写的是
+# http://localhost:5000，适合本机开发），所以必须再用环境变量把端点覆盖成容器里的
+# 对外地址，否则进程只听 127.0.0.1，端口映射进不来。
 ENV ASPNETCORE_URLS=http://+:8080 \
+    Kestrel__Endpoints__Http__Url=http://+:8080 \
     DOTNET_EnableDiagnostics=0 \
     YEEYEEYEE__CanvasDistPath=/app/canvas-dist \
     YEEYEEYEE__JobDatabasePath=/data/jobs.db \
@@ -60,3 +64,6 @@ VOLUME ["/data"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+
+# 必须有这一行：aspnet 基础镜像自带的 CMD 是 /bin/bash，不覆盖它容器会立刻退出。
+ENTRYPOINT ["dotnet", "YEEYEEYEE.Web.dll"]

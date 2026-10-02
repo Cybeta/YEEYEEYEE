@@ -67,7 +67,15 @@ docker compose up -d --build
 
 浏览器打开 `http://<部署机器的地址>:8080`，**第一次打开会让你建管理员账号**——第一个账号就是管理员，之后由它建别人的账号。数据（账号、任务、资产、场景）都在 `yeeeyee-data` 卷里，容器重建不丢；`docker compose down -v` 清空重来。
 
-暴露到公网之前请在 `.env` 里设 `YEEYEEYEE_SETUP_TOKEN`：不设的话，任何能访问到这个端口的人都能抢先把管理员建走。设了之后首次建号必须带上这个令牌，`docker compose` 会把它作为部署时的一道闸门。默认用「独立场景」模式（卷里一个 `scene.json`），容器起来就能改；要编辑桌面项目里的真画布，按 `docker-compose.yml` 里的注释把 `PROJECT_DIR` 挂进去并改两个环境变量。
+暴露到公网之前请在 `.env` 里设 `YEEYEEYEE_SETUP_TOKEN`：不设的话，任何能访问到这个端口的人都能抢先把管理员建走。设了之后首次建号必须带上这个令牌，`docker compose` 会把它作为部署时的一道闸门。默认用「独立场景」模式（卷里一个 `scene.json`），**但起来是个空画布，而 Web 端没有新建节点的入口**（见[路线图](TODO.md)）；要编辑桌面项目里的真画布，按 `docker-compose.yml` 里的注释把 `PROJECT_DIR` 挂进去并改两个环境变量。
+
+镜像的基础镜像来自 Docker Hub 与 MCR。**若所在网络拉不动 Docker Hub**（`docker pull` 卡住或报连接重置），给 Docker 配一个镜像源即可（写进 `%USERPROFILE%\.docker\daemon.json`，改完重启 Docker Desktop）：
+
+```json
+{ "registry-mirrors": ["https://docker.m.daocloud.io", "https://docker.1ms.run"] }
+```
+
+镜像约 444 MB。
 
 **本机直接跑**（改代码时用）：
 
@@ -133,6 +141,7 @@ dotnet run --project YEEYEEYEE.Migration.Tests
 dotnet run --project YEEYEEYEE.G6V1.Tests
 dotnet run --project YEEYEEYEE.Web.Tests
 npm.cmd --prefix YEEYEEYEE.Canvas test -- --run
+docker compose up -d --build   # 起容器，浏览器开 http://localhost:8080
 ```
 
 `YEEYEEYEE.slnx` 只包含 6 个生产项目，测试项目要单独运行——所以「解决方案构建通过」覆盖的是生产代码，测试项目的编译错误不会被它拦到。

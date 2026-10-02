@@ -239,7 +239,17 @@ internal static class AuthApi
     private static string AttemptKey(HttpContext context, string? username) =>
         (username ?? "").Trim().ToLowerInvariant() + "|" + (context.Connection.RemoteIpAddress?.ToString() ?? "unknown");
 
-    private static string? SetupToken(WebApplication app) => LegacyConfig.Text(app.Configuration, "SetupToken");
+    /// <summary>
+    /// 部署时配置的初始化令牌；**空字符串按「没配」算**。
+    /// 这条不是洁癖：`docker compose` 里习惯写 <c>${YEEYEEYEE_SETUP_TOKEN:-}</c>，
+    /// 没设变量时传进来就是一个空串。若把它当成「配了令牌」，
+    /// 界面会多出一个谁也填不出的初始化令牌输入框，首次建号直接卡死。
+    /// </summary>
+    private static string? SetupToken(WebApplication app)
+    {
+        var token = LegacyConfig.Text(app.Configuration, "SetupToken");
+        return string.IsNullOrWhiteSpace(token) ? null : token;
+    }
 
     private static object Describe(WebUser user) => new
     {
