@@ -2543,6 +2543,33 @@ public partial class MainWindow : Window, IAgentSessionHost
     }
 
     /// <summary>
+    /// 把「这一步在节点树里的位置」拼成几句话，交给看图评审当上下文。
+    ///
+    /// 为什么要给：只看到「一张少女立绘」的评审没法判断「这张符不符合要求」——
+    /// 要求是由这一步在整条链路里的用途决定的（这是角色设定图，还是某一场的分镜图）。
+    /// 只交代节点名、类别、章节与引用的设定，**不塞整棵树的坐标**：评审要的是「这一步在干什么」。
+    /// </summary>
+    private string DescribeNodeContext(WorkflowNode node)
+    {
+        var lines = new List<string> { $"节点：{node.Title}（{CategoryNameOf(node.Category)}）" };
+        if (node.Chapter.Length > 0) lines.Add($"所属章节：{node.Chapter}");
+
+        var names = new List<string>();
+        foreach (var reference in node.References)
+        {
+            var entity = currentCanvas?.Canvas.FindEntity(reference.EntityId);
+            if (entity is null) continue;
+            var variant = entity.Variants.FirstOrDefault(candidate => candidate.Id == reference.VariantId);
+            names.Add(variant is { Name.Length: > 0 } ? $"{entity.Name} · {variant.Name}" : entity.Name);
+        }
+
+        lines.Add(names.Count > 0
+            ? "这一步引用的设定（画面里应当与这些设定一致）：" + string.Join("、", names)
+            : "这一步没有引用任何设定。");
+        return string.Join("\n", lines);
+    }
+
+    /// <summary>
     /// 同时出 N 张：先在卡片上排 N 个格子，每张自己走一步、自己刷一格，出完让用户挑一张。
     ///
     /// 一张都不直接挂到节点上——一次出 N 张的目的是**从里面挑**，先挂上去再让用户删，
@@ -2569,6 +2596,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             StartedAt = DateTimeOffset.Now,
             Prompt = prompt,
             Negative = negative,
+            NodeContext = DescribeNodeContext(node),
             ModeNote = modeNote,
             SourceLabel = sourceLabel,
             Pool = poolChoice,
@@ -2852,8 +2880,10 @@ public partial class MainWindow : Window, IAgentSessionHost
             return;
         }
 
-        var (abbreviation, colorHex, line) = RevealSource(batch);
-        var picked = await GachaRevealDialog.ShowAsync(this, node.Title, cards, abbreviation, colorHex, line);
+        var (abbreviation, colorHex, line, providerId) = RevealSource(batch);
+        // 这一家的形象（你自己放进 provider-art 的那张图）；没放就是 null，揭晓里用回自绘徽记。
+        var avatar = ProviderAvatar.Load(providerId);
+        var picked = await GachaRevealDialog.ShowAsync(this, node.Title, cards, abbreviation, colorHex, line, avatar);
         // 没挑就关掉：不留痕迹。那一排卡还在画布上盖着，随时可以再点开。
         if (picked is not { } chosenIndex) return;
 
@@ -2875,7 +2905,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// 那才是这次真正打过去的去处，比报厂名更接近事实。
     /// 认不出来时用中性徽标「AI」，不硬安一家上去。
     /// </summary>
-    private static (string Abbreviation, string ColorHex, string Line) RevealSource(NodeImageBatch batch)
+    private static (string Abbreviation, string ColorHex, string Line, string ProviderId) RevealSource(NodeImageBatch batch)
     {
         AiProviderConfig config;
         try
@@ -2889,7 +2919,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             var fallback = batch.Pool is { } poolChoice
                 ? $"{poolChoice.Site.DisplayName} · {poolChoice.Pool.Label}"
                 : batch.SourceLabel;
-            return (ProviderBadges.NeutralAbbreviation, ProviderBadges.NeutralColorHex, fallback);
+            return (ProviderBadges.NeutralAbbreviation, ProviderBadges.NeutralColorHex, fallback, "custom");
         }
 
         var endpoint = config.ImageEndpoint.Length > 0 ? config.ImageEndpoint : config.Endpoint;
@@ -2900,7 +2930,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             ? $"{pool.Site.DisplayName} · {pool.Pool.Label}"
             : config.ImageModel.Length > 0 ? $"{preset.Name} · {config.ImageModel}" : preset.Name;
 
-        return (badge.Abbreviation, badge.ColorHex, line);
+        return (badge.Abbreviation, badge.ColorHex, line, preset.Id);
     }
 
     private static bool ParseGhostIndex(string action, string prefix, out int index) =>
@@ -4691,6 +4721,9 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         var open = AgentWorkbenchPanel.IsVisible;
         AgentBadgeButton.IsVisible = !open;
+        // 每次显形都回到半透明：面板是点这枚徽标打开的，那一刻鼠标就停在它上面，
+        // PointerExited 不一定会补发，不重置的话它会一直保持实心。
+        if (!open) AgentBadgeButton.Opacity = AgentBadgeIdleOpacity;
 
         var preset = CurrentProviderPreset();
         var badge = ProviderBadges.Of(preset.Id);
@@ -4726,6 +4759,20 @@ public partial class MainWindow : Window, IAgentSessionHost
         ShowAgentMode();
         StatusText.Text = $"已打开 Agent 协作（{ProviderLabel}）";
     }
+
+    /// <summary>徽标不做悬停时的透明度。放在这里是为了让「设成多少」只有一处。</summary>
+    private const double AgentBadgeIdleOpacity = 0.5;
+
+    /// <summary>
+    /// 徽标平时是半透明的：它浮在画布右下角，不透明时会实实在在挡住底下的节点。
+    /// 鼠标移上来才变实——那时用户已经在看它了，挡住底下无所谓；移开再淡回去。
+    /// </summary>
+    private void AgentBadge_OnPointerEntered(object? sender, PointerEventArgs e) =>
+        AgentBadgeButton.Opacity = 1.0;
+
+    private void AgentBadge_OnPointerExited(object? sender, PointerEventArgs e) =>
+        AgentBadgeButton.Opacity = AgentBadgeIdleOpacity;
+
     private void SelectTool_OnClick(object? sender, RoutedEventArgs e)
     {
         CanvasSurfaceControl.SetConnectionMode(false);

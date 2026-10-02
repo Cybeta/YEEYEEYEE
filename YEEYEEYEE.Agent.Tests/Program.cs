@@ -61,10 +61,11 @@ var tests = new (string Name, Action Run)[]
     ("更新：替换脚本实测——真换掉一个目录并留下结果文件", UpdateSwapScriptActuallyReplacesDirectory),
     ("出图批次：整批还在跑时单张一律不能操作（漏文件那条路的入口）", BatchSlotsAreNotActionableWhileRunning),
     ("出图开奖：按张数排布（一行最多 3 张 / 4 张 2×2 / 卡片固定 2:3 / 末行按自己的张数居中）", GachaCardLayoutIsPinnedByCount),
-    ("出图开奖：名次 → 档位（第 1 名金、最后一名白；只有一张不判；光点从金到白严格递减）", QualityTierFollowsRank),
-    ("出图开奖：模型名次必须完整才认（漏项 / 重复 / 越界 / 坏 JSON 一律作废）", QualityRankingMustBeComplete),
+    ("出图开奖：分数 → 档位（9 分以上金 / 7-8 红 / 5-6 紫 / 3-4 蓝 / 2 分以下白；光点从金到白严格递减）", QualityTierFollowsScore),
+    ("出图开奖：模型打分必须完整且合法才认（漏项 / 重复 / 越界 / 超范围分数 / 坏 JSON 一律作废）", QualityScoresMustBeComplete),
+    ("出图开奖：评审提示词必须带上出图要求、负面提示词、节点上下文与四类缺陷", JudgePromptCarriesContextAndChecks),
     ("出图开奖：本地筛查只判客观坏图（读不出 / 纯色 / 尺寸不对），不碰「好不好」", TechnicalScreeningOnlyFlagsBrokenImages),
-    ("出图开奖：名次落回槽位（顺序即编号，可跨过失败格；最高档决定预兆）", QualityGradesMapBackToSlots),
+    ("出图开奖：分数落回槽位；踩中负面提示词就是裂纹卡，且裂纹卡不参与预兆", QualityGradesMapBackToSlots),
     ("配置落盘：程序旁的旧文件会被搬到用户配置目录（搬不是拷）", LegacyProgramRootConfigIsMigrated),
     ("模型预设：地址能反推回同一家，预置模型元数据自洽", ProviderPresetCatalogIsConsistent),
     ("模型预设：预设换算两端共用一份（采样开关与型号覆盖都一致）", ProviderPresetValuesResolveIsConsistent),
@@ -6934,36 +6935,23 @@ static void GachaCardLayoutIsPinnedByCount()
 	Expect(!Throws(() => GachaCardLayout.Slot(6, 5)), "最后一张是合法序号");
 }
 
-static void QualityTierFollowsRank()
+static void QualityTierFollowsScore()
 {
-	// 6 张：第 1 名金、2 红、3 紫、中段蓝、最后一名白。
-	Expect(QualityJudgement.TierForRank(1, 6) == QualityTier.Gold, "6 张里第 1 名是金");
-	Expect(QualityJudgement.TierForRank(2, 6) == QualityTier.Red, "6 张里第 2 名是红");
-	Expect(QualityJudgement.TierForRank(3, 6) == QualityTier.Purple, "6 张里第 3 名是紫");
-	Expect(QualityJudgement.TierForRank(4, 6) == QualityTier.Blue, "6 张里第 4 名是蓝");
-	Expect(QualityJudgement.TierForRank(5, 6) == QualityTier.Blue, "6 张里第 5 名也是蓝");
-	Expect(QualityJudgement.TierForRank(6, 6) == QualityTier.White, "6 张里最后一名是白");
+	// 分数带的两端都要钉住：只钉中间值的话，把 9 改成 8 也不会有用例失败。
+	Expect(QualityJudgement.TierForScore(QualityJudgement.MaxScore) == QualityTier.Gold, "满分是金");
+	Expect(QualityJudgement.TierForScore(9) == QualityTier.Gold, "9 分是金（金的下界）");
+	Expect(QualityJudgement.TierForScore(8) == QualityTier.Red, "8 分是红（差一分就掉出金）");
+	Expect(QualityJudgement.TierForScore(7) == QualityTier.Red, "7 分是红");
+	Expect(QualityJudgement.TierForScore(6) == QualityTier.Purple, "6 分是紫");
+	Expect(QualityJudgement.TierForScore(5) == QualityTier.Purple, "5 分是紫");
+	Expect(QualityJudgement.TierForScore(4) == QualityTier.Blue, "4 分是蓝");
+	Expect(QualityJudgement.TierForScore(3) == QualityTier.Blue, "3 分是蓝");
+	Expect(QualityJudgement.TierForScore(2) == QualityTier.White, "2 分是白");
+	Expect(QualityJudgement.TierForScore(QualityJudgement.MinScore) == QualityTier.White, "0 分是白");
+	Expect(QualityJudgement.TierForScore(-1) == QualityTier.White, "负数按白处理（不该出现，但不能崩）");
 
-	// 5 张：4 名是蓝、5 名（最后）是白。
-	Expect(QualityJudgement.TierForRank(4, 5) == QualityTier.Blue, "5 张里第 4 名是蓝");
-	Expect(QualityJudgement.TierForRank(5, 5) == QualityTier.White, "5 张里最后一名是白");
-
-	// 4 张：第 3 名就是最后一名之前那一档，且第 4 名是白。
-	Expect(QualityJudgement.TierForRank(3, 4) == QualityTier.Purple, "4 张里第 3 名是紫");
-	Expect(QualityJudgement.TierForRank(4, 4) == QualityTier.White, "4 张里最后一名是白");
-
-	// 3 张：第 2 名是红，第 3 名（最后）是白。
-	Expect(QualityJudgement.TierForRank(2, 3) == QualityTier.Red, "3 张里第 2 名是红");
-	Expect(QualityJudgement.TierForRank(3, 3) == QualityTier.White, "3 张里最后一名是白");
-
-	// 2 张：最好的一张是金，另一张就是最后一名（白）。
-	Expect(QualityJudgement.TierForRank(1, 2) == QualityTier.Gold, "2 张里第 1 名是金");
-	Expect(QualityJudgement.TierForRank(2, 2) == QualityTier.White, "2 张里第 2 名（也就是最后一名）是白");
-
-	// 越界与不足两张：都落到白——但它们本来就不该被调用（解析那一步已经拒了）。
-	Expect(QualityJudgement.TierForRank(1, 1) == QualityTier.White, "只有一张不判档");
-	Expect(QualityJudgement.TierForRank(0, 6) == QualityTier.White, "名次 0 是非法的");
-	Expect(QualityJudgement.TierForRank(7, 6) == QualityTier.White, "名次超出张数是非法的");
+	// 分数是**绝对标准**：同一批里两张都给 8 分，它们就该都是红——这正是它比名次好的地方。
+	Expect(QualityJudgement.TierForScore(8) == QualityJudgement.TierForScore(8), "同样的分数给同样的档位");
 
 	// 每一档的光点数必须严格递减：这是「档位看得出来」的最低要求。
 	var sparks = new[]
@@ -6982,48 +6970,75 @@ static void QualityTierFollowsRank()
 	Expect(QualityJudgement.Label(QualityTier.White) == "白", "白档的中文名");
 	Expect(QualityJudgement.ModelDisclaimer.Contains("不是客观结论", StringComparison.Ordinal),
 		"档位旁边必须说明这是模型的判断，而不是客观结论");
+
+	// 分数带是公开的：它要出现在设置页上，用户得能自己核对「8 分为什么是红」。
+	Expect(QualityJudgement.ScoreBandNote.Contains("9 分以上金", StringComparison.Ordinal),
+		"分数带说明要把金的门槛写出来，实际：" + QualityJudgement.ScoreBandNote);
+	Expect(QualityJudgement.ScoreBandNote.Contains("裂纹", StringComparison.Ordinal),
+		"分数带说明里要交代裂纹卡，实际：" + QualityJudgement.ScoreBandNote);
+
+	// 分数在界面上的写法：有分写「8/10」，本地筛查那种没有分的写空串（不能显示 -1/10）。
+	Expect(new SlotQuality { Score = 8 }.ScoreLabel == "8/10", "有分数时写成 8/10");
+	Expect(new SlotQuality().ScoreLabel.Length == 0, "没有分数时是空串，不是 -1/10");
 }
 
-static void QualityRankingMustBeComplete()
+static void QualityScoresMustBeComplete()
 {
-	// 正常一份：编号是「第几张」，数组顺序就是名次。
-	var ok = QualityJudgement.ParseRanking(
-		"{\"ranking\":[{\"index\":3,\"note\":\"构图完整\"},{\"index\":1,\"note\":\"糊\"},{\"index\":2,\"note\":\"手崩了\"}]}", 3);
-	Expect(ok.Ranking is { Count: 3 }, "正常回复要能读出名次");
+	// 正常一份：编号是「第几张」，score 是 0–10，hits 是踩中的负面词。
+	var ok = QualityJudgement.ParseScores(
+		"{\"scores\":[{\"index\":1,\"score\":8,\"hits\":[],\"note\":\"主题清楚\"},{\"index\":2,\"score\":3,\"hits\":[\"多余手指\"],\"note\":\"左手多一根\"}]}", 2);
+	Expect(ok.Scores is { Count: 2 }, "正常回复要能读出分数");
 	Expect(ok.Error is null, "正常回复不该报错");
-	Expect(ok.Ranking![0].Index == 3 && ok.Ranking[0].Note == "构图完整", "名次顺序与理由都要按原样读出来");
+	Expect(ok.Scores![0].Score == 8 && ok.Scores[0].Note == "主题清楚", "分数与理由都要按原样读出来");
+	Expect(ok.Scores[0].Hits.Count == 0, "没踩中就应该是空数组");
+	Expect(ok.Scores[1].Score == 3 && ok.Scores[1].Hits.Count == 1 && ok.Scores[1].Hits[0] == "多余手指",
+		"踩中的负面词要按原词读出来（它决定这张是不是裂纹卡）");
 
 	// 外面包了代码块、前后有说明文字：仍然要能读（模型经常这么回）。
-	var fenced = QualityJudgement.ParseRanking(
-		"好的，我看完了：\n```json\n{\"ranking\":[{\"index\":1,\"note\":\"a\"},{\"index\":2,\"note\":\"b\"}]}\n```\n以上。", 2);
-	Expect(fenced.Ranking is { Count: 2 }, "前后带说明文字、外面包代码块也要能读");
+	var fenced = QualityJudgement.ParseScores(
+		"好的，我看完了：\n```json\n{\"scores\":[{\"index\":1,\"score\":9},{\"index\":2,\"score\":9}]}\n```\n以上。", 2);
+	Expect(fenced.Scores is { Count: 2 }, "前后带说明文字、外面包代码块也要能读");
+	Expect(fenced.Scores!.All(item => item.Score == 9), "两张都 9 分是合法的——绝对分允许并列");
 
-	// 少了项：整份作废（半份名次会给出武断的档位，比没有档位更糟）。
-	var short_ = QualityJudgement.ParseRanking(
-		"{\"ranking\":[{\"index\":1,\"note\":\"a\"},{\"index\":2,\"note\":\"b\"}]}", 3);
-	Expect(short_.Ranking is null && short_.Error is not null, "名次项数不足要整份作废");
-	Expect(short_.Error!.Contains("3", StringComparison.Ordinal), "报错要说清应当有几项，实际：" + short_.Error);
+	// **一张也能判**：绝对分不需要比较对象，这是这一版与名次版最大的区别。
+	var single = QualityJudgement.ParseScores("{\"scores\":[{\"index\":1,\"score\":7}]}", 1);
+	Expect(single.Scores is { Count: 1 } && single.Error is null, "只有一张也要能判（绝对分不需要第二张）");
+
+	// 少了项：整份作废（半份评分会给出武断的档位，比没有档位更糟）。
+	var partial = QualityJudgement.ParseScores(
+		"{\"scores\":[{\"index\":1,\"score\":8},{\"index\":2,\"score\":6}]}", 3);
+	Expect(partial.Scores is null && partial.Error is not null, "评分项数不足要整份作废");
+	Expect(partial.Error!.Contains("3", StringComparison.Ordinal), "报错要说清应当有几项，实际：" + partial.Error);
 
 	// 重复编号：作废。
-	var repeated = QualityJudgement.ParseRanking(
-		"{\"ranking\":[{\"index\":1,\"note\":\"a\"},{\"index\":1,\"note\":\"b\"}]}", 2);
-	Expect(repeated.Ranking is null && repeated.Error is not null, "重复编号要整份作废");
+	Expect(QualityJudgement.ParseScores(
+		"{\"scores\":[{\"index\":1,\"score\":8},{\"index\":1,\"score\":6}]}", 2).Scores is null, "重复编号要整份作废");
 
 	// 越界编号（0 与 count+1）：作废。
-	Expect(QualityJudgement.ParseRanking("{\"ranking\":[{\"index\":0,\"note\":\"a\"},{\"index\":2,\"note\":\"b\"}]}", 2).Ranking is null,
-		"编号 0 要作废");
-	Expect(QualityJudgement.ParseRanking("{\"ranking\":[{\"index\":1,\"note\":\"a\"},{\"index\":3,\"note\":\"b\"}]}", 2).Ranking is null,
-		"编号超出张数要作废");
+	Expect(QualityJudgement.ParseScores(
+		"{\"scores\":[{\"index\":0,\"score\":8},{\"index\":2,\"score\":6}]}", 2).Scores is null, "编号 0 要作废");
+	Expect(QualityJudgement.ParseScores(
+		"{\"scores\":[{\"index\":1,\"score\":8},{\"index\":3,\"score\":6}]}", 2).Scores is null, "编号超出张数要作废");
 
-	// 坏 JSON / 没有 JSON：作废，且给的是能读懂的原因。
-	Expect(QualityJudgement.ParseRanking("完全不认识的一段话", 3).Ranking is null, "没有 JSON 要作废");
-	Expect(QualityJudgement.ParseRanking("{\"ranking\":", 3).Ranking is null, "坏 JSON 要作废");
-	Expect(QualityJudgement.ParseRanking("{\"order\":[1,2]}", 2).Ranking is null, "缺 ranking 数组要作废");
+	// 分数超出 0–10：作废，且要把那个数说出来——夹到边界会把「模型答错了」伪装成「它给了满分」。
+	var over = QualityJudgement.ParseScores("{\"scores\":[{\"index\":1,\"score\":88}]}", 1);
+	Expect(over.Scores is null && over.Error is not null, "分数超出范围要作废");
+	Expect(over.Error!.Contains("88", StringComparison.Ordinal), "报错要写出越界的那个分数，实际：" + over.Error);
+	Expect(QualityJudgement.ParseScores("{\"scores\":[{\"index\":1,\"score\":-3}]}", 1).Scores is null, "负分要作废");
 
-	// 只有一张：不判——名次的意义来自比较，一张没有比较对象。
-	var single = QualityJudgement.ParseRanking("{\"ranking\":[{\"index\":1,\"note\":\"a\"}]}", 1);
-	Expect(single.Ranking is null && single.Error is not null, "只有一张不排名次");
-	Expect(single.Error!.Contains("一张", StringComparison.Ordinal), "说清为什么：只有一张");
+	// 不是整数 / 没给分数：作废（小数会让分数带变得没法解释）。
+	Expect(QualityJudgement.ParseScores("{\"scores\":[{\"index\":1,\"score\":8.5}]}", 1).Scores is null, "小数分数要作废");
+	Expect(QualityJudgement.ParseScores("{\"scores\":[{\"index\":1,\"note\":\"看着挺好\"}]}", 1).Scores is null, "没给分数要作废");
+	Expect(QualityJudgement.ParseScores("{\"scores\":[{\"index\":1,\"score\":\"8\"}]}", 1).Scores is null,
+		"字符串分数要作废（它不是整数）");
+
+	// 坏 JSON / 没有 JSON / 缺 scores：作废，且给的是能读懂的原因。
+	Expect(QualityJudgement.ParseScores("完全不认识的一段话", 2).Scores is null, "没有 JSON 要作废");
+	Expect(QualityJudgement.ParseScores("{\"scores\":", 2).Scores is null, "坏 JSON 要作废");
+	Expect(QualityJudgement.ParseScores("{\"ranking\":[1,2]}", 2).Scores is null, "缺 scores 数组要作废");
+
+	// 没有可判的图：不该被调用，但也不能崩。
+	Expect(QualityJudgement.ParseScores("{\"scores\":[]}", 0).Scores is null, "零张不判");
 }
 
 static void TechnicalScreeningOnlyFlagsBrokenImages()
@@ -7054,15 +7069,15 @@ static void TechnicalScreeningOnlyFlagsBrokenImages()
 
 static void QualityGradesMapBackToSlots()
 {
-	// 4 个槽位，但只有 4 张发给模型（序号 0 / 2 / 3 / 5），编号是发送顺序。
+	// 4 个槽位，只有 4 张发给模型（序号 0 / 2 / 3 / 5），编号是发送顺序。
 	var grades = QualityJudgement.ToGrades(
 		new[] { 0, 2, 3, 5 },
 		new[]
 		{
-			new QualityRanking(3, "最好的一张"),
-			new QualityRanking(1, "第二"),
-			new QualityRanking(4, "第三"),
-			new QualityRanking(2, "最差")
+			new QualityScore(1, 9, Array.Empty<string>(), "最好的一张"),
+			new QualityScore(2, 7, Array.Empty<string>(), "第二"),
+			new QualityScore(3, 5, new[] { "水印" }, "画面上有字"),
+			new QualityScore(4, 2, Array.Empty<string>(), "最差")
 		});
 
 	Expect(grades.Count == 4, "四格都要有档位");
@@ -7071,15 +7086,22 @@ static void QualityGradesMapBackToSlots()
 		"结果按槽位序号排好");
 
 	var bySlot = grades.ToDictionary(item => item.Index, item => item.Quality);
-	Expect(bySlot[3].Tier == QualityTier.Gold && bySlot[3].Rank == 1, "编号 3 的那张（槽位 3）是金、第 1 名");
-	Expect(bySlot[0].Tier == QualityTier.Red && bySlot[0].Rank == 2, "编号 1 的那张（槽位 0）是红、第 2 名");
-	Expect(bySlot[5].Tier == QualityTier.Purple && bySlot[5].Rank == 3, "编号 4 的那张（槽位 5）是紫、第 3 名");
-	Expect(bySlot[2].Tier == QualityTier.White && bySlot[2].Rank == 4, "最后一名是白（4 张里的第 4 名）");
-	Expect(bySlot[3].Reason == "最好的一张", "理由原样带过来");
+	Expect(bySlot[0].Tier == QualityTier.Gold && bySlot[0].Score == 9, "编号 1（槽位 0）9 分是金");
+	Expect(bySlot[2].Tier == QualityTier.Red && bySlot[2].Score == 7, "编号 2（槽位 2）7 分是红");
+	Expect(bySlot[3].Tier == QualityTier.Purple && bySlot[3].Score == 5, "编号 3（槽位 3）5 分是紫");
+	Expect(bySlot[5].Tier == QualityTier.White && bySlot[5].Score == 2, "编号 4（槽位 5）2 分是白");
+	Expect(bySlot[0].Reason == "最好的一张", "理由原样带过来");
 	Expect(bySlot.Values.All(item => item.Source == QualitySource.Model), "来源要标成模型");
-	Expect(bySlot.Values.All(item => item.Ranked == 4), "每格都要知道总共排了几张");
 
-	// 一整批的档位汇总：最高档决定预兆，没判过就是 null（不是白档）。
+	// 裂纹卡：踩中负面词的那张自己裂开，没踩中的不裂。
+	Expect(!bySlot[0].IsCracked, "hits 是空的就不是裂纹卡");
+	Expect(bySlot[3].IsCracked && bySlot[3].NegativeHits.Count == 1, "踩中一条负面词就是裂纹卡");
+	Expect(QualityJudgement.DescribeHits(bySlot[3].NegativeHits) == "水印", "踩中的词要能拼出来给人看");
+	// 本地筛查那种没有分数（它根本没看图），也不该被算成裂纹卡。
+	SlotQuality technical = new() { Tier = QualityTier.White, Source = QualitySource.Technical, Reason = "读不出来" };
+	Expect(!technical.IsCracked, "本地判定的坏图不是裂纹卡");
+
+	// 一整批的预兆：最高的那一档说了算，没判过就是 null（不是白档）。
 	NodeImageBatch batch = new() { NodeId = Guid.NewGuid() };
 	batch.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done });
 	batch.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done });
@@ -7087,15 +7109,54 @@ static void QualityGradesMapBackToSlots()
 	Expect(batch.Slots[0].Quality is null, "没判过的格子是 null，不是「白档」");
 
 	batch.Slots[0].Quality = bySlot[0];
-	Expect(batch.HasGrades && batch.BestTier == QualityTier.Red, "判过一格的最高档就是它");
+	Expect(batch.HasGrades && batch.BestTier == QualityTier.Gold, "判过一格的最高档就是它");
 
 	batch.Slots[1].Quality = bySlot[3];
-	Expect(batch.BestTier == QualityTier.Gold, "最高的那一档决定预兆");
+	Expect(batch.CrackedCount == 1, "数得出来有几张裂纹卡");
+	Expect(batch.BestTier == QualityTier.Gold, "加进来一张裂纹卡不该改变最高档");
+
+	// 把唯一那张干净的拿走，只剩裂纹卡：预兆降到**白档**，而不是变成「没判过」。
+	batch.Slots[0].Quality = bySlot[3];
+	Expect(batch.BestTier == QualityTier.White,
+		"全是裂纹卡时按白档给最弱的预兆，不能返回 null（那会被界面当成「没判过」）");
 
 	// 删掉的那一格不参与（它的档位不该再影响预兆）。
 	batch.Slots[1].Removed = true;
-	Expect(batch.BestTier == QualityTier.Red, "已删掉的格子不参与最高档");
 	Expect(batch.GradedSlots.Count == 1, "已删掉的格子不算判过");
+	Expect(batch.BestTier == QualityTier.White, "已删掉的不参与，剩下的那张裂纹卡仍按白档");
+}
+
+static void JudgePromptCarriesContextAndChecks()
+{
+	const string context = "节点：角色设定·林晚（角色）\n所属章节：第一话\n这一步引用的设定（画面里应当与这些设定一致）：林晚 · 常服";
+	const string requirement = "十七岁少女，齐耳短发，藏青棉布外套，站在雨里的书店门口";
+	const string negative = "多余手指，水印，多余肢体";
+
+	var prompt = ImageQualityJudge.BuildUserPrompt(context, requirement, negative, 3);
+
+	// 三样缺一不可：这一步在干什么、要画什么、不要什么。
+	Expect(prompt.Contains(context, StringComparison.Ordinal), "节点上下文要原样带进去");
+	Expect(prompt.Contains(requirement, StringComparison.Ordinal), "出图要求要带进去");
+	Expect(prompt.Contains(negative, StringComparison.Ordinal), "负面提示词要带进去（否则评审猜不到用户在意的到底是什么）");
+	Expect(prompt.Contains("逐条对照", StringComparison.Ordinal), "要明确要求逐条对照负面词");
+	Expect(prompt.Contains("hits", StringComparison.Ordinal), "要交代 hits 字段怎么填");
+
+	// 四类缺陷必须逐条问到——这几类正是用户点名要看的。
+	Expect(ImageQualityJudge.Checks.Count == 4, "评分维度是四条");
+	Expect(prompt.Contains("贴合度", StringComparison.Ordinal), "要问与出图要求的贴合度");
+	Expect(prompt.Contains("多余手指", StringComparison.Ordinal), "要问手指问题");
+	Expect(prompt.Contains("穿帮", StringComparison.Ordinal), "要问穿帮");
+	Expect(prompt.Contains("嵌", StringComparison.Ordinal), "要问角色与物体嵌进去这类错误");
+
+	// 要的是绝对分、不要名次：少这两句，模型会自己退回「排序」那套。
+	Expect(prompt.Contains("不要把它们互相比较", StringComparison.Ordinal), "要明确说不要互相比较");
+	Expect(prompt.Contains("整数", StringComparison.Ordinal), "要明确说分数是整数");
+	Expect(prompt.Contains("0–10", StringComparison.Ordinal), "要把分数范围写出来");
+
+	// 没有提示词 / 没有负面词时：如实说明，不让模型去猜、也不编一份出来。
+	var bare = ImageQualityJudge.BuildUserPrompt(string.Empty, string.Empty, string.Empty, 1);
+	Expect(bare.Contains("没有留下提示词", StringComparison.Ordinal), "没有提示词要如实说明");
+	Expect(bare.Contains("没有写负面提示词", StringComparison.Ordinal), "没有负面词要如实说明");
 }
 
 static void BatchSlotsAreNotActionableWhileRunning()

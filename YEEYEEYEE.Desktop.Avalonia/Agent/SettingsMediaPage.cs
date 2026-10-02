@@ -381,7 +381,7 @@ internal static class SettingsMediaPage
                     : string.Empty;
         var judgeQuality = new CheckBox
         {
-            Content = "出图后让模型判一下：给这一批排名次，名次换成档位（金 / 红 / 紫 / 蓝 / 白），开奖按档位出效果",
+            Content = "出图后让模型判一下：照着你写的提示词与负面词逐张打分，分数换成档位（金 / 红 / 紫 / 蓝 / 白），开奖按档位出效果",
             IsChecked = config.JudgeImageQuality,
             IsEnabled = judgeBlocked.Length == 0,
             FontSize = 11,
@@ -390,12 +390,20 @@ internal static class SettingsMediaPage
         root.Children.Add(judgeQuality);
         root.Children.Add(Note(judgeBlocked.Length > 0
             ? "现在打不开这条：" + judgeBlocked
-            : "开着会**多花一次模型调用**（把这一批图连同三个判据发过去），所以默认关。"));
+            : "开着会**多花一次模型调用**（把这一批图连同出图要求、负面词、节点上下文发过去），所以默认关。"));
         root.Children.Add(Note(
-            "档位是**模型在这一批里排的名次**，不是绝对质量：第 1 名金、第 2 名红、第 3 名紫、其余蓝、最后一名白；" +
-            "**只有一张时不判**——没有可比的第二张，名次没有意义。模型给的理由会原样显示在卡上。" +
+            QualityJudgement.ScoreBandNote +
+            "判的是**绝对分**，不是这一批里的名次——所以一张也能判，同一张图两次出图可以互相比较。" +
+            "评审会看四件事：与要求的贴合度、崩坏（多余手指 / 肢体断裂）、穿帮（多出来的东西 / 光影矛盾）、" +
+            "角色与物体互相嵌进去。**踩中负面提示词的那张是裂纹卡**（卡面裂开），它的分数再高也不计入预兆。" +
             "另外本地还会先筛一道客观坏图（读不出来 / 整张一个颜色 / 尺寸只有要求的一半以下），那些直接是白档。" +
-            "档位是模型的判断而不是客观结论，同一批再判一次未必一样——界面上会写明这一点。"));
+            "档位是模型的判断而不是客观结论，同一张图换个模型可能换档——界面上会写明这一点。"));
+        root.Children.Add(Note(
+            "**每个厂家可以有自己的形象**（开奖许愿那一拍用它，没有就用回自绘的 ◈ 徽记）：把图放进下面任一个 `"
+            + ProviderAvatar.FolderName + "` 目录，文件名用厂家 id —— "
+            + "deepseek / moonshot / qwen / zhipu / siliconflow / openai / ollama / custom（png / jpg / jpeg / webp / gif 都认）。"
+            + "程序不联网取图、也不内置任何图——素材从哪来、能不能用，由你自己决定并负责。\n· "
+            + string.Join("\n· ", ProviderAvatar.Roots())));
 
         // ---------- 写回 ----------
         // 文本字段原样写回（是否留空由各链路自己按「留空则复用」处理）；

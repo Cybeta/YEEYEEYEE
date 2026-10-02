@@ -125,6 +125,15 @@ public sealed class NodeImageBatch
 
     public string Negative { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 这一步在节点树里的位置（节点名、类别、章节、引用的设定），交给评审当上下文用。
+    ///
+    /// 为什么要给：只看到「一张少女立绘」的评审没法判断「这张符不符合要求」——
+    /// 要求是这一步在整条链路里的用途决定的（这是角色设定图，还是某一镜的分镜图）。
+    /// 由调用方拼好（只有它拿得到画布），这里只当字符串存着。
+    /// </summary>
+    public string NodeContext { get; set; } = string.Empty;
+
     /// <summary>这一批算「怎么来的」（图生图 / 池子身份），保存时写进附件的来源。</summary>
     public string ModeNote { get; set; } = string.Empty;
 
@@ -181,10 +190,25 @@ public sealed class NodeImageBatch
     /// <summary>
     /// 这一批里最高的档（一格都没判过时返回 null）。**预兆**（爆发那一拍的强度）用它：
     /// 它只说「这一批里有最好的那一档」，不说是哪一张——这与二游的预兆是同一件事。
+    ///
+    /// **裂纹卡不参与**：一张踩中负面提示词的图，分数再高也不该让这一批的入场变成最烈的那种。
+    /// 全是裂纹卡时给**白档**（最弱的预兆），而不是返回 null——后者会被界面当成「没判过」，
+    /// 那是两件不同的事（一批明确坏掉的图，不该长得像一批没判过的图）。
     /// </summary>
-    public QualityTier? BestTier => GradedSlots.Count == 0
-        ? null
-        : GradedSlots.Max(slot => slot.Quality!.Tier);
+    public QualityTier? BestTier
+    {
+        get
+        {
+            var graded = GradedSlots;
+            if (graded.Count == 0) return null;
+            var clean = graded.Where(slot => !slot.Quality!.IsCracked).ToList();
+            if (clean.Count == 0) return QualityTier.White;
+            return clean.Max(slot => slot.Quality!.Tier);
+        }
+    }
+
+    /// <summary>这一批里有几张是裂纹卡（踩中负面提示词）。</summary>
+    public int CrackedCount => GradedSlots.Count(slot => slot.Quality!.IsCracked);
 
     /// <summary>一张都没成：这时该说的是「全都没出来，可以重做」，而不是摆一排失败。</summary>
     public bool AllFailed => !IsRunning && DoneCount == 0 && FailedCount > 0;
