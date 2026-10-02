@@ -1,0 +1,30 @@
+# 行尾与二进制判定。
+#
+# 为什么需要它：这台机器上 core.autocrlf 是开的，仓库里又混着 LF 与 CRLF 写法的文件，
+# 于是每次 git 操作都会刷一堆「LF will be replaced by CRLF」的警告，图像与 zip 也有被
+# 当成文本做行尾转换的风险。这里把判定写死，警告和风险一起消失。
+
+# 默认让 git 自己判定文本/二进制，仓库里统一存 LF。
+* text=auto
+
+# Windows 脚本必须保持 CRLF：有些工具链读 LF 结尾的 .ps1 / .cmd 会出问题。
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+
+# 图像与二进制产物：绝不做行尾转换，也不参与文本 diff。
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.zip   binary
+*.dll   binary
+*.pdb   binary
+*.exe   binary
+*.db    binary
+*.safetensors binary
+
+# 锁文件是生成的，不进 diff，也不计入语言统计。
+YEEYEEYEE.Canvas/package-lock.json  -diff linguist-generated
