@@ -1,0 +1,16 @@
+# 构建上下文里不需要的东西。少拷几百 MB，也免得把本机的数据带进镜像。
+**/bin/
+**/obj/
+**/node_modules/
+YEEYEEYEE.Canvas/dist/
+artifacts/
+docs/
+.git/
+.gitignore
+canvases/
+jobs.db
+*.db
+*.db-wal
+*.db-shm
+# 桌面端的形象图与开奖截图之类，Web 服务用不到
+provider-art/

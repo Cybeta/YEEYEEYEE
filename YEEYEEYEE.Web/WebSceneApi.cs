@@ -13,40 +13,8 @@ internal static class WebSceneApi
 
     public static void Map(WebApplication app)
     {
-        // The desktop bridge is a separate protocol. Its old anonymous HTTP and WebSocket
-        // entry points must not bypass the web editor's authentication boundary.
-        app.Use(async (context, next) =>
-        {
-            if (context.Request.Path.StartsWithSegments("/api/web") ||
-                context.Request.Path.StartsWithSegments("/api/canvas") ||
-                context.Request.Path.StartsWithSegments("/ws/canvas"))
-            {
-                if (!IPAddress.IsLoopback(context.Connection.RemoteIpAddress ?? IPAddress.None))
-                {
-                    await Error(403, "LOCAL_ONLY", "仅允许本机访问").ExecuteAsync(context);
-                    return;
-                }
-                var configured = LegacyConfig.Text(app.Configuration, "WebToken");
-                if (string.IsNullOrWhiteSpace(configured))
-                {
-                    await Error(503, "TOKEN_NOT_CONFIGURED", "Web 访问令牌未配置").ExecuteAsync(context);
-                    return;
-                }
-                var authorization = context.Request.Headers.Authorization.ToString();
-                var candidate = authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
-                    ? authorization[7..] : string.Empty;
-                if (candidate.Length == 0 || candidate.Contains(' ') ||
-                    !CryptographicOperations.FixedTimeEquals(
-                        SHA256.HashData(Encoding.UTF8.GetBytes(candidate)),
-                        SHA256.HashData(Encoding.UTF8.GetBytes(configured))))
-                {
-                    await Error(401, "UNAUTHORIZED", "Bearer 令牌无效").ExecuteAsync(context);
-                    return;
-                }
-            }
-            await next(context);
-        });
-
+        // 身份与权限由 WebAccessGuard 统一处理（会话 cookie 或桌面桥的 Bearer + 本机），
+        // 它必须在这个方法之前注册。这里只管「解析出来的权限够不够改画布」。
         // A standalone JSON scene is not a desktop project canvas. Never silently fall back
         // to it when a project canvas is requested (or when no editor mode was selected).
         var projectCanvasPath = LegacyConfig.Text(app.Configuration, "ProjectCanvasPath");
@@ -71,10 +39,12 @@ internal static class WebSceneApi
         app.MapGet("/api/web/scene", () => projectStore is not null ? projectStore.Read() : store is not null ? store.Read() : unavailable!);
         app.MapPut("/api/web/records/{recordId}", (string recordId, HttpRequest request) =>
         {
-            // Read the server-side claims for every write; Bearer alone is not edit authority.
-            var claims = (LegacyConfig.Text(app.Configuration, "WebClaims") ?? "")
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (!claims.Contains("canvas.edit", StringComparer.Ordinal))
+            // Read the resolved permissions for every write; neither Bearer nor a session cookie alone
+            // is edit authority. For a logged-in browser user they come from the role (Viewer gets none),
+            // for the desktop bridge from the server-side WebClaims config (re-read live, so revoking
+            // a claim takes effect on the next request without a restart).
+            var claims = WebAccessGuard.Permissions(request.HttpContext);
+            if (!claims.Contains("canvas.edit"))
                 return Task.FromResult(Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限"));
             return projectStore is not null ? projectStore.Update(recordId, request) :
                 store is not null ? store.Update(recordId, request) : Task.FromResult(unavailable!);

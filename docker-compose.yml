@@ -1,0 +1,46 @@
+# 一键起一个 Web 服务：
+#
+#   docker compose up -d --build
+#
+# 起来之后浏览器打开 http://<这台机器的地址>:8080
+# **第一次打开会让你建管理员账号**（第一个账号就是管理员），之后就正常登录。
+#
+# 数据都在 yeeeyee-data 这个卷里（账号、任务、资产、场景）。要清空重来：
+#   docker compose down -v
+#
+# 两个要留意的地方，写在下面各段旁边：
+# ① 暴露到公网之前，请设 YEEYEEYEE_SETUP_TOKEN，否则谁先打开页面谁就是管理员。
+# ② 默认用的是「独立场景」模式（一个 scene.json），方便先跑起来看；
+#    要编辑桌面项目里的真画布，把 PROJECT_DIR 指向项目目录并按注释改环境变量。
+
+services:
+  web:
+    build:
+      context: .
+    image: yeeeyee-web:local
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # ① 首次建号的闸门。设了它之后，/api/auth/setup 必须带 X-Setup-Token 才能建管理员。
+      #    不设也能用，但那样任何能访问到这个端口的人都能抢先把管理员建走。
+      YEEYEEYEE__SetupToken: "${YEEYEEYEE_SETUP_TOKEN:-}"
+
+      # ② 默认：独立场景模式。容器起来就有一个可编辑的画布，文件在卷里。
+      YEEYEEYEE__AllowStandaloneWebScene: "true"
+      YEEYEEYEE__WebScenePath: "/data/scene.json"
+
+      # 若要改成编辑桌面项目的画布：注释掉上面两行，把下面的打开，并在 volumes 里挂载项目目录。
+      # 注意服务端是**以非 root 用户**读写的，挂进来的目录要对它可写。
+      # YEEYEEYEE__ProjectCanvasPath: "/project/canvases/main.json"
+      # YEEYEEYEE__ProjectEntitiesPath: "/project/project/entities.json"
+
+      # 桌面桥（桌面端往 Web 推场景）需要它 + 必须来自本机；容器部署下桌面端连不进来，
+      # 所以默认留空：留着只会让人以为这条路还在。
+      YEEYEEYEE__WebToken: ""
+    volumes:
+      - yeeeyee-data:/data
+      # - ${PROJECT_DIR:-./}:/project:ro   # 用项目画布模式时打开它
+
+volumes:
+  yeeeyee-data:

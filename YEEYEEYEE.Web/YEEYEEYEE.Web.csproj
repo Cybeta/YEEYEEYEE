@@ -5,10 +5,19 @@
     <ProjectReference Include="..\YEEYEEYEE.Desktop.Core\YEEYEEYEE.Desktop.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.9" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!--
+      这里**故意不是 net10.0-windows**：Web 服务要能跑在 Linux 容器里（一键部署那条路）。
+      它引用的 Host 与 Desktop.Core 本来就是 net10.0，两边一致之后，
+      整个 Web 进程链上没有任何 Windows-only 的 API（DPAPI 那类只在桌面端的 SecretProtector 里）。
+      改回去之前请先确认 Docker 那条路还走得通。
+    -->
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
