@@ -474,6 +474,19 @@ try
         using var response = await guarded.SendAsync(request);
         Assert((int)response.StatusCode == 200, "带了正确的初始化令牌应当能建号：" + await response.Content.ReadAsStringAsync());
     }
+
+    // 但**空字符串的初始化令牌必须按「没配」算**：docker compose 里写 ${VAR:-} 时，
+    // 变量没设传进来的就是一个空串。若当成「配了令牌」，界面会多出一个谁也填不出的
+    // 初始化令牌输入框，首次建号直接卡死——这条是真机上跑容器时踩到的。
+    Stop();
+    var blankTokenDatabase = Path.Combine(root, "users-blank-token.db");
+    if (File.Exists(blankTokenDatabase)) File.Delete(blankTokenDatabase);
+    await Start(userDatabase: blankTokenDatabase, setupToken: "");
+    using var blank = CookieClient();
+    Assert(!(await Check(blank, HttpMethod.Get, "/api/auth/state", 200)).GetProperty("setupTokenRequired").GetBoolean(),
+        "空令牌不该被当成已配置");
+    Assert((await Check(blank, HttpMethod.Post, "/api/auth/setup", 200, "{\"username\":\"lin\",\"password\":\"longenough\"}"))
+        .GetProperty("user").GetProperty("role").GetString() == "Admin", "空令牌下首次建号应当直接成功");
     Stop();
     Console.WriteLine("HTTP regression passed: auth, live canvas.edit revocation, byte-preserving denials, jobs, assets, conflicts, persistence, and project/standalone modes");
     Console.WriteLine("Auth regression passed: first user becomes admin, role-derived claims, session persistence, disable/password revocation, setup token");
