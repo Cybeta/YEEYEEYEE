@@ -105,15 +105,24 @@ internal sealed class ProjectCanvasSceneStore
         return library;
     }
 
-    private static object Project(RecentCanvasState state, long revision, CanvasOpenOutcome opened) => new
+    private static object Project(string canvasPath, RecentCanvasState state, long revision, CanvasOpenOutcome opened)
     {
-        revision,
-        records = NodeProjection.ProjectRecords(state.Canvas.Nodes, state.Canvas),
-        readOnly = opened.UnsupportedFormat || opened.Validation.HasErrors || opened.Migration.Ambiguities.Count > 0,
-        formatVersion = state.FormatVersion,
-        migration = opened.Migration,
-        validation = opened.Validation
-    };
+        // 顶部面包屑与画布标签要显示的是**项目名与画布名**，不是文件名。两个名字都在手边：
+        // 项目名在 project.json 里（ResolvePaths 已经确认过这个画布确实属于某个项目根），
+        // 画布名就是画布文件自己的 Title。缺了它们网页端只能显示占位文字，那比没有更糟。
+        var root = Directory.GetParent(Path.GetDirectoryName(canvasPath)!)!.FullName;
+        return new
+        {
+            revision,
+            records = NodeProjection.ProjectRecords(state.Canvas.Nodes, state.Canvas),
+            readOnly = opened.UnsupportedFormat || opened.Validation.HasErrors || opened.Migration.Ambiguities.Count > 0,
+            formatVersion = state.FormatVersion,
+            projectName = ProjectContext.Open(root)?.Descriptor.Name ?? Path.GetFileName(root),
+            canvasTitle = state.Title,
+            migration = opened.Migration,
+            validation = opened.Validation
+        };
+    }
 
     public IResult Read()
     {
@@ -121,7 +130,7 @@ internal sealed class ProjectCanvasSceneStore
         {
             var current = Load();
             CheckProjectAuthority(current.State);
-            return Results.Json(Project(current.State, current.Revision, current.Open));
+            return Results.Json(Project(path, current.State, current.Revision, current.Open));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
         {

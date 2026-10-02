@@ -1,0 +1,1134 @@
+/*
+  桌面端设计令牌的网页端镜像。
+
+  来源是 YEEYEEYEE.Desktop.Avalonia/App.axaml 里那一整套 Df* 画刷与控件样式。
+  这里不重新设计配色，只做「同一个名字、同一个值」的搬运：桌面端改一个颜色，
+  这一份要跟着改，否则两端会长成两个产品。
+
+  一条刻意的取舍：桌面端 RequestedThemeVariant 钉死为 Dark（那套 Df* 本来就是写死的暗色），
+  所以工作台也是暗色，不做浅色主题。做半套浅色只会得到半套看不清的界面。
+*/
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces（App.axaml: DfBg / DfSurface1-4 / DfGlass / DfGlassClear） */
+  --df-bg: #070a0f;
+  --df-surface-1: #0d131b;
+  --df-surface-2: #131b25;
+  --df-surface-3: #1a2431;
+  --df-surface-4: #202d3d;
+  --df-glass: rgba(13, 19, 27, 0.65);
+  --df-glass-clear: rgba(9, 14, 21, 0.5);
+
+  /* Ink */
+  --df-ink: #e9eff7;
+  --df-ink-2: #93a1b3;
+  --df-ink-3: #5c6a7c;
+
+  /* Lines */
+  --df-line: #1f2c3d;
+  --df-line-strong: #2c3d52;
+  --df-line-glow: rgba(77, 155, 255, 0.35);
+  --df-grid-line: rgba(77, 155, 255, 0.055);
+
+  /* Brand */
+  --df-primary: #4d9bff;
+  --df-primary-strong: #2f80ed;
+  --df-primary-soft: #14263f;
+
+  /* States */
+  --df-success: #5cc99a;
+  --df-warning: #dfb45a;
+  --df-error: #e0707e;
+
+  /* 光效：桌面端是 0x8C/0x59 这类 alpha，这里换算成同一个值 */
+  --df-glow-shadow: 0 0 28px -12px rgba(77, 155, 255, 0.55);
+  --df-glow-line: linear-gradient(90deg, rgba(77, 155, 255, 0) 0%, rgba(140, 197, 255, 0.55) 50%, rgba(77, 155, 255, 0) 100%);
+  --df-aurora: radial-gradient(72% 62% at 50% -10%, rgba(92, 77, 255, 0.36) 0%, rgba(31, 77, 255, 0.12) 42%, rgba(77, 155, 255, 0) 100%);
+  --df-scan: linear-gradient(180deg, rgba(77, 155, 255, 0) 0%, rgba(33, 77, 255, 0.13) 46%, rgba(140, 197, 255, 0.2) 50%, rgba(33, 77, 255, 0.13) 54%, rgba(77, 155, 255, 0) 100%);
+
+  /* 几何：MainWindow.axaml 的 Grid 常数 */
+  --df-rail-width: 244px;
+  --df-dock-width: 336px;
+  --df-titlebar-height: 58px;
+  --df-statusbar-height: 34px;
+  --df-gap: 10px;
+
+  --df-radius-glass: 16px;
+  --df-radius-panel: 12px;
+  --df-radius-box: 10px;
+  --df-radius-control: 8px;
+  --df-radius-small: 6px;
+  --df-radius-pill: 999px;
+
+  --df-font: Inter, "Microsoft YaHei UI", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+  --df-font-mono: "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--df-bg);
+  color: var(--df-ink);
+  font: 400 13px/1.5 var(--df-font);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button {
+  font-family: inherit;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+/* 桌面端没有浏览器那种亮色滚动条，这里换成同色系的细条 */
+.df-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--df-surface-4) transparent;
+}
+
+.df-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.df-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.df-scroll::-webkit-scrollbar-thumb {
+  background: var(--df-surface-4);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: var(--df-radius-pill);
+}
+
+.df-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--df-line-strong);
+  background-clip: padding-box;
+}
+
+/* ==================== 工作台骨架（MainWindow.axaml: WorkbenchRoot） ==================== */
+
+.df-workbench {
+  position: relative;
+  height: 100%;
+  padding: var(--df-gap);
+  display: grid;
+  grid-template-columns: var(--df-rail-width) minmax(0, 1fr) var(--df-dock-width);
+  grid-template-rows: var(--df-titlebar-height) minmax(0, 1fr) var(--df-statusbar-height);
+  overflow: hidden;
+}
+
+/* 全屏冷蓝光场：铺在工作台之下，不参与命中 */
+.df-aurora {
+  position: absolute;
+  inset: 0;
+  background: var(--df-aurora);
+  pointer-events: none;
+}
+
+/* 收起右侧栏时把第三列压到 0：留着 336px 空栏比不收更难看 */
+.df-workbench.is-dock-closed {
+  grid-template-columns: var(--df-rail-width) minmax(0, 1fr) 0;
+}
+
+.df-row-1 {
+  grid-row: 2;
+}
+
+.df-row-top {
+  grid-row: 1;
+}
+
+.df-row-bottom {
+  grid-row: 3;
+}
+
+.df-col-all {
+  grid-column: 1 / -1;
+}
+
+.df-span-bottom {
+  grid-row: 2 / span 2;
+}
+
+.df-col-rail {
+  grid-column: 1;
+}
+
+.df-col-center {
+  grid-column: 2;
+}
+
+.df-col-dock {
+  grid-column: 3;
+}
+
+.df-col-center-wide {
+  grid-column: 2 / span 2;
+}
+
+/* ==================== 玻璃面板 ==================== */
+
+.df-glass {
+  position: relative;
+  background: var(--df-glass);
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-glass);
+  overflow: hidden;
+  box-shadow: var(--df-glow-shadow);
+}
+
+.df-glass-flat {
+  position: relative;
+  background: var(--df-glass-clear);
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-glass);
+  overflow: hidden;
+}
+
+/* 面板顶边那道亮线（Border.edgeTop） */
+.df-edge-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--df-glow-line);
+  pointer-events: none;
+}
+
+/* ==================== 文字层级 ==================== */
+
+.df-heading {
+  color: var(--df-ink);
+  font-weight: 600;
+}
+
+.df-muted {
+  color: var(--df-ink-2);
+}
+
+.df-dim {
+  color: var(--df-ink-3);
+}
+
+.df-label {
+  color: var(--df-ink-3);
+  font-size: 11px;
+}
+
+.df-section-label {
+  color: var(--df-ink-3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+.df-mono {
+  font-family: var(--df-font-mono);
+}
+
+.df-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==================== 按钮族（App.axaml 里同名样式） ==================== */
+
+.df-tool-button,
+.df-nav-button,
+.df-mini-button,
+.df-seg,
+.df-primary-button,
+.df-chip,
+.df-text-button {
+  appearance: none;
+  border-style: solid;
+  border-width: 1px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--df-ink-2);
+  cursor: pointer;
+}
+
+.df-tool-button:disabled,
+.df-nav-button:disabled,
+.df-mini-button:disabled,
+.df-primary-button:disabled,
+.df-chip:disabled {
+  color: var(--df-ink-3);
+  cursor: not-allowed;
+}
+
+.df-tool-button {
+  padding: 6px 9px;
+  border-radius: var(--df-radius-control);
+  font-size: 12px;
+}
+
+.df-tool-button:hover:not(:disabled) {
+  background: var(--df-surface-2);
+  border-color: var(--df-line);
+  color: var(--df-ink);
+}
+
+.df-tool-button.is-active {
+  background: var(--df-primary-soft);
+  border-color: var(--df-line-glow);
+  color: var(--df-ink);
+}
+
+.df-nav-button {
+  padding: 8px 10px;
+  border-radius: var(--df-radius-box);
+  font-size: 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.df-nav-button:hover:not(:disabled) {
+  background: var(--df-surface-2);
+  color: var(--df-ink);
+}
+
+.df-nav-button.is-active {
+  background: var(--df-primary-soft);
+  border-color: var(--df-line-glow);
+  color: var(--df-ink);
+}
+
+.df-mini-button {
+  padding: 5px 8px;
+  border-radius: var(--df-radius-small);
+  font-size: 11px;
+}
+
+.df-mini-button:hover:not(:disabled) {
+  background: var(--df-surface-2);
+  color: var(--df-ink);
+}
+
+.df-mini-button.is-active {
+  background: var(--df-primary-soft);
+  border-color: var(--df-line-glow);
+  color: var(--df-ink);
+}
+
+.df-seg {
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.df-seg:hover:not(:disabled) {
+  color: var(--df-ink);
+}
+
+.df-seg.is-active {
+  background: var(--df-primary-soft);
+  color: var(--df-ink);
+}
+
+.df-primary-button {
+  background: var(--df-primary);
+  border-color: var(--df-primary-strong);
+  color: #fff;
+  border-radius: var(--df-radius-control);
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.df-primary-button:hover:not(:disabled) {
+  background: var(--df-primary-strong);
+}
+
+.df-primary-button:disabled {
+  background: var(--df-surface-3);
+  border-color: var(--df-line);
+  color: var(--df-ink-3);
+}
+
+.df-chip {
+  padding: 4px 10px;
+  border-radius: var(--df-radius-pill);
+  background: var(--df-surface-3);
+  border-color: var(--df-line);
+  color: var(--df-ink-2);
+  font-size: 11px;
+}
+
+.df-chip:hover:not(:disabled) {
+  background: var(--df-surface-4);
+  color: var(--df-ink);
+}
+
+.df-chip.is-active {
+  background: var(--df-primary-soft);
+  border-color: var(--df-line-glow);
+  color: var(--df-ink);
+}
+
+/* 不可点的静态芯片（Border.chip） */
+.df-chip-static {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-pill);
+  background: var(--df-surface-3);
+  color: var(--df-ink-2);
+  font-size: 11px;
+}
+
+.df-text-button {
+  padding: 0;
+  border: 0;
+  font-size: 12px;
+  color: var(--df-ink-2);
+}
+
+.df-text-button:hover:not(:disabled) {
+  color: var(--df-ink);
+}
+
+/* 「节点详情 / Agent 协作」那种页签：选中态是底边一条蓝线 */
+.df-tab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0 0 10px;
+  color: var(--df-ink-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.df-tab:hover {
+  color: var(--df-ink);
+}
+
+.df-tab.is-active {
+  color: var(--df-ink);
+  font-weight: 600;
+  border-bottom-color: var(--df-primary);
+}
+
+.df-window-button {
+  appearance: none;
+  width: 34px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--df-radius-small);
+  background: transparent;
+  color: var(--df-ink-2);
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.df-window-button:hover {
+  background: var(--df-surface-2);
+  color: var(--df-ink);
+}
+
+.df-window-button.is-close:hover {
+  background: var(--df-error);
+  color: #fff;
+}
+
+/* ==================== 输入 ==================== */
+
+.df-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--df-surface-2);
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-box);
+  padding: 0 10px;
+}
+
+.df-field.is-boxed {
+  padding: 8px 10px;
+  align-items: flex-start;
+}
+
+.df-field:focus-within {
+  border-color: var(--df-primary);
+}
+
+.df-input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--df-ink);
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+.df-input::placeholder {
+  color: var(--df-ink-3);
+}
+
+.df-input:disabled {
+  color: var(--df-ink-3);
+  cursor: not-allowed;
+}
+
+textarea.df-input {
+  resize: vertical;
+  line-height: 1.6;
+}
+
+/* 窄面板里的小下拉（ComboBox.panelCombo 的网页版） */
+.df-select {
+  width: 100%;
+  background: var(--df-surface-2);
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-small);
+  color: var(--df-ink);
+  font-size: 11px;
+  padding: 5px 8px;
+  outline: none;
+  cursor: pointer;
+}
+
+.df-select:hover:not(:disabled) {
+  border-color: var(--df-line-glow);
+  background: var(--df-primary-soft);
+}
+
+.df-select:focus {
+  border-color: var(--df-primary);
+}
+
+.df-select:disabled {
+  color: var(--df-ink-3);
+  cursor: not-allowed;
+}
+
+.df-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--df-ink-2);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.df-checkbox:hover {
+  color: var(--df-ink);
+}
+
+.df-checkbox input {
+  accent-color: var(--df-primary);
+  margin: 0;
+}
+
+.df-divider {
+  height: 1px;
+  background: var(--df-line);
+  border: 0;
+  margin: 0;
+}
+
+.df-divider-v {
+  width: 1px;
+  align-self: stretch;
+  background: var(--df-line);
+}
+
+/* ==================== 节点卡（Border.node） ==================== */
+
+.df-node {
+  position: absolute;
+  width: 232px;
+  min-height: 104px;
+  background: var(--df-surface-2);
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-panel);
+  padding: 12px 14px;
+  text-align: left;
+  color: var(--df-ink);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.df-node:hover {
+  background: var(--df-surface-3);
+  border-color: var(--df-line-strong);
+}
+
+.df-node.is-selected {
+  border: 2px solid var(--df-primary);
+  padding: 11px 13px;
+  box-shadow: 0 0 0 1px rgba(77, 155, 255, 0.35), 0 0 30px -6px rgba(77, 155, 255, 0.62);
+}
+
+.df-node-kind {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--df-ink-3);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.df-node-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--df-radius-pill);
+  flex: none;
+}
+
+.df-node-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.df-node-body {
+  font-size: 11px;
+  color: var(--df-ink-2);
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.df-node-foot {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--df-ink-3);
+}
+
+.df-node-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.df-ref-pill {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--df-radius-pill);
+  background: var(--df-surface-4);
+  color: var(--df-ink-2);
+  border: 1px solid var(--df-line);
+}
+
+.df-ref-pill.is-missing {
+  color: var(--df-error);
+  border-color: rgba(224, 112, 126, 0.45);
+  background: rgba(224, 112, 126, 0.1);
+}
+
+/* ==================== 提示与状态 ==================== */
+
+.df-notice {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--df-ink-2);
+  word-break: break-word;
+}
+
+.df-notice.is-success {
+  color: var(--df-success);
+}
+
+.df-notice.is-error {
+  color: var(--df-error);
+}
+
+.df-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  color: var(--df-ink-3);
+  font-size: 12px;
+  text-align: center;
+  padding: 24px;
+}
+
+/* ==================== 中央画布视口 ==================== */
+
+.df-viewport {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  background: var(--df-bg);
+  cursor: grab;
+  touch-action: none;
+}
+
+.df-viewport.is-panning {
+  cursor: grabbing;
+}
+
+.df-world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.df-world-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, var(--df-grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--df-grid-line) 1px, transparent 1px);
+  background-size: 48px 48px;
+  pointer-events: none;
+}
+
+/* 画布上那道缓慢下扫的光带（CanvasSurface 的 ScanBand），只做氛围 */
+.df-scanband {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 180px;
+  background: var(--df-scan);
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .df-scanband {
+    animation: df-scan 14s linear infinite;
+  }
+}
+
+@keyframes df-scan {
+  from {
+    transform: translateY(-260px);
+  }
+  to {
+    transform: translateY(3200px);
+  }
+}
+
+.df-hint {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  padding: 6px 10px;
+  border-radius: var(--df-radius-box);
+  background: rgba(13, 19, 27, 0.65);
+  border: 1px solid var(--df-line);
+  color: var(--df-ink-3);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+/* ==================== 标签条 ==================== */
+
+.df-tabs {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  overflow-x: auto;
+  padding: 3px 4px;
+}
+
+.df-tab-item {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--df-ink-2);
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.df-tab-item:hover {
+  background: var(--df-surface-2);
+  color: var(--df-ink);
+}
+
+.df-tab-item.is-active {
+  background: var(--df-primary-soft);
+  border-color: var(--df-line-glow);
+  color: var(--df-ink);
+}
+
+/* ==================== Agent 徽标 ==================== */
+
+.df-agent-badge {
+  position: absolute;
+  right: 24px;
+  bottom: 22px;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.18s ease;
+}
+
+.df-agent-badge:hover {
+  opacity: 1;
+}
+
+.df-agent-badge-ring {
+  width: 42px;
+  height: 42px;
+  border-radius: var(--df-radius-pill);
+  border: 1px solid var(--df-line-glow);
+  background: var(--df-surface-3);
+  color: var(--df-primary);
+  font-size: 12px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  box-shadow: var(--df-glow-shadow);
+}
+
+/* ==================== 会话与登录（沿用既有会话面板的语义） ==================== */
+
+.df-session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.df-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--df-radius-pill);
+  background: var(--df-surface-3);
+  border: 1px solid var(--df-line-strong);
+  color: #bdd6ef;
+  font-size: 11px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+
+.df-gate {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--df-bg);
+  overflow: auto;
+}
+
+.df-gate-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--df-surface-1);
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-glass);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.df-gate-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* ==================== 各区域内部布局 ==================== */
+
+.df-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 100%;
+  padding: 0 16px;
+}
+
+.df-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: none;
+}
+
+.df-brand-name {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.df-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.df-breadcrumb-text {
+  max-width: 220px;
+}
+
+.df-seg-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--df-surface-1);
+  border: 1px solid var(--df-line);
+  flex: none;
+}
+
+.df-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+}
+
+.df-search {
+  width: 210px;
+  height: 34px;
+}
+
+.df-rail-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 14px;
+  min-height: 0;
+}
+
+.df-center-grid {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  height: 100%;
+}
+
+.df-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.df-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 50px;
+  padding: 0 16px;
+  flex: none;
+}
+
+.df-panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  height: 38px;
+  padding: 0 16px;
+  flex: none;
+}
+
+.df-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.df-statusbar-inner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 100%;
+  padding: 0 14px;
+  font-size: 11px;
+}
+
+.df-statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-left: auto;
+}
+
+.df-sync {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.df-cluster {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: var(--df-radius-box);
+  background: var(--df-surface-1);
+  border: 1px solid var(--df-line);
+}
+
+.df-card {
+  background: var(--df-surface-2);
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-control);
+  padding: 10px;
+}
+
+.df-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.df-row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.df-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.df-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.df-grow {
+  flex: 1;
+  min-height: 0;
+}
+
+.df-wrap {
+  flex-wrap: wrap;
+}
+
+.df-viewport-shell {
+  position: relative;
+  height: 100%;
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-panel);
+  overflow: hidden;
+  background: var(--df-bg);
+}
+
+.df-scroll-pad {
+  height: 100%;
+  overflow: auto;
+  padding: 16px 14px;
+}
+
+/* 时间轴泳道 */
+.df-lane {
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-panel);
+  background: var(--df-surface-1);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.df-lane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.df-lane-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.df-lane-chip {
+  flex: none;
+  width: 168px;
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-control);
+  background: var(--df-surface-2);
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.df-lane-chip:hover {
+  background: var(--df-surface-3);
+  border-color: var(--df-line-strong);
+}
+
+.df-lane-chip.is-selected {
+  border-color: var(--df-primary);
+  box-shadow: 0 0 0 1px rgba(77, 155, 255, 0.35);
+}
+
+/* 剧本视图 */
+.df-script-entry {
+  border-left: 2px solid var(--df-line);
+  padding: 0 0 0 12px;
+}
+
+.df-script-chapter {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 18px 0 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--df-line);
+}
+
+.df-script-body {
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--df-ink-2);
+  margin: 6px 0 14px;
+}
