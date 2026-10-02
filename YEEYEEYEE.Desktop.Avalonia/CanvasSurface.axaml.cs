@@ -2000,19 +2000,19 @@ public partial class CanvasSurface : UserControl
         Border? sweep = null;
         if (faceDown)
         {
-            // 卡背也要有层次，否则整排盖着的时候就是六块深色方格。这里的四层与开奖窗口里的
-            // 卡背是同一套语言（内衬细线 + 中央徽记 + 本色带），缩到 92×68 仍认得出是「一张盖着的卡」。
+            // 卡背与开奖窗口里那套是同一个语言：**黑白**，只有一层内衬线、一个中央徽记、一道本色带。
+            // 颜色留给「开奖」那一层（卡背后的光晕），画布上这一排不抢色，才不会跟节点卡片打架。
             face.Children.Add(new Border
             {
                 Margin = new Thickness(4),
                 CornerRadius = new CornerRadius(5),
                 BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(34, 255, 255, 255)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(30, 255, 255, 255)),
                 IsHitTestVisible = false
             });
             face.Children.Add(new Border
             {
-                Height = 3,
+                Height = 2,
                 VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Top,
                 IsHitTestVisible = false,
                 Background = new LinearGradientBrush
@@ -2021,18 +2021,18 @@ public partial class CanvasSurface : UserControl
                     EndPoint = new global::Avalonia.RelativePoint(1, 0, global::Avalonia.RelativeUnit.Relative),
                     GradientStops =
                     {
-                        new GradientStop(Color.FromArgb(210, 146, 176, 255), 0),
-                        new GradientStop(Color.FromArgb(60, 146, 176, 255), 1)
+                        new GradientStop(Color.FromArgb(110, 255, 255, 255), 0),
+                        new GradientStop(Color.FromArgb(22, 255, 255, 255), 1)
                     }
                 }
             });
             face.Children.Add(new Border
             {
-                Width = 34,
-                Height = 34,
+                Width = 32,
+                Height = 32,
                 CornerRadius = new CornerRadius(8),
                 BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(150, 146, 176, 255)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(64, 255, 255, 255)),
                 HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center,
                 VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Center,
                 RenderTransformOrigin = global::Avalonia.RelativePoint.Center,
@@ -2042,7 +2042,7 @@ public partial class CanvasSurface : UserControl
 
             var back = new StackPanel
             {
-                Spacing = 2,
+                Spacing = 1,
                 VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Center,
                 HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center,
                 IsHitTestVisible = false
@@ -2050,16 +2050,16 @@ public partial class CanvasSurface : UserControl
             back.Children.Add(new TextBlock
             {
                 Text = "◈",
-                FontSize = 19,
+                FontSize = 18,
                 HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center,
-                Foreground = new SolidColorBrush(Color.FromArgb(165, 154, 182, 255))
+                Foreground = new SolidColorBrush(Color.FromArgb(200, 233, 237, 244))
             });
             back.Children.Add(new TextBlock
             {
                 Text = "已出好",
                 FontSize = 9,
                 HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center,
-                Foreground = new SolidColorBrush(Color.Parse("#8FA6BD"))
+                Foreground = new SolidColorBrush(Color.Parse("#7A828E"))
             });
             face.Children.Add(back);
         }
