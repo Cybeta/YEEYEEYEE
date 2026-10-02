@@ -43,6 +43,7 @@ YEEYEEYEE 寓意 YES 工程师 · YES 艺术家。项目、解决方案、程序
 | 智能导入 | 说明网页 → 自动建 api 生图 / 生视频技能 → 输密钥（加密落盘）→ 最小测试 → 查余额；ComfyUI 走独立分支 |
 | 提示与自检 | 生成中节点的呼吸光效；「引用的设定改了图」的下游提示（指纹比对）；生成链自检（设定图 → 分镜图 → 分镜视频 → 成品视频，报缺口数与预估花费） |
 | Web | React/Vite div 卡片；桌面推全量投影，浏览器可请求换/锁引用版本；缺独立创作、资产 HTTP 端点与完整交互联动 |
+| 更新 | 启动静默检查最新发行版 + 设置页手动检查；发现新版可应用内下载、退出后由脚本替换程序目录并自动重启，重启后列出更新内容。目录不可写或发行版没带 zip 时如实说明原因并引导去发布页 |
 | 其他 | 视频生成的**执行方未接入**（池子可登记，选了会明确拒绝而非偷偷起任务）；账号、房间协同、配额和审计未实现；MCP 为独立只读服务，未接入桌面端 |
 
 现有 `Entities` 随每张画布保存，并非项目级共享资源库。已有 `SourceEntityId`、`WorkTreeItemId` 等字段也不等于自动同步已经完成。具体边界以 [架构](02_Architecture.md) 为准。
@@ -72,7 +73,7 @@ dotnet run --project YEEYEEYEE.Web
 
 ## 验证与已修复项
 
-2026-10-02 全量改名后复核：Agent 190 项、Core 29 项、Migration `8/8`、G6V1 通过、Canvas TS 44 项、Web HTTP 回归通过；解决方案构建 0 错误（14 个既有警告），前端 TypeScript 检查与 Vite 构建通过。命令与范围见 [PROGRESS](PROGRESS.md)。
+2026-10-02 复核：Agent 196 项、Core 29 项、Migration `8/8`、G6V1 通过、Canvas TS 44 项、Web HTTP 回归通过；解决方案构建 0 错误（14 个既有警告），前端 TypeScript 检查与 Vite 构建通过。命令与范围见 [PROGRESS](PROGRESS.md)。
 
 - `AutoStage` 已改为准备动作→预览暂存→统一保存，避免同批重复执行。
 - `MarkVersionAdopted` 已解析；仅 JSON 布尔 `true` 开启采纳标记，已有回归用例。

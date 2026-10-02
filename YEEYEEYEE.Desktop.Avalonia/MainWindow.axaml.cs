@@ -140,6 +140,10 @@ public partial class MainWindow : Window, IAgentSessionHost
     public MainWindow()
     {
         InitializeComponent();
+        // 版本号只有一处来源（程序集）：标题栏那枚胶囊与左栏最底下一行都从这里取。
+        TitleVersionText.Text = AppVersion.Display;
+        RailVersionText.Text = AppVersion.Display + " · 本地项目";
+        Opened += MainWindow_OnOpened;
         AgentWorkbenchPanel.Attach(this);
         AgentWorkbenchPanel.CloseRequested += (_, _) => ShowInspectorMode();
         // 面板顶部状态每刷一次就同步右下角那枚常驻入口：换模型是在面板自己的下拉里做的，
@@ -220,6 +224,18 @@ public partial class MainWindow : Window, IAgentSessionHost
         AddHandler(PointerMovedEvent, ResizeGrip_OnPointerMoved, RoutingStrategies.Tunnel);
         AddHandler(PointerReleasedEvent, ResizeGrip_OnPointerReleased, RoutingStrategies.Tunnel);
         ShowStartPage();
+    }
+
+    // ==================== 更新 ====================
+
+    /// <summary>
+    /// 窗口第一次显示之后再处理更新：先把上一次替换的结果说清楚（成功列更新内容，失败说失败在哪），
+    /// 再静默查一次有没有新版本。放在 Opened 而不是构造函数里，是因为要弹的对话框需要一个已经存在的宿主窗口。
+    /// </summary>
+    private async void MainWindow_OnOpened(object? sender, EventArgs e)
+    {
+        Opened -= MainWindow_OnOpened;
+        await UpdateFlow.HandleStartupAsync(this);
     }
 
     // ==================== 启动页：先选项目 ====================

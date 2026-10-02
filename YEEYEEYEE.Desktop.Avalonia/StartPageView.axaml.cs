@@ -39,6 +39,8 @@ public partial class StartPageView : UserControl
     public StartPageView()
     {
         InitializeComponent();
+        // 版本号只有一处来源（程序集），界面不再写死。
+        TitleVersionText.Text = AppVersion.Display;
         // Loaded 可能触发多次（切回启动页时会重新挂载），动效只放一次，免得越叠越快。
         Loaded += (_, _) => PlayStartupAnimations();
     }
