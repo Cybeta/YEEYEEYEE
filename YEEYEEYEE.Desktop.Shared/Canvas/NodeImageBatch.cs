@@ -135,6 +135,24 @@ public sealed class NodeImageBatch
     /// <summary>跑完了且至少有一张能挑。跑着的时候不让挑——挑到一半的图是没有意义的。</summary>
     public bool CanPick => !IsRunning && DoneCount > 0;
 
+    /// <summary>
+    /// 这一格现在能不能被操作（采用 / 放大看 / 删除）。**整批还在跑时一律不能。**
+    ///
+    /// 为什么这条要单独立出来、而不是散在界面里判断：它此前只写在 <see cref="CanPick"/> 上（用来算那行提示文字），
+    /// 而右键菜单是按**格子状态**建的，于是「单张已出好、其余还在跑」时菜单直接给「用这一张」。
+    /// 点下去会走 <c>SavePickedSlot</c>：把整批丢掉，但**不会取消还在跑的请求**——它们跑完后仍会把图
+    /// 写进资产目录，可那时这一批已经不在表里了，那些文件没有任何地方引用（漏文件）；
+    /// 同一段续行还会按这个已丢弃的批次去改节点的执行状态。
+    ///
+    /// 所以规则放在模型里，菜单与动作都问它——菜单不是唯一入口，动作侧也得挡一道。
+    /// </summary>
+    public bool CanActOnSlot(int index) =>
+        !IsRunning
+        && SlotAt(index) is { Removed: false, Status: BatchSlotStatus.Done or BatchSlotStatus.Failed };
+
+    /// <summary>整批还在跑时，单张菜单该说的那句话（与「这一张还在出」区分开）。</summary>
+    public string SingleActionBlockedNote => IsRunning ? "这一批还在出，出完再挑" : "这一张还在出";
+
     /// <summary>一张都没成：这时该说的是「全都没出来，可以重做」，而不是摆一排失败。</summary>
     public bool AllFailed => !IsRunning && DoneCount == 0 && FailedCount > 0;
 

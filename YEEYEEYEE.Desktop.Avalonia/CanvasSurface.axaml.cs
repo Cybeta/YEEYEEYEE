@@ -510,6 +510,17 @@ public partial class CanvasSurface : UserControl
     public Action<Guid, string>? BatchActionRequested { get; set; }
 
     /// <summary>
+    /// 出图「开奖」（设置里的开关，默认关）。
+    ///
+    /// 开启后：整批出完之前那排卡不出缩略图，出完之后也是**背面朝上**，点一下才走全屏揭晓——
+    /// 图要到揭晓里才第一次露面。关闭时是原来的样子：出好一张显示一张，右键挑 / 删 / 重做。
+    ///
+    /// 画布只按这个标志换画法；「开奖时点了哪一张、剩下的怎么处理」全在主窗口（与
+    /// <see cref="BatchActionRequested"/> 的分工一致）。
+    /// </summary>
+    public bool GachaReveal { get; set; }
+
+    /// <summary>
     /// 单击有引用的节点时要不要铺出引用浮层（临时画布里由主窗口设成 false，原因见字段注释）。
     /// 关掉时如果浮层正开着，会立刻收起——不能留一张盖在临时画布上的浮层。
     /// </summary>
@@ -1937,9 +1948,13 @@ public partial class CanvasSurface : UserControl
                 batchGhostVisuals.Add(new BatchGhostLayout(node, ghost, ghostLeft - node.X, top - node.Y));
             }
 
+            // 开奖模式下，出完那一刻的提示要直接说出下一步动作：这一排盖着，只有点它才会开。
+            var captionText = batch.StatusLine();
+            if (GachaReveal && batch.CanPick) captionText += " · 点卡片开奖";
+
             var caption = new TextBlock
             {
-                Text = batch.StatusLine(),
+                Text = captionText,
                 FontSize = 10,
                 IsHitTestVisible = false,
                 Foreground = new SolidColorBrush(batch.IsRunning ? Color.Parse("#A7C7EA")
@@ -1958,6 +1973,9 @@ public partial class CanvasSurface : UserControl
     {
         var slot = batch.Slots[index];
         var isSelected = batch.SelectedIndices.Contains(index);
+        // 「开奖」模式下，**出好的格子也不露图**：先出好的那几张一旦露了脸，开奖就退化成补一个仪式，
+        // 惊喜已经被自己看掉了。所以这一支要盖过下面那个「出好就铺缩略图」的默认分支。
+        var faceDown = GachaReveal && slot.Status == BatchSlotStatus.Done && slot.Path.Length > 0;
 
         var frame = new Border
         {
@@ -1966,9 +1984,12 @@ public partial class CanvasSurface : UserControl
             CornerRadius = new CornerRadius(8),
             // 「虚影」要一眼看出是**暂时的**：底色半透、描边走浅亮色。
             // 画得跟真实节点一样的话，用户会以为画布上真多了几个节点。
-            Background = new SolidColorBrush(Color.FromArgb(205, 13, 19, 27)),
+            // 背面朝上的那几张再亮一档并偏蓝：整排盖着的时候，「这排是待开的卡」要看得出来。
+            Background = new SolidColorBrush(faceDown ? Color.FromArgb(232, 22, 32, 46) : Color.FromArgb(205, 13, 19, 27)),
             BorderThickness = new Thickness(isSelected ? 2 : 1),
-            BorderBrush = new SolidColorBrush(isSelected ? AccentPrimary : Color.FromArgb(160, 122, 155, 255)),
+            BorderBrush = new SolidColorBrush(isSelected ? AccentPrimary
+                : faceDown ? Color.FromArgb(190, 138, 168, 255)
+                : Color.FromArgb(160, 122, 155, 255)),
             ClipToBounds = true,
             Cursor = new global::Avalonia.Input.Cursor(global::Avalonia.Input.StandardCursorType.Hand)
         };
@@ -1977,7 +1998,32 @@ public partial class CanvasSurface : UserControl
         var face = new Panel();
         TextBlock? headline = null;
         Border? sweep = null;
-        if (slot.Status == BatchSlotStatus.Done && slot.Path.Length > 0)
+        if (faceDown)
+        {
+            var back = new StackPanel
+            {
+                Spacing = 3,
+                VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Center,
+                HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center,
+                IsHitTestVisible = false
+            };
+            back.Children.Add(new TextBlock
+            {
+                Text = "◈",
+                FontSize = 19,
+                HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center,
+                Foreground = new SolidColorBrush(Color.FromArgb(165, 154, 182, 255))
+            });
+            back.Children.Add(new TextBlock
+            {
+                Text = "已出好",
+                FontSize = 9,
+                HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center,
+                Foreground = new SolidColorBrush(Color.Parse("#8FA6BD"))
+            });
+            face.Children.Add(back);
+        }
+        else if (slot.Status == BatchSlotStatus.Done && slot.Path.Length > 0)
         {
             var bitmap = LoadThumbnail(AssetStore.ToReference(slot.Path));
             if (bitmap is not null)
@@ -2079,6 +2125,8 @@ public partial class CanvasSurface : UserControl
 
         if (slot.Status == BatchSlotStatus.Failed)
             ToolTip.SetTip(frame, slot.Error.Length > 0 ? slot.Error : "这一张没出来（服务端没有给出原因）。");
+        else if (faceDown)
+            ToolTip.SetTip(frame, batch.IsRunning ? batch.SingleActionBlockedNote : "点一下开奖（这一批的图在揭晓里才露面）");
         else if (slot.Status == BatchSlotStatus.Done)
             ToolTip.SetTip(frame, "双击看大图 · 右键选用或删除");
 
@@ -2087,6 +2135,19 @@ public partial class CanvasSurface : UserControl
             // 吃掉事件：不然这一下会接着冒泡成「选中节点」，点一下图就先跳去选节点了。
             args.Handled = true;
             var point = args.GetCurrentPoint(frame);
+
+            if (faceDown)
+            {
+                // 背面朝上的一格：**点一下就是「开这一批」**。右键只留「开奖」与「都不要重做」——
+                // 针对单张的「用这一张 / 放大看看 / 删除」在图露面之前没有意义（也没法判断该不该留）。
+                if (point.Properties.IsRightButtonPressed)
+                {
+                    ShowFaceDownMenu(node, batch, index, frame);
+                    return;
+                }
+                BatchActionRequested?.Invoke(node.Id, $"ghost-gacha:{index}");
+                return;
+            }
 
             if (point.Properties.IsRightButtonPressed)
             {
@@ -2134,6 +2195,29 @@ public partial class CanvasSurface : UserControl
         menu.Open(anchor);
     }
 
+    /// <summary>
+    /// 背面朝上的卡上的右键菜单：只看得到「背面」的时候，能给的就只有开奖与整批重做。
+    /// 单张那几项（用这一张 / 放大看看 / 删除）在图露面之前没法判断，所以不摆出来。
+    /// </summary>
+    private void ShowFaceDownMenu(WorkflowNode node, NodeImageBatch batch, int index, Control anchor)
+    {
+        var menu = new ContextMenu();
+        var open = new MenuItem
+        {
+            Header = batch.IsRunning ? batch.SingleActionBlockedNote : "开奖（这一批的图在揭晓里露面）",
+            IsEnabled = batch.CanPick
+        };
+        open.Click += (_, _) => BatchActionRequested?.Invoke(node.Id, $"ghost-gacha:{index}");
+        menu.Items.Add(open);
+
+        menu.Items.Add(new Separator());
+        var redo = new MenuItem { Header = "全部不要，重做", IsEnabled = !batch.HasUnfinished };
+        redo.Click += (_, _) => BatchActionRequested?.Invoke(node.Id, "redo");
+        menu.Items.Add(redo);
+
+        menu.Open(anchor);
+    }
+
     /// <summary>虚影上的右键菜单。画布只说「点了哪一张、要干什么」，规矩都在主窗口。</summary>
     private void ShowBatchGhostMenu(WorkflowNode node, NodeImageBatch batch, int index, Control anchor)
     {
@@ -2144,35 +2228,51 @@ public partial class CanvasSurface : UserControl
 
         if (slot.Status == BatchSlotStatus.Done)
         {
-            var use = new MenuItem { Header = "用这一张" };
+            var use = new MenuItem { Header = "用这一张", IsEnabled = batch.CanActOnSlot(index) };
             var captured = index;
             use.Click += (_, _) => BatchActionRequested?.Invoke(node.Id, $"ghost-use:{captured}");
             items.Add(use);
 
-            var preview = new MenuItem { Header = "放大看看" };
+            var preview = new MenuItem { Header = "放大看看", IsEnabled = batch.CanActOnSlot(index) };
             preview.Click += (_, _) => BatchActionRequested?.Invoke(node.Id, $"ghost-preview:{captured}");
             items.Add(preview);
 
-            var remove = new MenuItem { Header = "删除这一张" };
+            var remove = new MenuItem { Header = "删除这一张", IsEnabled = batch.CanActOnSlot(index) };
             remove.Click += (_, _) => BatchActionRequested?.Invoke(node.Id, $"ghost-delete:{captured}");
             items.Add(remove);
+
+            // 整批还在跑时为什么一样都不给做：规则在模型里（NodeImageBatch.CanActOnSlot），这里只负责显示。
+            // 它不是「挑到一半没意义」那么轻——中途采用会把整批丢掉，却不取消还在跑的请求，
+            // 那些请求跑完后仍会把图写进资产目录，可那时批次已经不在表里了，那些文件没人引用（漏文件）。
+            if (batch.IsRunning)
+            {
+                items.Add(new Separator());
+                items.Add(new MenuItem { Header = batch.SingleActionBlockedNote, IsEnabled = false });
+            }
         }
         else if (slot.Status == BatchSlotStatus.Failed)
         {
             items.Add(new MenuItem { Header = "这一张没出来（悬停看原因）", IsEnabled = false });
             // 失败的那一格也要能删掉：否则一排失败会永远挂在画布上，用户没有任何办法收掉它。
             // 它没有文件，所以「删除」只是把这一格去掉，不涉及回收站。
-            var remove = new MenuItem { Header = "删除这一格" };
+            var remove = new MenuItem { Header = "删除这一格", IsEnabled = batch.CanActOnSlot(index) };
             var capturedFailed = index;
             remove.Click += (_, _) => BatchActionRequested?.Invoke(node.Id, $"ghost-delete:{capturedFailed}");
             items.Add(remove);
+
+            if (batch.IsRunning)
+            {
+                items.Add(new Separator());
+                items.Add(new MenuItem { Header = batch.SingleActionBlockedNote, IsEnabled = false });
+            }
         }
         else
         {
-            items.Add(new MenuItem { Header = "这一张还在出", IsEnabled = false });
+            items.Add(new MenuItem { Header = batch.IsRunning ? batch.SingleActionBlockedNote : "这一张还在出", IsEnabled = false });
         }
 
-        if (batch.SelectedIndices.Count > 1)
+        // 批量删除也是一次「挑」，同样要等整批出完。
+        if (!batch.IsRunning && batch.SelectedIndices.Count > 1)
         {
             items.Add(new Separator());
             var removeSelected = new MenuItem { Header = $"删除选中的 {batch.SelectedIndices.Count} 张" };

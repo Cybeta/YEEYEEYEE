@@ -96,7 +96,7 @@ internal static class SettingsWindow
         {
             Title = "生图与生视频",
             Glyph = "✦",
-            Summary = "图像 / ComfyUI / 视频三条链路",
+            Summary = "图像 / ComfyUI / 视频三条链路，以及出图观感",
             Root = media.Root,
             Commit = media.Commit,
             Reload = media.Reload

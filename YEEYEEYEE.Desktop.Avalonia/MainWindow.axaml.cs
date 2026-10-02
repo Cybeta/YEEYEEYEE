@@ -196,6 +196,8 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 先把右下角那枚入口按当前厂家算一遍：它是「面板收起来时才显示」，
         // 而面板天生是收起来的——不主动算一次就要等到第一次切模型才会出现。
         UpdateAgentBadge();
+        // 出图开奖开关也先算一次：画布第一次画那排候选卡时就要知道该不该露图。
+        RefreshGachaReveal();
 
         // 标签条溢出入口：放不下才露出来（可见性只在真正变化时改，免得 LayoutUpdated 自己触发自己）。
         CanvasTabOverflowButton.Click += (_, _) => ShowCanvasTabMenu();
@@ -2246,6 +2248,13 @@ public partial class MainWindow : Window, IAgentSessionHost
             Spacing = 8,
             Children = { countBox, costNote }
         };
+        // 数量一变，下面那句「同时出 N 张」与预估花费必须立刻跟着变。原先只有换池子才会重算，
+        // 于是把数量从 1 调到 6 时，旁边一直写着「出 1 张：出好直接收进节点」——
+        // 而这一行正是「点下去之前看得见要花多少钱」的唯一地方，停在旧值等于把花钱的地方藏起来了。
+        countBox.PropertyChanged += (_, args) =>
+        {
+            if (args.Property == NumericUpDown.ValueProperty) SyncCost();
+        };
 
         void SyncCost()
         {
@@ -2438,6 +2447,32 @@ public partial class MainWindow : Window, IAgentSessionHost
     private readonly Dictionary<Guid, NodeImageBatch> imageBatches = new();
 
     /// <summary>
+    /// 出图「开奖」这个开关现在开着没有（设置 → 生图与生视频 → 出图观感）。
+    ///
+    /// 缓存一份、而不是每次重绘时读盘：画布重建很频繁，把一次配置读盘塞进渲染路径不合适。
+    /// 刷新点就三个：窗口起来时、设置窗口关掉之后、以及发起新一批出图之前——
+    /// 这三处覆盖了「开关可能变过」的全部时机（改了设置必然经过设置窗口）。
+    /// </summary>
+    private bool gachaReveal;
+
+    /// <summary>按磁盘上的配置刷新开奖开关，并同步给画布。</summary>
+    private void RefreshGachaReveal()
+    {
+        try
+        {
+            gachaReveal = AiProviderSettings.Load().GachaReveal;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
+        {
+            // 读不出来就当它关着——降级到「原来的样子」，与这个开关的默认值一致。
+            // 它只影响观感，为它把主流程拦下来（出图、开画布）不值得，所以这里不报错。
+            gachaReveal = false;
+        }
+        CanvasSurfaceControl.GachaReveal = gachaReveal;
+    }
+
+    /// <summary>
     /// 上一次出图用的那个池子。找不到（站点被删、池子被清单刷掉、同名不同档）就返回 null——
     /// **不退到「第一个」**：退一个别的池子上去，用户会以为上次那个还在，而真正发出去的是另一个模型、另一个价。
     /// </summary>
@@ -2513,6 +2548,10 @@ public partial class MainWindow : Window, IAgentSessionHost
         IReadOnlyList<string> references, double? denoise, int count,
         string sourceLabel = "")
     {
+        // 这一批马上要画那排候选卡了，先按磁盘上的配置取一次「出图观感」开关：
+        // 这样改了设置之后，即使没重开窗口，新发起的一批也立刻是新样子。
+        RefreshGachaReveal();
+
         // 同一个节点上重出一批时，先把上一批的候选连同文件一起清掉：用户点「重做」就是不要它们了。
         DiscardBatch(node.Id, keepPath: null);
 
@@ -2542,6 +2581,10 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         await Task.WhenAll(batch.Slots.Select(slot => GenerateIntoSlotAsync(node, batch, slot, provider)));
 
+        // 整批可能在跑的过程中就被丢掉了（那时 imageBatches 里已经没有它）。这种情况下不该再改节点状态：
+        // 用户已经做了别的决定（采用了一张、或者重做），这里再改一次就是隔空覆盖他的选择。
+        if (!IsLiveBatch(node.Id, batch)) return;
+
         batch.IsRunning = false;
         node.ExecutionStatus = batch.DoneCount > 0 ? NodeExecutionStatus.NeedsReview : NodeExecutionStatus.Failed;
         CanvasSurfaceControl.Refresh();
@@ -2552,12 +2595,28 @@ public partial class MainWindow : Window, IAgentSessionHost
         RefreshResourceList();
 
         StatusText.Text = batch.DoneCount > 0
-            ? $"出好了 {batch.DoneCount} 张"
-              + (batch.FailedCount > 0 ? $"，{batch.FailedCount} 张失败（把鼠标停在格子上看原因）" : string.Empty)
-              + "：在节点上方那排窗口里挑——右键「用这一张」收进节点，「删除这一张」扔掉它，"
-              + "都不要就「全部不要，重做」；双击可以放大看。"
+            ? gachaReveal
+                // 开奖模式：这一排是盖着的，下一步动作只有「点它」。所以文案直说这件事，
+                // 不提右键那几项——它们在图露面之前根本没有意义（菜单里也不摆）。
+                ? $"出好了 {batch.DoneCount} 张"
+                  + (batch.FailedCount > 0 ? $"，{batch.FailedCount} 张失败（把鼠标停在格子上看原因）" : string.Empty)
+                  + "：在节点上方那排背面朝上的卡片上点一下开奖，挑一张收进节点。"
+                : $"出好了 {batch.DoneCount} 张"
+                  + (batch.FailedCount > 0 ? $"，{batch.FailedCount} 张失败（把鼠标停在格子上看原因）" : string.Empty)
+                  + "：在节点上方那排窗口里挑——右键「用这一张」收进节点，「删除这一张」扔掉它，"
+                  + "都不要就「全部不要，重做」；双击可以放大看。"
             : $"这一批 {count} 张都没出来：把鼠标停在格子上看原因，或点「重做这一批」。";
     }
+
+    /// <summary>
+    /// 这一批还是不是该节点当前那一批。
+    ///
+    /// 出图是「生成即落盘」的，而一批要跑好一会儿，这中间用户可能把整批丢掉（重做、采用一张、
+    /// 或者在同一个节点上又发起了一批）。丢掉的批次再落盘就是没人引用的孤儿文件，
+    /// 再改节点状态就是隔空覆盖用户已经做出的选择。所以落盘前和写状态前都问一句。
+    /// </summary>
+    private bool IsLiveBatch(Guid nodeId, NodeImageBatch batch) =>
+        imageBatches.TryGetValue(nodeId, out var live) && ReferenceEquals(live, batch);
 
     /// <summary>出其中一张，把结果落进它自己那一格。**每张各失败各的**，不整批连坐。</summary>
     private async Task GenerateIntoSlotAsync(WorkflowNode node, NodeImageBatch batch, BatchSlot slot, IImageProvider provider)
@@ -2572,6 +2631,12 @@ public partial class MainWindow : Window, IAgentSessionHost
         try
         {
             var result = await provider.GenerateAsync(batch.Request!);
+
+            // 等结果的这段时间里，这一批可能已经被丢掉了（「全部不要，重做」，或者将来别的新路径）。
+            // 出图是「生成即落盘」的：丢掉的批次里再写文件，那些文件不会有任何地方引用，
+            // 就成了磁盘上的孤儿。所以落盘前先问一句「这一批还是当前那一批吗」。
+            if (!IsLiveBatch(node.Id, batch)) return;
+
             if (result.Status != ImageGenerationStatus.Succeeded || string.IsNullOrWhiteSpace(result.FilePath))
             {
                 slot.Status = BatchSlotStatus.Failed;
@@ -2634,7 +2699,11 @@ public partial class MainWindow : Window, IAgentSessionHost
             if (batch.SlotAt(selectIndex) is { Status: BatchSlotStatus.Done }) batch.SelectedIndices.Add(selectIndex);
             CanvasSurfaceControl.Refresh();
             StatusText.Text = batch.SelectedIndices.Count > 0
-                ? $"选中第 {selectIndex + 1} 张：右键可以「用这一张」，Delete 删除；Ctrl 点击可多选"
+                // 选中本身无害，但这一批还没出完时那几项动作都不能用——文案要跟着说清楚，
+                // 否则会出现「已经选中了、右键那几项却是灰的」这种自相矛盾的状态。
+                ? (batch.IsRunning
+                    ? $"第 {selectIndex + 1} 张已经出好，但{batch.SingleActionBlockedNote}。"
+                    : $"选中第 {selectIndex + 1} 张：右键可以「用这一张」，Delete 删除；Ctrl 点击可多选")
                 : $"第 {selectIndex + 1} 张还没出好。";
             return;
         }
@@ -2650,7 +2719,9 @@ public partial class MainWindow : Window, IAgentSessionHost
             CanvasSurfaceControl.Refresh();
             StatusText.Text = batch.SelectedIndices.Count == 0
                 ? "已取消选中。"
-                : $"已选中 {batch.SelectedIndices.Count} 张：Delete 删除，右键可「用这一张」。";
+                : (batch.IsRunning
+                    ? $"已选中 {batch.SelectedIndices.Count} 张，但{batch.SingleActionBlockedNote}。"
+                    : $"已选中 {batch.SelectedIndices.Count} 张：Delete 删除，右键可「用这一张」。");
             return;
         }
 
@@ -2668,6 +2739,11 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         if (action.StartsWith("ghost-preview:", StringComparison.Ordinal) && ParseGhostIndex(action, "ghost-preview:", out var previewIndex))
         {
+            if (!batch.CanActOnSlot(previewIndex))
+            {
+                StatusText.Text = batch.SingleActionBlockedNote + "。";
+                return;
+            }
             if (batch.SlotAt(previewIndex) is not { Status: BatchSlotStatus.Done, Path.Length: > 0 } previewSlot)
             {
                 StatusText.Text = "这一张还没出好，没东西可看。";
@@ -2679,12 +2755,28 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         if (action.StartsWith("ghost-use:", StringComparison.Ordinal) && ParseGhostIndex(action, "ghost-use:", out var useIndex))
         {
+            // 这条守卫是**必须**的，不是双保险：中途采用会把整批丢掉，却不会取消还在跑的请求，
+            // 它们跑完后仍会把图写进资产目录，而那时这一批已经不在表里了——那些文件没人引用（漏文件）。
+            // 规则在模型里，菜单只是显示，所以动作侧也得挡一道。
+            if (!batch.CanActOnSlot(useIndex))
+            {
+                StatusText.Text = batch.SingleActionBlockedNote + "。";
+                return;
+            }
             if (batch.SlotAt(useIndex) is not { Status: BatchSlotStatus.Done } useSlot)
             {
                 StatusText.Text = "这一张还没出好，不能采用。";
                 return;
             }
             SavePickedSlot(node, batch, useSlot, useIndex);
+            return;
+        }
+
+        // 开奖：那一排卡盖着，点一下才走全屏揭晓。开奖过程要等用户挑，所以是异步的，
+        // 这里不 await——动作入口是同步的，等下去会把整个界面卡在这儿。
+        if (action.StartsWith("ghost-gacha:", StringComparison.Ordinal) && ParseGhostIndex(action, "ghost-gacha:", out var gachaIndex))
+        {
+            _ = OpenGachaRevealAsync(node, batch, gachaIndex);
             return;
         }
 
@@ -2708,6 +2800,84 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
     }
 
+    /// <summary>
+    /// 开奖：把这一批已经出好的卡摆到全屏里去揭晓，用户挑中的那张收进节点。
+    ///
+    /// 挑完之后复用 <see cref="SavePickedSlot"/>——「采用一张 = 其余移入回收站」这条规矩只有那一份实现，
+    /// 开奖这条路不该自带一套（否则迟早会出现「从这里挑的，剩下的没进回收站」）。
+    /// </summary>
+    private async Task OpenGachaRevealAsync(WorkflowNode node, NodeImageBatch batch, int index)
+    {
+        // 点开之前再确认一次：整批没出完就不开（那排卡还是背面，没什么可开的）。
+        if (!batch.CanPick)
+        {
+            StatusText.Text = batch.SingleActionBlockedNote + "。";
+            return;
+        }
+
+        var cards = new List<GachaCard>();
+        for (var i = 0; i < batch.Count; i++)
+        {
+            if (batch.Slots[i] is { Status: BatchSlotStatus.Done, Removed: false, Path.Length: > 0 } slot)
+                cards.Add(new GachaCard(i, slot.Path));
+        }
+        if (cards.Count == 0)
+        {
+            StatusText.Text = "这一批没有可以开的图（都失败了，或者都被删掉了）。";
+            return;
+        }
+
+        var (abbreviation, colorHex, line) = RevealSource(batch);
+        var picked = await GachaRevealDialog.ShowAsync(this, node.Title, cards, abbreviation, colorHex, line);
+        // 没挑就关掉：不留痕迹。那一排卡还在画布上盖着，随时可以再点开。
+        if (picked is not { } chosenIndex) return;
+
+        // 开奖这几十秒里这一批可能已经变了（重做、被删、或者又发起了一批）。
+        // 那种情况下这一格已经不是当初那张图了，如实说明，不把一张不相干的图收进节点。
+        if (batch.SlotAt(chosenIndex) is not { Status: BatchSlotStatus.Done } chosenSlot)
+        {
+            StatusText.Text = "这一批在开奖期间变了，没有采用任何一张。";
+            return;
+        }
+        SavePickedSlot(node, batch, chosenSlot, chosenIndex);
+    }
+
+    /// <summary>
+    /// 开奖时「这次是哪一家在出图」该报什么。
+    ///
+    /// 报的是**图像链路**那一家（按地址认厂，与「当前模型」用同一套规则），不是聊天那一家——
+    /// 出图的开奖报成聊天模型就答非所问了。走池子出图时报站点与池子：
+    /// 那才是这次真正打过去的去处，比报厂名更接近事实。
+    /// 认不出来时用中性徽标「AI」，不硬安一家上去。
+    /// </summary>
+    private static (string Abbreviation, string ColorHex, string Line) RevealSource(NodeImageBatch batch)
+    {
+        AiProviderConfig config;
+        try
+        {
+            config = AiProviderSettings.Load();
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
+        {
+            // 报不出「是哪一家」不该拦住开奖：退回中性徽标，池子信息仍然照报。
+            var fallback = batch.Pool is { } poolChoice
+                ? $"{poolChoice.Site.DisplayName} · {poolChoice.Pool.Label}"
+                : batch.SourceLabel;
+            return (ProviderBadges.NeutralAbbreviation, ProviderBadges.NeutralColorHex, fallback);
+        }
+
+        var endpoint = config.ImageEndpoint.Length > 0 ? config.ImageEndpoint : config.Endpoint;
+        var preset = ProviderPreset.Match(endpoint);
+        var badge = ProviderBadges.Of(preset.Id);
+
+        var line = batch.Pool is { } pool
+            ? $"{pool.Site.DisplayName} · {pool.Pool.Label}"
+            : config.ImageModel.Length > 0 ? $"{preset.Name} · {config.ImageModel}" : preset.Name;
+
+        return (badge.Abbreviation, badge.ColorHex, line);
+    }
+
     private static bool ParseGhostIndex(string action, string prefix, out int index) =>
         int.TryParse(action[prefix.Length..], out index);
 
@@ -2720,6 +2890,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (currentCanvas is null || keys.Count == 0) return;
         var moved = 0;
         var failed = 0;
+        var blocked = 0;
         var touched = new HashSet<Guid>();
 
         foreach (var key in keys)
@@ -2728,6 +2899,13 @@ public partial class MainWindow : Window, IAgentSessionHost
             if (parts.Length != 2 || !Guid.TryParse(parts[0], out var nodeId) || !int.TryParse(parts[1], out var index)) continue;
             if (!imageBatches.TryGetValue(nodeId, out var batch)) continue;
             if (batch.SlotAt(index) is not { Removed: false } slot) continue;
+            // 整批还在跑时不能删：一是「删除」也是一次挑，二是删掉之后重绘会让一排里少一格，
+            // 与「出完再一起看」的规则对不上。菜单已经禁用了，这里是动作侧的守卫（Delete 键也走这条路）。
+            if (!batch.CanActOnSlot(index))
+            {
+                blocked++;
+                continue;
+            }
 
             if (slot.Status == BatchSlotStatus.Done && slot.Path.Length > 0)
             {
@@ -2745,7 +2923,13 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         CanvasSurfaceControl.Refresh();
         RefreshResourceList();
+        if (blocked > 0 && moved == 0 && failed == 0)
+        {
+            StatusText.Text = "这一批还在出，出完再挑。";
+            return;
+        }
         StatusText.Text = (moved > 0 ? $"已删除 {moved} 张（移入回收站，可还原）。" : "已从这一批里去掉。")
+            + (blocked > 0 ? $"另有 {blocked} 张要等这一批出完才能删。" : string.Empty)
             + (failed > 0 ? $"另有 {failed} 张没能移入回收站（文件可能已被移动或占用）。" : string.Empty);
     }
 
@@ -4941,6 +5125,9 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         if (!await SettingsWindow.ShowAsync(this, initialPage: 0)) return false;
         StatusText.Text = "模型配置已保存，下一轮对话生效";
+        // 这一页里也可能改了「出图观感」那个开关（它跟模型配置同在一个窗口），重新取一次并重画。
+        RefreshGachaReveal();
+        CanvasSurfaceControl.Refresh();
         AgentWorkbenchPanel.SyncHostState();
         return true;
     }
@@ -4955,6 +5142,9 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         if (!await SettingsWindow.ShowAsync(this)) return;
         StatusText.Text = "设置已保存";
+        // 「出图观感」那个开关就在这个窗口里：改了它要立刻反映到画布上那排候选卡的画法。
+        RefreshGachaReveal();
+        CanvasSurfaceControl.Refresh();
         // 模型 / 密钥可能变了：面板头部的「当前模型」与后续请求都要跟着换。
         AgentWorkbenchPanel.SyncHostState();
     }
