@@ -15,8 +15,14 @@ using Avalonia.Threading;
 
 namespace YEEYEEYEE.Desktop.Avalonia;
 
-/// <summary>揭晓里的一张卡：序号与画布上那排的编号一致，路径是已经落盘的那张图。</summary>
-internal sealed record GachaCard(int Index, string Path);
+/// <summary>
+/// 揭晓里的一张卡：序号与画布上那排的编号一致，路径是已经落盘的那张图。
+///
+/// <see cref="Quality"/> 是这一格的档位。**null 不等于白档**：前者是「没判过」，
+/// 界面上就是原来那副样子（四个光点、本色光晕）；后者是**判出来的最低档**，光点更少、光晕更暗。
+/// 两者混起来等于凭空给了一张白卡。
+/// </summary>
+internal sealed record GachaCard(int Index, string Path, SlotQuality? Quality);
 
 /// <summary>
 /// 出图「开奖」的全屏揭晓。设置里那个开关打开后才会有这条路。
@@ -46,15 +52,12 @@ internal sealed record GachaCard(int Index, string Path);
 internal static class GachaRevealDialog
 {
     /// <summary>
-    /// 光点数量。**暂时是常数**：全批一样多。
-    ///
-    /// 不先造一套「金 8 个 / 紫 5 个 / 蓝 2 个」的原因是：那会让用户以为系统judged了这张图更好，
-    /// 而实际上没有任何判据。等第 8 条定下「谁判、阈值多少」之后，把这个常量换成一个按档位取值的函数即可，
-    /// 布局、动画、光点渲染都不用动。
+    /// **没判过档位**时用几个光点。判过的那几档各有各的数量（见 <see cref="QualityJudgement.SparksFor"/>），
+    /// 白档比这个数还少——白是判出来的最低档，而这个是「不知道」，两者不该长得一样。
     /// </summary>
-    private const int SparkCount = 4;
+    private const int UngradedSparks = 4;
 
-    /// <summary>向中心收拢的尘埃数量。它是**装饰**，不表示任何档位（带档位含义的是 <see cref="SparkCount"/>）。</summary>
+    /// <summary>向中心收拢的尘埃数量。它是**装饰**，不表示任何档位（带档位含义的是每张卡那一组光点）。</summary>
     private const int GatherCount = 14;
 
     /// <summary>尘埃从离中心多远的地方开始收（像素）。</summary>
@@ -127,6 +130,26 @@ internal static class GachaRevealDialog
         // 爆发那一下的光取这批图的主色相（见 BatchLight）。
         var burstLight = BatchLight(tints, accent);
 
+        // 预兆：这一批里**最高的那一档**决定爆发那一下的强弱——它只说「这批里有最好的那一档」，
+        // 不说是哪一张，所以不会提前泄露结果。二游就是这么干的，区别是这里的光**有依据**（档位是真判出来的）。
+        // 一格都没判过时（None）用中性的强度与颜色，与以前完全一样。
+        QualityTier? omen = null;
+        foreach (var card in cards)
+        {
+            if (card.Quality is not { Source: not QualitySource.None } graded) continue;
+            if (omen is null || graded.Tier > omen.Value) omen = graded.Tier;
+        }
+        var omenSparks = omen is { } omenTier ? QualityJudgement.SparksFor(omenTier) : UngradedSparks;
+        var omenPunch = omen switch
+        {
+            QualityTier.Gold => 1.3,
+            QualityTier.Red => 1.15,
+            QualityTier.Purple => 1.0,
+            QualityTier.Blue => 0.88,
+            QualityTier.White => 0.74,
+            _ => 1.0
+        };
+
         int? selected = null;
         int? chosen = null;
 
@@ -166,14 +189,16 @@ internal static class GachaRevealDialog
         // ---- 舞台：许愿区、尘埃、光点、卡片区叠在同一块地方，靠不透明度交接 ----
         var wishStage = BuildWishStage(nodeTitle, cards.Count, badgeAbbreviation, accent, sourceLine,
             out var mark, out var markRing);
-        // 爆发时的光点：从中心朝上扇开（四个，数量含义见 SparkCount）。
-        var sparkField = BuildSparkField(burstLight, out var sparks);
+        // 爆发时的光点：从中心朝上扇开。数量由**预兆**决定（这一批最高那一档）。
+        var sparkField = BuildSparkField(burstLight, omenSparks, out var sparks);
         // 蓄势时的尘埃：从四周往中心收。它是装饰，数量不带含义。
         var dustField = BuildDustField(burstLight, out var dust);
-        // 爆发那一下：竖着的光柱 + 一圈白光。
-        var pillar = BuildEllipticalGlow(burstLight, 230, cardHeight * 3.0, peak: 210, mid: 120);
+        // 爆发那一下：竖着的光柱 + 一圈白光。**预兆的强弱就落在这两团光的尺寸与亮度上。**
+        var pillar = BuildEllipticalGlow(burstLight, 230 * omenPunch, cardHeight * 3.0 * omenPunch,
+            peak: (byte)Math.Clamp(210 * omenPunch, 60, 255), mid: (byte)Math.Clamp(120 * omenPunch, 40, 255));
         pillar.RenderTransform = TransformOperations.Parse("scale(1,0.22)");
-        var bloom = BuildEllipticalGlow(Colors.White, cardWidth * 3.6, cardWidth * 3.6, peak: 200, mid: 70);
+        var bloom = BuildEllipticalGlow(Colors.White, cardWidth * 3.6, cardWidth * 3.6,
+            peak: (byte)Math.Clamp(200 * omenPunch, 60, 255), mid: 70);
 
         // 每行一个水平面板，行与行在竖直方向排开。末行张数少时也居中（5 张 = 上 3 下 2）。
         var cardGrid = new StackPanel
@@ -230,6 +255,7 @@ internal static class GachaRevealDialog
         var cells = new List<Grid>();
         var flyers = new List<Grid>();
         var frames = new List<Border>();
+        var cardSparkSets = new List<List<Border>>();
         var halos = new List<Border>();
         var haloBoosts = new List<Border>();
         var faces = new List<Control>();
@@ -241,8 +267,9 @@ internal static class GachaRevealDialog
         for (var i = 0; i < cards.Count; i++)
         {
             var tint = tints[i];
+            var quality = cards[i].Quality;
             var back = BuildCardBack(i + 1, badgeAbbreviation);
-            var face = BuildCardFace(faceBitmaps[i], i + 1);
+            var face = BuildCardFace(faceBitmaps[i], i + 1, quality);
             faces.Add(face);
 
             // 卡面之外再套一层用于「翻面闪光」：它盖在卡面之上，翻完那一瞬间亮一下再化掉。
@@ -286,12 +313,22 @@ internal static class GachaRevealDialog
             };
             frames.Add(frame);
 
-            var halo = BuildHalo(tint, cardWidth + HaloBleed * 2, cardHeight + HaloBleed * 2);
+            // 光晕的强度也按档位：金档更亮、白档更暗。它是「档位看得出来」的第一眼信号，
+            // 而光点是第二眼（要等翻到它才看得到）。没判过档位时用中性强度。
+            var glow = quality is { Source: not QualitySource.None } graded
+                ? QualityJudgement.GlowFor(graded.Tier)
+                : 1.0;
+            var halo = BuildHalo(tint, cardWidth + HaloBleed * 2, cardHeight + HaloBleed * 2, strength: glow);
             halo.RenderTransformOrigin = RelativePoint.Center;
             halos.Add(halo);
-            var boost = BuildHalo(tint, cardWidth + HaloBleed * 2, cardHeight + HaloBleed * 2, brighter: true);
+            var boost = BuildHalo(tint, cardWidth + HaloBleed * 2, cardHeight + HaloBleed * 2,
+                brighter: true, strength: glow);
             boost.Opacity = 0;
             haloBoosts.Add(boost);
+
+            // 每张卡自己那组光点：翻到它的时候才飞出来，数量按它的档位。
+            var cardSparkField = BuildCardSparkField(tint, quality, out var cardSparks);
+            cardSparkSets.Add(cardSparks);
 
             // 两层壳，各管一件事（一层壳上挂两段动效会互相打架）：
             // · flyer —— 卡片从中心飞出来：只动它的 translate 与 opacity；
@@ -306,6 +343,9 @@ internal static class GachaRevealDialog
             dimmer.Children.Add(halo);
             dimmer.Children.Add(boost);
             dimmer.Children.Add(frame);
+            // 光点放在卡**之外**（dimmer 不裁剪，卡片自己有 ClipToBounds），
+            // 否则飞出去的那一段会被卡片自己裁掉。
+            dimmer.Children.Add(cardSparkField);
             cells.Add(dimmer);
 
             var flyer = new Grid
@@ -354,7 +394,7 @@ internal static class GachaRevealDialog
         });
         // 全部揭晓之后，画面上只剩一排卡和底部几个按钮，会显得「上面空着」。
         // 顶上补一行结果标题（节点名 + 这一批几张），与卡排一起浮出来。
-        var resultHeader = BuildResultHeader(nodeTitle, cards.Count);
+        var resultHeader = BuildResultHeader(nodeTitle, cards.Count, omen);
         resultHeader.VerticalAlignment = VerticalAlignment.Top;
         resultHeader.Margin = new Thickness(0, 72, 0, 0);
         resultHeader.Opacity = 0;
@@ -446,7 +486,10 @@ internal static class GachaRevealDialog
         // ⑤ 全部揭晓，这时才能挑
         var cardsAt = CardsFlyAtMs;
         var flipsAt = cardsAt + (frames.Count - 1) * CardFlyStaggerMs + CardFlyMs + SettleHoldMs;
-        var allDoneAt = flipsAt + (frames.Count - 1) * FlipStaggerMs + FlipHalfMs + FlipBackMs;
+        // +40：把「全部揭晓」排在**最后一张的光点射出来之后**。两张定时器的到点时刻一样时，
+        // 先建的先跑，而 FinishAll 会把 flipsDone 置真、后建的那组光点就被自己那道守卫拦掉了——
+        // 于是最后一张永远不放光点。留 40 毫秒的缝就没有这个问题。
+        var allDoneAt = flipsAt + (frames.Count - 1) * FlipStaggerMs + FlipHalfMs + FlipBackMs + 40;
 
         void FinishAll()
         {
@@ -702,15 +745,44 @@ internal static class GachaRevealDialog
                 StartDrift(halos[i], seconds: 3.2 + i * 0.55, startHigh: i % 2 == 1);
         });
 
-        // ④ 依次翻面。
+        // ④ 依次翻面；每张翻到位的那一刻，把它自己那组光点射出来（数量按它的档位）。
         At(flipsAt, () =>
         {
             for (var i = 0; i < frames.Count; i++)
+            {
                 FlipCard(frames[i], inners[i], flashes[i], faces[i], DelayMs: i * FlipStaggerMs);
+
+                var set = cardSparkSets[i];
+                if (set.Count == 0) continue;
+                var landedAt = flipsAt + i * FlipStaggerMs + FlipHalfMs + FlipBackMs;
+                ScheduleOnce(landedAt, () =>
+                {
+                    // 已经「跳过动画」了就别再冒出来——否则跳完之后还会零星炸几下。
+                    if (flipsDone) return;
+                    BurstSparks(set);
+                }).Start();
+            }
         });
         At(allDoneAt, FinishAll);
 
         // ---- 交互 ----
+        /// <summary>
+        /// 选中那一行说明。判过档位的把**名次、档位、谁判的、以及模型自己那句话**一起写出来——
+        /// 只说「金卡」等于把模型的判断当成事实；把原话摆出来，用户才能判断这个判断值不值得信。
+        /// </summary>
+        string DescribeSelection(int index)
+        {
+            var quality = cards[index].Quality;
+            if (quality is not { Source: not QualitySource.None } graded)
+                return $"已选中第 {index + 1} 张（共 {cards.Count} 张）";
+
+            var who = graded.Source == QualitySource.Model ? "模型判定" : "本地判定";
+            var header = graded.Rank > 0
+                ? $"第 {index + 1} 张 · {QualityJudgement.Label(graded.Tier)}档（这批第 {graded.Rank}/{graded.Ranked} 名，{who}）"
+                : $"第 {index + 1} 张 · {QualityJudgement.Label(graded.Tier)}档（{who}）";
+            return graded.Reason.Length > 0 ? header + "：" + graded.Reason : header;
+        }
+
         // 选中状态只有这一处计算：点击与键盘都走它，免得两处各写一份、慢慢长出不一致。
         void ApplySelection(int index)
         {
@@ -729,7 +801,7 @@ internal static class GachaRevealDialog
                 haloBoosts[k].Opacity = on ? 0.85 : 0;
             }
             confirm.IsEnabled = true;
-            footerHint.Text = $"已选中第 {index + 1} 张（共 {cards.Count} 张）";
+            footerHint.Text = DescribeSelection(index);
         }
 
         skip.Click += (_, _) => FinishAll();
@@ -863,7 +935,7 @@ internal static class GachaRevealDialog
     /// 收边一律是灰的，没有一道彩色——图的颜色归图，卡片不跟它抢。
     /// 图读不出来时如实说明，不拿一张空白冒充。
     /// </summary>
-    private static Control BuildCardFace(Bitmap? bitmap, int number)
+    private static Control BuildCardFace(Bitmap? bitmap, int number, SlotQuality? quality)
     {
         var panel = new Panel { IsHitTestVisible = false };
 
@@ -920,8 +992,50 @@ internal static class GachaRevealDialog
 
         panel.Children.Add(BuildCornerTicks(inset: 14, size: 10, alpha: 90));
         panel.Children.Add(BuildIndexChip(number, top: false));
+
+        // 档位小牌：卡面上**唯一带颜色**的东西。
+        // 卡片本身保持黑白（颜色归背后那团光），但档位必须一眼看得见，所以这一枚破例；
+        // 写的是「金 第 1/6」——把名次一起写出来，因为档位只是名次的一件外衣，名次才是真信息。
+        if (quality is { Source: not QualitySource.None } graded)
+        {
+            var label = QualityJudgement.Label(graded.Tier)
+                + (graded.Rank > 0 ? $" 第 {graded.Rank}/{graded.Ranked}" : string.Empty);
+            panel.Children.Add(new Border
+            {
+                Margin = new Thickness(0, 0, 12, 12),
+                Padding = new Thickness(7, 2, 7, 3),
+                CornerRadius = new CornerRadius(6),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Background = new SolidColorBrush(Color.FromArgb(190, 8, 10, 14)),
+                BorderThickness = new Thickness(1),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(150, TierColor(graded.Tier).R,
+                    TierColor(graded.Tier).G, TierColor(graded.Tier).B)),
+                Child = new TextBlock
+                {
+                    Text = label,
+                    FontSize = 10,
+                    FontWeight = FontWeight.SemiBold,
+                    Foreground = new SolidColorBrush(TierColor(graded.Tier))
+                }
+            });
+        }
+
         return panel;
     }
+
+    /// <summary>
+    /// 档位的颜色。**只用在那一枚小牌上**——卡面本身是黑白的，这是唯一一处破例，
+    /// 因为「这张是哪一档」必须一眼看得出来。
+    /// </summary>
+    private static Color TierColor(QualityTier tier) => tier switch
+    {
+        QualityTier.Gold => Color.Parse("#F3C556"),
+        QualityTier.Red => Color.Parse("#E8756B"),
+        QualityTier.Purple => Color.Parse("#B389E8"),
+        QualityTier.Blue => Color.Parse("#7BA8E8"),
+        _ => Color.Parse("#C9D2DE")
+    };
 
     /// <summary>四角刻线：只画两条边的 L 形短线。有它卡面立刻「像一张卡」而不是一块图。</summary>
     private static Control BuildCornerTicks(double inset, double size, byte alpha)
@@ -990,15 +1104,16 @@ internal static class GachaRevealDialog
     /// 一大块圆角矩形叠在深底上就是一块灰疙瘩（上一版正是这么翻车的）。径向渐变才是真的
     /// 从中心往外淡出，没有任何硬边界。
     /// </summary>
-    private static Border BuildHalo(Color tint, double width, double height, bool brighter = false)
+    private static Border BuildHalo(Color tint, double width, double height, bool brighter = false, double strength = 1.0)
     {
         // 三个数都是试出来的：
         // · 0.85 处就降到全透明，剩下 15% 留成空白——最后一档如果正好落在边界上，
         //   六团光就会一起在同一个高度截断，连成一条横贯整排的直线（看着像浮出一个大色块）。
         // · 卡片只盖住半径的六成左右，所以真正看得见的是 0.6~0.85 那一段，
         //   亮度要给足，否则光全被卡片自己挡在后面、什么都看不见。
-        var center = brighter ? 215 : 150;
-        var mid = brighter ? 160 : 105;
+        // strength 是档位给的倍数（金更亮、白更暗）；它只改亮度，不改形状——形状变了就认不出是同一张卡了。
+        var center = (brighter ? 215 : 150) * strength;
+        var mid = (brighter ? 160 : 105) * strength;
         return new Border
         {
             Width = width,
@@ -1016,8 +1131,8 @@ internal static class GachaRevealDialog
                 RadiusY = new RelativeScalar(0.5, RelativeUnit.Relative),
                 GradientStops =
                 {
-                    new GradientStop(Color.FromArgb((byte)center, tint.R, tint.G, tint.B), 0),
-                    new GradientStop(Color.FromArgb((byte)mid, tint.R, tint.G, tint.B), 0.5),
+                    new GradientStop(Color.FromArgb((byte)Math.Clamp(center, 0, 255), tint.R, tint.G, tint.B), 0),
+                    new GradientStop(Color.FromArgb((byte)Math.Clamp(mid, 0, 255), tint.R, tint.G, tint.B), 0.5),
                     new GradientStop(Color.FromArgb(0, tint.R, tint.G, tint.B), 0.85),
                     new GradientStop(Color.FromArgb(0, tint.R, tint.G, tint.B), 1)
                 }
@@ -1110,8 +1225,8 @@ internal static class GachaRevealDialog
             Color = Color.FromArgb(165, 0, 0, 0)
         });
 
-    /// <summary>结果标题：节点名 + 这一批几张。卡片出现时一起浮出来。</summary>
-    private static Control BuildResultHeader(string nodeTitle, int count)
+    /// <summary>结果标题：节点名 + 这一批几张；判过档位时再加一句「这是模型的判断」。</summary>
+    private static Control BuildResultHeader(string nodeTitle, int count, QualityTier? omen)
     {
         var stack = new StackPanel
         {
@@ -1142,6 +1257,21 @@ internal static class GachaRevealDialog
         });
         line.Children.Add(Rule(flip: true));
         stack.Children.Add(line);
+
+        // 档位是模型给的判断，这句话必须写在**画面上看得见的地方**，不能只躺在说明文档里：
+        // 写成「金卡」而不说明是谁说的，用户就会把它当成客观结论。
+        if (omen is not null)
+        {
+            stack.Children.Add(new TextBlock
+            {
+                Text = QualityJudgement.ModelDisclaimer,
+                FontSize = 10,
+                Margin = new Thickness(0, 3, 0, 0),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Foreground = new SolidColorBrush(Color.FromArgb(200, 158, 148, 122))
+            });
+        }
+
         return stack;
     }
 
@@ -1293,7 +1423,7 @@ internal static class GachaRevealDialog
     /// 每条光点把「飞多远多大角度」先算好塞进 <c>Tag</c>（形如 "12px,-180px"），
     /// 动画阶段直接取用——省得在动画回调里再算一次三角函数。
     /// </summary>
-    private static Control BuildSparkField(Color accent, out List<Border> sparks)
+    private static Control BuildSparkField(Color accent, int count, out List<Border> sparks)
     {
         const double size = 460;
         var field = new Canvas
@@ -1307,11 +1437,11 @@ internal static class GachaRevealDialog
         };
 
         sparks = new List<Border>();
-        for (var i = 0; i < SparkCount; i++)
+        for (var i = 0; i < count; i++)
         {
             // 以上方为中心扇开（-90 度是正上方）：光点是「从形象这里散出去的」，方向要对得上。
             var spread = 26.0;
-            var angle = -90 + (i - (SparkCount - 1) / 2.0) * spread;
+            var angle = -90 + (i - (count - 1) / 2.0) * spread;
             var radius = 168 + (i % 2) * 34;
             var dx = Math.Cos(angle * Math.PI / 180) * radius;
             var dy = Math.Sin(angle * Math.PI / 180) * radius;
@@ -1341,6 +1471,102 @@ internal static class GachaRevealDialog
         }
 
         return field;
+    }
+
+    /// <summary>
+    /// **一张卡自己那组光点**：翻到它的时候从卡片中间朝上扇开，数量按这张卡的档位。
+    ///
+    /// 为什么挪到每张卡上，而不是全批共用一组：档位是**每一格各自**的，共用一组就没法按档位给数量。
+    /// 没判过档位时用中性数量（<see cref="UngradedSparks"/>）——它与白档不是一回事，白档给得更少。
+    /// </summary>
+    private static Control BuildCardSparkField(Color tint, SlotQuality? quality, out List<Border> sparks)
+    {
+        var tier = quality is { Source: not QualitySource.None } graded ? graded.Tier : (QualityTier?)null;
+        var count = tier is { } value ? QualityJudgement.SparksFor(value) : UngradedSparks;
+
+        // 画布比卡片大得多：光点要飞出卡外才看得见，而卡片自己有 ClipToBounds。
+        const double size = 820;
+        var field = new Canvas
+        {
+            Width = size,
+            Height = size,
+            IsHitTestVisible = false,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        sparks = new List<Border>();
+        for (var i = 0; i < count; i++)
+        {
+            // 扇得比全批那组更开：卡片本身很宽，扇太窄的话光点会从卡片上下穿过去，看不出是「从这张卡里飞出来的」。
+            var spread = 34.0;
+            var angle = -90 + (i - (count - 1) / 2.0) * spread;
+            var radius = 250 + (i % 3) * 46;
+            var dx = Math.Cos(angle * Math.PI / 180) * radius;
+            var dy = Math.Sin(angle * Math.PI / 180) * radius;
+
+            var dot = tier == QualityTier.Gold ? 9.0 : 7.0;
+            var spark = new Border
+            {
+                Width = dot,
+                Height = dot,
+                CornerRadius = new CornerRadius(dot / 2),
+                Background = new SolidColorBrush(Color.FromArgb(238, tint.R, tint.G, tint.B)),
+                BoxShadow = new BoxShadows(new BoxShadow
+                {
+                    OffsetX = 0,
+                    OffsetY = 0,
+                    Blur = 22,
+                    Spread = 3,
+                    Color = Color.FromArgb(205, tint.R, tint.G, tint.B)
+                }),
+                IsHitTestVisible = false,
+                Opacity = 0,
+                RenderTransformOrigin = RelativePoint.Center,
+                RenderTransform = TransformOperations.Parse("translate(0px,0px)"),
+                Tag = $"{dx:0.#}px,{dy:0.#}px"
+            };
+            Canvas.SetLeft(spark, size / 2 - dot / 2);
+            Canvas.SetTop(spark, size / 2 - dot / 2);
+            field.Children.Add(spark);
+            sparks.Add(spark);
+        }
+        return field;
+    }
+
+    /// <summary>
+    /// 把一组光点朝各自的方向射出去（起点在原点，方向与距离在各自的 <c>Tag</c> 里）。
+    ///
+    /// 与全批那组一样：先「无过渡」地点亮，再挂上过渡往 0 收 + 往外飞。
+    /// 反过来的话连点亮那一下都会被当成一段动画，一闪的感觉就没了。
+    /// </summary>
+    private static void BurstSparks(IReadOnlyList<Border> sparks)
+    {
+        for (var i = 0; i < sparks.Count; i++)
+        {
+            var spark = sparks[i];
+            var delay = i * 26;
+            spark.Opacity = 1;
+            spark.Transitions = new Transitions
+            {
+                new TransformOperationsTransition
+                {
+                    Property = Visual.RenderTransformProperty,
+                    Duration = TimeSpan.FromMilliseconds(460),
+                    Delay = TimeSpan.FromMilliseconds(delay),
+                    Easing = new CubicEaseOut()
+                },
+                new DoubleTransition
+                {
+                    Property = Visual.OpacityProperty,
+                    Duration = TimeSpan.FromMilliseconds(280),
+                    Delay = TimeSpan.FromMilliseconds(delay + 220),
+                    Easing = new CubicEaseIn()
+                }
+            };
+            spark.RenderTransform = TransformOperations.Parse($"translate({spark.Tag as string})");
+            spark.Opacity = 0;
+        }
     }
 
     /// <summary>

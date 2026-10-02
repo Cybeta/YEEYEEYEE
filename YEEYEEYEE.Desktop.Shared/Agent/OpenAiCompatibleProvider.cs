@@ -25,13 +25,26 @@ public static class AiProviderFactory
         if (config.UseLocalProvider || !config.IsConfigured) return null;
         return new OpenAiCompatibleProvider(config);
     }
+
+    /// <summary>
+    /// 「看图 + 要一份结构化 JSON」的能力（给一批图排名次用）。
+    ///
+    /// 比上面那条多一个条件：**模型必须开了图片输入**。没开就返回 null，调用方据此把开关置灰并说明原因——
+    /// 而不是给一个点下去被接口拒绝的按钮（那正是 <c>EnsureImageInputAllowed</c> 会拦下来的情况）。
+    /// </summary>
+    public static IAiImageJsonCompleter? CreateImageJsonCompleter()
+    {
+        var config = AiProviderSettings.Load();
+        if (config.UseLocalProvider || !config.IsConfigured || !config.SupportsImageInput) return null;
+        return new OpenAiCompatibleProvider(config);
+    }
 }
 
 /// <summary>
 /// 通过 OpenAI 兼容的 /chat/completions 接口生成节点内容与下游节点建议。
 /// 仅在用户显式配置 endpoint 与 model 后启用，密钥只从本地配置文件或环境变量读取。
 /// </summary>
-public sealed class OpenAiCompatibleProvider : IAiProvider, ICompositionPlanner, IAiChatProvider, IAiJsonCompleter
+public sealed class OpenAiCompatibleProvider : IAiProvider, ICompositionPlanner, IAiChatProvider, IAiJsonCompleter, IAiImageJsonCompleter
 {
     private const string SystemPrompt =
         "你是 AI 创作工作流助手，服务于小说与短剧的分镜生产流程。只输出 JSON，不要输出解释、Markdown 代码块或多余文字。";
@@ -78,6 +91,20 @@ public sealed class OpenAiCompatibleProvider : IAiProvider, ICompositionPlanner,
     /// </summary>
     public Task<string> CompleteJsonAsync(string systemPrompt, string userPrompt, CancellationToken cancellationToken = default) =>
         SendAsync(systemPrompt, new[] { new AiChatMessage { Role = "user", Content = userPrompt } }, cancellationToken);
+
+    /// <summary>
+    /// 「看图 + 要一份结构化 JSON」：图片作为图片块随消息发出去。
+    /// **顺序即编号**——提示词里说的「第 N 张」就是 <paramref name="images"/> 里的第 N 项，
+    /// 所以调用方必须按同一个顺序传（名次是靠编号对回来的，顺序错了名次就全错）。
+    /// </summary>
+    public Task<string> CompleteJsonWithImagesAsync(
+        string systemPrompt,
+        string userPrompt,
+        IReadOnlyList<string> images,
+        CancellationToken cancellationToken = default) =>
+        SendAsync(systemPrompt,
+            new[] { new AiChatMessage { Role = "user", Content = userPrompt, Images = images } },
+            cancellationToken);
 
     /// <summary>
     /// 一条请求走两种协议格式：OpenAI 兼容的 /chat/completions 与 Anthropic 兼容的 /v1/messages。

@@ -25,6 +25,14 @@ public sealed class BatchSlot
     public string Error { get; set; } = string.Empty;
 
     /// <summary>
+    /// 这一格的判定结果（没判过就是 null）。
+    ///
+    /// **null 与「白档」是两件事**：前者是「不知道」，后者是「判出来是最低档」。
+    /// 界面上必须分得开——把没判过的画成白卡，等于凭空宣布了一个结果。
+    /// </summary>
+    public SlotQuality? Quality { get; set; }
+
+    /// <summary>
     /// 用户把这一张删了（文件已移入回收站）。
     /// **保留这个格子、只做标记**，而不是从列表里抽掉：抽掉会让后面几张的编号整体前移，
     /// 用户刚记住的「第 3 张不错」就变成第 2 张，而虚影上的角标也会跟着跳。
@@ -85,6 +93,15 @@ public sealed class NodeImageBatch
 
     /// <summary>这一批还在跑（跑着时不能保存，也不能重做）。</summary>
     public bool IsRunning { get; set; }
+
+    /// <summary>
+    /// 正在判档（本地筛查 + 模型排名次）。
+    ///
+    /// **它不挡住挑图**：图早就出好了，判档只是给开奖加一层档位效果，等不等由用户决定。
+    /// 单独立一个标志是为了让界面能如实说「正在判」，而不是让状态栏那句「出好了 6 张」挂着不动、
+    /// 让人以为程序卡住了。
+    /// </summary>
+    public bool IsGrading { get; set; }
 
     /// <summary>这一批的开始时刻：预览窗口上方那行字要报总进度，这里留着判断「这一批已经跑了多久」。</summary>
     public DateTimeOffset? StartedAt { get; set; }
@@ -153,6 +170,22 @@ public sealed class NodeImageBatch
     /// <summary>整批还在跑时，单张菜单该说的那句话（与「这一张还在出」区分开）。</summary>
     public string SingleActionBlockedNote => IsRunning ? "这一批还在出，出完再挑" : "这一张还在出";
 
+    /// <summary>这一批里**判过**的那些格（没判过的不算）。</summary>
+    public IReadOnlyList<BatchSlot> GradedSlots => Slots
+        .Where(slot => !slot.Removed && slot.Quality is { Source: not QualitySource.None })
+        .ToList();
+
+    /// <summary>判过至少一格。</summary>
+    public bool HasGrades => GradedSlots.Count > 0;
+
+    /// <summary>
+    /// 这一批里最高的档（一格都没判过时返回 null）。**预兆**（爆发那一拍的强度）用它：
+    /// 它只说「这一批里有最好的那一档」，不说是哪一张——这与二游的预兆是同一件事。
+    /// </summary>
+    public QualityTier? BestTier => GradedSlots.Count == 0
+        ? null
+        : GradedSlots.Max(slot => slot.Quality!.Tier);
+
     /// <summary>一张都没成：这时该说的是「全都没出来，可以重做」，而不是摆一排失败。</summary>
     public bool AllFailed => !IsRunning && DoneCount == 0 && FailedCount > 0;
 
@@ -177,6 +210,8 @@ public sealed class NodeImageBatch
         if (IsRunning)
             return $"正在出 {Count} 张：{ProgressLine()}"
                 + (FailedCount > 0 ? $"，失败 {FailedCount}" : string.Empty);
+        // 判档不挡住挑图，所以这里只说「正在判」，不说「请稍候」——图早就能挑了。
+        if (IsGrading) return $"出了 {DoneCount} 张 · 正在判定档位";
         if (AllFailed) return $"{Count} 张都没出来：可以右键重做";
         if (SelectedIndices.Count > 0) return $"{DoneCount} 张可选 · 已选中 {SelectedIndices.Count} 张";
         return CanPick ? $"出了 {DoneCount} 张：双击看大图，右键选用或删除" : $"{Count} 张候选";

@@ -61,6 +61,10 @@ var tests = new (string Name, Action Run)[]
     ("更新：替换脚本实测——真换掉一个目录并留下结果文件", UpdateSwapScriptActuallyReplacesDirectory),
     ("出图批次：整批还在跑时单张一律不能操作（漏文件那条路的入口）", BatchSlotsAreNotActionableWhileRunning),
     ("出图开奖：按张数排布（一行最多 3 张 / 4 张 2×2 / 卡片固定 2:3 / 末行按自己的张数居中）", GachaCardLayoutIsPinnedByCount),
+    ("出图开奖：名次 → 档位（第 1 名金、最后一名白；只有一张不判；光点从金到白严格递减）", QualityTierFollowsRank),
+    ("出图开奖：模型名次必须完整才认（漏项 / 重复 / 越界 / 坏 JSON 一律作废）", QualityRankingMustBeComplete),
+    ("出图开奖：本地筛查只判客观坏图（读不出 / 纯色 / 尺寸不对），不碰「好不好」", TechnicalScreeningOnlyFlagsBrokenImages),
+    ("出图开奖：名次落回槽位（顺序即编号，可跨过失败格；最高档决定预兆）", QualityGradesMapBackToSlots),
     ("配置落盘：程序旁的旧文件会被搬到用户配置目录（搬不是拷）", LegacyProgramRootConfigIsMigrated),
     ("模型预设：地址能反推回同一家，预置模型元数据自洽", ProviderPresetCatalogIsConsistent),
     ("模型预设：预设换算两端共用一份（采样开关与型号覆盖都一致）", ProviderPresetValuesResolveIsConsistent),
@@ -6928,6 +6932,170 @@ static void GachaCardLayoutIsPinnedByCount()
 	Expect(Throws(() => GachaCardLayout.Slot(6, -1)), "负序号要抛");
 	Expect(Throws(() => GachaCardLayout.Slot(0, 0)), "零张要抛");
 	Expect(!Throws(() => GachaCardLayout.Slot(6, 5)), "最后一张是合法序号");
+}
+
+static void QualityTierFollowsRank()
+{
+	// 6 张：第 1 名金、2 红、3 紫、中段蓝、最后一名白。
+	Expect(QualityJudgement.TierForRank(1, 6) == QualityTier.Gold, "6 张里第 1 名是金");
+	Expect(QualityJudgement.TierForRank(2, 6) == QualityTier.Red, "6 张里第 2 名是红");
+	Expect(QualityJudgement.TierForRank(3, 6) == QualityTier.Purple, "6 张里第 3 名是紫");
+	Expect(QualityJudgement.TierForRank(4, 6) == QualityTier.Blue, "6 张里第 4 名是蓝");
+	Expect(QualityJudgement.TierForRank(5, 6) == QualityTier.Blue, "6 张里第 5 名也是蓝");
+	Expect(QualityJudgement.TierForRank(6, 6) == QualityTier.White, "6 张里最后一名是白");
+
+	// 5 张：4 名是蓝、5 名（最后）是白。
+	Expect(QualityJudgement.TierForRank(4, 5) == QualityTier.Blue, "5 张里第 4 名是蓝");
+	Expect(QualityJudgement.TierForRank(5, 5) == QualityTier.White, "5 张里最后一名是白");
+
+	// 4 张：第 3 名就是最后一名之前那一档，且第 4 名是白。
+	Expect(QualityJudgement.TierForRank(3, 4) == QualityTier.Purple, "4 张里第 3 名是紫");
+	Expect(QualityJudgement.TierForRank(4, 4) == QualityTier.White, "4 张里最后一名是白");
+
+	// 3 张：第 2 名是红，第 3 名（最后）是白。
+	Expect(QualityJudgement.TierForRank(2, 3) == QualityTier.Red, "3 张里第 2 名是红");
+	Expect(QualityJudgement.TierForRank(3, 3) == QualityTier.White, "3 张里最后一名是白");
+
+	// 2 张：最好的一张是金，另一张就是最后一名（白）。
+	Expect(QualityJudgement.TierForRank(1, 2) == QualityTier.Gold, "2 张里第 1 名是金");
+	Expect(QualityJudgement.TierForRank(2, 2) == QualityTier.White, "2 张里第 2 名（也就是最后一名）是白");
+
+	// 越界与不足两张：都落到白——但它们本来就不该被调用（解析那一步已经拒了）。
+	Expect(QualityJudgement.TierForRank(1, 1) == QualityTier.White, "只有一张不判档");
+	Expect(QualityJudgement.TierForRank(0, 6) == QualityTier.White, "名次 0 是非法的");
+	Expect(QualityJudgement.TierForRank(7, 6) == QualityTier.White, "名次超出张数是非法的");
+
+	// 每一档的光点数必须严格递减：这是「档位看得出来」的最低要求。
+	var sparks = new[]
+	{
+		QualityJudgement.SparksFor(QualityTier.Gold), QualityJudgement.SparksFor(QualityTier.Red),
+		QualityJudgement.SparksFor(QualityTier.Purple), QualityJudgement.SparksFor(QualityTier.Blue),
+		QualityJudgement.SparksFor(QualityTier.White)
+	};
+	for (var i = 1; i < sparks.Length; i++)
+		Expect(sparks[i] < sparks[i - 1], $"光点数要从金到白严格递减，第 {i + 1} 档没降下来");
+
+	// 白档的光点比「没判过」还少：白是判出来的最低档，没判过是「不知道」，两者不该长得一样。
+	Expect(sparks[sparks.Length - 1] < 4, "白档的光点数要少于「没判过」时用的 4 个");
+
+	Expect(QualityJudgement.Label(QualityTier.Gold) == "金", "金档的中文名");
+	Expect(QualityJudgement.Label(QualityTier.White) == "白", "白档的中文名");
+	Expect(QualityJudgement.ModelDisclaimer.Contains("不是客观结论", StringComparison.Ordinal),
+		"档位旁边必须说明这是模型的判断，而不是客观结论");
+}
+
+static void QualityRankingMustBeComplete()
+{
+	// 正常一份：编号是「第几张」，数组顺序就是名次。
+	var ok = QualityJudgement.ParseRanking(
+		"{\"ranking\":[{\"index\":3,\"note\":\"构图完整\"},{\"index\":1,\"note\":\"糊\"},{\"index\":2,\"note\":\"手崩了\"}]}", 3);
+	Expect(ok.Ranking is { Count: 3 }, "正常回复要能读出名次");
+	Expect(ok.Error is null, "正常回复不该报错");
+	Expect(ok.Ranking![0].Index == 3 && ok.Ranking[0].Note == "构图完整", "名次顺序与理由都要按原样读出来");
+
+	// 外面包了代码块、前后有说明文字：仍然要能读（模型经常这么回）。
+	var fenced = QualityJudgement.ParseRanking(
+		"好的，我看完了：\n```json\n{\"ranking\":[{\"index\":1,\"note\":\"a\"},{\"index\":2,\"note\":\"b\"}]}\n```\n以上。", 2);
+	Expect(fenced.Ranking is { Count: 2 }, "前后带说明文字、外面包代码块也要能读");
+
+	// 少了项：整份作废（半份名次会给出武断的档位，比没有档位更糟）。
+	var short_ = QualityJudgement.ParseRanking(
+		"{\"ranking\":[{\"index\":1,\"note\":\"a\"},{\"index\":2,\"note\":\"b\"}]}", 3);
+	Expect(short_.Ranking is null && short_.Error is not null, "名次项数不足要整份作废");
+	Expect(short_.Error!.Contains("3", StringComparison.Ordinal), "报错要说清应当有几项，实际：" + short_.Error);
+
+	// 重复编号：作废。
+	var repeated = QualityJudgement.ParseRanking(
+		"{\"ranking\":[{\"index\":1,\"note\":\"a\"},{\"index\":1,\"note\":\"b\"}]}", 2);
+	Expect(repeated.Ranking is null && repeated.Error is not null, "重复编号要整份作废");
+
+	// 越界编号（0 与 count+1）：作废。
+	Expect(QualityJudgement.ParseRanking("{\"ranking\":[{\"index\":0,\"note\":\"a\"},{\"index\":2,\"note\":\"b\"}]}", 2).Ranking is null,
+		"编号 0 要作废");
+	Expect(QualityJudgement.ParseRanking("{\"ranking\":[{\"index\":1,\"note\":\"a\"},{\"index\":3,\"note\":\"b\"}]}", 2).Ranking is null,
+		"编号超出张数要作废");
+
+	// 坏 JSON / 没有 JSON：作废，且给的是能读懂的原因。
+	Expect(QualityJudgement.ParseRanking("完全不认识的一段话", 3).Ranking is null, "没有 JSON 要作废");
+	Expect(QualityJudgement.ParseRanking("{\"ranking\":", 3).Ranking is null, "坏 JSON 要作废");
+	Expect(QualityJudgement.ParseRanking("{\"order\":[1,2]}", 2).Ranking is null, "缺 ranking 数组要作废");
+
+	// 只有一张：不判——名次的意义来自比较，一张没有比较对象。
+	var single = QualityJudgement.ParseRanking("{\"ranking\":[{\"index\":1,\"note\":\"a\"}]}", 1);
+	Expect(single.Ranking is null && single.Error is not null, "只有一张不排名次");
+	Expect(single.Error!.Contains("一张", StringComparison.Ordinal), "说清为什么：只有一张");
+}
+
+static void TechnicalScreeningOnlyFlagsBrokenImages()
+{
+	// 读不出来 → 白档，理由说清是哪一条。
+	var broken = TechnicalScreening.Screen(new ImageFacts(false, 0, 0, 0, 0, 1024));
+	Expect(broken is { Source: QualitySource.Technical, Tier: QualityTier.White }, "读不出来的判成白档（本地）");
+	Expect(broken!.Reason.Contains("读不出来", StringComparison.Ordinal), "理由要说清是读不出来");
+
+	// 整张几乎一个颜色 → 白档。
+	var solid = TechnicalScreening.Screen(new ImageFacts(true, 1024, 1024, 576, 1, 1024));
+	Expect(solid is { Tier: QualityTier.White }, "整张一个颜色的判成白档");
+	Expect(solid!.Reason.Contains("一个颜色", StringComparison.Ordinal), "理由要说清是纯色");
+
+	// 尺寸比要求小一大截 → 白档。
+	var tiny = TechnicalScreening.Screen(new ImageFacts(true, 256, 256, 576, 40, 1024));
+	Expect(tiny is { Tier: QualityTier.White }, "尺寸只有要求的一半以下的判成白档");
+	Expect(tiny!.Reason.Contains("256", StringComparison.Ordinal), "理由要把实际尺寸写出来");
+
+	// 一张正常图：**本地这层不判**——分辨率、颜色数都不等于好看。
+	Expect(TechnicalScreening.Screen(new ImageFacts(true, 1024, 1024, 576, 40, 1024)) is null,
+		"正常图本地不判（不碰「好不好」）");
+	// 刚好一半的尺寸不算「小很多」（阈值是严格的两倍关系）。
+	Expect(TechnicalScreening.Screen(new ImageFacts(true, 512, 512, 576, 40, 1024)) is null, "刚好一半不算明显偏小");
+	// 没给出要求尺寸时不检查这一条（不猜）。
+	Expect(TechnicalScreening.Screen(new ImageFacts(true, 256, 256, 576, 40, 0)) is null, "没给要求尺寸就不检查尺寸");
+}
+
+static void QualityGradesMapBackToSlots()
+{
+	// 4 个槽位，但只有 4 张发给模型（序号 0 / 2 / 3 / 5），编号是发送顺序。
+	var grades = QualityJudgement.ToGrades(
+		new[] { 0, 2, 3, 5 },
+		new[]
+		{
+			new QualityRanking(3, "最好的一张"),
+			new QualityRanking(1, "第二"),
+			new QualityRanking(4, "第三"),
+			new QualityRanking(2, "最差")
+		});
+
+	Expect(grades.Count == 4, "四格都要有档位");
+	// 交出来是按槽位序号排好的。
+	Expect(grades[0].Index == 0 && grades[1].Index == 2 && grades[2].Index == 3 && grades[3].Index == 5,
+		"结果按槽位序号排好");
+
+	var bySlot = grades.ToDictionary(item => item.Index, item => item.Quality);
+	Expect(bySlot[3].Tier == QualityTier.Gold && bySlot[3].Rank == 1, "编号 3 的那张（槽位 3）是金、第 1 名");
+	Expect(bySlot[0].Tier == QualityTier.Red && bySlot[0].Rank == 2, "编号 1 的那张（槽位 0）是红、第 2 名");
+	Expect(bySlot[5].Tier == QualityTier.Purple && bySlot[5].Rank == 3, "编号 4 的那张（槽位 5）是紫、第 3 名");
+	Expect(bySlot[2].Tier == QualityTier.White && bySlot[2].Rank == 4, "最后一名是白（4 张里的第 4 名）");
+	Expect(bySlot[3].Reason == "最好的一张", "理由原样带过来");
+	Expect(bySlot.Values.All(item => item.Source == QualitySource.Model), "来源要标成模型");
+	Expect(bySlot.Values.All(item => item.Ranked == 4), "每格都要知道总共排了几张");
+
+	// 一整批的档位汇总：最高档决定预兆，没判过就是 null（不是白档）。
+	NodeImageBatch batch = new() { NodeId = Guid.NewGuid() };
+	batch.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done });
+	batch.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done });
+	Expect(!batch.HasGrades && batch.BestTier is null, "没判过就没有档位——不是白档");
+	Expect(batch.Slots[0].Quality is null, "没判过的格子是 null，不是「白档」");
+
+	batch.Slots[0].Quality = bySlot[0];
+	Expect(batch.HasGrades && batch.BestTier == QualityTier.Red, "判过一格的最高档就是它");
+
+	batch.Slots[1].Quality = bySlot[3];
+	Expect(batch.BestTier == QualityTier.Gold, "最高的那一档决定预兆");
+
+	// 删掉的那一格不参与（它的档位不该再影响预兆）。
+	batch.Slots[1].Removed = true;
+	Expect(batch.BestTier == QualityTier.Red, "已删掉的格子不参与最高档");
+	Expect(batch.GradedSlots.Count == 1, "已删掉的格子不算判过");
 }
 
 static void BatchSlotsAreNotActionableWhileRunning()
