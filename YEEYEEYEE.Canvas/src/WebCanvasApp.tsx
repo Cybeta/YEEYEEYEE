@@ -1,73 +1,43 @@
-import { useEffect, useRef, useState } from 'react'
-import { chapterLabelOf } from './ChapterView'
-import { layerOf, type OperationRecord } from './Protocol/VersionedMessages'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { mapAssets, recordReferences, resolveReference, type Asset } from './assets'
+import { ALL_CHAPTERS_ID } from './ChapterView'
+import { CANVAS_VERSION } from './Protocol/VersionedMessages'
 import { SessionPanel } from './SessionPanel'
-import { canEdit, gateOf, parseAuthState, type AuthState } from './SessionView'
+import { canEdit, gateOf, parseAuthState, roleLabel, type AuthState } from './SessionView'
+import { AgentPanel, type WebJob, type WebSkill } from './shell/AgentPanel'
+import { ChapterTree } from './shell/ChapterTree'
+import { InspectorPanel } from './shell/InspectorPanel'
+import { RightDock } from './shell/RightDock'
+import { canvasBounds, chapterGroups, isEditableRecord, parseScene, recordContent, recordTitle, type ShellScene } from './shell/records'
+import { Workspace } from './shell/Workspace'
+import {
+  WorkbenchShell, type DockMode, type RailSection, type StatusFacts, type WorkbenchChrome, type WorkbenchView
+} from './shell/WorkbenchShell'
+import './session.css'
 import './workflow.css'
+// 令牌放最后：它定义的 :root 与 body 是整页的底色与字体，得压过前面那两份样式。
+import './shell/tokens.css'
 
-type WebScene = { revision: number; records: OperationRecord[] }
-type Version = { id: string; number?: number; label?: string }
-type Variant = { id: string; name?: string; versions?: Version[] }
-type Asset = { id: string; name: string; kind?: string; variants?: Variant[] }
-type Reference = { entityId: string; name?: string; kind?: string; variantId?: string; variantVersionId?: string | null }
+/**
+ * 网页端工作台的编排层。
+ *
+ * 这里只做三件事：取数据、管状态、把插槽交给外壳。界面怎么摆全在 shell/ 下，
+ * 所以这个文件里没有一处布局，只有「谁在什么时候调用哪个接口」。
+ *
+ * 与旧版 WebCanvasApp 的差别值得记一笔：旧版把整页写在一处、用 .workflow-shell 那套类，
+ * 形状是一个「场景记录列表 + 侧栏」，与桌面端毫无关系。现在它是桌面工作台的镜像。
+ */
+
+// 既有用例从 WebCanvasApp 里取这三个函数，它们已经搬到 assets.ts；
+// 这里保留出口，免得一次搬迁就顺带改测试。
+export { mapAssets, recordReferences, resolveReference } from './assets'
+
 type Notice = { kind: 'success' | 'error' | 'info'; message: string }
-type WebSkill = { id: string; name: string; capability: string }
-type WebJob = { jobId: string; state: string; progressPercent: number; errorCode?: string; errorMessage?: string; attempt: number; retryOfJobId?: string; rootJobId: string; canRetry: boolean; outputs: { role: string; ref: string }[] }
 
-function hasId(value: unknown): value is { id: string; [key: string]: unknown } {
-  return !!value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { id?: unknown }).id === 'string' && !!(value as { id: string }).id.trim()
-}
-
-/** entities.json uses id at every level; names are labels, never identity keys. */
-export function mapAssets(value: unknown): { entities: Asset[]; invalidCount: number } {
-  if (!value || typeof value !== 'object' || !Array.isArray((value as { entities?: unknown }).entities)) throw new Error('响应格式不正确')
-  const raw = (value as { entities: unknown[] }).entities
-  const entities = raw.filter((item): item is Asset => hasId(item) && typeof item.name === 'string').map((item) => ({
-    id: item.id, name: item.name, kind: typeof item.kind === 'string' ? item.kind : undefined,
-    variants: Array.isArray(item.variants) ? item.variants.filter(hasId).map((variant) => ({
-      id: variant.id, name: typeof variant.name === 'string' ? variant.name : undefined,
-      versions: Array.isArray(variant.versions) ? variant.versions.filter(hasId).map((version) => ({
-        id: version.id, number: typeof version.number === 'number' ? version.number : undefined,
-        label: typeof version.label === 'string' ? version.label : undefined
-      })) : undefined
-    })) : undefined
-  }))
-  return { entities, invalidCount: raw.length - entities.length }
-}
-
-export function recordReferences(item: OperationRecord): Reference[] {
-  const raw = item.record.references
-  if (!Array.isArray(raw)) return []
-  return raw.filter((ref): ref is Reference => !!ref && typeof ref === 'object' && typeof ref.entityId === 'string' && !!ref.entityId.trim())
-}
-
-export function resolveReference(ref: Reference, assets: Asset[], available = true): { asset?: Asset; variant?: Variant; version?: Version; error?: string; mode: string } {
-  const mode = ref.variantVersionId ? '锁定版本' : '跟随最新'
-  if (!available) return { mode, error: '资产库不可用，无法核对引用' }
-  const asset = assets.find((item) => item.id === ref.entityId)
-  if (!asset) return { mode, error: `实体缺失：${ref.entityId}` }
-  if (!ref.variantId) return { asset, mode, error: '引用未指定变体 ID' }
-  const variant = asset.variants?.find((item) => item.id === ref.variantId)
-  if (!variant) return { asset, mode, error: `变体缺失：${ref.variantId}` }
-  if (!ref.variantVersionId) return { asset, variant, mode }
-  const version = variant.versions?.find((item) => item.id === ref.variantVersionId)
-  return version ? { asset, variant, version, mode } : { asset, variant, mode, error: `锁定版本缺失：${ref.variantVersionId}` }
-}
-
-function recordTitle(item: OperationRecord): string {
-  return typeof item.record.title === 'string' ? item.record.title : typeof item.record.name === 'string' ? item.record.name : item.recordType
-}
-function recordContent(item: OperationRecord): string {
-  return typeof item.record.content === 'string' ? item.record.content : typeof item.record.text === 'string' ? item.record.text : ''
-}
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '未知错误'
 }
-function validRecord(value: unknown): value is OperationRecord {
-  if (!value || typeof value !== 'object') return false
-  const item = value as Partial<OperationRecord>
-  return typeof item.recordId === 'string' && typeof item.recordType === 'string' && !!item.record && typeof item.record === 'object' && !Array.isArray(item.record)
-}
+
 /**
  * 会话 cookie 由浏览器自动带上，所以这里**不再手动塞 Authorization 头**。
  * 凭据放在 HttpOnly cookie 里：脚本读不到它，也就不存在「前端把令牌存哪儿」这个问题。
@@ -90,15 +60,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export function WebCanvasApp() {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [authFailure, setAuthFailure] = useState('')
-  const [scene, setScene] = useState<WebScene | null>(null)
+  const [scene, setScene] = useState<ShellScene | null>(null)
   const [assets, setAssets] = useState<Asset[]>([])
   const [assetsReady, setAssetsReady] = useState(false)
   const [selectedId, setSelectedId] = useState('')
-  const [assetId, setAssetId] = useState('')
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
-  const [notice, setNotice] = useState<Notice>({ kind: 'info', message: '登录后加载场景。' })
-  const [assetNotice, setAssetNotice] = useState('尚未加载资产。')
+  const [notice, setNotice] = useState<Notice>({ kind: 'info', message: '登录后加载画布。' })
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [skills, setSkills] = useState<WebSkill[]>([])
@@ -106,29 +74,37 @@ export function WebCanvasApp() {
   const [prompt, setPrompt] = useState('')
   const [taskNotice, setTaskNotice] = useState('技能与任务尚未加载。')
   const [taskBusy, setTaskBusy] = useState(false)
+  const [view, setView] = useState<WorkbenchView>('canvas')
+  const [section, setSection] = useState<RailSection>('story')
+  const [search, setSearch] = useState('')
+  const [dockOpen, setDockOpen] = useState(true)
+  const [dockMode, setDockMode] = useState<DockMode>('inspector')
+  const [activeChapter, setActiveChapter] = useState<string>(ALL_CHAPTERS_ID)
+  const [lastSaved, setLastSaved] = useState('')
   const generation = useRef(0)
-  const nodeRefs = useRef(new Map<string, HTMLElement>())
-  const assetRefs = useRef(new Map<string, HTMLButtonElement>())
-  const selected = scene?.records.find((item) => item.recordId === selectedId)
+
+  const records = useMemo(() => scene?.records ?? [], [scene])
+  const groups = useMemo(() => chapterGroups(records), [records])
+  const selected = useMemo(() => records.find((item) => item.recordId === selectedId) ?? null, [records, selectedId])
   const dirty = !!selected && (title !== recordTitle(selected) || content !== recordContent(selected))
+  const readOnly = scene?.readOnly === true
+  const role = auth?.user?.role ?? 'Viewer'
+  const editable = canEdit(role) && !readOnly
 
   function selectRecord(id: string) {
     if (dirty && !window.confirm('当前编辑尚未保存，确定放弃修改并切换节点吗？')) return
-    const item = scene?.records.find((record) => record.recordId === id)
+    const item = records.find((record) => record.recordId === id)
     if (!item) return
     setSelectedId(id)
     setTitle(recordTitle(item))
     setContent(recordContent(item))
-    setNotice({ kind: 'info', message: `已选择节点 ${id}。` })
-    requestAnimationFrame(() => nodeRefs.current.get(id)?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' }))
   }
 
   async function loadScene() {
     if (dirty && !window.confirm('重新加载将放弃未保存的修改，确定继续吗？')) return
     const run = ++generation.current
     setLoading(true)
-    setNotice({ kind: 'info', message: '正在加载场景…' })
-    setAssetNotice('正在加载资产…')
+    setNotice({ kind: 'info', message: '正在加载画布…' })
     setScene(null)
     setAssets([])
     setAssetsReady(false)
@@ -136,27 +112,32 @@ export function WebCanvasApp() {
     setJobs([])
     setTaskNotice('正在加载技能与任务…')
     setSelectedId('')
-    setAssetId('')
+    setActiveChapter(ALL_CHAPTERS_ID)
     const [sceneResult, assetResult] = await Promise.allSettled([
-      request<WebScene>('/api/web/scene'),
+      request<unknown>('/api/web/scene'),
       request<unknown>('/api/web/assets')
     ])
     if (run !== generation.current) return
     setLoading(false)
-    if (sceneResult.status === 'fulfilled' && Number.isFinite(sceneResult.value?.revision) && Array.isArray(sceneResult.value.records) && sceneResult.value.records.every(validRecord)) {
-      setScene(sceneResult.value)
-      setNotice({ kind: 'success', message: `场景加载成功，修订 ${sceneResult.value.revision}，共 ${sceneResult.value.records.length} 条记录。` })
-    } else {
-      setNotice({ kind: 'error', message: `场景加载失败：${sceneResult.status === 'rejected' ? errorMessage(sceneResult.reason) : '响应格式不正确'}` })
+    try {
+      if (sceneResult.status === 'rejected') throw sceneResult.reason
+      const parsed = parseScene(sceneResult.value)
+      setScene(parsed)
+      setNotice({
+        kind: 'success',
+        message: `画布加载成功：修订 ${parsed.revision}，${parsed.records.filter(isEditableRecord).length} 个节点、${parsed.records.length - parsed.records.filter(isEditableRecord).length} 条工作树章节。${parsed.readOnly ? ' 服务端把它标成了只读。' : ''}`
+      })
+    } catch (error) {
+      setNotice({ kind: 'error', message: `画布加载失败：${errorMessage(error)}` })
     }
     try {
       if (assetResult.status === 'rejected') throw assetResult.reason
       const { entities, invalidCount } = mapAssets(assetResult.value)
       setAssets(entities)
       setAssetsReady(true)
-      setAssetNotice(`资产加载成功，共 ${entities.length} 项。${invalidCount ? ` 跳过 ${invalidCount} 项缺少有效 id/name 的实体。` : ''}`)
+      if (invalidCount > 0) setNotice({ kind: 'info', message: `资产跳过 ${invalidCount} 项缺少有效 id/name 的实体。` })
     } catch (error) {
-      setAssetNotice(`资产加载失败：${errorMessage(error)}`)
+      setNotice({ kind: 'error', message: `资产加载失败：${errorMessage(error)}` })
     }
     try {
       const catalog = await request<{ skills: WebSkill[] }>('/api/web/skills')
@@ -171,7 +152,7 @@ export function WebCanvasApp() {
     }
   }
 
-  /** 问一次服务端「我是谁」。没登录就什么都不加载——**别在没身份的时候去打场景接口**。 */
+  /** 问一次服务端「我是谁」。没登录就什么都不加载——**别在没身份的时候去打画布接口**。 */
   async function refreshSession() {
     try {
       const state = parseAuthState(await request<unknown>('/api/auth/state'))
@@ -228,149 +209,210 @@ export function WebCanvasApp() {
 
   async function save() {
     if (!selected || !scene || saving) return
+    if (readOnly) {
+      setNotice({ kind: 'error', message: '服务端把这张画布标成了只读，拒绝保存。' })
+      return
+    }
     // 只读角色在服务端本来就会被拒（拿到的是 403），但界面不该先给一个点了必然失败的按钮。
-    if (auth?.user && !canEdit(auth.user.role)) {
+    if (!canEdit(role)) {
       setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
       return
     }
     const id = selected.recordId
-    const revision = scene.revision
+    const baseRevision = scene.revision
     const draftTitle = title
     const draftContent = content
     setSaving(true)
     setNotice({ kind: 'info', message: '正在保存…' })
     try {
-      const result = await request<{ revision: number; record: OperationRecord }>(`/api/web/records/${encodeURIComponent(id)}`, {
-        method: 'PUT', body: JSON.stringify({ baseRevision: revision, title: draftTitle, content: draftContent })
+      const result = await request<{ revision: number; record: ShellScene['records'][number] }>(`/api/web/records/${encodeURIComponent(id)}`, {
+        method: 'PUT', body: JSON.stringify({ baseRevision, title: draftTitle, content: draftContent })
       })
-      if (!Number.isFinite(result?.revision) || !validRecord(result.record) || result.record.recordId !== id) throw new Error('保存响应格式不正确')
-      setScene((current) => current ? { revision: result.revision, records: current.records.map((item) => item.recordId === id ? result.record : item) } : current)
+      if (!Number.isFinite(result?.revision) || !result.record || result.record.recordId !== id) throw new Error('保存响应格式不正确')
+      setScene((current) => current
+        ? { ...current, revision: result.revision, records: current.records.map((item) => item.recordId === id ? result.record : item) }
+        : current)
       setTitle(recordTitle(result.record))
       setContent(recordContent(result.record))
-      setNotice({ kind: 'success', message: `保存成功：${id} · 修订 ${result.revision}。` })
+      setLastSaved(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+      setNotice({ kind: 'success', message: `已保存 ${id.slice(0, 8)}，画布修订 ${result.revision}。` })
     } catch (error) {
-      setNotice({ kind: 'error', message: `保存失败：${errorMessage(error)}。修改仍在编辑框中；修订冲突时请重新加载场景。` })
+      setNotice({ kind: 'error', message: `保存失败：${errorMessage(error)}。修改仍在编辑框里；修订冲突时请重新加载画布。` })
     } finally {
       setSaving(false)
     }
   }
 
-  function locateAsset(id: string) {
-    const asset = assets.find((item) => item.id === id)
-    if (!asset) {
-      setAssetNotice(`资产定位失败：实体 ID ${id} 在当前项目库中不存在。`)
-      return
+  async function logout() {
+    try {
+      await request('/api/auth/logout', { method: 'POST' })
+    } catch {
+      // 退出失败也要重新问一次身份：cookie 可能已经失效，界面必须跟着真实状态走。
     }
-    setAssetId(id)
-    requestAnimationFrame(() => assetRefs.current.get(id)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
-    setAssetNotice(`已按实体 ID 定位资产 ${id}。${asset.name ? ` ${asset.name}` : ''}（仅定位，未修改资产）`)
+    await refreshSession()
   }
 
   // 还没问出「我是谁」之前不要画工作台：先显示登录页再跳走会闪一下，也容易让人以为要填两次。
-  if (!auth) return <div className="session-panel">
-    <div className="session-card"><h2>正在确认登录状态…</h2><p className="session-hint">如果一直停在这里，说明服务端没起来。</p></div>
+  if (!auth) return <div className="df-gate">
+    <div className="df-gate-card">
+      <h2 className="df-gate-title">正在确认登录状态…</h2>
+      <p className="df-notice">如果一直停在这里，说明服务端没起来。</p>
+    </div>
   </div>
 
-  if (authFailure) return <div className="session-panel">
-    <div className="session-card">
-      <h2>无法确认登录状态</h2>
-      <p className="session-hint">{authFailure}</p>
-      <button type="button" onClick={() => void refreshSession()}>重试</button>
+  if (authFailure) return <div className="df-gate">
+    <div className="df-gate-card">
+      <h2 className="df-gate-title">无法确认登录状态</h2>
+      <p className="df-notice is-error">{authFailure}</p>
+      <button type="button" className="df-mini-button" style={{ alignSelf: 'flex-start' }} onClick={() => void refreshSession()}>重试</button>
     </div>
   </div>
 
   if (gateOf(auth) !== 'ready') return <SessionPanel state={auth} onChanged={() => void refreshSession()} />
 
-  // 过了上面那道门就一定有用户，取一次给下面用，省得每次都要再判一遍可空。
-  const currentUser = auth.user!
+  const user = auth.user!
+  const bounds = canvasBounds(records)
+  const nodeCount = records.filter(isEditableRecord).length
 
-  return <div className="workflow-shell web-shell">
-    <header className="workflow-header">
-      <div className="brand-lockup"><strong>YEEYEEYEE</strong><span>场景画布</span></div>
-      <SessionPanel state={auth} onChanged={() => void refreshSession()} />
-      <span className="web-revision">修订 {scene?.revision ?? '—'}</span>
-    </header>
-    <aside className="node-library web-sidebar">
-      <strong>场景记录</strong>
-      <p className={`web-notice ${notice.kind}`} role="status">{notice.message}</p>
-      <label className="web-picker">节点定位
-        <select value={selectedId} onChange={(event) => selectRecord(event.target.value)} disabled={!scene?.records.length}>
-          <option value="">选择稳定记录 ID</option>
-          {scene?.records.map((item) => <option key={item.recordId} value={item.recordId}>{recordTitle(item)} · {item.recordId}</option>)}
-        </select>
-      </label>
-      <section aria-label="本机技能与任务">
-        <strong>本机技能与任务</strong>
-        <p className="web-notice" role="status">{taskNotice}</p>
-        {skills.map((skill) => <div key={skill.id} className="web-reference">
-          <strong>{skill.name}</strong><code>{skill.id}</code>
-          <label>提示词<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={4000} /></label>
-          <button type="button" disabled={!prompt.trim() || taskBusy} onClick={() => void taskAction(`/api/web/skills/${encodeURIComponent(skill.id)}/invoke`, { prompt, idempotencyKey: crypto.randomUUID() })}>调用技能</button>
-        </div>)}
-        {jobs.map((job) => <div key={job.jobId} className="web-reference">
-          <code>{job.jobId}</code><span>第 {job.attempt} 次 · {job.state} · {job.progressPercent}%</span>
-          {job.retryOfJobId && <code>重试自 {job.retryOfJobId}</code>}
-          {job.errorCode && <b role="alert">{job.errorCode}：{job.errorMessage || '任务失败'}</b>}
-          {job.outputs?.map((output, index) => <code key={index}>{output.role}：{output.ref}</code>)}
-          <button type="button" disabled={taskBusy || !['Queued', 'Running'].includes(job.state)} onClick={() => void taskAction(`/api/web/jobs/${job.jobId}/cancel`)}>取消</button>
-          <button type="button" disabled={taskBusy || !job.canRetry} onClick={() => void taskAction(`/api/web/jobs/${job.jobId}/retry`)}>重试</button>
-        </div>)}
-      </section>
-      <strong>项目资产（只读）</strong>
-      <p className="web-notice" role="status">{assetNotice}</p>
-      <label className="web-picker">资产定位
-        <select value={assetId} onChange={(event) => locateAsset(event.target.value)} disabled={!assets.length}>
-          <option value="">选择实体稳定 ID</option>
-          {assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name || '未命名'} · {asset.id}</option>)}
-        </select>
-      </label>
-      <div className="web-assets">
-        {assets.map((asset) => <button type="button" key={asset.id} ref={(element) => { if (element) assetRefs.current.set(asset.id, element); else assetRefs.current.delete(asset.id) }} className={assetId === asset.id ? 'active' : ''} onClick={() => locateAsset(asset.id)}>
-          <strong>{asset.kind || '资产'} · {asset.name || '未命名'}</strong><code>实体 ID：{asset.id}</code>
-          {asset.variants?.map((variant) => <span className="web-asset-variant" key={variant.id}>{variant.name || '未命名变体'} <code>变体 ID：{variant.id}</code>
-            {variant.versions?.map((version) => <span className="web-asset-version" key={version.id}>{version.label || (version.number != null ? `v${version.number}` : '版本')} <code>版本 ID：{version.id}</code></span>)}
-          </span>)}
-        </button>)}
-      </div>
-    </aside>
-    <main className="workflow-canvas web-canvas" aria-label="场景节点">
-      {scene?.records.map((item) => <button key={item.recordId} ref={(element) => { if (element) nodeRefs.current.set(item.recordId, element); else nodeRefs.current.delete(item.recordId) }} className={`web-node ${selectedId === item.recordId ? 'selected' : ''}`} onClick={() => selectRecord(item.recordId)}>
-        <small>L{layerOf(item.recordType)} · {item.recordType} · {chapterLabelOf(item)}</small>
-        <strong>{recordTitle(item)}</strong><span>{recordContent(item) || '暂无内容'}</span><code>{item.recordId}</code>
-        {recordReferences(item).map((ref, index) => {
-          const resolved = resolveReference(ref, assets, assetsReady)
-          return <span className={`web-node-ref ${resolved.error ? 'web-missing' : ''}`} key={`${ref.entityId}-${index}`}>{resolved.asset?.name || ref.name || ref.entityId} · {resolved.mode}{resolved.error ? ` · ${resolved.error}` : ''}</span>
-        })}
-      </button>)}
-      {!scene && <div className="web-empty">加载场景后显示节点。</div>}
-      {scene?.records.length === 0 && <div className="web-empty">场景暂无记录。</div>}
-    </main>
-    <aside className="inspector web-inspector">
-      <strong>记录详情</strong>
-      {selected ? <>
-        <div className="detail-row"><span>记录 ID</span><code>{selected.recordId}</code></div>
-        <div className="detail-row"><span>类型</span><b>{selected.recordType}</b></div>
-        <label>标题<input value={title} onChange={(event) => { setTitle(event.target.value); setNotice({ kind: 'info', message: '有未保存的修改。' }) }} disabled={saving} /></label>
-        <label>内容<textarea value={content} onChange={(event) => { setContent(event.target.value); setNotice({ kind: 'info', message: '有未保存的修改。' }) }} disabled={saving} /></label>
-        <button className="web-save" disabled={!dirty || saving || !canEdit(currentUser.role)} onClick={() => void save()}>{saving ? '保存中…' : canEdit(currentUser.role) ? '保存标题和内容' : '只读账号不能保存'}</button>
-        <p className="inspector-foot">仅在服务端确认保存成功后更新场景修订；失败时保留编辑内容。资产与引用只读，不会修改项目资产。</p>
-        <section className="web-references" aria-label="节点引用"><strong>节点引用</strong>
-          {recordReferences(selected).length === 0 && <p className="inspector-foot">暂无引用。</p>}
-          {recordReferences(selected).map((ref, index) => {
-            const resolved = resolveReference(ref, assets, assetsReady)
-            return <div className={`web-reference ${resolved.error ? 'web-missing' : ''}`} key={`${ref.entityId}-${index}`}>
-              <div><strong>{resolved.asset?.name || ref.name || '未知实体'}</strong><span className="web-ref-mode">{resolved.mode}</span></div>
-              <code>实体 ID：{ref.entityId}</code>
-              <code>变体 ID：{ref.variantId || '未指定'}</code>
-              {resolved.variant && <span>变体：{resolved.variant.name || '未命名变体'}</span>}
-              <code>版本 ID：{ref.variantVersionId || '跟随最新（无锁定 ID）'}</code>
-              {resolved.version && <span>版本：{resolved.version.label || (resolved.version.number != null ? `v${resolved.version.number}` : '未命名版本')}</span>}
-              {resolved.error && <b role="alert">{resolved.error}</b>}
-              <button type="button" className="web-locate" disabled={!resolved.asset} onClick={() => locateAsset(ref.entityId)}>按实体 ID 定位资产</button>
-            </div>
-          })}
-        </section>
-      </> : <div className="inspector-empty">选择节点后可编辑标题与内容并查看引用。</div>}
-    </aside>
-  </div>
+  const sync: { label: string; tone: StatusFacts['syncTone'] } = notice.kind === 'error'
+    ? { label: '有错误', tone: 'error' }
+    : saving ? { label: '保存中', tone: 'busy' }
+      : loading ? { label: '加载中', tone: 'busy' }
+        : readOnly ? { label: '只读画布', tone: 'idle' }
+          : dirty ? { label: '有未保存修改', tone: 'busy' }
+            : { label: '已同步', tone: 'ok' }
+
+  const status: StatusFacts = {
+    text: notice.message,
+    revision: `修订 ${scene?.revision ?? '—'}`,
+    syncLabel: sync.label,
+    syncTone: sync.tone,
+    nodes: `${nodeCount} 节点`,
+    // 连线没有被投影到网页端（NodeProjection 只投影节点），所以这里如实写出来，
+    // 而不是显示一个永远是 0 的漂亮数字。
+    edges: '连线未投影',
+    canvasSize: `画布 ${bounds.width}×${bounds.height}`,
+    version: scene?.formatVersion != null ? `格式 v${scene.formatVersion}` : '格式 —',
+    saved: `最后保存 ${lastSaved || '—'}`
+  }
+
+  const chrome: WorkbenchChrome = {
+    version: `v${CANVAS_VERSION}`,
+    projectName: scene?.projectName ?? '服务端项目',
+    projectSubtitle: scene
+      ? `${readOnly ? '只读' : '可编辑'} · 修订 ${scene.revision} · ${roleLabel(user.role)}`
+      : '尚未加载',
+    canvasTitle: scene?.canvasTitle ?? '未命名画布',
+    view,
+    onView: setView,
+    section,
+    onSection: (next) => {
+      setSection(next)
+      if (next === 'story') setView('canvas')
+    },
+    search,
+    onSearch: setSearch,
+    dockOpen,
+    onToggleDock: () => setDockOpen((current) => !current),
+    agentActive: dockOpen && dockMode === 'agent',
+    onOpenAgent: () => { setDockOpen(true); setDockMode('agent') },
+    onSave: () => void save(),
+    saveLabel: saving ? '保存中…' : '保存修订',
+    saveDisabled: !editable || !dirty || saving
+  }
+
+  const inspectorHint = !selected
+    ? '在画布上点一个节点后可以改它的名称与内容'
+    : readOnly ? '这张画布被服务端标成只读，改不了'
+      : !canEdit(role) ? '你的账号是只读，改不了画布'
+        : dirty ? '改完点「应用修改」或按 Ctrl+Enter 写回画布' : '没有未保存的修改'
+
+  return (
+    <WorkbenchShell
+      chrome={chrome}
+      status={status}
+      session={<SessionChip name={user.displayName || user.username} role={roleLabel(user.role)} onLogout={() => void logout()} />}
+      tree={(
+        <ChapterTree
+          groups={groups}
+          activeChapter={activeChapter}
+          selectedId={selectedId}
+          onChapter={setActiveChapter}
+          onSelect={selectRecord}
+        />
+      )}
+      workspace={(
+        <Workspace
+          view={view}
+          records={records}
+          selectedId={selectedId}
+          onSelect={selectRecord}
+          search={search}
+          canvasTitle={chrome.canvasTitle}
+          activeChapter={activeChapter}
+          onChapter={setActiveChapter}
+          readOnly={readOnly}
+          assets={assets}
+          assetsReady={assetsReady}
+        />
+      )}
+      dock={dockOpen ? (
+        <RightDock mode={dockMode} onMode={setDockMode} onClose={() => setDockOpen(false)}>
+          {dockMode === 'inspector'
+            ? (
+              <InspectorPanel
+                selected={selected}
+                records={records}
+                title={title}
+                content={content}
+                dirty={dirty}
+                saving={saving}
+                readOnly={readOnly}
+                canEdit={canEdit(role)}
+                hint={inspectorHint}
+                assets={assets}
+                assetsReady={assetsReady}
+                onTitle={setTitle}
+                onContent={setContent}
+                onApply={() => void save()}
+              />
+            )
+            : (
+              <AgentPanel
+                skills={skills}
+                jobs={jobs}
+                prompt={prompt}
+                busy={taskBusy}
+                canInvoke={!!auth.user}
+                notice={taskNotice}
+                onPrompt={setPrompt}
+                onInvoke={(skillId) => void taskAction(`/api/web/skills/${encodeURIComponent(skillId)}/invoke`, { prompt, idempotencyKey: crypto.randomUUID() })}
+                onCancel={(jobId) => void taskAction(`/api/web/jobs/${jobId}/cancel`)}
+                onRetry={(jobId) => void taskAction(`/api/web/jobs/${jobId}/retry`)}
+              />
+            )}
+        </RightDock>
+      ) : null}
+      badge={{
+        visible: !dockOpen,
+        text: 'AI',
+        onClick: () => { setDockOpen(true); setDockMode('agent') }
+      }}
+    />
+  )
+}
+
+/** 标题栏右侧的账号区：头像首字母 + 名字与角色 + 退出。 */
+function SessionChip({ name, role, onLogout }: { name: string; role: string; onLogout: () => void }) {
+  const initials = name.slice(0, 2).toUpperCase()
+  return (
+    <span className="df-session">
+      <span className="df-avatar" aria-hidden="true">{initials}</span>
+      <span className="df-stack" style={{ alignItems: 'flex-start', lineHeight: 1.3 }}>
+        <span style={{ fontSize: 12, color: 'var(--df-ink)' }}>{name}</span>
+        <span className="df-dim" style={{ fontSize: 10 }}>{role}</span>
+      </span>
+      <button type="button" className="df-tool-button" onClick={onLogout} title={`退出登录（${name} · ${role}）`}>退出</button>
+    </span>
+  )
 }

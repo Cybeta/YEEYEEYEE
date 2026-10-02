@@ -243,6 +243,9 @@ try
     var projected = await Check(realClient, HttpMethod.Get, "/api/web/scene", 200);
     Assert(projected.GetProperty("records")[0].GetProperty("recordId").GetString() == nodeId.ToString() &&
         projected.GetProperty("records")[1].GetProperty("recordId").GetString() == anotherId.ToString(), "Stable desktop node IDs");
+    // 工作台的面包屑与画布标签要显示项目名与画布名（不是文件名），所以这两个名字必须投影出来。
+    Assert(projected.GetProperty("projectName").GetString() == "HTTP test" &&
+        projected.GetProperty("canvasTitle").GetString() == "Project", "Project and canvas names projected");
     Assert(realBefore.SequenceEqual(File.ReadAllBytes(realCanvas)), "GET migrated authoritative file on disk");
     SetClaims("skill.invoke,job.cancel");
     await WaitForEditClaim(realClient, nodeId.ToString(), allowed: false);
