@@ -197,7 +197,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 而面板天生是收起来的——不主动算一次就要等到第一次切模型才会出现。
         UpdateAgentBadge();
         // 出图开奖开关也先算一次：画布第一次画那排候选卡时就要知道该不该露图。
-        RefreshGachaReveal();
+        RefreshRevealPreferences();
 
         // 标签条溢出入口：放不下才露出来（可见性只在真正变化时改，免得 LayoutUpdated 自己触发自己）。
         CanvasTabOverflowButton.Click += (_, _) => ShowCanvasTabMenu();
@@ -2455,19 +2455,25 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// </summary>
     private bool gachaReveal;
 
-    /// <summary>按磁盘上的配置刷新开奖开关，并同步给画布。</summary>
-    private void RefreshGachaReveal()
+    /// <summary>出图后要不要让模型判档（设置里的开关，默认关——它要多花一次模型调用）。</summary>
+    private bool judgeImageQuality;
+
+    /// <summary>按磁盘上的配置刷新「出图观感」那两个开关，并把开奖开关同步给画布。</summary>
+    private void RefreshRevealPreferences()
     {
         try
         {
-            gachaReveal = AiProviderSettings.Load().GachaReveal;
+            var settings = AiProviderSettings.Load();
+            gachaReveal = settings.GachaReveal;
+            judgeImageQuality = settings.JudgeImageQuality;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException
             or System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
         {
-            // 读不出来就当它关着——降级到「原来的样子」，与这个开关的默认值一致。
-            // 它只影响观感，为它把主流程拦下来（出图、开画布）不值得，所以这里不报错。
+            // 读不出来就当它们关着——降级到「原来的样子」，与这两个开关的默认值一致。
+            // 它们只影响观感，为它们把主流程拦下来（出图、开画布）不值得，所以这里不报错。
             gachaReveal = false;
+            judgeImageQuality = false;
         }
         CanvasSurfaceControl.GachaReveal = gachaReveal;
     }
@@ -2550,7 +2556,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         // 这一批马上要画那排候选卡了，先按磁盘上的配置取一次「出图观感」开关：
         // 这样改了设置之后，即使没重开窗口，新发起的一批也立刻是新样子。
-        RefreshGachaReveal();
+        RefreshRevealPreferences();
 
         // 同一个节点上重出一批时，先把上一批的候选连同文件一起清掉：用户点「重做」就是不要它们了。
         DiscardBatch(node.Id, keepPath: null);
@@ -2589,12 +2595,30 @@ public partial class MainWindow : Window, IAgentSessionHost
         node.ExecutionStatus = batch.DoneCount > 0 ? NodeExecutionStatus.NeedsReview : NodeExecutionStatus.Failed;
         CanvasSurfaceControl.Refresh();
 
+        // 判档（可选）：先本地筛客观坏图（免费、确定、能指出是哪一条），再让模型给剩下的排名次。
+        // 放在整批出完之后，而不是一张一张跟着出：名次要有可比的对象，单张自己排不出名次。
+        // 它**不挡住挑图**——图早就出好了，判档只是给开奖添一层档位效果。
+        var gradeNote = string.Empty;
+        if (judgeImageQuality && batch.DoneCount > 0)
+        {
+            batch.IsGrading = true;
+            CanvasSurfaceControl.Refresh();
+            // 先把「正在判」说出去：否则那排卡一动不动，用户会以为卡住了。
+            StatusText.Text = $"出好了 {batch.DoneCount} 张：正在判定档位（要花一次模型调用）…";
+            gradeNote = await ImageQualityRunner.RunAsync(batch);
+            // 判的过程中这一批可能已经被丢掉（采用了一张 / 重做）——那时不该再改它的状态。
+            if (!IsLiveBatch(node.Id, batch)) return;
+            batch.IsGrading = false;
+            CanvasSurfaceControl.Refresh();
+        }
+
         // **不自动采用、不自动弹大图**。理由是一个真实反馈：出了 1 张之后照片自己弹出来、图也已经挂上了，
         // 用户既没法丢弃、也没法选择重出——因为选择权在弹出窗口之前就被替他做完了。
         // 现在单张与多张一样：图先落在节点上方那个窗口里，用不用、删不删、重做不重做都由用户点。
         RefreshResourceList();
 
-        StatusText.Text = batch.DoneCount > 0
+        // 判档那句说明放在最前面：它是这一批最新的状态；后面那段「怎么挑」是稳定的说明。
+        StatusText.Text = (gradeNote.Length > 0 ? gradeNote + "  " : string.Empty) + (batch.DoneCount > 0
             ? gachaReveal
                 // 开奖模式：这一排是盖着的，下一步动作只有「点它」。所以文案直说这件事，
                 // 不提右键那几项——它们在图露面之前根本没有意义（菜单里也不摆）。
@@ -2605,7 +2629,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                   + (batch.FailedCount > 0 ? $"，{batch.FailedCount} 张失败（把鼠标停在格子上看原因）" : string.Empty)
                   + "：在节点上方那排窗口里挑——右键「用这一张」收进节点，「删除这一张」扔掉它，"
                   + "都不要就「全部不要，重做」；双击可以放大看。"
-            : $"这一批 {count} 张都没出来：把鼠标停在格子上看原因，或点「重做这一批」。";
+            : $"这一批 {count} 张都没出来：把鼠标停在格子上看原因，或点「重做这一批」。");
     }
 
     /// <summary>
@@ -2819,7 +2843,8 @@ public partial class MainWindow : Window, IAgentSessionHost
         for (var i = 0; i < batch.Count; i++)
         {
             if (batch.Slots[i] is { Status: BatchSlotStatus.Done, Removed: false, Path.Length: > 0 } slot)
-                cards.Add(new GachaCard(i, slot.Path));
+                // 判定结果一起带进去：没判过就是 null，**不等于白档**——揭晓里两者长得不一样。
+                cards.Add(new GachaCard(i, slot.Path, slot.Quality));
         }
         if (cards.Count == 0)
         {
@@ -5126,7 +5151,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (!await SettingsWindow.ShowAsync(this, initialPage: 0)) return false;
         StatusText.Text = "模型配置已保存，下一轮对话生效";
         // 这一页里也可能改了「出图观感」那个开关（它跟模型配置同在一个窗口），重新取一次并重画。
-        RefreshGachaReveal();
+        RefreshRevealPreferences();
         CanvasSurfaceControl.Refresh();
         AgentWorkbenchPanel.SyncHostState();
         return true;
@@ -5143,7 +5168,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (!await SettingsWindow.ShowAsync(this)) return;
         StatusText.Text = "设置已保存";
         // 「出图观感」那个开关就在这个窗口里：改了它要立刻反映到画布上那排候选卡的画法。
-        RefreshGachaReveal();
+        RefreshRevealPreferences();
         CanvasSurfaceControl.Refresh();
         // 模型 / 密钥可能变了：面板头部的「当前模型」与后续请求都要跟着换。
         AgentWorkbenchPanel.SyncHostState();

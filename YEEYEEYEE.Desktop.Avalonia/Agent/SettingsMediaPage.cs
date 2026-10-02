@@ -371,6 +371,32 @@ internal static class SettingsMediaPage
             "两种模式下有一条是一样的：整批还在跑时都不能挑。中途挑会把整批丢掉，" +
             "而已经发出去的出图请求取消不了，它们跑完的图就没人认领了，所以统一等这一批出完。"));
 
+        // 让模型给这一批排名次（名次换成档位）。缺哪一条就说哪一条，不给一个点下去必然不生效的勾选框。
+        var judgeBlocked = config.UseLocalProvider
+            ? "现在选的是本地模拟，判定不会真的发生。"
+            : !config.IsConfigured
+                ? "还没有配置接口地址与模型。"
+                : !config.SupportsImageInput
+                    ? "当前模型没有开「支持图片输入」——请在接入设置的高级配置里勾上，或换一个能看图的模型。"
+                    : string.Empty;
+        var judgeQuality = new CheckBox
+        {
+            Content = "出图后让模型判一下：给这一批排名次，名次换成档位（金 / 红 / 紫 / 蓝 / 白），开奖按档位出效果",
+            IsChecked = config.JudgeImageQuality,
+            IsEnabled = judgeBlocked.Length == 0,
+            FontSize = 11,
+            Foreground = Brush("DfInk2")
+        };
+        root.Children.Add(judgeQuality);
+        root.Children.Add(Note(judgeBlocked.Length > 0
+            ? "现在打不开这条：" + judgeBlocked
+            : "开着会**多花一次模型调用**（把这一批图连同三个判据发过去），所以默认关。"));
+        root.Children.Add(Note(
+            "档位是**模型在这一批里排的名次**，不是绝对质量：第 1 名金、第 2 名红、第 3 名紫、其余蓝、最后一名白；" +
+            "**只有一张时不判**——没有可比的第二张，名次没有意义。模型给的理由会原样显示在卡上。" +
+            "另外本地还会先筛一道客观坏图（读不出来 / 整张一个颜色 / 尺寸只有要求的一半以下），那些直接是白档。" +
+            "档位是模型的判断而不是客观结论，同一批再判一次未必一样——界面上会写明这一点。"));
+
         // ---------- 写回 ----------
         // 文本字段原样写回（是否留空由各链路自己按「留空则复用」处理）；
         // 整数字段用 TryParse，解析失败就**保持原值不动**——用户正在中间状态打字（例如删光了准备重填）时，
@@ -402,6 +428,7 @@ internal static class SettingsMediaPage
 
             // 出图观感（文档顶层，不属于某一份接口配置）：勾选框是三态的，只有 true 才算开。
             config.GachaReveal = gachaReveal.IsChecked == true;
+            config.JudgeImageQuality = judgeQuality.IsChecked == true;
         }
 
         /// <summary>
@@ -428,6 +455,7 @@ internal static class SettingsMediaPage
             videoMaxRefs.Text = config.VideoMaxReferenceImages.ToString();
             videoSeconds.Text = config.VideoDefaultSeconds.ToString();
             gachaReveal.IsChecked = config.GachaReveal;
+            judgeQuality.IsChecked = config.JudgeImageQuality;
         }
 
         /// <summary>

@@ -51,6 +51,23 @@ public interface IAiJsonCompleter
 }
 
 /// <summary>
+/// 「结构化 JSON + 图片」的多模态补全能力（例如给一批图排名次）。
+///
+/// 单独一个接口、而不是往 <see cref="IAiJsonCompleter"/> 上加一个带图的方法：
+/// 能力的可用性不一样——要求 JSON 只要有模型就行，**看图还要求这个模型开了图片输入**。
+/// 混在一起的话，调用方会拿到一个「能要 JSON、但一传图就失败」的对象，
+/// 而它没法在调之前知道自己能不能传图。所以由工厂返回 null 把这件事说清楚。
+/// </summary>
+public interface IAiImageJsonCompleter
+{
+    Task<string> CompleteJsonWithImagesAsync(
+        string systemPrompt,
+        string userPrompt,
+        IReadOnlyList<string> images,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// 多轮对话能力。与 <see cref="IAiProvider.GenerateAsync"/> 的区别：
 /// 对话**不强制 JSON 输出**，允许模型用自然语言回答，用于「和助手讨论企划 / 剧情 / 设定」这类场景；
 /// 结构化生成仍然走 GenerateAsync。
