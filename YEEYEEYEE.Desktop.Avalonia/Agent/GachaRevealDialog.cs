@@ -27,17 +27,21 @@ internal sealed record GachaCard(int Index, string Path);
 /// 早先否决过「出图完自动弹出大图」，理由是选择权在用户看到之前就被替他做完了；
 /// 而这里是他自己点的卡片，看多久、要不要挑、要不要先不看，都由他。
 ///
-/// 四条刻意的设计取舍：
-/// · **形象是自有的**（那个 ◈ 标记 + 厂家配色），不用任何厂家的 logo 或拟人形象——那些是各自的商标与
+/// 五条刻意的设计取舍：
+/// · **卡面是黑白的，颜色全在卡背后那团光里。** 卡片本身只有深浅灰：一层卡纸、一圈细描边、
+///   中央一枚自有徽记。区分六张卡靠的是每张卡背后那团**缓缓流动**的光晕，它的颜色取这张图自己的主色相。
+///   这么分是有道理的：卡面一旦上色（上一版就是这么干的：彩色描边、彩色色带、彩色角标），
+///   它就和自己要展示的那张图抢眼，看着"花"而不是"好"；把颜色挪到卡背后之后，
+///   卡片安静下来，而颜色反而成了更好用的线索（扫一眼光就知道哪张是哪张）。
+/// · **形象是自有的**（那个 ◈ 标记 + 厂家缩写），不用任何厂家的 logo 或拟人形象——那些是各自的商标与
 ///   著作权作品，且拿了会让人以为有官方合作。厂家只体现为「两个字母 + 一个区分色」，与
 ///   <see cref="ProviderBadges"/> 是同一份数据。
 /// · **光点数量暂时统一**，不按「金 / 紫 / 蓝」分档：质量判据还没定（TODO 第 8 条），
 ///   凭空分档等于在界面上宣布一个不存在的评级。等判据定了，只改 <see cref="SparkCount"/> 的来源。
 /// · **许愿是仪式，不是因果**：图在这一层打开之前就已经全出好了。所以文案只陈述事实
 ///   （「这一批 N 张已出好」），不写「许愿会影响出图」这类不成立的话。
-/// · **每张卡的颜色取它自己那张图的主色相**，不是六张共用一个厂家色。卡面顶部那道色带、选中时的
-///   光晕、翻面时的闪光都用它——这是「这张卡的颜色」，不是「这张卡的质量」，
-///   所以它不承担任何评级含义（评级是待到办第 8 条的事）。
+/// · **光晕的颜色是「这张卡偏什么色」，不是「这张卡更好」**，所以它不承担任何评级含义
+///   （评级是待办第 8 条的事）。
 /// </summary>
 internal static class GachaRevealDialog
 {
@@ -65,8 +69,11 @@ internal static class GachaRevealDialog
     /// <summary>翻面的后半程（从侧面展开成正对）。</summary>
     private const int FlipBackMs = 170;
 
-    /// <summary>兜底卡面比例（拿不到图时用）。二游卡面偏瘦长。</summary>
+    /// <summary>兜底卡面比例（拿不到图时用）。</summary>
     private const double FallbackCardAspect = 1.42;
+
+    /// <summary>光晕比卡片每边多出多少。少了看不出「卡背后有光」，多了会糊到邻居身上。</summary>
+    private const double HaloBleed = 52;
 
     /// <summary>
     /// 打开全屏揭晓。返回被选中的那一张的序号；用户没挑就关掉时返回 null
@@ -94,7 +101,7 @@ internal static class GachaRevealDialog
         var gap = cards.Count <= 3 ? 22 : 15;
         var rowWidth = cards.Count * cardWidth + (cards.Count - 1) * gap;
 
-        // 每张卡自己的主色：另解一张很小的缩略图，按色相分桶取最主要的那个色相。
+        // 每张卡背后那团光的颜色：另解一张很小的缩略图，按色相分桶取最主要的那个色相。
         // 解 24 宽而不是从正面的 480 宽那张里抽：480 那张要全量拷进内存才读得到，
         // 而「这张图偏什么色」这件事，24×24 已经足够，且几乎不花时间。
         var tints = new Color[cards.Count];
@@ -149,12 +156,11 @@ internal static class GachaRevealDialog
             VerticalAlignment = VerticalAlignment.Center
         };
 
-        // 卡排下面一条舞台边线、卡排后面一层柔光：六张卡直接浮在纯黑里会显得又空又平，
-        // 这两样都不承担信息，纯粹让「这是一次揭晓」有个台面。
+        // 卡排下面一条舞台边线：不给台面一点交代的话，六张卡会像浮在空处。
         var floor = new Border
         {
             Width = rowWidth + 150,
-            Height = 1.5,
+            Height = 1,
             HorizontalAlignment = HorizontalAlignment.Center,
             IsHitTestVisible = false,
             Background = new LinearGradientBrush
@@ -163,9 +169,9 @@ internal static class GachaRevealDialog
                 EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
                 GradientStops =
                 {
-                    new GradientStop(Color.FromArgb(0, accent.R, accent.G, accent.B), 0),
-                    new GradientStop(Color.FromArgb(120, accent.R, accent.G, accent.B), 0.5),
-                    new GradientStop(Color.FromArgb(0, accent.R, accent.G, accent.B), 1)
+                    new GradientStop(Color.FromArgb(0, 255, 255, 255), 0),
+                    new GradientStop(Color.FromArgb(46, 255, 255, 255), 0.5),
+                    new GradientStop(Color.FromArgb(0, 255, 255, 255), 1)
                 }
             }
         };
@@ -179,7 +185,13 @@ internal static class GachaRevealDialog
             Children = { cardRow, floor }
         };
 
+        // 一个格子 = 一团光晕 + 一张卡 + 一层「选中时加亮的光晕」。三者叠在一起，
+        // 格子本身的尺寸就是卡片的尺寸，光晕超出格子向外溢（没有祖先裁剪它），
+        // 所以六团光会在边缘互相渗一点——那正是想要的「流动」感。
+        var cells = new List<Grid>();
         var frames = new List<Border>();
+        var halos = new List<Border>();
+        var haloBoosts = new List<Border>();
         var faces = new List<Control>();
         var inners = new List<Grid>();
         var flashes = new List<Border>();
@@ -189,8 +201,8 @@ internal static class GachaRevealDialog
         for (var i = 0; i < cards.Count; i++)
         {
             var tint = tints[i];
-            var back = BuildCardBack(i + 1, tint);
-            var face = BuildCardFace(faceBitmaps[i], i + 1, tint);
+            var back = BuildCardBack(i + 1, badgeAbbreviation);
+            var face = BuildCardFace(faceBitmaps[i], i + 1);
             faces.Add(face);
 
             // 卡面之外再套一层用于「翻面闪光」：它盖在卡面之上，翻完那一瞬间亮一下再化掉。
@@ -206,9 +218,9 @@ internal static class GachaRevealDialog
                     EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
                     GradientStops =
                     {
-                        new GradientStop(Color.FromArgb(200, 255, 255, 255), 0),
-                        new GradientStop(Color.FromArgb(150, tint.R, tint.G, tint.B), 0.5),
-                        new GradientStop(Color.FromArgb(0, tint.R, tint.G, tint.B), 1)
+                        new GradientStop(Color.FromArgb(190, 255, 255, 255), 0),
+                        new GradientStop(Color.FromArgb(70, 255, 255, 255), 0.45),
+                        new GradientStop(Color.FromArgb(0, 255, 255, 255), 1)
                     }
                 }
             };
@@ -220,11 +232,11 @@ internal static class GachaRevealDialog
             {
                 Width = cardWidth,
                 Height = cardHeight,
-                CornerRadius = new CornerRadius(15),
-                BorderThickness = new Thickness(1.5),
-                BorderBrush = CardBorder(tint, selected: false),
-                Background = new SolidColorBrush(Color.Parse("#0B1119")),
-                BoxShadow = CardShadows(tint, selected: false),
+                CornerRadius = new CornerRadius(14),
+                BorderThickness = new Thickness(1),
+                BorderBrush = CardEdge(selected: false),
+                Background = new SolidColorBrush(Color.Parse("#0A0C10")),
+                BoxShadow = CardShadows(selected: false),
                 ClipToBounds = true,
                 Child = inner,
                 Cursor = new Cursor(StandardCursorType.Hand),
@@ -233,6 +245,20 @@ internal static class GachaRevealDialog
                 RenderTransform = TransformOperations.Parse("scale(1,1)")
             };
             frames.Add(frame);
+
+            var halo = BuildHalo(tint, cardWidth + HaloBleed * 2, cardHeight + HaloBleed * 2);
+            halo.RenderTransformOrigin = RelativePoint.Center;
+            halos.Add(halo);
+            var boost = BuildHalo(tint, cardWidth + HaloBleed * 2, cardHeight + HaloBleed * 2, brighter: true);
+            boost.Opacity = 0;
+            haloBoosts.Add(boost);
+
+            var cell = new Grid { Width = cardWidth, Height = cardHeight };
+            cell.Children.Add(halo);
+            cell.Children.Add(boost);
+            cell.Children.Add(frame);
+            cells.Add(cell);
+
             var captured = i;
             frame.PointerPressed += (_, e) =>
             {
@@ -240,21 +266,21 @@ internal static class GachaRevealDialog
                 if (!flipsDone) return;     // 还没翻完先不接受选择：这时候看到的还不是图
                 ApplySelection(captured);
             };
-            // 鼠标扫过时这张抬一点、亮回来。一整排等亮的卡看着像「六张图」，
+            // 鼠标扫过时这一格抬起来：一整排等亮的卡看着像「六张图」，
             // 扫过会动的那一排才像「可以挑的卡」。
             frame.PointerEntered += (_, _) =>
             {
                 if (!flipsDone || selected == captured) return;
-                frame.RenderTransform = TransformOperations.Parse("scale(1.035)");
-                frame.Opacity = 1;
+                frame.RenderTransform = TransformOperations.Parse("scale(1.045)");
+                cell.Opacity = 0.8;
             };
             frame.PointerExited += (_, _) =>
             {
                 if (!flipsDone || selected == captured) return;
                 frame.RenderTransform = TransformOperations.Parse("scale(1,1)");
-                frame.Opacity = selected is null ? 1 : 0.5;
+                cell.Opacity = selected is null ? 1 : 0.45;
             };
-            cardRow.Children.Add(frame);
+            cardRow.Children.Add(cell);
         }
 
         var stage = new Grid { Children = { wishStage, sparkField, cardColumn } };
@@ -268,7 +294,7 @@ internal static class GachaRevealDialog
         });
         // 全部揭晓之后，画面上只剩一排卡和底部几个按钮，会显得「上面空着」。
         // 顶上补一行结果标题（节点名 + 这一批几张），与卡排一起浮出来。
-        var resultHeader = BuildResultHeader(nodeTitle, cards.Count, accent);
+        var resultHeader = BuildResultHeader(nodeTitle, cards.Count);
         resultHeader.VerticalAlignment = VerticalAlignment.Top;
         resultHeader.Margin = new Thickness(0, 72, 0, 0);
         resultHeader.Opacity = 0;
@@ -290,10 +316,10 @@ internal static class GachaRevealDialog
                 EndPoint = new RelativePoint(0.5, 1, RelativeUnit.Relative),
                 GradientStops =
                 {
-                    new GradientStop(Color.FromArgb(0, 118, 156, 255), 0),
-                    new GradientStop(Color.FromArgb(18, 118, 156, 255), 0.44),
-                    new GradientStop(Color.FromArgb(12, 92, 132, 224), 0.58),
-                    new GradientStop(Color.FromArgb(0, 70, 110, 200), 1)
+                    new GradientStop(Color.FromArgb(0, 255, 255, 255), 0),
+                    new GradientStop(Color.FromArgb(11, 226, 236, 255), 0.44),
+                    new GradientStop(Color.FromArgb(8, 190, 210, 245), 0.58),
+                    new GradientStop(Color.FromArgb(0, 150, 180, 220), 1)
                 }
             }
         };
@@ -337,7 +363,7 @@ internal static class GachaRevealDialog
         var timers = new List<DispatcherTimer>();
         void At(int ms, Action action) => timers.Add(ScheduleOnce(ms, action));
 
-        // 所有卡都停在同一条时间线上：翻面结束之后才允许挑。选中的那张再抬起来、
+        // 所有卡都停在同一条时间线上：翻面结束之后才允许挑。选中的那一格再抬起来、
         // 其余压暗——「挑一张」这件事在画面上必须有主次，六张等亮是看不出选没选的。
         var cardsAt = WishHoldMs + 470;
         var flipsAt = cardsAt + CardsAppearMs;
@@ -353,6 +379,8 @@ internal static class GachaRevealDialog
                 frames[i].Transitions = null;
                 if (!ReferenceEquals(inners[i].Children[0], faces[i])) inners[i].Children[0] = faces[i];
                 flashes[i].Opacity = 0;
+                haloBoosts[i].Transitions = null;
+                cells[i].Opacity = selected is null ? 1 : (selected == i ? 1 : 0.45);
             }
             wishStage.Opacity = 0;
             sparkField.Opacity = 0;
@@ -365,7 +393,7 @@ internal static class GachaRevealDialog
             footerHint.Text = "点一张挑走，再点「用这一张」";
         }
 
-        /// <summary>把「选中要动的那几项」接上过渡：抬升、压暗、描边都要有动画才不跳。</summary>
+        /// <summary>把「选中要动的那几项」接上过渡：抬升、压暗、加亮的光晕都要有动画才不跳。</summary>
         void ArmInteractions()
         {
             for (var i = 0; i < frames.Count; i++)
@@ -377,11 +405,24 @@ internal static class GachaRevealDialog
                         Property = Visual.RenderTransformProperty,
                         Duration = TimeSpan.FromMilliseconds(180),
                         Easing = new CubicEaseOut()
-                    },
+                    }
+                };
+                cells[i].Transitions = new Transitions
+                {
                     new DoubleTransition
                     {
                         Property = Visual.OpacityProperty,
-                        Duration = TimeSpan.FromMilliseconds(180),
+                        Duration = TimeSpan.FromMilliseconds(220),
+                        Easing = new CubicEaseOut()
+                    }
+                };
+                // 选中那层光晕：加亮靠它，所以它自己不能再被别的动画占着 Opacity，否则改不动。
+                haloBoosts[i].Transitions = new Transitions
+                {
+                    new DoubleTransition
+                    {
+                        Property = Visual.OpacityProperty,
+                        Duration = TimeSpan.FromMilliseconds(240),
                         Easing = new CubicEaseOut()
                     }
                 };
@@ -432,6 +473,10 @@ internal static class GachaRevealDialog
             ambient.Opacity = 1;
             resultHeader.Opacity = 1;
             cardColumn.Opacity = 1;
+            // 光晕从这一刻开始缓缓流动：每张的周期不一样、起始方向也交替，
+            // 所以六团光不会同步呼吸——同步就成了一整块背景，那样反而分不出哪团光属于哪张卡。
+            for (var i = 0; i < halos.Count; i++)
+                StartDrift(halos[i], seconds: 3.2 + i * 0.55, startHigh: i % 2 == 1);
         });
         At(flipsAt, () =>
         {
@@ -449,12 +494,14 @@ internal static class GachaRevealDialog
             for (var k = 0; k < frames.Count; k++)
             {
                 var on = k == index;
-                var tint = tints[k];
-                frames[k].BorderThickness = new Thickness(on ? 3 : 1.5);
-                frames[k].BorderBrush = CardBorder(tint, on);
-                frames[k].BoxShadow = CardShadows(tint, on);
+                frames[k].BorderThickness = new Thickness(on ? 2.5 : 1);
+                frames[k].BorderBrush = CardEdge(on);
+                frames[k].BoxShadow = CardShadows(on);
                 frames[k].RenderTransform = TransformOperations.Parse(on ? "scale(1.06)" : "scale(1,1)");
-                frames[k].Opacity = on ? 1 : 0.5;
+                // 压暗压的是**整格**（卡 + 它背后那团光），不是只压卡：
+                // 只压卡的话，没被选中的那几张背后的光还是满亮，画面照样是六团一样亮的光。
+                cells[k].Opacity = on ? 1 : 0.45;
+                haloBoosts[k].Opacity = on ? 0.85 : 0;
             }
             confirm.IsEnabled = true;
             footerHint.Text = $"已选中第 {index + 1} 张（共 {cards.Count} 张）";
@@ -507,141 +554,91 @@ internal static class GachaRevealDialog
     // ==================== 卡面 ====================
 
     /// <summary>
-    /// 卡背：双框 + 斜向掠光 + 中央徽记 + 四角刻线。
+    /// 卡背：一层深灰卡纸 + 内衬细线 + 中央自有徽记 + 底下一行厂家缩写 + 左上角序号。
     ///
-    /// 二游的卡背之所以好看，靠的不是图案复杂，而是**层次**：底色有渐变、外框里再收一层内框、
-    /// 光斜着扫过去、中间有个能认的记号。所以这里就按这四层叠，不用任何位图素材。
+    /// **它是黑白的。** 卡背是整排盖着时唯一看得见的东西，如果它自己就有颜色，
+    /// 那六张卡会先被自己的底色区分一次；而区分是背后那团光该干的事。
     /// </summary>
-    private static Control BuildCardBack(int number, Color tint)
+    private static Control BuildCardBack(int number, string badge)
     {
         var panel = new Panel { IsHitTestVisible = false };
 
-        // 第一层：斜向的深蓝紫渐变（纯色会把卡背压成一块死色）。
         panel.Children.Add(new Border
         {
             Background = new LinearGradientBrush
             {
                 StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-                EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
+                EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
                 GradientStops =
                 {
-                    new GradientStop(Color.Parse("#243052"), 0),
-                    new GradientStop(Color.Parse("#141C2E"), 0.5),
-                    new GradientStop(Color.Parse("#080C14"), 1)
+                    new GradientStop(Color.Parse("#171A20"), 0),
+                    new GradientStop(Color.Parse("#0E1015"), 0.55),
+                    new GradientStop(Color.Parse("#08090C"), 1)
                 }
             }
         });
 
-        // 第二层：斜向掠光。宽度给足，靠外层 ClipToBounds 裁掉，这样旋转后两头不会出现硬边。
+        // 内衬细线：外框里再收一层，卡面才不像一块糊上去的色块。
         panel.Children.Add(new Border
         {
-            Width = 420,
-            Height = 620,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            IsHitTestVisible = false,
-            RenderTransformOrigin = RelativePoint.Center,
-            RenderTransform = TransformOperations.Parse("rotate(22deg)"),
-            Background = new LinearGradientBrush
-            {
-                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-                EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
-                GradientStops =
-                {
-                    new GradientStop(Color.FromArgb(0, 255, 255, 255), 0),
-                    new GradientStop(Color.FromArgb(30, 255, 255, 255), 0.46),
-                    new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.62),
-                    new GradientStop(Color.FromArgb(16, tint.R, tint.G, tint.B), 0.8),
-                    new GradientStop(Color.FromArgb(0, tint.R, tint.G, tint.B), 1)
-                }
-            }
-        });
-
-        // 第三层：内框。外框里再收一层 1px 的浅线，卡面才不像一块糊上去的色块。
-        panel.Children.Add(new Border
-        {
-            Margin = new Thickness(7),
+            Margin = new Thickness(8),
             CornerRadius = new CornerRadius(9),
             BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(28, 255, 255, 255)),
             IsHitTestVisible = false
         });
 
-        // 第四层：中央徽记。光环 + 斜放的方框 + ◈，三层同心。
-        var emblem = new Grid
+        // 中央：一枚自有的记号。不用任何厂家的 logo（商标与著作权，且会让人以为有官方合作），
+        // 厂家只体现为底下那行两字母缩写，与右下角那枚徽标是同一份数据。
+        var emblem = new StackPanel
         {
+            Spacing = 10,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         };
-        emblem.Children.Add(new Border
+        var ring = new Border
         {
-            Width = 92,
-            Height = 92,
-            CornerRadius = new CornerRadius(46),
-            Background = new SolidColorBrush(Color.FromArgb(26, tint.R, tint.G, tint.B)),
-            BoxShadow = new BoxShadows(new BoxShadow
-            {
-                OffsetX = 0,
-                OffsetY = 0,
-                Blur = 34,
-                Spread = 1,
-                Color = Color.FromArgb(120, tint.R, tint.G, tint.B)
-            })
-        });
-        emblem.Children.Add(new Border
-        {
-            Width = 62,
-            Height = 62,
-            CornerRadius = new CornerRadius(12),
-            BorderThickness = new Thickness(1.2),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(170, tint.R, tint.G, tint.B)),
-            Background = new SolidColorBrush(Color.FromArgb(18, tint.R, tint.G, tint.B)),
-            RenderTransformOrigin = RelativePoint.Center,
-            RenderTransform = TransformOperations.Parse("rotate(45deg)")
-        });
-        emblem.Children.Add(new TextBlock
+            Width = 84,
+            Height = 84,
+            CornerRadius = new CornerRadius(42),
+            BorderThickness = new Thickness(1),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(46, 255, 255, 255)),
+            Background = new SolidColorBrush(Color.FromArgb(9, 255, 255, 255)),
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        ring.Child = new TextBlock
         {
             Text = "◈",
-            FontSize = 26,
+            FontSize = 32,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            Foreground = new SolidColorBrush(Color.FromArgb(240, 232, 240, 255))
-        });
+            Foreground = new SolidColorBrush(Color.FromArgb(226, 233, 237, 244))
+        };
+        emblem.Children.Add(ring);
+        if (badge.Length > 0)
+        {
+            emblem.Children.Add(new TextBlock
+            {
+                Text = badge,
+                FontSize = 10,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Foreground = new SolidColorBrush(Color.FromArgb(140, 150, 158, 170))
+            });
+        }
         panel.Children.Add(emblem);
 
-        panel.Children.Add(BuildCornerTicks(tint, inset: 13, size: 11, alpha: 130));
-
-        // 序号放左上角：整排盖着的时候要能对上是第几张。
-        var index = new Border
-        {
-            Margin = new Thickness(13, 12, 0, 0),
-            Padding = new Thickness(7, 1, 7, 2),
-            CornerRadius = new CornerRadius(6),
-            HorizontalAlignment = HorizontalAlignment.Left,
-            VerticalAlignment = VerticalAlignment.Top,
-            Background = new SolidColorBrush(Color.FromArgb(150, 8, 12, 20)),
-            BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(90, tint.R, tint.G, tint.B)),
-            Child = new TextBlock
-            {
-                Text = number.ToString(),
-                FontSize = 11,
-                FontWeight = FontWeight.SemiBold,
-                Foreground = new SolidColorBrush(Color.FromArgb(220, 214, 228, 250))
-            }
-        };
-        panel.Children.Add(index);
-
+        panel.Children.Add(BuildCornerTicks(inset: 14, size: 10, alpha: 40));
+        panel.Children.Add(BuildIndexChip(number, top: true));
         return panel;
     }
 
     /// <summary>
-    /// 卡面：满幅图 + 底部压暗 + 顶部色带 + 编号牌 + 四角刻线。
+    /// 卡面：满幅图，外加一圈黑白收边（底部压暗 + 内衬细线 + 角刻线 + 左下序号）。
     ///
-    /// 顶部那道色带是这张图自己的颜色（<see cref="ReadCardColor"/>）——它说的只是「这张卡偏什么色」，
-    /// 不表示这张卡更好或更差。图读不出来时如实说明，不拿一张空白冒充。
+    /// 收边一律是灰的，没有一道彩色——图的颜色归图，卡片不跟它抢。
+    /// 图读不出来时如实说明，不拿一张空白冒充。
     /// </summary>
-    private static Control BuildCardFace(Bitmap? bitmap, int number, Color tint)
+    private static Control BuildCardFace(Bitmap? bitmap, int number)
     {
         var panel = new Panel { IsHitTestVisible = false };
 
@@ -665,7 +662,7 @@ internal static class GachaRevealDialog
             });
         }
 
-        // 底部压暗：不加的话，亮图的下缘会把编号牌和「第几张」吃掉。
+        // 底部压暗：不加的话，亮图的下缘会把序号吃掉。
         panel.Children.Add(new Border
         {
             Background = new LinearGradientBrush
@@ -674,161 +671,173 @@ internal static class GachaRevealDialog
                 EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
                 GradientStops =
                 {
-                    new GradientStop(Color.FromArgb(0, 4, 7, 12), 0),
-                    new GradientStop(Color.FromArgb(0, 4, 7, 12), 0.52),
-                    new GradientStop(Color.FromArgb(210, 4, 7, 12), 1)
+                    new GradientStop(Color.FromArgb(0, 4, 5, 8), 0),
+                    new GradientStop(Color.FromArgb(0, 4, 5, 8), 0.6),
+                    new GradientStop(Color.FromArgb(190, 4, 5, 8), 1)
                 }
             }
         });
 
-        // 顶部色带：这张卡自己的颜色。
         panel.Children.Add(new Border
         {
-            Height = 4,
-            VerticalAlignment = VerticalAlignment.Top,
-            Background = new LinearGradientBrush
-            {
-                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-                EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
-                GradientStops =
-                {
-                    new GradientStop(Color.FromArgb(235, tint.R, tint.G, tint.B), 0),
-                    new GradientStop(Color.FromArgb(150, tint.R, tint.G, tint.B), 0.55),
-                    new GradientStop(Color.FromArgb(40, tint.R, tint.G, tint.B), 1)
-                }
-            }
-        });
-
-        // 内衬细线：与卡背同一套「外框里再收一层」，翻过来时不至于像换了一张卡。
-        panel.Children.Add(new Border
-        {
-            Margin = new Thickness(7),
+            Margin = new Thickness(8),
             CornerRadius = new CornerRadius(9),
             BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(56, 255, 255, 255)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(36, 255, 255, 255)),
             IsHitTestVisible = false
         });
 
-        panel.Children.Add(BuildCornerTicks(tint, inset: 13, size: 11, alpha: 200));
-
-        var plate = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 6,
-            Margin = new Thickness(11, 0, 0, 11),
-            HorizontalAlignment = HorizontalAlignment.Left,
-            VerticalAlignment = VerticalAlignment.Bottom
-        };
-        plate.Children.Add(new Border
-        {
-            Width = 20,
-            Height = 20,
-            CornerRadius = new CornerRadius(6),
-            Background = new SolidColorBrush(Color.FromArgb(235, tint.R, tint.G, tint.B)),
-            Child = new TextBlock
-            {
-                Text = number.ToString(),
-                FontSize = 11,
-                FontWeight = FontWeight.Bold,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                Foreground = new SolidColorBrush(Color.Parse("#080C14"))
-            }
-        });
-        plate.Children.Add(new TextBlock
-        {
-            Text = "候选",
-            FontSize = 10,
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = new SolidColorBrush(Color.FromArgb(210, 226, 236, 250))
-        });
-        panel.Children.Add(plate);
-
+        panel.Children.Add(BuildCornerTicks(inset: 14, size: 10, alpha: 90));
+        panel.Children.Add(BuildIndexChip(number, top: false));
         return panel;
     }
 
     /// <summary>四角刻线：只画两条边的 L 形短线。有它卡面立刻「像一张卡」而不是一块图。</summary>
-    private static Control BuildCornerTicks(Color tint, double inset, double size, byte alpha)
+    private static Control BuildCornerTicks(double inset, double size, byte alpha)
     {
         var panel = new Panel { IsHitTestVisible = false };
-        var brush = new SolidColorBrush(Color.FromArgb(alpha, tint.R, tint.G, tint.B));
+        var brush = new SolidColorBrush(Color.FromArgb(alpha, 255, 255, 255));
         var margin = new Thickness(inset);
         panel.Children.Add(new Border
         {
             Width = size, Height = size, Margin = margin,
-            BorderThickness = new Thickness(1.4, 1.4, 0, 0), BorderBrush = brush,
+            BorderThickness = new Thickness(1.2, 1.2, 0, 0), BorderBrush = brush,
             CornerRadius = new CornerRadius(3, 0, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top
         });
         panel.Children.Add(new Border
         {
             Width = size, Height = size, Margin = margin,
-            BorderThickness = new Thickness(0, 1.4, 1.4, 0), BorderBrush = brush,
+            BorderThickness = new Thickness(0, 1.2, 1.2, 0), BorderBrush = brush,
             CornerRadius = new CornerRadius(0, 3, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top
         });
         panel.Children.Add(new Border
         {
             Width = size, Height = size, Margin = margin,
-            BorderThickness = new Thickness(1.4, 0, 0, 1.4), BorderBrush = brush,
+            BorderThickness = new Thickness(1.2, 0, 0, 1.2), BorderBrush = brush,
             CornerRadius = new CornerRadius(0, 0, 0, 3),
             HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Bottom
         });
         panel.Children.Add(new Border
         {
             Width = size, Height = size, Margin = margin,
-            BorderThickness = new Thickness(0, 0, 1.4, 1.4), BorderBrush = brush,
+            BorderThickness = new Thickness(0, 0, 1.2, 1.2), BorderBrush = brush,
             CornerRadius = new CornerRadius(0, 0, 3, 0),
             HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom
         });
         return panel;
     }
 
-    /// <summary>
-    /// 卡片的投影。两层：一层往下的落地影（让卡片「坐在台面上」而不是浮在色块里），
-    /// 一层本色微光；选中时把本色光换成更强的一圈。
-    ///
-    /// 为什么不给整排卡加一块大柔光当台面：试过。`BoxShadow` 会把**形状内部**也填上颜色，
-    /// 一大块圆角矩形叠在深底上就变成一块灰疙瘩，比不加还难看。要让卡浮起来只能一张一张地投影。
-    /// </summary>
-    private static BoxShadows CardShadows(Color tint, bool selected) => selected
-        ? new BoxShadows(
-            new BoxShadow
+    /// <summary>序号牌：整排盖着（或全亮着）的时候，要能对上是第几张。</summary>
+    private static Control BuildIndexChip(int number, bool top)
+    {
+        return new Border
+        {
+            Margin = top ? new Thickness(14, 13, 0, 0) : new Thickness(14, 0, 0, 13),
+            Padding = new Thickness(8, 1, 8, 2),
+            CornerRadius = new CornerRadius(6),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = top ? VerticalAlignment.Top : VerticalAlignment.Bottom,
+            Background = new SolidColorBrush(Color.FromArgb(165, 8, 10, 14)),
+            BorderThickness = new Thickness(1),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)),
+            Child = new TextBlock
             {
-                OffsetX = 0, OffsetY = 18, Blur = 34, Spread = -10,
-                Color = Color.FromArgb(180, 0, 0, 0)
-            },
-            new[]
-            {
-                new BoxShadow
-                {
-                    OffsetX = 0, OffsetY = 0, Blur = 46, Spread = 1,
-                    Color = Color.FromArgb(205, tint.R, tint.G, tint.B)
-                }
-            })
-        : new BoxShadows(
-            new BoxShadow
-            {
-                OffsetX = 0, OffsetY = 12, Blur = 26, Spread = -12,
-                Color = Color.FromArgb(160, 0, 0, 0)
-            },
-            new[]
-            {
-                new BoxShadow
-                {
-                    OffsetX = 0, OffsetY = 0, Blur = 20, Spread = -7,
-                    Color = Color.FromArgb(80, tint.R, tint.G, tint.B)
-                }
-            });
+                Text = number.ToString(),
+                FontSize = 11,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromArgb(225, 222, 228, 238))
+            }
+        };
+    }
 
     /// <summary>
-    /// 卡片描边：**左上亮、右下暗**的斜向渐变。平涂一圈同色看起来像个塑料框，
-    /// 而斜向的明暗一变，边框立刻有金属边的意思——二游卡框基本上都是这个做法。
+    /// 卡片背后那团光晕。**它是这张卡唯一的颜色**——卡面是黑白的，六张靠这团光区分。
+    ///
+    /// 用 <see cref="RadialGradientBrush"/> 而不是 `BoxShadow`：阴影会把形状**内部**也填上颜色，
+    /// 一大块圆角矩形叠在深底上就是一块灰疙瘩（上一版正是这么翻车的）。径向渐变才是真的
+    /// 从中心往外淡出，没有任何硬边界。
     /// </summary>
-    private static IBrush CardBorder(Color tint, bool selected)
+    private static Border BuildHalo(Color tint, double width, double height, bool brighter = false)
     {
-        var light = Mix(tint, Colors.White, selected ? 0.62 : 0.3);
-        var deep = selected ? tint : Mix(tint, Color.Parse("#0A1120"), 0.45);
+        // 三个数都是试出来的：
+        // · 0.85 处就降到全透明，剩下 15% 留成空白——最后一档如果正好落在边界上，
+        //   六团光就会一起在同一个高度截断，连成一条横贯整排的直线（看着像浮出一个大色块）。
+        // · 卡片只盖住半径的六成左右，所以真正看得见的是 0.6~0.85 那一段，
+        //   亮度要给足，否则光全被卡片自己挡在后面、什么都看不见。
+        var center = brighter ? 215 : 150;
+        var mid = brighter ? 160 : 105;
+        return new Border
+        {
+            Width = width,
+            Height = height,
+            CornerRadius = new CornerRadius(Math.Min(width, height) / 2),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false,
+            Background = new RadialGradientBrush
+            {
+                Center = new RelativePoint(0.5, 0.5, RelativeUnit.Relative),
+                GradientOrigin = new RelativePoint(0.5, 0.5, RelativeUnit.Relative),
+                // 半径是**相对**量（0.5 = 半个宽/高），且类型是 RelativeScalar 而不是 double。
+                RadiusX = new RelativeScalar(0.5, RelativeUnit.Relative),
+                RadiusY = new RelativeScalar(0.5, RelativeUnit.Relative),
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb((byte)center, tint.R, tint.G, tint.B), 0),
+                    new GradientStop(Color.FromArgb((byte)mid, tint.R, tint.G, tint.B), 0.5),
+                    new GradientStop(Color.FromArgb(0, tint.R, tint.G, tint.B), 0.85),
+                    new GradientStop(Color.FromArgb(0, tint.R, tint.G, tint.B), 1)
+                }
+            }
+        };
+    }
+
+    /// <summary>
+    /// 让一团光晕缓缓上下漂、同时轻轻呼吸。周期由调用方给，每张卡不一样——**同步就白做了**：
+    /// 六团光一起亮一起灭，看起来是一整块背景，反而分不出哪团光属于哪张卡。
+    /// </summary>
+    private static void StartDrift(Visual halo, double seconds, bool startHigh)
+    {
+        var animation = new Animation
+        {
+            Duration = TimeSpan.FromSeconds(seconds),
+            IterationCount = IterationCount.Infinite,
+            PlaybackDirection = PlaybackDirection.Alternate,
+            Easing = new SineEaseInOut(),
+            Children =
+            {
+                new KeyFrame
+                {
+                    Cue = new Cue(0d),
+                    Setters =
+                    {
+                        new Setter(Visual.OpacityProperty, startHigh ? 0.95 : 0.5),
+                        new Setter(Visual.RenderTransformProperty,
+                            TransformOperations.Parse(startHigh ? "translate(0px,-8px)" : "translate(0px,8px)"))
+                    }
+                },
+                new KeyFrame
+                {
+                    Cue = new Cue(1d),
+                    Setters =
+                    {
+                        new Setter(Visual.OpacityProperty, startHigh ? 0.5 : 0.95),
+                        new Setter(Visual.RenderTransformProperty,
+                            TransformOperations.Parse(startHigh ? "translate(0px,8px)" : "translate(0px,-8px)"))
+                    }
+                }
+            }
+        };
+        _ = animation.RunAsync(halo);
+    }
+
+    /// <summary>卡片描边：左上亮、右下暗的斜向渐变，但**只有白与灰**。平涂一圈同色看着像塑料框。</summary>
+    private static IBrush CardEdge(bool selected)
+    {
+        var light = selected ? Color.FromArgb(150, 255, 255, 255) : Color.FromArgb(58, 255, 255, 255);
+        var deep = selected ? Color.FromArgb(52, 255, 255, 255) : Color.FromArgb(20, 255, 255, 255);
         return new LinearGradientBrush
         {
             StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
@@ -836,25 +845,42 @@ internal static class GachaRevealDialog
             GradientStops =
             {
                 new GradientStop(light, 0),
-                new GradientStop(tint, 0.42),
+                new GradientStop(Color.FromArgb(selected ? (byte)96 : (byte)38, 255, 255, 255), 0.5),
                 new GradientStop(deep, 1)
             }
         };
     }
 
-    /// <summary>把两个颜色按 t 混合（0 = a，1 = b）。</summary>
-    private static Color Mix(Color a, Color b, double t)
-    {
-        t = Math.Clamp(t, 0, 1);
-        return Color.FromArgb(
-            (byte)Math.Round(a.A + (b.A - a.A) * t),
-            (byte)Math.Round(a.R + (b.R - a.R) * t),
-            (byte)Math.Round(a.G + (b.G - a.G) * t),
-            (byte)Math.Round(a.B + (b.B - a.B) * t));
-    }
+    /// <summary>
+    /// 卡片的投影：一层往下的落地影 + 选中时一圈更亮的白边光。**没有颜色**——
+    /// 颜色归卡背后那团光晕。
+    ///
+    /// 为什么不给整排卡加一块大柔光当台面：试过。`BoxShadow` 会把**形状内部**也填上颜色，
+    /// 一大块圆角矩形叠在深底上就变成一块灰疙瘩，比不加还难看。
+    /// </summary>
+    private static BoxShadows CardShadows(bool selected) => selected
+        ? new BoxShadows(
+            new BoxShadow
+            {
+                OffsetX = 0, OffsetY = 18, Blur = 34, Spread = -10,
+                Color = Color.FromArgb(190, 0, 0, 0)
+            },
+            new[]
+            {
+                new BoxShadow
+                {
+                    OffsetX = 0, OffsetY = 0, Blur = 30, Spread = -6,
+                    Color = Color.FromArgb(46, 255, 255, 255)
+                }
+            })
+        : new BoxShadows(new BoxShadow
+        {
+            OffsetX = 0, OffsetY = 12, Blur = 26, Spread = -12,
+            Color = Color.FromArgb(165, 0, 0, 0)
+        });
 
     /// <summary>结果标题：节点名 + 这一批几张。卡片出现时一起浮出来。</summary>
-    private static Control BuildResultHeader(string nodeTitle, int count, Color accent)
+    private static Control BuildResultHeader(string nodeTitle, int count)
     {
         var stack = new StackPanel
         {
@@ -876,30 +902,30 @@ internal static class GachaRevealDialog
             Spacing = 10,
             HorizontalAlignment = HorizontalAlignment.Center
         };
-        line.Children.Add(Rule(accent, flip: false));
+        line.Children.Add(Rule(flip: false));
         line.Children.Add(new TextBlock
         {
             Text = $"共 {count} 张 · 点一张收进节点",
             FontSize = 11,
             Foreground = new SolidColorBrush(Color.Parse("#8FA6BD"))
         });
-        line.Children.Add(Rule(accent, flip: true));
+        line.Children.Add(Rule(flip: true));
         stack.Children.Add(line);
         return stack;
     }
 
     /// <summary>标题两侧那两小段渐隐横线。</summary>
-    private static Control Rule(Color accent, bool flip)
+    private static Control Rule(bool flip)
     {
         var stops = new GradientStops
         {
-            new GradientStop(Color.FromArgb(0, accent.R, accent.G, accent.B), 0),
-            new GradientStop(Color.FromArgb(170, accent.R, accent.G, accent.B), 1)
+            new GradientStop(Color.FromArgb(0, 255, 255, 255), 0),
+            new GradientStop(Color.FromArgb(90, 255, 255, 255), 1)
         };
         if (flip) stops = new GradientStops
         {
-            new GradientStop(Color.FromArgb(170, accent.R, accent.G, accent.B), 0),
-            new GradientStop(Color.FromArgb(0, accent.R, accent.G, accent.B), 1)
+            new GradientStop(Color.FromArgb(90, 255, 255, 255), 0),
+            new GradientStop(Color.FromArgb(0, 255, 255, 255), 1)
         };
         return new Border
         {
@@ -1125,7 +1151,7 @@ internal static class GachaRevealDialog
             card.RenderTransform = TransformOperations.Parse("scale(1,1)");
 
             // 闪光：**先无过渡地点亮，再挂上过渡往 0 收**。反过来的话（先挂过渡再点亮）
-            // 那 0 → 0.9 也会被当成一段动画，一闪的效果就没了。
+            // 那 0 → 0.85 也会被当成一段动画，一闪的效果就没了。
             flash.Opacity = 0.85;
             flash.Transitions = new Transitions
             {
@@ -1212,10 +1238,10 @@ internal static class GachaRevealDialog
     }
 
     /// <summary>
-    /// 这张卡自己的颜色：另解一张 24 宽的缩略图，按色相分 12 桶，取权重最大的那一桶的色相，
+    /// 这张卡背后那团光该用什么颜色：另解一张 24 宽的缩略图，按色相分 12 桶，取权重最大的那一桶的色相，
     /// 再按固定的饱和度与亮度画出来。
     ///
-    /// 为什么不直接用平均色：照片的平均色几乎都往灰里掉，画成色带就是一条脏灰色，还不如没有。
+    /// 为什么不直接用平均色：照片的平均色几乎都往灰里掉，画成光晕就是一团脏灰，还不如没有。
     /// 所以要的是「主色相」而不是「平均色」。为什么不用 480 那张正面图：读它的像素要整张拷进内存
     /// （4K 图就是几十 MB），而「这张图偏什么色」24×24 已经够用。
     ///
