@@ -69,8 +69,14 @@ internal static class GachaRevealDialog
     /// <summary>翻面的后半程（从侧面展开成正对）。</summary>
     private const int FlipBackMs = 170;
 
-    /// <summary>兜底卡面比例（拿不到图时用）。</summary>
-    private const double FallbackCardAspect = 1.42;
+    /// <summary>
+    /// 卡面固定比例（**高 / 宽**），取 2:3——二游的卡牌基本都是这个竖长方形。
+    ///
+    /// **固定，不跟着图走。** 上一版按每张图自己的比例自适应，一排里方的方、横的横，
+    /// 看着是一排缩略图而不是「一手牌」；一副牌就是要大小一致。
+    /// 代价是方图（出图默认就是方的）放进竖卡里要裁掉两侧——见 BuildCardFace 里为什么宁可裁也不留白。
+    /// </summary>
+    private const double CardAspect = 1.5;
 
     /// <summary>光晕比卡片每边多出多少。少了看不出「卡背后有光」，多了会糊到邻居身上。</summary>
     private const double HaloBleed = 52;
@@ -95,11 +101,15 @@ internal static class GachaRevealDialog
         var faceBitmaps = new Bitmap?[cards.Count];
         for (var i = 0; i < cards.Count; i++) faceBitmaps[i] = LoadFace(cards[i].Path);
 
-        // 卡片按张数定尺寸：3 张时可以给大一点，6 张就得收窄，否则一行放不下。
-        var cardWidth = cards.Count <= 3 ? 232 : 168;
-        var cardHeight = cardWidth * CardHeightRatioFor(faceBitmaps);
-        var gap = cards.Count <= 3 ? 22 : 15;
-        var rowWidth = cards.Count * cardWidth + (cards.Count - 1) * gap;
+        // 排列：一行最多 3 张，超了就换行——6 张就是上下两排、每排 3 张。
+        // 4 张例外走 2×2：3+1 会显得上面挤、下面空。
+        var perRow = cards.Count switch { <= 3 => cards.Count, 4 => 2, _ => 3 };
+        var rows = (cards.Count + perRow - 1) / perRow;
+        // 卡片固定竖长方形；宽度按总张数给——张数少就给大一点，反正一行放得下。
+        var cardWidth = cards.Count switch { 1 => 300, 2 => 260, 3 => 240, _ => 200 };
+        var cardHeight = cardWidth * CardAspect;
+        var gap = 18;
+        var rowWidth = perRow * cardWidth + (perRow - 1) * gap;
 
         // 每张卡背后那团光的颜色：另解一张很小的缩略图，按色相分桶取最主要的那个色相。
         // 解 24 宽而不是从正面的 480 宽那张里抽：480 那张要全量拷进内存才读得到，
@@ -148,13 +158,25 @@ internal static class GachaRevealDialog
             out var mark, out var markRing);
         var sparkField = BuildSparkField(accent, out var sparks);
 
-        var cardRow = new StackPanel
+        // 每行一个水平面板，行与行在竖直方向排开。末行张数少时也居中（5 张 = 上 3 下 2）。
+        var cardGrid = new StackPanel
         {
-            Orientation = Orientation.Horizontal,
-            Spacing = gap,
+            Spacing = 30,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         };
+        var rowOf = new List<StackPanel>();
+        for (var r = 0; r < rows; r++)
+        {
+            var row = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = gap,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            rowOf.Add(row);
+            cardGrid.Children.Add(row);
+        }
 
         // 卡排下面一条舞台边线：不给台面一点交代的话，六张卡会像浮在空处。
         var floor = new Border
@@ -182,7 +204,7 @@ internal static class GachaRevealDialog
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Opacity = 0,
-            Children = { cardRow, floor }
+            Children = { cardGrid, floor }
         };
 
         // 一个格子 = 一团光晕 + 一张卡 + 一层「选中时加亮的光晕」。三者叠在一起，
@@ -280,7 +302,7 @@ internal static class GachaRevealDialog
                 frame.RenderTransform = TransformOperations.Parse("scale(1,1)");
                 cell.Opacity = selected is null ? 1 : 0.45;
             };
-            cardRow.Children.Add(cell);
+            rowOf[i / perRow].Children.Add(cell);
         }
 
         var stage = new Grid { Children = { wishStage, sparkField, cardColumn } };
@@ -644,6 +666,12 @@ internal static class GachaRevealDialog
 
         if (bitmap is not null)
         {
+            // 满幅：整张卡铺满。**不是 Uniform** ——竖卡里放一张方图，Uniform 会在上下留出两条，
+            // 那两条无论拿什么填（试过同一张图放大模糊）都会在接缝处露馅：图上只要有地平线这类
+            // 横向结构，就会看成「双地平线」，比裁掉还难看。
+            //
+            // 代价是方图会裁掉两侧（约三分之一宽）。可以接受，因为**六张裁法完全一样**，
+            // 比的是同一把尺子；而收进节点的是没裁过的那份原图，所以裁掉的构图并没丢。
             panel.Children.Add(new Image
             {
                 Source = bitmap,
@@ -1197,30 +1225,6 @@ internal static class GachaRevealDialog
     }
 
     // ==================== 读图 ====================
-
-    /// <summary>
-    /// 这一批卡的卡面比例（**高 / 宽**）：取这批图自己的高宽比（取中位数），再收进一个上下限。
-    ///
-    /// 为什么要按图定、而不是写死一个「像卡」的竖比例：出图多是方的或横的，硬套竖卡
-    /// 就会把两侧裁掉一大半，而挑图的时候恰恰要看全——裁掉的正好是边上的构图。
-    /// 让卡跟着图走，就不必裁，卡也仍然是「一张卡」的样子。
-    /// 上限 1.5 保瘦长、下限 0.62 让横图也能成卡（那时它就是一张横的缩略图，这是对的）。
-    ///
-    /// 注意方向：这里是**高 / 宽**，所以横图得到的是小于 1 的值。搞反了会让 16:9 的图
-    /// 被套进一张竖卡里，然后被裁掉一大半——比写死比例还糟。
-    /// </summary>
-    private static double CardHeightRatioFor(IReadOnlyList<Bitmap?> faces)
-    {
-        var ratios = new List<double>();
-        foreach (var face in faces)
-        {
-            if (face is null || face.PixelSize.Width <= 0 || face.PixelSize.Height <= 0) continue;
-            ratios.Add((double)face.PixelSize.Height / face.PixelSize.Width);
-        }
-        if (ratios.Count == 0) return FallbackCardAspect;
-        ratios.Sort();
-        return Math.Clamp(ratios[ratios.Count / 2], 0.62, 1.5);
-    }
 
     /// <summary>解一张正面要用的图。按 480 宽解码而不是整图：出图可能是 4K，整图解出来只会让翻面卡顿。</summary>
     private static Bitmap? LoadFace(string path)
