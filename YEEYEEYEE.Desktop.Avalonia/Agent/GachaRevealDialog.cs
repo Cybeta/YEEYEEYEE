@@ -87,15 +87,6 @@ internal static class GachaRevealDialog
     /// <summary>翻面的后半程（从侧面展开成正对）。</summary>
     private const int FlipBackMs = 170;
 
-    /// <summary>
-    /// 卡面固定比例（**高 / 宽**），取 2:3——二游的卡牌基本都是这个竖长方形。
-    ///
-    /// **固定，不跟着图走。** 上一版按每张图自己的比例自适应，一排里方的方、横的横，
-    /// 看着是一排缩略图而不是「一手牌」；一副牌就是要大小一致。
-    /// 代价是方图（出图默认就是方的）放进竖卡里要裁掉两侧——见 BuildCardFace 里为什么宁可裁也不留白。
-    /// </summary>
-    private const double CardAspect = 1.5;
-
     /// <summary>光晕比卡片每边多出多少。少了看不出「卡背后有光」，多了会糊到邻居身上。</summary>
     private const double HaloBleed = 52;
 
@@ -119,15 +110,13 @@ internal static class GachaRevealDialog
         var faceBitmaps = new Bitmap?[cards.Count];
         for (var i = 0; i < cards.Count; i++) faceBitmaps[i] = LoadFace(cards[i].Path);
 
-        // 排列：一行最多 3 张，超了就换行——6 张就是上下两排、每排 3 张。
-        // 4 张例外走 2×2：3+1 会显得上面挤、下面空。
-        var perRow = cards.Count switch { <= 3 => cards.Count, 4 => 2, _ => 3 };
-        var rows = (cards.Count + perRow - 1) / perRow;
-        // 卡片固定竖长方形；宽度按总张数给——张数少就给大一点，反正一行放得下。
-        var cardWidth = cards.Count switch { 1 => 300, 2 => 260, 3 => 240, _ => 200 };
-        var cardHeight = cardWidth * CardAspect;
-        var gap = 18;
-        var rowWidth = perRow * cardWidth + (perRow - 1) * gap;
+        // 排列与卡片尺寸都走 GachaCardLayout：那份规则是纯计算、有回归用例钉着，这里只负责摆。
+        var perRow = GachaCardLayout.PerRow(cards.Count);
+        var rows = GachaCardLayout.Rows(cards.Count);
+        var cardWidth = GachaCardLayout.Width(cards.Count);
+        var cardHeight = GachaCardLayout.Height(cards.Count);
+        var gap = GachaCardLayout.Gap;
+        var rowWidth = GachaCardLayout.RowWidth(cards.Count);
 
         // 每张卡背后那团光的颜色：另解一张很小的缩略图，按色相分桶取最主要的那个色相。
         // 解 24 宽而不是从正面的 480 宽那张里抽：480 那张要全量拷进内存才读得到，
@@ -189,7 +178,7 @@ internal static class GachaRevealDialog
         // 每行一个水平面板，行与行在竖直方向排开。末行张数少时也居中（5 张 = 上 3 下 2）。
         var cardGrid = new StackPanel
         {
-            Spacing = 30,
+            Spacing = GachaCardLayout.RowGap,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         };
@@ -309,10 +298,9 @@ internal static class GachaRevealDialog
             // · dimmer —— 选中时把「卡 + 它背后那团光」一起压暗：只动它的 opacity。
             // 卡片自己是摆在 (col,row) 上的，所以「从中心飞出来」= 先把它挪到中心的相反方向
             // （-dx,-dy），再回到 0。
-            var col = i % perRow;
-            var rowIndex = i / perRow;
-            var offsetX = (col - (perRow - 1) / 2.0) * (cardWidth + gap);
-            var offsetY = (rowIndex - (rows - 1) / 2.0) * (cardHeight + cardGrid.Spacing);
+            // 位置与「从中心飞出来」的起点都由 GachaCardLayout 算——末行张数少时按它自己的张数居中。
+            var rowIndex = GachaCardLayout.Slot(cards.Count, i).Row;
+            var (offsetX, offsetY) = GachaCardLayout.OffsetFromCentre(cards.Count, i);
 
             var dimmer = new Grid { Width = cardWidth, Height = cardHeight };
             dimmer.Children.Add(halo);
