@@ -1,0 +1,91 @@
+name: 构建与测试
+
+# 这个仓库原先没有任何自动检查：所有测试都靠本机手跑，而解决方案文件里又不含测试项目，
+# 所以「clone 下来能不能构建」没有答案。这份 workflow 就是补那个答案。
+#
+# 三件事各自独立，任何一件红了都能单独看出是哪一层出的问题：
+#   dotnet  —— 生产代码能不能编过、五个测试项目能不能过
+#   canvas  —— 前端能不能通过类型检查、用例、构建
+#   image   —— Dockerfile 在别人机器上能不能真的构建出镜像
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet:
+    name: .NET 构建与测试
+    # 必须是 Windows：桌面端与四个测试项目的目标框架是 net10.0-windows。
+    runs-on: windows-latest
+    env:
+      # 关掉 Avalonia 构建服务的遥测写入，省得构建日志里混进无关噪音。
+      AVALONIA_TELEMETRY_OPTOUT: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # 解决方案只含 6 个生产项目，所以这一步覆盖的是生产代码。
+      - name: 构建解决方案
+        run: dotnet build YEEYEEYEE.slnx
+
+      # 测试项目不在解决方案里，得各自单独跑。
+      - name: Agent 测试
+        run: dotnet run --project YEEYEEYEE.Agent.Tests
+
+      - name: Core 测试
+        run: dotnet run --project YEEYEEYEE.Core.Tests
+
+      - name: 迁移测试
+        run: dotnet run --project YEEYEEYEE.Migration.Tests
+
+      - name: G6V1 测试
+        run: dotnet run --project YEEYEEYEE.G6V1.Tests
+
+      - name: Web 接口与认证回归
+        run: dotnet run --project YEEYEEYEE.Web.Tests
+
+  canvas:
+    name: 前端构建与测试
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: YEEYEEYEE.Canvas
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 与 Dockerfile 里的 node:22-alpine 对齐，免得本地过、镜像里不过。
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: YEEYEEYEE.Canvas/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 单元测试
+        run: npm test
+
+      # build 脚本里带 tsc --noEmit，所以这一步同时是类型检查。
+      - name: 类型检查与打包
+        run: npm run build
+
+  image:
+    name: 容器镜像构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 只验证「能不能构建出来」。真正跑起来还要看运行期行为，
+      # 那部分靠 YEEYEEYEE.Web.Tests 与本机冒烟覆盖。
+      - name: 构建镜像
+        run: docker build -t yeeeyee-web:ci .
