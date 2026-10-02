@@ -351,6 +351,26 @@ internal static class SettingsMediaPage
         };
         root.Children.Add(testVideo);
 
+        // ---------- 出图观感 ----------
+        // 放在这一页的最后：它不是接口字段，填错了也不会坏掉，属于「出图这件事长什么样」。
+        Divider();
+        root.Children.Add(Header("出图观感"));
+        var gachaReveal = new CheckBox
+        {
+            Content = "出图「开奖」：一批出完后留一排背面朝上的卡，点开走全屏揭晓，再挑一张",
+            IsChecked = config.GachaReveal,
+            FontSize = 11,
+            Foreground = Brush("DfInk2")
+        };
+        root.Children.Add(gachaReveal);
+        root.Children.Add(Note(
+            "开启后：整批出完之前那排卡一直背面朝上（只显示「已完成 5/6」这类真实计数，不出缩略图），" +
+            "出完后点它才开奖，揭晓时依次翻面；挑一张收进节点，其余进回收站。" +
+            "关掉就是原来的样子：出好一张显示一张，右键挑、删、重做。"));
+        root.Children.Add(Note(
+            "两种模式下有一条是一样的：整批还在跑时都不能挑。中途挑会把整批丢掉，" +
+            "而已经发出去的出图请求取消不了，它们跑完的图就没人认领了，所以统一等这一批出完。"));
+
         // ---------- 写回 ----------
         // 文本字段原样写回（是否留空由各链路自己按「留空则复用」处理）；
         // 整数字段用 TryParse，解析失败就**保持原值不动**——用户正在中间状态打字（例如删光了准备重填）时，
@@ -379,6 +399,9 @@ internal static class SettingsMediaPage
                 config.VideoMaxReferenceImages = videoMaxReferenceImages;
             if (int.TryParse(TextOf(videoSeconds), out var videoDefaultSeconds))
                 config.VideoDefaultSeconds = videoDefaultSeconds;
+
+            // 出图观感（文档顶层，不属于某一份接口配置）：勾选框是三态的，只有 true 才算开。
+            config.GachaReveal = gachaReveal.IsChecked == true;
         }
 
         /// <summary>
@@ -404,6 +427,7 @@ internal static class SettingsMediaPage
             videoApiKey.Text = config.VideoApiKey;
             videoMaxRefs.Text = config.VideoMaxReferenceImages.ToString();
             videoSeconds.Text = config.VideoDefaultSeconds.ToString();
+            gachaReveal.IsChecked = config.GachaReveal;
         }
 
         /// <summary>

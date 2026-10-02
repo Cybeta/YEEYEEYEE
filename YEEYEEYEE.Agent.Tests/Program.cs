@@ -59,6 +59,7 @@ var tests = new (string Name, Action Run)[]
     ("更新：重启标记能原样存回（前一版 / 目标版 / 更新内容）", UpdateMarkerRoundTrips),
     ("更新：替换脚本只含 ASCII（PS5 会把无 BOM 的 UTF-8 当 ANSI 读）", UpdateSwapScriptIsAsciiOnly),
     ("更新：替换脚本实测——真换掉一个目录并留下结果文件", UpdateSwapScriptActuallyReplacesDirectory),
+    ("出图批次：整批还在跑时单张一律不能操作（漏文件那条路的入口）", BatchSlotsAreNotActionableWhileRunning),
     ("配置落盘：程序旁的旧文件会被搬到用户配置目录（搬不是拷）", LegacyProgramRootConfigIsMigrated),
     ("模型预设：地址能反推回同一家，预置模型元数据自洽", ProviderPresetCatalogIsConsistent),
     ("模型预设：预设换算两端共用一份（采样开关与型号覆盖都一致）", ProviderPresetValuesResolveIsConsistent),
@@ -6854,6 +6855,44 @@ static void UpdateSwapScriptActuallyReplacesDirectory()
 		catch (IOException) { }
 		catch (UnauthorizedAccessException) { }
 	}
+}
+
+// 「跑着的时候不能挑」这条规则此前只写在 CanPick 上（算提示文字用的），而右键菜单是按**格子状态**建的，
+// 于是「单张已出好、其余还在跑」时菜单直接给「用这一张」。点下去会把整批丢掉、却不取消还在跑的请求，
+// 那些请求跑完后仍会把图写进资产目录，可那时批次已经不在表里了——没人引用（漏文件）。
+// 这条测试钉住规则本身：它现在是模型里的唯一出处，菜单和动作都问它。
+static void BatchSlotsAreNotActionableWhileRunning()
+{
+	NodeImageBatch running = new NodeImageBatch { NodeId = Guid.NewGuid(), NodeTitle = "雨夜追车", IsRunning = true };
+	running.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done, Path = "shot-1.png" });
+	running.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Running });
+	running.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Failed, Error = "服务端没有给出原因" });
+	Expect(!running.CanActOnSlot(0), "整批还在跑时，已出好的那一格也不能采用 / 放大 / 删除");
+	Expect(!running.CanActOnSlot(1), "还在跑的那一格本来就不能操作");
+	Expect(!running.CanActOnSlot(2), "整批还在跑时，失败的那一格也不能操作");
+	Expect(!running.CanPick, "跑着的时候不能挑");
+	Expect(running.SingleActionBlockedNote.Contains("出完再挑", StringComparison.Ordinal),
+		"整批还在跑时该说的是「出完再挑」，不是「这一张还在出」，实际：" + running.SingleActionBlockedNote);
+
+	running.Slots[1].Status = BatchSlotStatus.Done;
+	running.Slots[1].Path = "shot-2.png";
+	running.IsRunning = false;
+	Expect(running.CanPick, "整批出完后可以挑");
+	Expect(running.CanActOnSlot(0) && running.CanActOnSlot(1), "整批出完后，出好的格子可以操作");
+	Expect(running.CanActOnSlot(2), "整批出完后，失败的那一格也要能删掉——否则一排失败会永远挂在画布上");
+	Expect(!running.CanActOnSlot(9), "越界索引不能操作");
+	Expect(!running.CanActOnSlot(-1), "负索引不能操作");
+	Expect(!running.SingleActionBlockedNote.Contains("出完再挑", StringComparison.Ordinal),
+		"整批跑完之后就不该再提「出完再挑」，实际：" + running.SingleActionBlockedNote);
+
+	running.Slots[0].Removed = true;
+	Expect(!running.CanActOnSlot(0), "已经删掉的那一格不能再操作");
+	Expect(running.CanActOnSlot(1), "删掉一格不影响别的格子");
+
+	// 整批没在跑、但格子还没出好：正常不该出现这个状态，规则本身要自洽（不能因为「没在跑」就放行）。
+	NodeImageBatch waiting = new NodeImageBatch { NodeId = Guid.NewGuid() };
+	waiting.Slots.Add(new BatchSlot());
+	Expect(!waiting.CanActOnSlot(0), "还没出好的格子不能操作");
 }
 
 static void AttachmentPromptIsStoredAndReadable()
