@@ -35,21 +35,27 @@ public static class AppPaths
     public static string UserConfigDirectory =>
         EnvCompat.Get("CONFIG_HOME") is { Length: > 0 } custom
             ? Path.GetFullPath(custom)
-            : RenamedOrExistingSegment(UserConfigRoot, "YEEYEEYEE", "DreamForge");
+            : PreferPopulated(
+                Path.Combine(UserConfigRoot, "YEEYEEYEE"),
+                Path.Combine(UserConfigRoot, "DreamForge"),
+                directory => ConfigFileNames.Any(name => File.Exists(Path.Combine(directory, name))));
+
+    /// <summary>判断「这个配置目录里到底有没有东西」用的文件——有任意一个就算有。</summary>
+    private static readonly string[] ConfigFileNames = { "ai-config.json", "recent-projects.json", "ai-key.bin" };
 
     /// <summary>
-    /// 改名后的目录名：**新名存在就用新名，否则旧名还在就用旧名，两个都没有才用新名**（准备新建）。
+    /// 改名后的目录名：**谁真的装着东西就用谁**（新目录优先，但只有个空壳不算数）。
     ///
-    /// 用户配置目录里放的是密钥与最近项目，用户项目目录里放的是他的工程。改名那一刻直接切到新目录，
-    /// 程序会表现得像「第一次运行」——密钥要重填、最近项目是空的、工程列表空了，而文件其实好好躺在旧目录里。
-    /// 两个目录名并存时以新名为准，用户把旧目录手工搬过去即可完成迁移。
+    /// 为什么不能只判断「目录存在」：改名之后程序自己会顺手把新目录建出来（初始化的副作用），
+    /// 于是「新目录存在、旧目录里有配置」这种状态很容易出现，而只按存在与否判断就会选中那个空壳，
+    /// 用户看到的是「密钥要我重填、最近项目没了」——文件其实好端端躺在旧目录里。所以这里看的是内容。
+    /// 两处都没有内容（首次运行）时才用新目录，准备新建。
     /// </summary>
-    private static string RenamedOrExistingSegment(string root, string preferred, string legacy)
+    internal static string PreferPopulated(string preferred, string legacy, Func<string, bool> hasData)
     {
-        var next = Path.Combine(root, preferred);
-        if (Directory.Exists(next)) return next;
-        var previous = Path.Combine(root, legacy);
-        return Directory.Exists(previous) ? previous : next;
+        if (hasData(preferred)) return preferred;
+        if (hasData(legacy)) return legacy;
+        return preferred;
     }
 
     private static string UserConfigRoot
@@ -105,12 +111,29 @@ public static class AppPaths
         }
     }
 
-    public static string UserProjectsRoot => Path.Combine(
-        RenamedOrExistingSegment(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            "YEEYEEYEE",
-            "DreamForge"),
-        "Projects");
+    public static string UserProjectsRoot => ProjectsDirectoryUnder(
+        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+
+    /// <summary>
+    /// 用户文档下的项目目录：同样是「新名字优先、但看内容」——旧目录里有工程时继续用旧的，
+    /// 否则改名会让用户以为自己的工程不见了。
+    /// </summary>
+    private static string ProjectsDirectoryUnder(string root) => PreferPopulated(
+        Path.Combine(root, "YEEYEEYEE", "Projects"),
+        Path.Combine(root, "DreamForge", "Projects"),
+        HasAnyEntry);
+
+    private static bool HasAnyEntry(string directory)
+    {
+        try
+        {
+            return Directory.Exists(directory) && Directory.EnumerateFileSystemEntries(directory).Any();
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     public static bool CanWriteProgramRoot()
     {
@@ -133,12 +156,7 @@ public static class AppPaths
         {
             Path.Combine(ProgramRoot, "Projects"),
             UserProjectsRoot,
-            Path.Combine(
-                RenamedOrExistingSegment(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "YEEYEEYEE",
-                    "DreamForge"),
-                "Projects")
+            ProjectsDirectoryUnder(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))
         };
 
         foreach (var candidate in candidates)

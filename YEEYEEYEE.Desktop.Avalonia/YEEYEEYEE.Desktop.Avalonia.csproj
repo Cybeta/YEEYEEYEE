@@ -7,6 +7,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <!-- 版本号的唯一来源：发布 0.1.0（界面标题栏与左栏那两处文字跟着这个走）。 -->
+    <Version>0.1.0</Version>
+    <Product>YEEYEEYEE</Product>
+    <AssemblyTitle>YEEYEEYEE</AssemblyTitle>
   </PropertyGroup>
 
   <ItemGroup>
