@@ -405,6 +405,32 @@ internal static class SettingsMediaPage
             + "程序不联网取图、也不内置任何图——素材从哪来、能不能用，由你自己决定并负责。\n· "
             + string.Join("\n· ", ProviderAvatar.Roots())));
 
+        // 让应用用**自己已配置的图像链路**生成这一家的形象：密钥在你手里，我不碰它；
+        // 换模型、加厂家时你自己点一下就能补一张，不用等我发版。
+        var makeAvatar = Secondary("用当前图像链路生成这一家的形象");
+        makeAvatar.HorizontalAlignment = HorizontalAlignment.Left;
+        makeAvatar.Click += async (_, _) =>
+        {
+            // 与「测试连接」同一个道理：图像链路工厂是重新读磁盘配置的，不先保存就会拿着旧配置去生成。
+            if (!saveToDisk())
+                report("配置没能写盘，生成用的是磁盘上旧的那一份", YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Warning);
+
+            var endpoint = config.ImageEndpoint.Length > 0 ? config.ImageEndpoint : config.Endpoint;
+            var preset = ProviderPreset.Match(endpoint);
+            var badge = ProviderBadges.Of(preset.Id);
+
+            report($"正在用当前图像链路生成「{preset.Name}」的形象（{ProviderAvatarStudio.Size}×{ProviderAvatarStudio.Size}），最多等 5 分钟…",
+                YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Info);
+            var note = await ProviderAvatarStudio.GenerateAsync(preset.Id, preset.Name, badge.ColorHex);
+            report(note, note.StartsWith("已生成", StringComparison.Ordinal)
+                ? YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Success
+                : YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Error);
+        };
+        root.Children.Add(makeAvatar);
+        root.Children.Add(Note(
+            "这个按钮画的是**自创角色**：只借这一家的气质与配色，提示词里明确要求不模仿任何已存在的作品角色或商标。" +
+            "生成一次就存进上面那个目录，之后不用再生成；想换一张再点一次即可（同名的旧图会被替换）。"));
+
         // ---------- 写回 ----------
         // 文本字段原样写回（是否留空由各链路自己按「留空则复用」处理）；
         // 整数字段用 TryParse，解析失败就**保持原值不动**——用户正在中间状态打字（例如删光了准备重填）时，

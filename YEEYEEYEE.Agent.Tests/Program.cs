@@ -6937,11 +6937,18 @@ static void GachaCardLayoutIsPinnedByCount()
 
 static void QualityTierFollowsScore()
 {
+	// 档位的高低顺序是用户定的：红 > 金 > 紫 > 蓝 > 白。**这条要单独钉住**——
+	// 枚举的数值就是名次，比较全靠它，改错了不会有别的用例报出来。
+	Expect(QualityTier.Red > QualityTier.Gold, "红比金高（与很多二游把金放最上面不同）");
+	Expect(QualityTier.Gold > QualityTier.Purple, "金比紫高");
+	Expect(QualityTier.Purple > QualityTier.Blue, "紫比蓝高");
+	Expect(QualityTier.Blue > QualityTier.White, "蓝比白高");
+
 	// 分数带的两端都要钉住：只钉中间值的话，把 9 改成 8 也不会有用例失败。
-	Expect(QualityJudgement.TierForScore(QualityJudgement.MaxScore) == QualityTier.Gold, "满分是金");
-	Expect(QualityJudgement.TierForScore(9) == QualityTier.Gold, "9 分是金（金的下界）");
-	Expect(QualityJudgement.TierForScore(8) == QualityTier.Red, "8 分是红（差一分就掉出金）");
-	Expect(QualityJudgement.TierForScore(7) == QualityTier.Red, "7 分是红");
+	Expect(QualityJudgement.TierForScore(QualityJudgement.MaxScore) == QualityTier.Red, "满分是红（最高档）");
+	Expect(QualityJudgement.TierForScore(9) == QualityTier.Red, "9 分是红（红的下界）");
+	Expect(QualityJudgement.TierForScore(8) == QualityTier.Gold, "8 分是金（差一分就掉出红）");
+	Expect(QualityJudgement.TierForScore(7) == QualityTier.Gold, "7 分是金");
 	Expect(QualityJudgement.TierForScore(6) == QualityTier.Purple, "6 分是紫");
 	Expect(QualityJudgement.TierForScore(5) == QualityTier.Purple, "5 分是紫");
 	Expect(QualityJudgement.TierForScore(4) == QualityTier.Blue, "4 分是蓝");
@@ -6950,30 +6957,42 @@ static void QualityTierFollowsScore()
 	Expect(QualityJudgement.TierForScore(QualityJudgement.MinScore) == QualityTier.White, "0 分是白");
 	Expect(QualityJudgement.TierForScore(-1) == QualityTier.White, "负数按白处理（不该出现，但不能崩）");
 
-	// 分数是**绝对标准**：同一批里两张都给 8 分，它们就该都是红——这正是它比名次好的地方。
+	// 分数是**绝对标准**：同一批里两张都给 8 分，它们就该都是金——这正是它比名次好的地方。
 	Expect(QualityJudgement.TierForScore(8) == QualityJudgement.TierForScore(8), "同样的分数给同样的档位");
 
-	// 每一档的光点数必须严格递减：这是「档位看得出来」的最低要求。
+	// 每一档的光点数必须**按高低顺序**严格递减：这是「档位看得出来」的最低要求。
 	var sparks = new[]
 	{
-		QualityJudgement.SparksFor(QualityTier.Gold), QualityJudgement.SparksFor(QualityTier.Red),
+		QualityJudgement.SparksFor(QualityTier.Red), QualityJudgement.SparksFor(QualityTier.Gold),
 		QualityJudgement.SparksFor(QualityTier.Purple), QualityJudgement.SparksFor(QualityTier.Blue),
 		QualityJudgement.SparksFor(QualityTier.White)
 	};
 	for (var i = 1; i < sparks.Length; i++)
-		Expect(sparks[i] < sparks[i - 1], $"光点数要从金到白严格递减，第 {i + 1} 档没降下来");
+		Expect(sparks[i] < sparks[i - 1], $"光点数要从红到白严格递减，第 {i + 1} 档没降下来");
+
+	// 每一档的光晕亮度同理：最高档最亮。
+	var glows = new[]
+	{
+		QualityJudgement.GlowFor(QualityTier.Red), QualityJudgement.GlowFor(QualityTier.Gold),
+		QualityJudgement.GlowFor(QualityTier.Purple), QualityJudgement.GlowFor(QualityTier.Blue),
+		QualityJudgement.GlowFor(QualityTier.White)
+	};
+	for (var i = 1; i < glows.Length; i++)
+		Expect(glows[i] < glows[i - 1], $"光晕亮度要从红到白严格递减，第 {i + 1} 档没降下来");
 
 	// 白档的光点比「没判过」还少：白是判出来的最低档，没判过是「不知道」，两者不该长得一样。
 	Expect(sparks[sparks.Length - 1] < 4, "白档的光点数要少于「没判过」时用的 4 个");
 
-	Expect(QualityJudgement.Label(QualityTier.Gold) == "金", "金档的中文名");
+	Expect(QualityJudgement.Label(QualityTier.Red) == "红", "红档的中文名");
 	Expect(QualityJudgement.Label(QualityTier.White) == "白", "白档的中文名");
 	Expect(QualityJudgement.ModelDisclaimer.Contains("不是客观结论", StringComparison.Ordinal),
 		"档位旁边必须说明这是模型的判断，而不是客观结论");
 
-	// 分数带是公开的：它要出现在设置页上，用户得能自己核对「8 分为什么是红」。
-	Expect(QualityJudgement.ScoreBandNote.Contains("9 分以上金", StringComparison.Ordinal),
-		"分数带说明要把金的门槛写出来，实际：" + QualityJudgement.ScoreBandNote);
+	// 分数带是公开的：它要出现在设置页上，用户得能自己核对「8 分为什么是金」。
+	Expect(QualityJudgement.ScoreBandNote.Contains("9 分以上红", StringComparison.Ordinal),
+		"分数带说明要把红最高的门槛写出来，实际：" + QualityJudgement.ScoreBandNote);
+	Expect(QualityJudgement.ScoreBandNote.Contains("7–8 金", StringComparison.Ordinal),
+		"分数带说明里金要排在红之后，实际：" + QualityJudgement.ScoreBandNote);
 	Expect(QualityJudgement.ScoreBandNote.Contains("裂纹", StringComparison.Ordinal),
 		"分数带说明里要交代裂纹卡，实际：" + QualityJudgement.ScoreBandNote);
 
@@ -7086,8 +7105,8 @@ static void QualityGradesMapBackToSlots()
 		"结果按槽位序号排好");
 
 	var bySlot = grades.ToDictionary(item => item.Index, item => item.Quality);
-	Expect(bySlot[0].Tier == QualityTier.Gold && bySlot[0].Score == 9, "编号 1（槽位 0）9 分是金");
-	Expect(bySlot[2].Tier == QualityTier.Red && bySlot[2].Score == 7, "编号 2（槽位 2）7 分是红");
+	Expect(bySlot[0].Tier == QualityTier.Red && bySlot[0].Score == 9, "编号 1（槽位 0）9 分是红——红是最高档");
+	Expect(bySlot[2].Tier == QualityTier.Gold && bySlot[2].Score == 7, "编号 2（槽位 2）7 分是金");
 	Expect(bySlot[3].Tier == QualityTier.Purple && bySlot[3].Score == 5, "编号 3（槽位 3）5 分是紫");
 	Expect(bySlot[5].Tier == QualityTier.White && bySlot[5].Score == 2, "编号 4（槽位 5）2 分是白");
 	Expect(bySlot[0].Reason == "最好的一张", "理由原样带过来");
@@ -7109,11 +7128,11 @@ static void QualityGradesMapBackToSlots()
 	Expect(batch.Slots[0].Quality is null, "没判过的格子是 null，不是「白档」");
 
 	batch.Slots[0].Quality = bySlot[0];
-	Expect(batch.HasGrades && batch.BestTier == QualityTier.Gold, "判过一格的最高档就是它");
+	Expect(batch.HasGrades && batch.BestTier == QualityTier.Red, "判过一格的最高档就是它（9 分是红）");
 
 	batch.Slots[1].Quality = bySlot[3];
 	Expect(batch.CrackedCount == 1, "数得出来有几张裂纹卡");
-	Expect(batch.BestTier == QualityTier.Gold, "加进来一张裂纹卡不该改变最高档");
+	Expect(batch.BestTier == QualityTier.Red, "加进来一张裂纹卡不该改变最高档");
 
 	// 把唯一那张干净的拿走，只剩裂纹卡：预兆降到**白档**，而不是变成「没判过」。
 	batch.Slots[0].Quality = bySlot[3];

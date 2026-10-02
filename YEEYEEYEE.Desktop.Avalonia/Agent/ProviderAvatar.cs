@@ -69,6 +69,31 @@ internal static class ProviderAvatar
         return null;
     }
 
+    /// <summary>
+    /// 这一家**已经存在**的所有候选文件（不同扩展名各算一个）。
+    /// 生成新形象前要先按它删一遍：查找是按扩展名顺序来的，留着旧的那份会盖掉刚生成的那张。
+    /// </summary>
+    public static IReadOnlyList<string> PathsFor(string providerId)
+    {
+        if (string.IsNullOrWhiteSpace(providerId)) return Array.Empty<string>();
+        var found = new List<string>();
+        foreach (var root in Roots())
+        {
+            foreach (var extension in Extensions)
+            {
+                var path = Path.Combine(root, providerId + extension);
+                if (File.Exists(path)) found.Add(path);
+            }
+        }
+        return found;
+    }
+
+    /// <summary>忘掉这一家的缓存（刚生成完新图、或用户换了文件时调用）。</summary>
+    public static void Forget(string providerId)
+    {
+        if (!string.IsNullOrWhiteSpace(providerId)) Cache.Remove(providerId);
+    }
+
     /// <summary>两个可以放形象的目录（给设置页与文档显示用）。</summary>
     public static IEnumerable<string> Roots()
     {
