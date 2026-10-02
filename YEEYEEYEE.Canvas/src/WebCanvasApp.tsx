@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { chapterLabelOf } from './ChapterView'
 import { layerOf, type OperationRecord } from './Protocol/VersionedMessages'
+import { SessionPanel } from './SessionPanel'
+import { canEdit, gateOf, parseAuthState, type AuthState } from './SessionView'
 import './workflow.css'
 
 type WebScene = { revision: number; records: OperationRecord[] }
@@ -11,7 +13,6 @@ type Reference = { entityId: string; name?: string; kind?: string; variantId?: s
 type Notice = { kind: 'success' | 'error' | 'info'; message: string }
 type WebSkill = { id: string; name: string; capability: string }
 type WebJob = { jobId: string; state: string; progressPercent: number; errorCode?: string; errorMessage?: string; attempt: number; retryOfJobId?: string; rootJobId: string; canRetry: boolean; outputs: { role: string; ref: string }[] }
-const TOKEN_KEY = 'yeeeyee.canvas.web.token'
 
 function hasId(value: unknown): value is { id: string; [key: string]: unknown } {
   return !!value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { id?: unknown }).id === 'string' && !!(value as { id: string }).id.trim()
@@ -67,10 +68,15 @@ function validRecord(value: unknown): value is OperationRecord {
   const item = value as Partial<OperationRecord>
   return typeof item.recordId === 'string' && typeof item.recordType === 'string' && !!item.record && typeof item.record === 'object' && !Array.isArray(item.record)
 }
-async function request<T>(path: string, token: string, options?: RequestInit): Promise<T> {
+/**
+ * 会话 cookie 由浏览器自动带上，所以这里**不再手动塞 Authorization 头**。
+ * 凭据放在 HttpOnly cookie 里：脚本读不到它，也就不存在「前端把令牌存哪儿」这个问题。
+ */
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...options,
-    headers: { Authorization: `Bearer ${token}`, ...(options?.body ? { 'Content-Type': 'application/json' } : {}) },
+    credentials: 'same-origin',
+    headers: { ...(options?.body ? { 'Content-Type': 'application/json' } : {}) },
     cache: 'no-store'
   })
   const data: unknown = await response.json().catch(() => null)
@@ -82,8 +88,8 @@ async function request<T>(path: string, token: string, options?: RequestInit): P
 }
 
 export function WebCanvasApp() {
-  const [tokenInput, setTokenInput] = useState(() => sessionStorage.getItem(TOKEN_KEY) ?? '')
-  const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_KEY) ?? '')
+  const [auth, setAuth] = useState<AuthState | null>(null)
+  const [authFailure, setAuthFailure] = useState('')
   const [scene, setScene] = useState<WebScene | null>(null)
   const [assets, setAssets] = useState<Asset[]>([])
   const [assetsReady, setAssetsReady] = useState(false)
@@ -91,7 +97,7 @@ export function WebCanvasApp() {
   const [assetId, setAssetId] = useState('')
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
-  const [notice, setNotice] = useState<Notice>({ kind: 'info', message: '输入令牌后加载场景。' })
+  const [notice, setNotice] = useState<Notice>({ kind: 'info', message: '登录后加载场景。' })
   const [assetNotice, setAssetNotice] = useState('尚未加载资产。')
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -117,16 +123,9 @@ export function WebCanvasApp() {
     requestAnimationFrame(() => nodeRefs.current.get(id)?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' }))
   }
 
-  async function loadScene(currentToken: string) {
-    if (!currentToken.trim()) {
-      setNotice({ kind: 'error', message: '请先输入令牌。' })
-      return
-    }
+  async function loadScene() {
     if (dirty && !window.confirm('重新加载将放弃未保存的修改，确定继续吗？')) return
     const run = ++generation.current
-    const credential = currentToken.trim()
-    sessionStorage.setItem(TOKEN_KEY, credential)
-    setToken(credential)
     setLoading(true)
     setNotice({ kind: 'info', message: '正在加载场景…' })
     setAssetNotice('正在加载资产…')
@@ -139,8 +138,8 @@ export function WebCanvasApp() {
     setSelectedId('')
     setAssetId('')
     const [sceneResult, assetResult] = await Promise.allSettled([
-      request<WebScene>('/api/web/scene', credential),
-      request<unknown>('/api/web/assets', credential)
+      request<WebScene>('/api/web/scene'),
+      request<unknown>('/api/web/assets')
     ])
     if (run !== generation.current) return
     setLoading(false)
@@ -160,8 +159,8 @@ export function WebCanvasApp() {
       setAssetNotice(`资产加载失败：${errorMessage(error)}`)
     }
     try {
-      const catalog = await request<{ skills: WebSkill[] }>('/api/web/skills', credential)
-      const tasks = await request<{ jobs: WebJob[] }>('/api/web/jobs', credential)
+      const catalog = await request<{ skills: WebSkill[] }>('/api/web/skills')
+      const tasks = await request<{ jobs: WebJob[] }>('/api/web/jobs')
       if (run !== generation.current) return
       if (!Array.isArray(catalog.skills) || !Array.isArray(tasks.jobs)) throw new Error('响应格式不正确')
       setSkills(catalog.skills)
@@ -172,18 +171,38 @@ export function WebCanvasApp() {
     }
   }
 
+  /** 问一次服务端「我是谁」。没登录就什么都不加载——**别在没身份的时候去打场景接口**。 */
+  async function refreshSession() {
+    try {
+      const state = parseAuthState(await request<unknown>('/api/auth/state'))
+      setAuth(state)
+      setAuthFailure('')
+      if (state.user) void loadScene()
+      else {
+        setScene(null)
+        setAssets([])
+        setAssetsReady(false)
+        setSkills([])
+        setJobs([])
+        setTaskNotice('技能与任务尚未加载。')
+      }
+    } catch (error) {
+      setAuthFailure(`无法确认登录状态：${errorMessage(error)}`)
+    }
+  }
+
   useEffect(() => {
-    if (token) void loadScene(token)
-    // Initial session credential is loaded once; subsequent loads are explicit.
+    void refreshSession()
+    // 只跑一次；之后由登录 / 退出按钮显式触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
-    if (!token) return
+    if (!auth?.user) return
     let active = true
     const refresh = async () => {
       try {
-        const result = await request<{ jobs: WebJob[] }>('/api/web/jobs', token)
+        const result = await request<{ jobs: WebJob[] }>('/api/web/jobs')
         if (active) {
           if (!Array.isArray(result.jobs)) throw new Error('任务响应格式不正确')
           setJobs(result.jobs)
@@ -192,14 +211,14 @@ export function WebCanvasApp() {
     }
     const timer = window.setInterval(() => void refresh(), 3000)
     return () => { active = false; window.clearInterval(timer) }
-  }, [token])
+  }, [auth?.user?.id])
 
   async function taskAction(path: string, body?: object) {
-    if (!token || taskBusy) return
+    if (!auth?.user || taskBusy) return
     const run = generation.current
     setTaskBusy(true)
     try {
-      const result = await request<WebJob>(path, token, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
+      const result = await request<WebJob>(path, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
       if (run !== generation.current) return
       setJobs((current) => [result, ...current.filter((job) => job.jobId !== result.jobId)])
       setTaskNotice(`任务 ${result.jobId}：${result.state}${result.errorMessage ? ` · ${result.errorMessage}` : ''}`)
@@ -209,6 +228,11 @@ export function WebCanvasApp() {
 
   async function save() {
     if (!selected || !scene || saving) return
+    // 只读角色在服务端本来就会被拒（拿到的是 403），但界面不该先给一个点了必然失败的按钮。
+    if (auth?.user && !canEdit(auth.user.role)) {
+      setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
+      return
+    }
     const id = selected.recordId
     const revision = scene.revision
     const draftTitle = title
@@ -216,7 +240,7 @@ export function WebCanvasApp() {
     setSaving(true)
     setNotice({ kind: 'info', message: '正在保存…' })
     try {
-      const result = await request<{ revision: number; record: OperationRecord }>(`/api/web/records/${encodeURIComponent(id)}`, token, {
+      const result = await request<{ revision: number; record: OperationRecord }>(`/api/web/records/${encodeURIComponent(id)}`, {
         method: 'PUT', body: JSON.stringify({ baseRevision: revision, title: draftTitle, content: draftContent })
       })
       if (!Number.isFinite(result?.revision) || !validRecord(result.record) || result.record.recordId !== id) throw new Error('保存响应格式不正确')
@@ -242,15 +266,28 @@ export function WebCanvasApp() {
     setAssetNotice(`已按实体 ID 定位资产 ${id}。${asset.name ? ` ${asset.name}` : ''}（仅定位，未修改资产）`)
   }
 
+  // 还没问出「我是谁」之前不要画工作台：先显示登录页再跳走会闪一下，也容易让人以为要填两次。
+  if (!auth) return <div className="session-panel">
+    <div className="session-card"><h2>正在确认登录状态…</h2><p className="session-hint">如果一直停在这里，说明服务端没起来。</p></div>
+  </div>
+
+  if (authFailure) return <div className="session-panel">
+    <div className="session-card">
+      <h2>无法确认登录状态</h2>
+      <p className="session-hint">{authFailure}</p>
+      <button type="button" onClick={() => void refreshSession()}>重试</button>
+    </div>
+  </div>
+
+  if (gateOf(auth) !== 'ready') return <SessionPanel state={auth} onChanged={() => void refreshSession()} />
+
+  // 过了上面那道门就一定有用户，取一次给下面用，省得每次都要再判一遍可空。
+  const currentUser = auth.user!
+
   return <div className="workflow-shell web-shell">
     <header className="workflow-header">
       <div className="brand-lockup"><strong>YEEYEEYEE</strong><span>场景画布</span></div>
-      <form className="web-auth" onSubmit={(event) => { event.preventDefault(); void loadScene(tokenInput) }}>
-        <label htmlFor="web-token">访问令牌</label>
-        <input id="web-token" type="password" autoComplete="off" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} placeholder="输入 Bearer 令牌" />
-        <button type="submit" disabled={loading || saving}>加载场景</button>
-        <button type="button" disabled={loading || saving} onClick={() => { generation.current++; sessionStorage.removeItem(TOKEN_KEY); setToken(''); setTokenInput(''); setScene(null); setAssets([]); setAssetsReady(false); setSkills([]); setJobs([]); setTaskNotice('技能与任务尚未加载。'); setSelectedId(''); setAssetId(''); setNotice({ kind: 'info', message: '令牌已清除。' }); setAssetNotice('尚未加载资产。') }}>清除令牌</button>
-      </form>
+      <SessionPanel state={auth} onChanged={() => void refreshSession()} />
       <span className="web-revision">修订 {scene?.revision ?? '—'}</span>
     </header>
     <aside className="node-library web-sidebar">
@@ -315,7 +352,7 @@ export function WebCanvasApp() {
         <div className="detail-row"><span>类型</span><b>{selected.recordType}</b></div>
         <label>标题<input value={title} onChange={(event) => { setTitle(event.target.value); setNotice({ kind: 'info', message: '有未保存的修改。' }) }} disabled={saving} /></label>
         <label>内容<textarea value={content} onChange={(event) => { setContent(event.target.value); setNotice({ kind: 'info', message: '有未保存的修改。' }) }} disabled={saving} /></label>
-        <button className="web-save" disabled={!dirty || saving} onClick={() => void save()}>{saving ? '保存中…' : '保存标题和内容'}</button>
+        <button className="web-save" disabled={!dirty || saving || !canEdit(currentUser.role)} onClick={() => void save()}>{saving ? '保存中…' : canEdit(currentUser.role) ? '保存标题和内容' : '只读账号不能保存'}</button>
         <p className="inspector-foot">仅在服务端确认保存成功后更新场景修订；失败时保留编辑内容。资产与引用只读，不会修改项目资产。</p>
         <section className="web-references" aria-label="节点引用"><strong>节点引用</strong>
           {recordReferences(selected).length === 0 && <p className="inspector-foot">暂无引用。</p>}

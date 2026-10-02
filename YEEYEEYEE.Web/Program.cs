@@ -4,6 +4,7 @@ using System.Text.Json;
 using YEEYEEYEE.Core;
 using YEEYEEYEE.Host;
 using YEEYEEYEE.Web;
+using YEEYEEYEE.Web.Auth;
 using Microsoft.Extensions.FileProviders;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -13,6 +14,10 @@ var comfyUiBaseUrl = configuration["ComfyUI:BaseUrl"] ?? throw new InvalidOperat
 var comfyUiClientId = configuration["ComfyUI:ClientId"];
 var comfyUiCheckpoint = configuration["ComfyUI:Checkpoint"];
 var assetDirectory = LegacyConfig.Text(configuration, "AssetDirectory") ?? Path.Combine(AppContext.BaseDirectory, "assets");
+// 账号库与任务库分开存：任务库会随作业增长，账号库只有几十行；混在一起会让备份账号时顺带拖走一堆作业记录。
+var userDatabasePath = LegacyConfig.Text(configuration, "UserDatabasePath") ?? Path.Combine(AppContext.BaseDirectory, "yeeeyee.users.db");
+// 前端产物默认在源码树里，容器部署时它不在那个相对位置，所以允许用配置指定。
+var configuredCanvasDist = LegacyConfig.Text(configuration, "CanvasDistPath");
 var pollingInterval = configuration.GetValue<TimeSpan?>("ComfyUI:PollingInterval") ?? TimeSpan.FromSeconds(2);
 builder.Services.AddSingleton<IJobStore>(_ => new SqliteJobStore(databasePath));
 builder.Services.AddHttpClient("comfyui", client =>
@@ -37,6 +42,11 @@ builder.Services.AddSingleton<ExternalTaskCallbackReceiver>(services =>
 builder.Services.AddSingleton<ExternalTaskPoller>(services => new ExternalTaskPoller(
     services.GetRequiredService<SingleMachineExecutionService>(), services.GetRequiredService<ComfyUiProvider>(), pollingInterval));
 builder.Services.AddHostedService<ExternalTaskPollingHostedService>();
+// 账号库。建表在这里做一次（全是 IF NOT EXISTS），不要等到第一个请求进来才建——
+// 那样第一个请求会同时踩到建表与写库，出问题时的报错会指向错误的地方。
+var users = new UserStore(userDatabasePath);
+users.EnsureSchema();
+builder.Services.AddSingleton(users);
 var callbackSecret = configuration["ComfyUI:CallbackSecret"];
 if (!string.IsNullOrWhiteSpace(callbackSecret))
     builder.Services.AddSingleton(_ => new HmacCallbackVerifier(new CallbackSignatureOptions { Secret = Convert.FromBase64String(callbackSecret) }));
@@ -45,7 +55,9 @@ var app = builder.Build();
 var execution = app.Services.GetRequiredService<SingleMachineExecutionService>();
 var callbackReceiver = app.Services.GetRequiredService<ExternalTaskCallbackReceiver>();
 var resourceReplaceRequests = new ConcurrentQueue<CanvasResourceReplaceRequest>();
-var canvasDistPath = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "YEEYEEYEE.Canvas", "dist"));
+var canvasDistPath = string.IsNullOrWhiteSpace(configuredCanvasDist)
+    ? Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "YEEYEEYEE.Canvas", "dist"))
+    : Path.GetFullPath(configuredCanvasDist);
 var transport = new WebCanvasTransport();
 var bridge = new HostBridge(transport, execution: execution);
 bridge.Initialize(new SessionContext
@@ -56,6 +68,10 @@ bridge.Initialize(new SessionContext
 bridge.ResourceReplaceRequested += request => resourceReplaceRequests.Enqueue(new CanvasResourceReplaceRequest(
     Guid.NewGuid(), request.RecordId, request.EntityId, request.VariantId, request.VariantVersionId));
 
+// 守卫必须在场景/技能接口之前注册：它把身份解析成 <see cref="WebAccessGuard.PermissionsItem"/>，
+// 后面的写入判断靠它。
+WebAccessGuard.Map(app, users);
+AuthApi.Map(app, users);
 WebSceneApi.Map(app);
 WebSkillJobApi.Map(app);
 app.UseWebSockets();

@@ -23,7 +23,7 @@ var dll = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "YEEYEEYEE.Web
 if (!File.Exists(dll)) throw new Exception("Web assembly missing");
 Process? server = null;
 var port = 0;
-async Task Start(string? token = "secret-value", string claims = "canvas.edit,skill.invoke,job.cancel", string approval = "preapproved-local-image", bool standalone = true, string? projectCanvas = null)
+async Task Start(string? token = "secret-value", string claims = "canvas.edit,skill.invoke,job.cancel", string approval = "preapproved-local-image", bool standalone = true, string? projectCanvas = null, string? userDatabase = null, string? setupToken = null)
 {
     SetClaims(claims);
     using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -43,6 +43,10 @@ async Task Start(string? token = "secret-value", string claims = "canvas.edit,sk
         Path.GetFileName(Path.GetDirectoryName(projectCanvas)) == "canvases"
         ? Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(projectCanvas)!)!, "project", "entities.json") : assetsPath;
     start.Environment["YEEYEEYEE__WebToken"] = token;
+    // 账号库单独一个文件：每个账号用例都能从一个空库开始，不跟别的用例互相影响。
+    start.Environment["YEEYEEYEE__UserDatabasePath"] = userDatabase ?? Path.Combine(root, "users.db");
+    if (setupToken is null) start.Environment.Remove("YEEYEEYEE__SetupToken");
+    else start.Environment["YEEYEEYEE__SetupToken"] = setupToken;
     start.Environment["ComfyUI__BaseUrl"] = "http://127.0.0.1:8188";
     start.Environment["ComfyUI__Checkpoint"] = "offline-model.safetensors";
     // appsettings.json reloads in the running server, allowing real HTTP revocation tests.
@@ -60,8 +64,17 @@ async Task Start(string? token = "secret-value", string claims = "canvas.edit,sk
 }
 void Stop()
 {
-    if (server is { HasExited: false }) { server.Kill(entireProcessTree: true); server.WaitForExit(); }
-    server?.Dispose();
+    // 幂等：重复调用、以及进程已经被上一次调用释放过，都不该抛异常。
+    // （早些时候没这一步，最后那个 finally 里的 Stop() 会对已释放的对象取 HasExited 而崩掉，
+    //   于是「两套回归都通过」之后整个测试进程仍以非零码退出。）
+    if (server is null) return;
+    try
+    {
+        if (!server.HasExited) { server.Kill(entireProcessTree: true); server.WaitForExit(); }
+    }
+    catch (InvalidOperationException) { }
+    server.Dispose();
+    server = null;
 }
 async Task<JsonElement> Check(HttpClient client, HttpMethod method, string path, int status, string? json = null)
 {
@@ -351,6 +364,118 @@ try
     Assert((await Check(noMode, HttpMethod.Get, "/api/web/scene", 503)).GetProperty("code").GetString() == "SCENE_MODE_NOT_CONFIGURED", "Missing explicit standalone mode must fail closed");
     await Check(noMode, HttpMethod.Put, $"/api/web/records/{id}", 503, "{\"baseRevision\":5,\"title\":\"wrong\",\"content\":\"wrong\"}");
     Assert(independentBefore.SequenceEqual(File.ReadAllBytes(scenePath)), "Disabled standalone mode changed scene");
+
+    // ---------- 账号与会话：第一个用户 = 管理员 ----------
+    Stop();
+    var userDatabase = Path.Combine(root, "users-auth.db");
+    foreach (var leftover in new[] { userDatabase, userDatabase + "-wal", userDatabase + "-shm" }) if (File.Exists(leftover)) File.Delete(leftover);
+    await Start(userDatabase: userDatabase);
+
+    // 带 cookie 容器的客户端：**不设任何 Bearer**，走的就是浏览器那条路。
+    // 可以传一个已有的 cookie 罐进来——重启之后端口会变，旧客户端指向的是死地址，
+    // 这时要用同一个罐建新客户端（cookie 不区分端口，所以能接着用）。
+    HttpClient CookieClient(CookieContainer? jar = null) =>
+        new(new HttpClientHandler { CookieContainer = jar ?? new CookieContainer(), UseCookies = true })
+        { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+    string Snapshot() => File.ReadAllText(scenePath);
+
+    using var admin = CookieClient();
+    var freshState = await Check(admin, HttpMethod.Get, "/api/auth/state", 200);
+    Assert(!freshState.GetProperty("initialized").GetBoolean() &&
+        freshState.GetProperty("user").ValueKind == JsonValueKind.Null, "空库必须如实报「还没有账号」");
+    Assert(freshState.GetProperty("passwordMinLength").GetInt32() >= 8, "口令长度下限没告诉前端");
+
+    // 建号前打场景接口：应当是「未登录」，不是「令牌无效」。
+    Assert((await Check(admin, HttpMethod.Get, "/api/web/scene", 401)).GetProperty("code").GetString() == "UNAUTHORIZED", "未登录的读应当回 401");
+
+    await Check(admin, HttpMethod.Post, "/api/auth/setup", 400, "{\"username\":\"lin\",\"password\":\"short\"}");
+    Assert((await Check(admin, HttpMethod.Post, "/api/auth/setup", 400, "{\"username\":\"林晚\",\"password\":\"longenough\"}")).GetProperty("code").GetString() == "INVALID_USERNAME", "非法用户名要挡住");
+    var created = await Check(admin, HttpMethod.Post, "/api/auth/setup", 200, "{\"username\":\"lin\",\"password\":\"longenough\",\"displayName\":\"林晚\"}");
+    Assert(created.GetProperty("user").GetProperty("role").GetString() == "Admin", "第一个用户必须是管理员");
+    var adminId = created.GetProperty("user").GetProperty("id").GetGuid();
+
+    // 再建一次：必须 409，不能靠「先到先得」被第二个人抢成管理员。
+    await Check(admin, HttpMethod.Post, "/api/auth/setup", 409, "{\"username\":\"other\",\"password\":\"longenough\"}");
+
+    // 会话 cookie 本身就是身份：不带 Bearer 也能读、也能改。
+    var sceneBySession = await Check(admin, HttpMethod.Get, "/api/web/scene", 200);
+    var sessionRevision = sceneBySession.GetProperty("revision").GetInt64();
+    using var noCookie = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+    Assert((await Check(noCookie, HttpMethod.Get, "/api/web/scene", 401)).GetProperty("code").GetString() == "UNAUTHORIZED", "没有 cookie 的读必须被拒");
+    var beforeSession = Snapshot();
+    await Check(admin, HttpMethod.Put, $"/api/web/records/{id}", 200,
+        JsonSerializer.Serialize(new { baseRevision = sessionRevision, title = "BySession", content = "BySession" }));
+    Assert(beforeSession != Snapshot(), "管理员用会话改画布应当真的落盘");
+
+    // 管理员建一个只读账号：它能读，改不了。
+    var viewerCreated = await Check(admin, HttpMethod.Post, "/api/auth/users", 200, "{\"username\":\"viewer1\",\"password\":\"longenough\",\"role\":\"Viewer\"}");
+    var viewerId = viewerCreated.GetProperty("user").GetProperty("id").GetGuid();
+    using var viewer = CookieClient();
+    await Check(viewer, HttpMethod.Post, "/api/auth/login", 401, "{\"username\":\"viewer1\",\"password\":\"wrong-password\"}");
+    var viewerLogin = await Check(viewer, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"viewer1\",\"password\":\"longenough\"}");
+    Assert(viewerLogin.GetProperty("user").GetProperty("role").GetString() == "Viewer", "建号时的角色要生效");
+    var viewerScene = await Check(viewer, HttpMethod.Get, "/api/web/scene", 200);
+    var viewerRevision = viewerScene.GetProperty("revision").GetInt64();
+    Assert((await Check(viewer, HttpMethod.Put, $"/api/web/records/{id}", 403,
+        JsonSerializer.Serialize(new { baseRevision = viewerRevision, title = "Nope", content = "Nope" })))
+        .GetProperty("code").GetString() == "CANVAS_EDIT_FORBIDDEN", "只读角色的写入必须被拒");
+    // 管用户是管理员专属，只读账号连列表都看不到。
+    Assert((await Check(viewer, HttpMethod.Get, "/api/auth/users", 403)).GetProperty("code").GetString() == "ADMIN_REQUIRED", "非管理员不该能列账号");
+    Assert((await Check(noCookie, HttpMethod.Get, "/api/auth/users", 401)).GetProperty("code").GetString() == "UNAUTHORIZED", "未登录不该能列账号");
+
+    // 最后一个管理员不能被降级：否则没人能再管账号。
+    Assert((await Check(admin, HttpMethod.Patch, $"/api/auth/users/{adminId}", 409, "{\"role\":\"Viewer\"}"))
+        .GetProperty("code").GetString() == "LAST_ADMIN", "唯一管理员不该能降级");
+    Assert((await Check(admin, HttpMethod.Delete, $"/api/auth/users/{adminId}", 409)).GetProperty("code").GetString() == "LAST_ADMIN", "唯一管理员不该能删除");
+
+    // 停用一个账号：它手里的会话要**立刻**失效，不能等 cookie 过期。
+    await Check(admin, HttpMethod.Patch, $"/api/auth/users/{viewerId}", 200, "{\"disabled\":true}");
+    Assert((await Check(viewer, HttpMethod.Get, "/api/web/scene", 401)).GetProperty("code").GetString() == "UNAUTHORIZED", "被停用账号的会话必须立刻失效");
+    Assert((await Check(viewer, HttpMethod.Post, "/api/auth/login", 403, "{\"username\":\"viewer1\",\"password\":\"longenough\"}"))
+        .GetProperty("code").GetString() == "ACCOUNT_DISABLED", "被停用的账号登录要如实说停用");
+    await Check(admin, HttpMethod.Patch, $"/api/auth/users/{viewerId}", 200, "{\"disabled\":false}");
+
+    // 会话存在库里：进程重启之后同一张 cookie 还能用。
+    var survivorJar = new CookieContainer();
+    var survivor = CookieClient(survivorJar);
+    await Check(survivor, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"viewer1\",\"password\":\"longenough\"}");
+    Stop();
+    await Start(userDatabase: userDatabase);
+    var survivorAfterRestart = CookieClient(survivorJar);
+    Assert((await Check(survivorAfterRestart, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64() > 0, "会话应当跨重启有效");
+
+    // 自己改口令：旧口令错了要拒；改成功之后旧会话失效，新口令能登录。
+    using var changer = CookieClient();
+    await Check(changer, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"viewer1\",\"password\":\"longenough\"}");
+    Assert((await Check(changer, HttpMethod.Post, "/api/auth/password", 401, "{\"currentPassword\":\"wrong\",\"newPassword\":\"brand-new-pass\"}"))
+        .GetProperty("code").GetString() == "INVALID_CREDENTIALS", "旧口令不对要拒");
+    await Check(changer, HttpMethod.Post, "/api/auth/password", 200, "{\"currentPassword\":\"longenough\",\"newPassword\":\"brand-new-pass\"}");
+    Assert((await Check(changer, HttpMethod.Get, "/api/web/scene", 401)).GetProperty("code").GetString() == "UNAUTHORIZED", "改完口令旧会话必须失效");
+    using var relogin = CookieClient();
+    await Check(relogin, HttpMethod.Post, "/api/auth/login", 401, "{\"username\":\"viewer1\",\"password\":\"longenough\"}");
+    await Check(relogin, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"viewer1\",\"password\":\"brand-new-pass\"}");
+
+    // 退出登录之后 cookie 立刻作废。
+    await Check(relogin, HttpMethod.Post, "/api/auth/logout", 200);
+    Assert((await Check(relogin, HttpMethod.Get, "/api/web/scene", 401)).GetProperty("code").GetString() == "UNAUTHORIZED", "退出后不该还能读");
+
+    // 部署要求初始化令牌时，没带令牌谁都建不了号——这是给公网容器留的那道门。
+    Stop();
+    var tokenDatabase = Path.Combine(root, "users-setup-token.db");
+    if (File.Exists(tokenDatabase)) File.Delete(tokenDatabase);
+    await Start(userDatabase: tokenDatabase, setupToken: "deploy-secret");
+    using var guarded = CookieClient();
+    Assert((await Check(guarded, HttpMethod.Post, "/api/auth/setup", 403, "{\"username\":\"lin\",\"password\":\"longenough\"}"))
+        .GetProperty("code").GetString() == "SETUP_TOKEN_REQUIRED", "配了初始化令牌就必须校验");
+    using (var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/setup"))
+    {
+        request.Content = new StringContent("{\"username\":\"lin\",\"password\":\"longenough\"}", Encoding.UTF8, "application/json");
+        request.Headers.Add("X-Setup-Token", "deploy-secret");
+        using var response = await guarded.SendAsync(request);
+        Assert((int)response.StatusCode == 200, "带了正确的初始化令牌应当能建号：" + await response.Content.ReadAsStringAsync());
+    }
+    Stop();
     Console.WriteLine("HTTP regression passed: auth, live canvas.edit revocation, byte-preserving denials, jobs, assets, conflicts, persistence, and project/standalone modes");
+    Console.WriteLine("Auth regression passed: first user becomes admin, role-derived claims, session persistence, disable/password revocation, setup token");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }
