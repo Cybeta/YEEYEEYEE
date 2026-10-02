@@ -54,11 +54,29 @@ internal static class GachaRevealDialog
     /// </summary>
     private const int SparkCount = 4;
 
-    /// <summary>许愿阶段停留多久（毫秒）。全屏、用户主动开，所以可以比格子内那种 0.3 秒宽松得多。</summary>
-    private const int WishHoldMs = 820;
+    /// <summary>向中心收拢的尘埃数量。它是**装饰**，不表示任何档位（带档位含义的是 <see cref="SparkCount"/>）。</summary>
+    private const int GatherCount = 14;
 
-    /// <summary>卡片出现到开始翻面的间隔。</summary>
-    private const int CardsAppearMs = 200;
+    /// <summary>尘埃从离中心多远的地方开始收（像素）。</summary>
+    private const double GatherRadius = 340;
+
+    /// <summary>尘埃往中心飞多久。</summary>
+    private const int GatherFlyMs = 620;
+
+    /// <summary>蓄势几拍之后爆发（毫秒）：光柱撑开 + 一圈白光 + 全屏一闪，许愿区也是在这一刻开始淡出。</summary>
+    private const int BurstMs = 820;
+
+    /// <summary>爆发之后多久，卡片从中心飞出来。</summary>
+    private const int CardsFlyAtMs = 1250;
+
+    /// <summary>一张卡飞到位要多久。</summary>
+    private const int CardFlyMs = 520;
+
+    /// <summary>相邻两张卡飞出的错开量。</summary>
+    private const int CardFlyStaggerMs = 90;
+
+    /// <summary>整手牌落位之后再等一拍，才开始翻面（留点时间让人看清这一手）。</summary>
+    private const int SettleHoldMs = 200;
 
     /// <summary>相邻两张卡翻面的错开量：既有「一张张揭晓」的节奏，整排也不至于等太久。</summary>
     private const int FlipStaggerMs = 170;
@@ -117,6 +135,9 @@ internal static class GachaRevealDialog
         var tints = new Color[cards.Count];
         for (var i = 0; i < cards.Count; i++) tints[i] = ReadCardColor(cards[i].Path, accent);
 
+        // 爆发那一下的光取这批图的主色相（见 BatchLight）。
+        var burstLight = BatchLight(tints, accent);
+
         int? selected = null;
         int? chosen = null;
 
@@ -153,10 +174,17 @@ internal static class GachaRevealDialog
         Grid.SetColumn(footerButtons, 1);
         footer.Children.Add(footerButtons);
 
-        // ---- 舞台：许愿区、光点、卡片区叠在同一块地方，靠不透明度交接 ----
+        // ---- 舞台：许愿区、尘埃、光点、卡片区叠在同一块地方，靠不透明度交接 ----
         var wishStage = BuildWishStage(nodeTitle, cards.Count, badgeAbbreviation, accent, sourceLine,
             out var mark, out var markRing);
-        var sparkField = BuildSparkField(accent, out var sparks);
+        // 爆发时的光点：从中心朝上扇开（四个，数量含义见 SparkCount）。
+        var sparkField = BuildSparkField(burstLight, out var sparks);
+        // 蓄势时的尘埃：从四周往中心收。它是装饰，数量不带含义。
+        var dustField = BuildDustField(burstLight, out var dust);
+        // 爆发那一下：竖着的光柱 + 一圈白光。
+        var pillar = BuildEllipticalGlow(burstLight, 230, cardHeight * 3.0, peak: 210, mid: 120);
+        pillar.RenderTransform = TransformOperations.Parse("scale(1,0.22)");
+        var bloom = BuildEllipticalGlow(Colors.White, cardWidth * 3.6, cardWidth * 3.6, peak: 200, mid: 70);
 
         // 每行一个水平面板，行与行在竖直方向排开。末行张数少时也居中（5 张 = 上 3 下 2）。
         var cardGrid = new StackPanel
@@ -211,6 +239,7 @@ internal static class GachaRevealDialog
         // 格子本身的尺寸就是卡片的尺寸，光晕超出格子向外溢（没有祖先裁剪它），
         // 所以六团光会在边缘互相渗一点——那正是想要的「流动」感。
         var cells = new List<Grid>();
+        var flyers = new List<Grid>();
         var frames = new List<Border>();
         var halos = new List<Border>();
         var haloBoosts = new List<Border>();
@@ -275,11 +304,32 @@ internal static class GachaRevealDialog
             boost.Opacity = 0;
             haloBoosts.Add(boost);
 
-            var cell = new Grid { Width = cardWidth, Height = cardHeight };
-            cell.Children.Add(halo);
-            cell.Children.Add(boost);
-            cell.Children.Add(frame);
-            cells.Add(cell);
+            // 两层壳，各管一件事（一层壳上挂两段动效会互相打架）：
+            // · flyer —— 卡片从中心飞出来：只动它的 translate 与 opacity；
+            // · dimmer —— 选中时把「卡 + 它背后那团光」一起压暗：只动它的 opacity。
+            // 卡片自己是摆在 (col,row) 上的，所以「从中心飞出来」= 先把它挪到中心的相反方向
+            // （-dx,-dy），再回到 0。
+            var col = i % perRow;
+            var rowIndex = i / perRow;
+            var offsetX = (col - (perRow - 1) / 2.0) * (cardWidth + gap);
+            var offsetY = (rowIndex - (rows - 1) / 2.0) * (cardHeight + cardGrid.Spacing);
+
+            var dimmer = new Grid { Width = cardWidth, Height = cardHeight };
+            dimmer.Children.Add(halo);
+            dimmer.Children.Add(boost);
+            dimmer.Children.Add(frame);
+            cells.Add(dimmer);
+
+            var flyer = new Grid
+            {
+                Width = cardWidth,
+                Height = cardHeight,
+                Opacity = 0,
+                RenderTransformOrigin = RelativePoint.Center,
+                RenderTransform = TransformOperations.Parse($"translate({-offsetX:0.#}px,{-offsetY:0.#}px)")
+            };
+            flyer.Children.Add(dimmer);
+            flyers.Add(flyer);
 
             var captured = i;
             frame.PointerPressed += (_, e) =>
@@ -294,18 +344,18 @@ internal static class GachaRevealDialog
             {
                 if (!flipsDone || selected == captured) return;
                 frame.RenderTransform = TransformOperations.Parse("scale(1.045)");
-                cell.Opacity = 0.8;
+                dimmer.Opacity = 0.8;
             };
             frame.PointerExited += (_, _) =>
             {
                 if (!flipsDone || selected == captured) return;
                 frame.RenderTransform = TransformOperations.Parse("scale(1,1)");
-                cell.Opacity = selected is null ? 1 : 0.45;
+                dimmer.Opacity = selected is null ? 1 : 0.45;
             };
-            rowOf[i / perRow].Children.Add(cell);
+            rowOf[rowIndex].Children.Add(flyer);
         }
 
-        var stage = new Grid { Children = { wishStage, sparkField, cardColumn } };
+        var stage = new Grid { Children = { bloom, pillar, wishStage, dustField, sparkField, cardColumn } };
 
         var body = new Grid { RowDefinitions = new RowDefinitions("*,Auto") };
         body.Children.Add(new Panel
@@ -346,6 +396,17 @@ internal static class GachaRevealDialog
             }
         };
 
+        // 爆发那一瞬间的**全屏一闪**。二游基本都有这一下：屏幕白一下，把「抽到了」这件事砸实。
+        // 峰值压在 0.34——再亮就刺眼了，而且全屏、无边框，看久了很难受。
+        var whiteout = new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            IsHitTestVisible = false,
+            Opacity = 0,
+            Background = new SolidColorBrush(Colors.White)
+        };
+
         // ---- 整块底：不透明的深底 + 顶部一层冷蓝光，与主窗口同一套观感 ----
         var surface = new Panel();
         surface.Children.Add(new Border
@@ -369,6 +430,7 @@ internal static class GachaRevealDialog
         });
         surface.Children.Add(ambient);
         surface.Children.Add(body);
+        surface.Children.Add(whiteout);
 
         var window = new Window
         {
@@ -387,8 +449,15 @@ internal static class GachaRevealDialog
 
         // 所有卡都停在同一条时间线上：翻面结束之后才允许挑。选中的那一格再抬起来、
         // 其余压暗——「挑一张」这件事在画面上必须有主次，六张等亮是看不出选没选的。
-        var cardsAt = WishHoldMs + 470;
-        var flipsAt = cardsAt + CardsAppearMs;
+        //
+        // 分拍（这是二游抽卡动画的骨架，但每一拍都用自绘的东西做）：
+        // ① 蓄势：尘埃从四周往中心收，徽记在呼吸
+        // ② 爆发：光柱撑开 + 一圈白光 + 全屏一闪，许愿区淡出
+        // ③ 卡片从中心飞出来落位
+        // ④ 依次翻面
+        // ⑤ 全部揭晓，这时才能挑
+        var cardsAt = CardsFlyAtMs;
+        var flipsAt = cardsAt + (frames.Count - 1) * CardFlyStaggerMs + CardFlyMs + SettleHoldMs;
         var allDoneAt = flipsAt + (frames.Count - 1) * FlipStaggerMs + FlipHalfMs + FlipBackMs;
 
         void FinishAll()
@@ -402,10 +471,17 @@ internal static class GachaRevealDialog
                 if (!ReferenceEquals(inners[i].Children[0], faces[i])) inners[i].Children[0] = faces[i];
                 flashes[i].Opacity = 0;
                 haloBoosts[i].Transitions = null;
+                flyers[i].Transitions = null;
+                flyers[i].Opacity = 1;
+                flyers[i].RenderTransform = TransformOperations.Parse("translate(0px,0px)");
                 cells[i].Opacity = selected is null ? 1 : (selected == i ? 1 : 0.45);
             }
             wishStage.Opacity = 0;
+            dustField.Opacity = 0;
             sparkField.Opacity = 0;
+            pillar.Opacity = 0;
+            bloom.Opacity = 0;
+            whiteout.Opacity = 0;
             ambient.Opacity = 1;
             resultHeader.Opacity = 1;
             cardColumn.Opacity = 1;
@@ -451,7 +527,7 @@ internal static class GachaRevealDialog
             }
         }
 
-        // 许愿：形象落位 + 呼吸，光点随后飞出。
+        // ① 蓄势：徽记落位 + 呼吸；尘埃从四周往中心收。
         At(0, () =>
         {
             mark.Opacity = 1;
@@ -459,8 +535,110 @@ internal static class GachaRevealDialog
             markRing.Opacity = 1;
             StartFloat(mark, seconds: 2.6);
         });
-        At(WishHoldMs, () =>
+        At(60, () =>
         {
+            dustField.Opacity = 1;
+            for (var i = 0; i < dust.Count; i++)
+            {
+                var fleck = dust[i];
+                var delay = i * 22;
+                // 尘埃是「从外面被吸进来」的：起点已经在外面了（建的时候就摆好了），
+                // 这里只负责接上过渡、把它送回中心。缓动用 EaseIn —— 越靠近中心越快，
+                // 才有被吸过去的感觉；用 EaseOut 会变成「滑进来」。
+                fleck.Transitions = new Transitions
+                {
+                    new TransformOperationsTransition
+                    {
+                        Property = Visual.RenderTransformProperty,
+                        Duration = TimeSpan.FromMilliseconds(GatherFlyMs),
+                        Delay = TimeSpan.FromMilliseconds(delay),
+                        Easing = new CubicEaseIn()
+                    },
+                    new DoubleTransition
+                    {
+                        Property = Visual.OpacityProperty,
+                        Duration = TimeSpan.FromMilliseconds(260),
+                        Delay = TimeSpan.FromMilliseconds(delay),
+                        Easing = new CubicEaseOut()
+                    }
+                };
+                fleck.Opacity = 1;
+                fleck.RenderTransform = TransformOperations.Parse("translate(0px,0px)");
+            }
+        });
+
+        // ② 爆发。
+        At(BurstMs, () =>
+        {
+            wishStage.Opacity = 0;
+
+            // 光柱：先「无过渡」地点亮、定住起点，再挂上过渡往终点走。
+            // 反过来的话（先挂过渡再设起点）连起点都会被当成一段动画。
+            dustField.Transitions = new Transitions
+            {
+                new DoubleTransition
+                {
+                    Property = Visual.OpacityProperty,
+                    Duration = TimeSpan.FromMilliseconds(200),
+                    Easing = new CubicEaseIn()
+                }
+            };
+            dustField.Opacity = 0;
+
+            pillar.Opacity = 1;
+            pillar.Transitions = new Transitions
+            {
+                new TransformOperationsTransition
+                {
+                    Property = Visual.RenderTransformProperty,
+                    Duration = TimeSpan.FromMilliseconds(460),
+                    Easing = new CubicEaseOut()
+                },
+                new DoubleTransition
+                {
+                    Property = Visual.OpacityProperty,
+                    Duration = TimeSpan.FromMilliseconds(320),
+                    Delay = TimeSpan.FromMilliseconds(240),
+                    Easing = new CubicEaseIn()
+                }
+            };
+            pillar.RenderTransform = TransformOperations.Parse("scale(1,1.5)");
+            pillar.Opacity = 0;
+
+            // 一圈白光：亮一下就化掉，顺带放大一圈。
+            bloom.Opacity = 0.85;
+            bloom.Transitions = new Transitions
+            {
+                new TransformOperationsTransition
+                {
+                    Property = Visual.RenderTransformProperty,
+                    Duration = TimeSpan.FromMilliseconds(420),
+                    Easing = new CubicEaseOut()
+                },
+                new DoubleTransition
+                {
+                    Property = Visual.OpacityProperty,
+                    Duration = TimeSpan.FromMilliseconds(480),
+                    Easing = new CubicEaseOut()
+                }
+            };
+            bloom.RenderTransform = TransformOperations.Parse("scale(1.35)");
+            bloom.Opacity = 0;
+
+            // 全屏一闪。
+            whiteout.Opacity = 0.34;
+            whiteout.Transitions = new Transitions
+            {
+                new DoubleTransition
+                {
+                    Property = Visual.OpacityProperty,
+                    Duration = TimeSpan.FromMilliseconds(230),
+                    Easing = new CubicEaseOut()
+                }
+            };
+            whiteout.Opacity = 0;
+
+            // 四个光点朝上散开。
             sparkField.Opacity = 1;
             for (var i = 0; i < sparks.Count; i++)
             {
@@ -488,18 +666,55 @@ internal static class GachaRevealDialog
                     $"translate({spark.Tag as string})");
             }
         });
+
+        // ③ 卡片从中心飞出来落位。
         At(cardsAt, () =>
         {
-            wishStage.Opacity = 0;
+            sparkField.Transitions = new Transitions
+            {
+                new DoubleTransition
+                {
+                    Property = Visual.OpacityProperty,
+                    Duration = TimeSpan.FromMilliseconds(260),
+                    Easing = new CubicEaseOut()
+                }
+            };
             sparkField.Opacity = 0;
             ambient.Opacity = 1;
             resultHeader.Opacity = 1;
             cardColumn.Opacity = 1;
+            for (var i = 0; i < flyers.Count; i++)
+            {
+                var flyer = flyers[i];
+                var delay = i * CardFlyStaggerMs;
+                flyer.Transitions = new Transitions
+                {
+                    new TransformOperationsTransition
+                    {
+                        Property = Visual.RenderTransformProperty,
+                        Duration = TimeSpan.FromMilliseconds(CardFlyMs),
+                        Delay = TimeSpan.FromMilliseconds(delay),
+                        // 落位要有「砸到位」的感觉：Back 系缓动会先冲过头再收回来。
+                        Easing = new BackEaseOut()
+                    },
+                    new DoubleTransition
+                    {
+                        Property = Visual.OpacityProperty,
+                        Duration = TimeSpan.FromMilliseconds(CardFlyMs / 2),
+                        Delay = TimeSpan.FromMilliseconds(delay),
+                        Easing = new CubicEaseOut()
+                    }
+                };
+                flyer.RenderTransform = TransformOperations.Parse("translate(0px,0px)");
+                flyer.Opacity = 1;
+            }
             // 光晕从这一刻开始缓缓流动：每张的周期不一样、起始方向也交替，
             // 所以六团光不会同步呼吸——同步就成了一整块背景，那样反而分不出哪团光属于哪张卡。
             for (var i = 0; i < halos.Count; i++)
                 StartDrift(halos[i], seconds: 3.2 + i * 0.55, startHigh: i % 2 == 1);
         });
+
+        // ④ 依次翻面。
         At(flipsAt, () =>
         {
             for (var i = 0; i < frames.Count; i++)
@@ -1140,6 +1355,101 @@ internal static class GachaRevealDialog
         return field;
     }
 
+    /// <summary>
+    /// 蓄势用的尘埃：一圈小亮点，建的时候就已经摆在中心外面，等着被「吸」进去。
+    ///
+    /// 起点只在建的时候算一次（动画只要把它们送回原点就行）——起点算两次的话，
+    /// 动画开始那一瞬间会先闪回原地再飞，看得出来。
+    /// 数量是装饰，不带任何含义（带档位含义的是 <see cref="SparkCount"/>）。
+    /// </summary>
+    private static Control BuildDustField(Color light, out List<Border> dust)
+    {
+        const double size = (GatherRadius + 90) * 2;
+        var field = new Canvas
+        {
+            Width = size,
+            Height = size,
+            Opacity = 0,
+            IsHitTestVisible = false,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        dust = new List<Border>();
+        for (var i = 0; i < GatherCount; i++)
+        {
+            // 撒一圈，但不落在一个正圆上：半径错开几档才像飘着的灰，不像一圈灯。
+            var angle = i * (360.0 / GatherCount) + (i % 3) * 9;
+            var radius = GatherRadius - (i % 4) * 34;
+            var rad = angle * Math.PI / 180;
+            var dx = Math.Cos(rad) * radius;
+            // 竖直方向压扁一点：屏幕是横的，按正圆撒会顶到上下边。
+            var dy = Math.Sin(rad) * radius * 0.7;
+
+            var dot = i % 3 == 0 ? 5.0 : 3.0;
+            var fleck = new Border
+            {
+                Width = dot,
+                Height = dot,
+                CornerRadius = new CornerRadius(dot / 2),
+                Background = new SolidColorBrush(Color.FromArgb(220, light.R, light.G, light.B)),
+                BoxShadow = new BoxShadows(new BoxShadow
+                {
+                    OffsetX = 0,
+                    OffsetY = 0,
+                    Blur = 14,
+                    Spread = 2,
+                    Color = Color.FromArgb(150, light.R, light.G, light.B)
+                }),
+                IsHitTestVisible = false,
+                Opacity = 0,
+                RenderTransformOrigin = RelativePoint.Center,
+                RenderTransform = TransformOperations.Parse($"translate({dx:0.#}px,{dy:0.#}px)")
+            };
+            Canvas.SetLeft(fleck, size / 2 - dot / 2);
+            Canvas.SetTop(fleck, size / 2 - dot / 2);
+            field.Children.Add(fleck);
+            dust.Add(fleck);
+        }
+        return field;
+    }
+
+    /// <summary>
+    /// 一团椭圆形的柔光。爆发那一下的**光柱**与**白光**都是它——宽高不一样，一团是竖柱、一团是圆盘。
+    ///
+    /// 用径向渐变而不是 `BoxShadow`：阴影会把形状**内部**也填上颜色，出来是一块实心的圆角矩形（踩过）。
+    /// 渐变在 0.9 处就归零、剩下留白，免得边界上出现一条硬边（这条在卡背后那团光上也踩过）。
+    /// </summary>
+    private static Border BuildEllipticalGlow(Color light, double width, double height, byte peak, byte mid)
+    {
+        return new Border
+        {
+            Width = width,
+            Height = height,
+            CornerRadius = new CornerRadius(Math.Min(width, height) / 2),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false,
+            Opacity = 0,
+            RenderTransformOrigin = RelativePoint.Center,
+            RenderTransform = TransformOperations.Parse("scale(1,1)"),
+            Background = new RadialGradientBrush
+            {
+                Center = new RelativePoint(0.5, 0.5, RelativeUnit.Relative),
+                GradientOrigin = new RelativePoint(0.5, 0.5, RelativeUnit.Relative),
+                RadiusX = new RelativeScalar(0.5, RelativeUnit.Relative),
+                RadiusY = new RelativeScalar(0.5, RelativeUnit.Relative),
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(peak, light.R, light.G, light.B), 0),
+                    new GradientStop(Color.FromArgb(mid, light.R, light.G, light.B), 0.45),
+                    new GradientStop(Color.FromArgb(0, light.R, light.G, light.B), 0.9),
+                    new GradientStop(Color.FromArgb(0, light.R, light.G, light.B), 1)
+                }
+            }
+        };
+    }
+
     // ==================== 动画零件 ====================
 
     /// <summary>
@@ -1309,6 +1619,35 @@ internal static class GachaRevealDialog
         {
             return fallback;
         }
+    }
+
+    /// <summary>
+    /// 爆发那一下的光用什么颜色：把这批图各自的主色相**在圆周上平均**成一个
+    /// （色相是角度，直接算术平均会在 0/360 交界处出错，所以先化成单位向量再加）。
+    ///
+    /// 二游在爆发那一下常常用光的颜色暗示抽到了什么——也就是说那束光在**预告**结果。
+    /// 这里的光不预告，它就是从结果推出来的：「你这批图偏这个色，所以光是这个色」。
+    /// 所以它没法撒谎，也用不着撒谎——我们根本没有质量判据（待办第 8 条）。
+    /// </summary>
+    private static Color BatchLight(IReadOnlyList<Color> tints, Color fallback)
+    {
+        if (tints.Count == 0) return fallback;
+        double x = 0, y = 0;
+        foreach (var tint in tints)
+        {
+            var rad = HueOf(tint) * Math.PI / 180;
+            x += Math.Cos(rad);
+            y += Math.Sin(rad);
+        }
+        if (Math.Abs(x) < 1e-6 && Math.Abs(y) < 1e-6) return fallback;
+        return FromHsv(Math.Atan2(y, x) * 180 / Math.PI, 0.58, 0.9);
+    }
+
+    /// <summary>一个颜色的色相（0–360）。</summary>
+    private static double HueOf(Color color)
+    {
+        double r = color.R, g = color.G, b = color.B;
+        return Hue(r, g, b, Math.Max(r, Math.Max(g, b)), Math.Min(r, Math.Min(g, b)));
     }
 
     private static double Hue(double r, double g, double b, double max, double min)
