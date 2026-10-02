@@ -68,7 +68,7 @@
                 <TextBlock Text="YEEYEEYEE" Foreground="{StaticResource DfInk}" FontSize="14"
                            FontWeight="SemiBold" VerticalAlignment="Center" />
                 <Border Classes="chip" Padding="7,1" VerticalAlignment="Center">
-                  <TextBlock Text="v0.9" Foreground="{StaticResource DfInk2}" FontSize="10" />
+                  <TextBlock Text="v0.1.0" Foreground="{StaticResource DfInk2}" FontSize="10" />
                 </Border>
               </StackPanel>
 

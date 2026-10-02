@@ -35,7 +35,7 @@
                 <TextBlock Text="YEEYEEYEE" Foreground="{StaticResource DfInk}" FontSize="14" FontWeight="SemiBold"
                            VerticalAlignment="Center" />
                 <Border Classes="chip" Padding="7,1" VerticalAlignment="Center">
-                  <TextBlock Text="v0.9" Foreground="{StaticResource DfInk2}" FontSize="10" />
+                  <TextBlock Text="v0.1.0" Foreground="{StaticResource DfInk2}" FontSize="10" />
                 </Border>
               </StackPanel>
 
@@ -93,7 +93,7 @@
             <Border Classes="edgeTop" />
             <DockPanel Margin="14">
               <!-- 停靠顺序即视觉顺序：先停靠的贴最外沿，所以版本号在最底下，「设置」紧贴在它上方。 -->
-              <TextBlock DockPanel.Dock="Bottom" Text="v0.9.18 · 本地项目" Classes="dim" FontSize="11"
+              <TextBlock DockPanel.Dock="Bottom" Text="v0.1.0 · 本地项目" Classes="dim" FontSize="11"
                          Margin="4,12,0,0" />
               <Button DockPanel.Dock="Bottom" Classes="navButton" HorizontalAlignment="Stretch"
                       HorizontalContentAlignment="Left" Margin="0,10,0,0" Click="Settings_OnClick"

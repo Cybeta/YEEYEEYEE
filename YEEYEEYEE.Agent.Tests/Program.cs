@@ -53,6 +53,7 @@ var tests = new (string Name, Action Run)[]
     ("密钥保护：别的平台的密文如实报解不开，带冒号的密钥不被误判", CiphertextFromAnotherPlatformIsReportedUnreadable),
     ("密钥保护：明文档如实带 plain: 前缀并被标记出来", PlaintextTierIsReportedHonestly),
     ("配置落盘：应用级文件在用户配置目录，不再写在程序旁边", AppFilesLiveInUserConfigDirectory),
+    ("改名过渡：配置目录新名优先，但旧目录里有东西就用旧的", RenamedDirectoryPrefersTheOneWithData),
     ("配置落盘：程序旁的旧文件会被搬到用户配置目录（搬不是拷）", LegacyProgramRootConfigIsMigrated),
     ("模型预设：地址能反推回同一家，预置模型元数据自洽", ProviderPresetCatalogIsConsistent),
     ("模型预设：预设换算两端共用一份（采样开关与型号覆盖都一致）", ProviderPresetValuesResolveIsConsistent),
@@ -6641,13 +6642,49 @@ static void AppFilesLiveInUserConfigDirectory()
 {
 	string userConfigDirectory = AppPaths.UserConfigDirectory;
 	Expect(Path.IsPathRooted(userConfigDirectory), "用户配置目录应是绝对路径：" + userConfigDirectory);
-	Expect(userConfigDirectory.EndsWith("YEEYEEYEE", StringComparison.Ordinal), "用户配置目录应以 YEEYEEYEE 结尾：" + userConfigDirectory);
+	// 改名过渡：新目录优先，但**只有个空壳而旧目录里真存着配置**时用旧目录。两种目录名都可能出现，
+	// 规则本身由 RenamedDirectoryPrefersTheOneWithData 钉住，这里只校验目录名在允许范围内。
+	string folder = Path.GetFileName(userConfigDirectory);
+	Expect(folder is "YEEYEEYEE" or "DreamForge", "用户配置目录应是 YEEYEEYEE（过渡期允许 DreamForge）：" + userConfigDirectory);
+	if (folder == "DreamForge")
+		Expect(File.Exists(Path.Combine(userConfigDirectory, "ai-config.json"))
+			|| File.Exists(Path.Combine(userConfigDirectory, "recent-projects.json")),
+			"只有旧目录里确实存着配置时才会退回旧目录：" + userConfigDirectory);
 	string fileName = $"probe-{Guid.NewGuid():N}.json";
 	string text = AppPaths.ResolveAppFile(fileName);
 	Expect(string.Equals(Path.GetDirectoryName(text), userConfigDirectory, StringComparison.Ordinal), "应用级文件应解析到用户配置目录，实际：" + text);
 	Expect(!File.Exists(text), "解析位置不该顺手创建文件");
 	Expect(condition: true, "dpapi: 前缀不能改，旧配置是按它判断有没有密文的");
 	Expect(!string.IsNullOrWhiteSpace(SecretProtector.StorageDescription), "落盘方案说明要有内容给界面显示");
+}
+
+// 改名后目录名的选择规则：**谁真的装着东西就用谁**。
+// 容易踩的坑是「新目录存在」不等于「新目录有东西」——程序自己会顺手把新目录建出来，
+// 于是空壳会把用户已有配置的旧目录顶掉，用户看到的是「密钥要我重填」。
+static void RenamedDirectoryPrefersTheOneWithData()
+{
+	string root = Path.Combine(Path.GetTempPath(), "yeeeyee-prefer-" + Guid.NewGuid().ToString("N"));
+	string next = Path.Combine(root, "YEEYEEYEE");
+	string previous = Path.Combine(root, "DreamForge");
+	static bool HasConfig(string directory) => File.Exists(Path.Combine(directory, "ai-config.json"));
+	try
+	{
+		Expect(AppPaths.PreferPopulated(next, previous, HasConfig) == next, "两个目录都没有内容时应选新目录，准备新建");
+
+		Directory.CreateDirectory(previous);
+		File.WriteAllText(Path.Combine(previous, "ai-config.json"), "{}");
+		Directory.CreateDirectory(next);
+		Expect(AppPaths.PreferPopulated(next, previous, HasConfig) == previous,
+			"旧目录里有配置、新目录只是空壳时必须用旧目录，否则用户会以为密钥没填过");
+
+		File.WriteAllText(Path.Combine(next, "ai-config.json"), "{}");
+		Expect(AppPaths.PreferPopulated(next, previous, HasConfig) == next, "新目录里也有配置时以新目录为准");
+	}
+	finally
+	{
+		try { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+		catch (IOException) { }
+	}
 }
 
 static void AttachmentPromptIsStoredAndReadable()

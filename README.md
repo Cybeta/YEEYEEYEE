@@ -1,8 +1,12 @@
 # YEEYEEYEE
 
-> 当前基线：2026-10-02
+> 当前基线：2026-10-02 · 版本 0.1.0
 
 YEEYEEYEE 寓意 YES 工程师 · YES 艺术家。项目、解决方案、程序集、命名空间与协议标识统一为 `YEEYEEYEE`（早期代号 DreamForge 已完成全量替换，旧名只在环境变量与 Web 配置键上保留回退读取）。当前主端是 Windows 优先的 Avalonia 桌面工作区：支持文本与图像生成、出图批次、技能与接口站池子、Agent 协作与项目文件管理。旧 WinForms 端已**删除**（第 128 轮，源码可从 Git 历史取回），不再占用仓库。Web 提供作业服务、桌面画布镜像及引用版本回写，尚不能独立完成创作。
+
+![工作台](docs/screenshots/02-workbench.png)
+
+从启动到出图的完整手工流程（含各页面截图）见 [使用说明](USAGE.md)。
 
 共享代码只有一份来源：`YEEYEEYEE.Desktop.Core`（画布模型与画布基础设施）与 `YEEYEEYEE.Desktop.Shared`（无界面逻辑），界面只调用它们。详见 [架构](02_Architecture.md)。
 
@@ -17,6 +21,7 @@ YEEYEEYEE 寓意 YES 工程师 · YES 艺术家。项目、解决方案、程序
 | 顺序 | 文档 | 职责 |
 |---|---|---|
 | 入口 | [README](README.md) | 启动、当前边界、故障案例 |
+| 使用 | [使用说明](USAGE.md) | 从启动到出图的手工流程，配各页面截图 |
 | 01 | [产品决策](01_Project_Plan.md) | 产品目标、两轴分工与待实现方案 |
 | 02 | [架构](02_Architecture.md) | 源码事实、架构图、数据与迁移边界 |
 | 03 | [技能](03_Skill_System.md) | 生成技能、站点与池子、角色能力与插件 |

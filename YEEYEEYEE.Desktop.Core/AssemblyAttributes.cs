@@ -5,3 +5,7 @@ using System.Runtime.CompilerServices;
 // 这条声明原先挂在旧 WinForms 端项目上（ProjectMigrationFaultHook.cs 里就只有这一行），
 // 第 127 轮随「把共享代码收进库」一起搬到真正声明那个 internal 成员的程序集：Core。
 [assembly: InternalsVisibleTo("YEEYEEYEE.Migration.Tests")]
+
+// 改名过渡的目录选择规则（AppPaths.PreferPopulated）也是 internal：它要按「新目录只有空壳、
+// 旧目录里才有配置」这种状态来测，而那种状态没法在真实用户目录里安全地造出来（会动到用户密钥）。
+[assembly: InternalsVisibleTo("YEEYEEYEE.Agent.Tests")]
