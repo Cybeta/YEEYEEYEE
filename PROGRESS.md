@@ -1,4 +1,4 @@
-# DreamForge 开发进度基准
+# YEEYEEYEE 开发进度基准
 
 ## 当前基线
 
@@ -8,16 +8,25 @@
 站点与池子（**站点是一级实体**，调用前选池子并记住上次）、出图批次（数量 1–6、节点上方虚影实时预览、选一张保存其余进回收站）、
 Agent 面板改造（模型选择下移、发送/停止合一、用量显示、面板收起后右下角常驻厂家徽标入口）、
 画布上的生成光效与候选窗口、「引用的设定改了图」的下游提示、生成链自检（四层缺口报数与花费预估），
-以及一轮工程收尾：抽出 `DreamForge.Desktop.Shared`、**合并两份分叉的核心**、旧 WinForms 端归档。
+以及一轮工程收尾：抽出 `YEEYEEYEE.Desktop.Shared`、**合并两份分叉的核心**、旧 WinForms 端归档。
 测试基线：Agent **190 项**、Migration `8/8`、G6V1 通过；解决方案 0 错误。细节见下面各轮（倒序）。
 
 **文档汇总与上传**：按「中性描述」原则把文档与示例里的真实站点、域名统一改成中性示例（`example`，如 `video.example.com`），示例密钥改成 `sk-site-secret` 这类明显假值；`.gitignore` 增加 `*.design/`（设计目录含本机绝对路径与工具清单，不入库）。提交前全库扫过 `sk-*` / `Bearer` / `dpapi:` / 绝对路径 / 邮箱等模式，**未发现真实密钥**（命中均为测试假数据）。`README`、`02`、`03`、`04`（Mermaid 图与 Markdown 列表版）、`PROGRESS`、`TODO` 同步到当前架构。已提交并推送 `main`。本轮复核基线：Agent 190、Core 29、Migration `8/8`、G6V1 通过、Canvas TS `44/44`，解决方案 0 错误。
 
-2026-09-30 Goal7 阶段进展（**待独立复核，不是整批完成**）：新增 `/api/web` 本机 Bearer HTTP 场景/资产/技能任务接口，项目模式适配桌面画布权威文件、字节指纹冲突检查及保存备份；独立模式须显式启用，不可信项目不回退。TS 普通浏览器入口改为 WebCanvasApp，按稳定 ID 选择节点/资产、只读展示引用、编辑标题和内容、轮询任务。协议细节见 `protocol/PROTOCOL.md` 第 8 节。**本轮实跑** `dotnet build DreamForge.slnx --no-restore`：6 项目、0 警告 0 错误；`dotnet run --project DreamForge.Web.Tests/DreamForge.Web.Tests.csproj`：HTTP 回归通过（单一控制台用例，未输出断言总数）；`npm.cmd --prefix DreamForge.Canvas test -- --run`：7 文件 43/43；前端 `npm.cmd --prefix DreamForge.Canvas run build` 通过；`git diff --check` 返回 0，仅行尾转换提示。Web HTTP 回归使用隔离临时场景/项目与离线 ComfyUI，验证匿名拒绝不改数据、冲突、项目格式保存、独立场景重启持久化、资源失效拒绝、任务失败及重试；前端资产解析仅 3 条单测。**未验**真实浏览器完整点击链、实际提供方成功出图、跨进程/断电、Web/桌面同时编辑的端到端协作及 Goal7 整批验收；不可将 HTTP 控制台回归等同浏览器验收。下一步由独立复核核对权限、路由/构建部署及真实浏览器保存重开与失败路径，再定目标7结论。
+**第 128 轮：全量改名为 YEEYEEYEE · 删除旧端 · 解耦核实**
+
+- **改名（全量）**：解决方案 `YEEYEEYEE.slnx`；13 个项目文件夹、工程文件名、程序集名、C# 命名空间、axaml 的 `x:Class` 与 `xmlns` 一起改，仓库内零 `DreamForge` 残留。做法是先改目录与工程文件名，再按后缀白名单批量替换文件内容（**保留每个文件原有的 BOM 与行尾**），最后统一编译验证。
+- **旧名回退**（改名不能弄丢已经存在的东西）：环境变量读 `YEEYEEYEE_*` 优先、回退 `DREAMFORGE_*`（`EnvCompat.Get`）；Web 配置键读 `YEEYEEYEE:*` 优先、回退 `DreamForge:*`（`LegacyConfig.Text` / `.Flag`）；用户配置目录与项目目录用 `AppPaths.RenamedOrExistingSegment`——新目录存在就用新的，否则旧目录还在就用旧的。**用户已填的密钥与已有工程因此不会因为改名而「消失」**。
+- **删除**：`_legacy_winforms/`（33 个文件）整体删除；顺带删掉根目录三个**空**残留目录（0 文件，git 本就不跟踪空目录）。按你的选择保留 `YEEYEEYEE.Mcp` 与 `YEEYEEYEE.Canvas/dist` 及本机运行期数据。
+- **解耦核实**（按 csproj 与实际引用实测，不靠记忆）：依赖单向无环；**没有任何项目引用 Avalonia 端**（主端可整体替换）；跨项目 `<Compile Include>` 一条不剩；全仓已无 `System.Windows.Forms` / `UseWindowsForms` / WebView2。**唯一残留的跨端耦合是 Web → Desktop.Core，且只有一处**（`ProjectCanvasSceneStore.cs` 的 `using YEEYEEYEE.Desktop;`），性质是「桌面端为权威数据源」而非意外耦合。明细表见 [02 架构](02_Architecture.md) 的「解耦现状」。
+- **验证**：`dotnet build YEEYEEYEE.slnx` **0 错误**（14 个既有警告，与改名无关）；Agent **190**、Core **29**、Migration `8/8`、G6V1 通过、Web HTTP 回归通过、Canvas TS `44/44`、前端 `npm run build` 通过。
+- 按约定未做点击测试。改名后需要你实测的重点只有一处：**启动页能否认出旧配置目录（`%LOCALAPPDATA%\DreamForge`）里的密钥与最近项目**。
+
+2026-09-30 Goal7 阶段进展（**待独立复核，不是整批完成**）：新增 `/api/web` 本机 Bearer HTTP 场景/资产/技能任务接口，项目模式适配桌面画布权威文件、字节指纹冲突检查及保存备份；独立模式须显式启用，不可信项目不回退。TS 普通浏览器入口改为 WebCanvasApp，按稳定 ID 选择节点/资产、只读展示引用、编辑标题和内容、轮询任务。协议细节见 `protocol/PROTOCOL.md` 第 8 节。**本轮实跑** `dotnet build YEEYEEYEE.slnx --no-restore`：6 项目、0 警告 0 错误；`dotnet run --project YEEYEEYEE.Web.Tests/YEEYEEYEE.Web.Tests.csproj`：HTTP 回归通过（单一控制台用例，未输出断言总数）；`npm.cmd --prefix YEEYEEYEE.Canvas test -- --run`：7 文件 43/43；前端 `npm.cmd --prefix YEEYEEYEE.Canvas run build` 通过；`git diff --check` 返回 0，仅行尾转换提示。Web HTTP 回归使用隔离临时场景/项目与离线 ComfyUI，验证匿名拒绝不改数据、冲突、项目格式保存、独立场景重启持久化、资源失效拒绝、任务失败及重试；前端资产解析仅 3 条单测。**未验**真实浏览器完整点击链、实际提供方成功出图、跨进程/断电、Web/桌面同时编辑的端到端协作及 Goal7 整批验收；不可将 HTTP 控制台回归等同浏览器验收。下一步由独立复核核对权限、路由/构建部署及真实浏览器保存重开与失败路径，再定目标7结论。
 
 2026-09-30 Goal7 真实浏览器阶段补证（仍待整批复核）：主助手访问隔离项目 Web `http://127.0.0.1:57963/`，在同名异 ID 节点/资产中选中节点 `dce0d6c7-ff9a-4719-8534-c330d14a7001`，编辑标题为“项目画布浏览器验收”和内容并点击保存；服务端修订 `96815015154153` → `161031302757786`。按实体 ID 定位资产 `8fd28d45-bd34-43c7-8c55-6d81ca4dd801`；重新导航后修改保留、第二节点未变。离线技能未预授权，未执行浏览器任务；真实桌面—Web 联动及选择回传未验，Goal7 整批不得放行。下一步补齐上述真实交互与失败路径后统一验收；不记录隔离令牌。
 
-2026-09-30 Goal7 HTTP 编辑授权补证（待独立复核）：`WebSceneApi` 的项目与独立场景 PUT 每次从服务端 `DreamForge:WebClaims` 重验 `canvas.edit`；缺声明返回 `403 CANVAS_EDIT_FORBIDDEN`，GET 保持只读可用。`Web.Tests` 在真实 HTTP 服务运行中撤销并恢复声明，验证相同 Bearer 的两模式拒绝、拒绝前后文件字节一致、项目无新增备份及恢复后既有写入路径；本轮 `dotnet run --project DreamForge.Web.Tests/DreamForge.Web.Tests.csproj` 通过（控制台未输出断言总数），`dotnet build DreamForge.slnx --no-restore` 6 项目、0 警告 0 错误，`git diff --check` 返回 0（仅行尾转换提示）。仍不是浏览器点击或多用户鉴权证据。
+2026-09-30 Goal7 HTTP 编辑授权补证（待独立复核）：`WebSceneApi` 的项目与独立场景 PUT 每次从服务端 `YEEYEEYEE:WebClaims` 重验 `canvas.edit`；缺声明返回 `403 CANVAS_EDIT_FORBIDDEN`，GET 保持只读可用。`Web.Tests` 在真实 HTTP 服务运行中撤销并恢复声明，验证相同 Bearer 的两模式拒绝、拒绝前后文件字节一致、项目无新增备份及恢复后既有写入路径；本轮 `dotnet run --project YEEYEEYEE.Web.Tests/YEEYEEYEE.Web.Tests.csproj` 通过（控制台未输出断言总数），`dotnet build YEEYEEYEE.slnx --no-restore` 6 项目、0 警告 0 错误，`git diff --check` 返回 0（仅行尾转换提示）。仍不是浏览器点击或多用户鉴权证据。
 
 2026-09-30 G6-U1：项目库补偿未恢复时统一守卫阻断关窗、切项目及切画布，恢复成功后放行；独立复核已通过，详情以 `LOCAL_HANDOFF.html` 为准。
 
@@ -30,7 +39,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 - 主线为企划 → 章节 → 分镜 → 成品。角色、道具、场景不建常驻画布节点，分镜通过 `References`/`entityTargets` 引用，按需临时展开；旧类别和入口仍在，尚未完成旧数据迁移。
 - `ParentNodeId` 是画布布局关系，`WorkTreeItemId` 是叙事锚点，`References` 是视觉引用；字段存在不等于同步已实现。
 - 工作树和资源库都保留；当前 `Entities` 与 `WorkTree` 随画布保存。项目级资源库迁移必须先完成稳定 ID、引用扫描、删除保护、回收站和版本锁定验证。
-- 桌面主端为 Avalonia 自绘（`DreamForge.Desktop.Avalonia`），无界面逻辑在 `DreamForge.Desktop.Shared`，画布模型与存储基础设施在 `DreamForge.Desktop.Core`；旧 WinForms 端已归档到 `_legacy_winforms/`，不参与构建。Web 已有 `/api/web` 的阶段性 HTTP 创作路径与旧镜像/引用版本回写并存，尚待独立复核和浏览器验收。TS/React 使用 div 卡片，tldraw 依赖已清理，Canvas 与 Mcp 不在解决方案中。
+- 桌面主端为 Avalonia 自绘（`YEEYEEYEE.Desktop.Avalonia`），无界面逻辑在 `YEEYEEYEE.Desktop.Shared`，画布模型与存储基础设施在 `YEEYEEYEE.Desktop.Core`；旧 WinForms 端已在第 128 轮删除，仓库里只剩一个桌面主端。项目、解决方案、程序集与命名空间统一为 `YEEYEEYEE`，旧名只在环境变量与 Web 配置键上保留回退读取。Web 已有 `/api/web` 的阶段性 HTTP 创作路径与旧镜像/引用版本回写并存，尚待独立复核和浏览器验收。TS/React 使用 div 卡片，tldraw 依赖已清理，Canvas 与 Mcp 不在解决方案中。
 - 宿主消息协议 v1 有 17 种消息，`/api/web` HTTP 不使用该信封；桌面 Agent 使用独立的 13 种 action 协议。基础文本/图像链路已有，视频与多端协同尚未验收；Goal7 不得以接口测试替代整批浏览器验收。
 
 ## 更新规则
@@ -66,12 +75,12 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ## 本轮最终验证（2026-09-29）
 
-- `dotnet build DreamForge.slnx`：通过，6 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：通过，22 项测试全部通过（19 项基线 + 目标 5 的任务重试 3 项）。
-- `dotnet run --project DreamForge.Agent.Tests/DreamForge.Agent.Tests.csproj --no-build`：通过，152 项测试全部通过（目标 5 新增 3 项、接口智能导入 3 项、接口导入向导 5 项、第 15 轮返工 R1–R6 / S1–S6 / U1–U6 新增 10 项用例，第 16 轮 V1–V6 各 1 项并扩展 U6 用例，第 17 轮 R16-1/R16-4 各 1 项，第 18 轮 R17-2 提交入口 1 项，<strong>目标 6 新增 6 项、复核返工 G6-R1～R3 各 1 项、G6-S2/S3 各 1 项、G6-T1/T2 各 1 项</strong>；含 U4 歧义绑定、V4 同模型两接口按档位绑定、控件自别名与项目级资源库的固定夹具）。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：通过，23 项测试全部通过（含返工 R1 的重试上限回归）。
-- `npm.cmd --prefix DreamForge.Canvas test -- --run`：通过，6 个测试文件、40 项测试全部通过。
-- `npm.cmd --prefix DreamForge.Canvas run build`：通过，`tsc --noEmit` 与 `vite build` 均通过。
+- `dotnet build YEEYEEYEE.slnx`：通过，6 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：通过，22 项测试全部通过（19 项基线 + 目标 5 的任务重试 3 项）。
+- `dotnet run --project YEEYEEYEE.Agent.Tests/YEEYEEYEE.Agent.Tests.csproj --no-build`：通过，152 项测试全部通过（目标 5 新增 3 项、接口智能导入 3 项、接口导入向导 5 项、第 15 轮返工 R1–R6 / S1–S6 / U1–U6 新增 10 项用例，第 16 轮 V1–V6 各 1 项并扩展 U6 用例，第 17 轮 R16-1/R16-4 各 1 项，第 18 轮 R17-2 提交入口 1 项，<strong>目标 6 新增 6 项、复核返工 G6-R1～R3 各 1 项、G6-S2/S3 各 1 项、G6-T1/T2 各 1 项</strong>；含 U4 歧义绑定、V4 同模型两接口按档位绑定、控件自别名与项目级资源库的固定夹具）。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：通过，23 项测试全部通过（含返工 R1 的重试上限回归）。
+- `npm.cmd --prefix YEEYEEYEE.Canvas test -- --run`：通过，6 个测试文件、40 项测试全部通过。
+- `npm.cmd --prefix YEEYEEYEE.Canvas run build`：通过，`tsc --noEmit` 与 `vite build` 均通过。
 - `git diff --check`：通过，无空白错误（仅 LF/CRLF 行尾提示）。
 - 可重复 UI 冒烟（仓库外临时工程，真实对话框与真实画布控件）：通过，26 段，含引用与回收站、章节结构、章节布局、任务重试、接口智能导入窗口、接口导入向导四步（读网页 → 建技能 → 输密钥加密落盘 → 最小测试返图 / 选「否」保存完成），以及真实宿主入口十段：第 17 段 `RollbackLastCommit`（同画布撤销后资产原样回位且字节一致、画布节点数恢复；跨画布撤销被拒、画布未改动、**不**进入待恢复、不拦离开、记录保留），第 18 段资产清理（`asset://` 引用先解析成本机路径再移出、撤销后内容逐字恢复；解析不到的引用如实报未移动），第 19 段真实标签生命周期（`A(49 节点)→B(1 节点)→A→B` 内容互不串味、关闭当前标签切回该标签内容、关闭非当前标签不动当前未保存编辑），第 20 段撤销上下文与恢复收敛（换文档后身份变化且旧上下文作废；待恢复时重试入口可达、只重试失败项、画布只回退一次、账本退出待恢复），第 21 段待恢复期间禁新批（预览不换批、面板保存给「先恢复」说明、直接提交被拒且画布不变；恢复完成后新批放行），第 22 段复制画布接守卫（待恢复时真实复制入口不创建副本、不切标签；干净现场副本状态独立；恢复后复制恢复正常），第 23 段项目级资源闭环（真实迁移入口 → 资源入库并标记项目级 → 实体列表显示「项目级」→ 改库后本画布看到新内容 → 其它画布引用时删除被硬阻断 → 删掉那份画布后允许删除），第 24 段复核返工 G6-R1/G6-R3（真实发布入口写回项目库后重开仍保留编辑；漏带项目库时真实打开入口即标记缺失并阻断解析），第 25 段复核返工 G6-S1/G6-S2（出图前阻断并注入计数桩：缺库时提供方调用为 0、库放回后判定层恢复可执行；真实 `KeepPersistedCommits`：取消不撤销已确认并落库的提交），第 26 段复核返工 G6-T1/T2/T3（打开之后才删库时执行前重新核验、提供方仍为 0 调用；本地实体发布结果为「成功但未持久化」不谎报已保存；补偿失败的待恢复记录、写库守卫与重试恢复后库与内存一致）。
 
@@ -100,10 +109,10 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 | 主题 | 事实 |
 | --- | --- |
-| 解决方案 | `DreamForge.slnx` 含 6 个项目；`DreamForge.Mcp` 与 `DreamForge.Canvas` 都不在其中 |
+| 解决方案 | `YEEYEEYEE.slnx` 含 6 个项目；`YEEYEEYEE.Mcp` 与 `YEEYEEYEE.Canvas` 都不在其中 |
 | 引用关系 | Core←Host←{Desktop,Web}；Desktop 不引用 Web/Mcp，两者只走 HTTP；`Core.Tests` 因校验桌面状态已引用 **Desktop**（`net10.0-windows`） |
 | 桌面画布 | `WorkflowCanvasControl`（GDI+ 自绘）；WebView2 与 postMessage 已移除；自动排版为**按章节分块**（`ChapterKeyOf` / `ChapterBounds` / `ArrangeChapter`） |
-| 前端画布 | `DreamForge.Canvas` 由 `DreamForge.Web` 托管（静态 dist + `/ws/canvas` + `/api/canvas/*`），浏览器走 WebSocket；仍是 div 卡片，tldraw 未被使用，不在 slnx |
+| 前端画布 | `YEEYEEYEE.Canvas` 由 `YEEYEEYEE.Web` 托管（静态 dist + `/ws/canvas` + `/api/canvas/*`），浏览器走 WebSocket；仍是 div 卡片，tldraw 未被使用，不在 slnx |
 | 桌面 ↔ Web | 桌面端 `POST /api/canvas/scene` 推全量投影 + 每 500ms 轮询 `GET /api/canvas/resource-replace/next`；Web 广播 `host/scene.reset`，并回投 `host/resource.replace.result` |
 | 数据模型 | 画布 JSON = `Nodes` + `Edges` + `Entities`（视觉轴）+ `WorkTree`（叙事轴）+ 可选的 `FormatVersion`（数据格式版本，缺省 0 表示旧文件）；`NodeCategory` 追加 `StoryPlan=6 / StoryOutline=7 / Chapter=8` |
 | 三套锚点 | `ParentNodeId`（排版）/ `WorkTreeItemId`（叙事轴）/ `References[]`（视觉轴，可被 `entityTarget`/`entityTargets` 写入）；只读校验器按这三套关系分别检查，归属歧义与错绑分开报告 |
@@ -125,8 +134,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 - 确认并采用 C# + TypeScript 双语言边界。
 - 建立 `protocol/PROTOCOL.md`，定义版本 1 信封、消息目录、方向校验、能力位覆盖、fail-closed 错误码和单人撤销边界。
 - 建立 `protocol/fixtures/` 跨语言一致性夹具及 `manifest.json`。
-- 初始化 `DreamForge.Canvas` npm 包配置，锁定 tldraw `5.4.2`。
-- 建立 `DreamForge.Canvas/src/Protocol/VersionedMessages.ts`、`CanvasMessageCodec.ts`、`Capabilities.ts`。
+- 初始化 `YEEYEEYEE.Canvas` npm 包配置，锁定 tldraw `5.4.2`。
+- 建立 `YEEYEEYEE.Canvas/src/Protocol/VersionedMessages.ts`、`CanvasMessageCodec.ts`、`Capabilities.ts`。
 - 建立 `CanvasBridge.ts`、`CanvasStore.ts`、tldraw 入口 `CanvasApp.tsx` 和 Dream 节点类型。
 - 建立协议一致性、Bridge 和 CanvasStore 测试。
 
@@ -142,9 +151,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- 建立 `DreamForge.slnx`，纳入 `DreamForge.Core` 与 `DreamForge.Core.Tests`。
+- 建立 `YEEYEEYEE.slnx`，纳入 `YEEYEEYEE.Core` 与 `YEEYEEYEE.Core.Tests`。
 - 两个项目统一使用 `net10.0`。
-- 将 `05_Core_Contracts.cs` 的核心领域建模落入可构建的 `DreamForge.Core` 类库。
+- 将 `05_Core_Contracts.cs` 的核心领域建模落入可构建的 `YEEYEEYEE.Core` 类库。
 - 实现 `SessionContext`、`Invocation`、`ExecutionResult`、`Channel`、`Skill`、`Tool`、`TypedReference` 和单人 `OperationRecord`。
 - 实现版本化 JSON 协议解码：版本、消息类型、方向、必填字段、能力声明和 fail-closed 错误码。
 - 实现 `AccessPolicy`：权限只读取服务端 `ServerClaims`，不信任客户端角色字段进行提权。
@@ -155,22 +164,22 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet restore DreamForge.slnx`：通过。
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，6 项测试全部通过。
+- `dotnet restore YEEYEEYEE.slnx`：通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，6 项测试全部通过。
 - 初次编译发现 `System.TypedReference` 与项目 `TypedReference` 同名歧义，已在测试中显式限定项目类型并复验通过。
 
 ### 遗留问题
 
 - C# 协议测试目前覆盖核心规则，尚未逐个读取 `protocol/fixtures/manifest.json` 做完整跨语言夹具回放。
 - `ReferenceGraph` 当前以仓储传入字典作为授权后的可见集合；服务端查询层仍需实现实际数据权限过滤。
-- `DreamForge.Core` 尚未接入 ASP.NET Core、SignalR、SQLite 或 Avalonia。
+- `YEEYEEYEE.Core` 尚未接入 ASP.NET Core、SignalR、SQLite 或 Avalonia。
 - 解决方案当前仍没有桌面端和 Web 宿主项目。
 
 ### 下一步
 
-1. 建立 `DreamForge.Desktop` 的 Avalonia + WebView 宿主壳。
-2. 建立 `DreamForge.Web` 的浏览器宿主适配层。
+1. 建立 `YEEYEEYEE.Desktop` 的 Avalonia + WebView 宿主壳。
+2. 建立 `YEEYEEYEE.Web` 的浏览器宿主适配层。
 3. 实现 C# `CanvasBridge` 适配器，与 TypeScript `CanvasBridge` 完成握手、场景初始化和 Job 更新回传。
 4. 为协议夹具建立 C# 自动回放测试。
 
@@ -178,27 +187,27 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- 建立 `DreamForge.Host` 共享宿主桥接项目，目标框架为 `net10.0`。
+- 建立 `YEEYEEYEE.Host` 共享宿主桥接项目，目标框架为 `net10.0`。
 - 实现 `HostBridge`：会话初始化、服务端声明能力位、场景初始化、Job 更新、错误回传和 Canvas 消息接收。
 - 实现 `DesktopCanvasTransport`：为 Avalonia WebView 提供 JSON 入站/出站边界。
 - 实现 `WebCanvasTransport`：为浏览器 `postMessage` 提供 JSON 入站/出站边界。
-- 建立 `DreamForge.Desktop` 与 `DreamForge.Web` 两个 `net10.0` 启动壳，均引用共享宿主桥接层。
+- 建立 `YEEYEEYEE.Desktop` 与 `YEEYEEYEE.Web` 两个 `net10.0` 启动壳，均引用共享宿主桥接层。
 - 统一默认场景序列化为 `{ revision, snapshot: { records: [] } }`，避免 `JsonElement` 与匿名类型混用。
 - 保持 Core 内部强类型 `ReferenceKind`，跨语言协议使用字符串类型；后续夹具回放需继续校验转换规则。
 
 ### 本轮验证
 
-- `dotnet restore DreamForge.slnx`：通过。
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，6 项测试全部通过。
-- `dotnet run --project DreamForge.Desktop/DreamForge.Desktop.csproj --no-restore`：通过，输出协议版本 1 的 `host/init` 消息。
-- `dotnet run --project DreamForge.Web/DreamForge.Web.csproj --no-restore`：通过，输出协议版本 1 的 `host/init` 消息。
+- `dotnet restore YEEYEEYEE.slnx`：通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，6 项测试全部通过。
+- `dotnet run --project YEEYEEYEE.Desktop/YEEYEEYEE.Desktop.csproj --no-restore`：通过，输出协议版本 1 的 `host/init` 消息。
+- `dotnet run --project YEEYEEYEE.Web/YEEYEEYEE.Web.csproj --no-restore`：通过，输出协议版本 1 的 `host/init` 消息。
 - `npm.cmd run build`：通过；TypeScript 编译和 Vite 构建均通过。
 
 ### 当前边界
 
-- 当前 `DreamForge.Desktop` 是宿主通信壳，不包含 Avalonia UI 包和真实 WebView 控件；真实控件接入应在桌面 UI 层完成。
-- 当前 `DreamForge.Web` 是浏览器互操作边界，不包含 Blazor WebAssembly 页面；页面层接入时不得把 tldraw 重新实现为 Razor 画布。
+- 当前 `YEEYEEYEE.Desktop` 是宿主通信壳，不包含 Avalonia UI 包和真实 WebView 控件；真实控件接入应在桌面 UI 层完成。
+- 当前 `YEEYEEYEE.Web` 是浏览器互操作边界，不包含 Blazor WebAssembly 页面；页面层接入时不得把 tldraw 重新实现为 Razor 画布。
 - 宿主启动示例使用控制台输出验证协议，尚未执行真实浏览器渲染或 Avalonia WebView 输入法/焦点/性能验证。
 
 ### 下一步
@@ -211,16 +220,16 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- 在 `DreamForge.Desktop` 新增原生 WinForms 工作流画布控件，支持节点新增、删除、选择、拖动、输入输出端口连线、连线删除、滚轮缩放、中键平移、网格和箭头绘制。
+- 在 `YEEYEEYEE.Desktop` 新增原生 WinForms 工作流画布控件，支持节点新增、删除、选择、拖动、输入输出端口连线、连线删除、滚轮缩放、中键平移、网格和箭头绘制。
 - 将六节点剧情流程实现为可选模板，不作为固定初始内容。
 - 增加选中节点属性面板，可编辑标题、类型和内容。
 - 最近画布文件扩展为完整保存节点和边数据，同时保留任务执行、取消、状态与任务记录。
-- 移除 Desktop 的 Microsoft.Web.WebView2 包引用、Canvas dist 输出复制、DesktopCanvasTransport 和 WebView 初始化；未修改 `DreamForge.Canvas` 工程。
+- 移除 Desktop 的 Microsoft.Web.WebView2 包引用、Canvas dist 输出复制、DesktopCanvasTransport 和 WebView 初始化；未修改 `YEEYEEYEE.Canvas` 工程。
 
 ### 本轮验证
 
-- `dotnet build DreamForge.Desktop/DreamForge.Desktop.csproj`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.Desktop/YEEYEEYEE.Desktop.csproj`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj`：通过，16 项测试全部通过。
 - 修正连线交互后再次执行 Desktop 构建：通过，0 个警告，0 个错误。
 
 ### 遗留问题
@@ -236,7 +245,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- 在 `DreamForge.Host` 实现 `IInvocationExecutor` 抽象和 `InMemoryInvocationExecutor`，为后续 ComfyUI/Channel 执行器保留替换边界。
+- 在 `YEEYEEYEE.Host` 实现 `IInvocationExecutor` 抽象和 `InMemoryInvocationExecutor`，为后续 ComfyUI/Channel 执行器保留替换边界。
 - 实现 `SingleMachineExecutionService`：服务端权限校验、Job 创建、状态推进、进度发布、成功/失败/取消结果和幂等复用。
 - 将 `canvas/invoke.request` 接入 `HostBridge`，解析 `Invocation` 与 `idempotencyKey`，拒绝未握手或无 `skill.invoke` 权限的请求。
 - 将 `canvas/job.cancel.request` 接入 Job 取消入口，并要求服务端会话具备 `job.cancel` 声明。
@@ -246,8 +255,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，7 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，7 项测试全部通过。
 - 端到端测试已确认 `Queued → Running → Succeeded` 更新链路、100% 进度回传和幂等 JobId 复用。
 
 ### 当前边界
@@ -266,7 +275,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- 收紧 `DreamForgeProtocol.Decode`：信封 `id` 必须为 GUID，`ts` 必须为整数，未知消息类型、版本、方向和缺失字段继续 fail-closed。
+- 收紧 `YEEYEEYEEProtocol.Decode`：信封 `id` 必须为 GUID，`ts` 必须为整数，未知消息类型、版本、方向和缺失字段继续 fail-closed。
 - 增加 `host/job.update` 负载校验：Job/Invocation 标识、状态枚举和 `0..100` 进度必须合法。
 - 强化 `Job` 为线程安全状态机：进度不可倒退，成功/失败/取消终态不可再次变更，输出集合复制后再暴露。
 - 修正 Job 取消语义：排队 Job 直接进入 `Cancelled`，运行中 Job 进入 `Cancelling` 并向执行器传播 `CancellationToken`。
@@ -277,8 +286,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，9 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，9 项测试全部通过。
 - 已串行验证构建和测试，避免并行写入 Core 输出目录造成文件锁误报。
 
 ### 当前边界
@@ -309,8 +318,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，11 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，11 项测试全部通过。
 - 新增测试覆盖：外部 ID 执行器返回、SQLite 写入、服务重启恢复、Job 外部 ID 冲突拒绝。
 
 ### 当前边界
@@ -341,8 +350,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，13 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，13 项测试全部通过。
 - 新增测试覆盖：回调状态映射、终态重复回调、跨用户拒绝、进度不回退、轮询自动完成和停止释放。
 
 ### 当前边界
@@ -361,7 +370,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- 为 `DreamForge.Host` 引入 `Microsoft.Data.Sqlite 9.0.9`，目标框架保持 `net10.0`。
+- 为 `YEEYEEYEE.Host` 引入 `Microsoft.Data.Sqlite 9.0.9`，目标框架保持 `net10.0`。
 - 新增 `IJobStore` 和 `SqliteJobStore`，自动创建 `jobs` 表及用户/更新时间索引。
 - 持久化 Job 核心快照：JobId、UserId、InvocationId、幂等键、状态、进度、错误信息和输出 Asset JSON。
 - Job 写入使用 `ON CONFLICT(job_id) DO UPDATE`，状态更新与幂等键恢复可重复执行。
@@ -372,8 +381,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，10 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，10 项测试全部通过。
 - SQLite 测试已覆盖：成功 Job 写入、重新创建服务实例恢复、恢复后的幂等键复用、未完成 Job 的宿主重启失败标记。
 
 ### 当前边界
@@ -399,8 +408,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 新增验证覆盖：外部回调真实进度、队列状态映射、WebSocket 进度写回、监听任务停止释放、ComfyUI interrupt 请求和输出文件下载。
 - 当前 Provider 支持可配置 WebSocket 接收超时、最大重连次数和初始重连间隔，断线采用指数退避并受上限约束。
 
@@ -424,13 +433,13 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 - 新增 `ComfyUiProvider`：查询 `GET /history/{prompt_id}`，映射排队、运行、失败和成功状态，并将图片输出转换为 `comfyui://` Asset 引用。
 - 新增 `HmacCallbackVerifier`：使用 HMAC-SHA256 校验 `timestamp.Base64(rawBody)` 签名，支持 `sha256=` 前缀、固定时间比较、时间窗口和 nonce 防重放。
 - 新增 `SignedExternalCallbackHandler`：验签后使用字符串枚举兼容配置反序列化 `ExternalTaskUpdate`，并交给统一回调接收器。
-- `DreamForge.Web` 改为 ASP.NET Core Web SDK，接入 `/callbacks/comfyui/{userId}` HTTP 路由和 `/health` 健康检查；回调缺少签名、签名无效、重放、过期、无效 JSON 和未知 Job 分别返回对应 HTTP 结果。
+- `YEEYEEYEE.Web` 改为 ASP.NET Core Web SDK，接入 `/callbacks/comfyui/{userId}` HTTP 路由和 `/health` 健康检查；回调缺少签名、签名无效、重放、过期、无效 JSON 和未知 Job 分别返回对应 HTTP 结果。
 - 测试夹具补充 HTTP Handler、ComfyUI 提交/历史映射、HMAC 签名、防重放、过期拒绝和签名回调完成 Job 的完整链路。
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，15 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，15 项测试全部通过。
 - 已确认 ComfyUI `prompt_id` 能绑定到本地 Job，历史输出能转为 Asset，合法签名能推进 Job 到成功，错误签名、重复 nonce 和过期时间会被拒绝。
 
 ### 当前边界
@@ -449,22 +458,22 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- `DreamForge.Web` 改为应用级依赖注入：`SqliteJobStore`、`SingleMachineExecutionService`、`ComfyUiExecutor`、`ComfyUiProvider`、回调接收器和 HMAC 验证器均由容器管理。
-- Web 配置支持 `DreamForge:JobDatabasePath`、`ComfyUI:BaseUrl`、`ComfyUI:ClientId`、`ComfyUI:WorkflowJson`、`ComfyUI:HttpTimeout`、`ComfyUI:PollingInterval` 和 `ComfyUI:CallbackSecret`。
+- `YEEYEEYEE.Web` 改为应用级依赖注入：`SqliteJobStore`、`SingleMachineExecutionService`、`ComfyUiExecutor`、`ComfyUiProvider`、回调接收器和 HMAC 验证器均由容器管理。
+- Web 配置支持 `YEEYEEYEE:JobDatabasePath`、`ComfyUI:BaseUrl`、`ComfyUI:ClientId`、`ComfyUI:WorkflowJson`、`ComfyUI:HttpTimeout`、`ComfyUI:PollingInterval` 和 `ComfyUI:CallbackSecret`。
 - Web 的画布宿主、HTTP 回调和外部任务轮询共享同一个 `SingleMachineExecutionService`，因此 Job 创建、SQLite 恢复、轮询更新和签名回调使用同一份状态。
 - 新增 `ExternalTaskPollingHostedService`，将外部任务轮询器接入 ASP.NET Core 启停生命周期，并修正启动/停止取消令牌竞态。
-- `DreamForge.Host` 增加 `Microsoft.AspNetCore.App` FrameworkReference，以承载 Web 生命周期抽象。
+- `YEEYEEYEE.Host` 增加 `Microsoft.AspNetCore.App` FrameworkReference，以承载 Web 生命周期抽象。
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，15 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，15 项测试全部通过。
 - 已验证既有 SQLite 恢复、ComfyUI Provider、外部轮询、HMAC 回调和 Job 生命周期回归测试没有退化。
 
 ### 当前边界
 
 - `ComfyUI:BaseUrl` 是必需配置；当前 `WorkflowJson` 使用固定工作流 JSON，尚未根据 Invocation 输入动态生成 ComfyUI 节点图。
-- Web 默认数据库文件位于应用目录下；生产部署应显式配置 `DreamForge:JobDatabasePath` 到可写、备份策略明确的持久化目录。
+- Web 默认数据库文件位于应用目录下；生产部署应显式配置 `YEEYEEYEE:JobDatabasePath` 到可写、备份策略明确的持久化目录。
 - 回调密钥要求 Base64 编码；nonce 仍为单进程内存缓存，多实例部署前需要共享存储。
 - ComfyUI 输出仍以 `comfyui://` 引用暴露，尚未实现文件下载、本地缓存、外部取消、精确队列进度、重试和限流。
 
@@ -482,15 +491,15 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 - 当前支持：`prompt`、`negativePrompt`、`width`、`height`、`steps`、`cfg`、`seed` 和 `checkpoint`。
 - 对尺寸、步数、CFG 和 seed 执行服务端范围限制，避免客户端传入无限资源参数。
 - ComfyUI Provider 解析历史输出中的 `filename`、`subfolder` 和 `type`，调用 `/view` 下载真实文件。
-- 支持配置 `DreamForge:AssetDirectory`，文件写入本地 Asset 目录并返回 `asset://<generated-name>` 引用。
+- 支持配置 `YEEYEEYEE:AssetDirectory`，文件写入本地 Asset 目录并返回 `asset://<generated-name>` 引用。
 - 未配置 Asset 目录时保留 `comfyui://<filename>` 兼容行为。
 - Web 宿主使用动态工作流工厂，不再读取固定 `WorkflowJson`；新增 `ComfyUI:Checkpoint` 配置。
 - 下载文件使用随机本地文件名，避免路径穿越和输出文件名冲突；远程文件名只允许作为 ComfyUI `/view` 参数，不直接拼接本地路径。
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，15 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，15 项测试全部通过。
 - 新增测试覆盖动态 prompt 映射、参数边界裁剪、ComfyUI `/prompt`、`/history`、`/view` 和本地文件落盘。
 
 ### 当前边界
@@ -510,7 +519,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- 将 `DreamForge.Desktop` 从控制台宿主切换为 `net10.0-windows` WinForms GUI 应用。
+- 将 `YEEYEEYEE.Desktop` 从控制台宿主切换为 `net10.0-windows` WinForms GUI 应用。
 - 新增 `MainForm` 三栏窗口：左侧导航、中央图像任务配置区、右侧状态与任务列表区。
 - 接入工作流类型、提示词、反向提示词、尺寸、采样步数、CFG、种子等基础参数控件。
 - 接入任务提交、Job 状态与进度更新、任务列表刷新和当前任务取消按钮。
@@ -519,9 +528,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.Desktop/DreamForge.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.Desktop/YEEYEEYEE.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 
 ### 当前边界
 
@@ -540,15 +549,15 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- 在 `DreamForge.Desktop/MainForm.cs` 左侧导航增加“新建画布”入口。
+- 在 `YEEYEEYEE.Desktop/MainForm.cs` 左侧导航增加“新建画布”入口。
 - 增加当前画布标题和修订号显示，创建新画布后生成新的时间标识并递增修订号。
 - 新建画布操作增加确认提示，确认后清空当前提示词、反向提示词、尺寸、采样、CFG、种子和当前任务状态。
 - 新建画布不会删除任务历史，仅重置当前桌面编辑上下文。
 
 ### 本轮验证
 
-- `dotnet build DreamForge.Desktop/DreamForge.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.Desktop/YEEYEEYEE.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 
 ### 当前边界
 
@@ -566,8 +575,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.Desktop/DreamForge.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.Desktop/YEEYEEYEE.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 
 ### 当前边界
 
@@ -586,19 +595,19 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.Desktop/DreamForge.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.Desktop/YEEYEEYEE.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 
 ### 当前边界
 
 - 当前画布工作区是 WinForms 交互占位层，不是最终 tldraw 实例。
-- 下一步应接入 Avalonia WebView 或等价 WebView 控件，加载 `DreamForge.Canvas` 的 `CanvasApp`，并将新建画布映射到 `host/scene.reset`。
+- 下一步应接入 Avalonia WebView 或等价 WebView 控件，加载 `YEEYEEYEE.Canvas` 的 `CanvasApp`，并将新建画布映射到 `host/scene.reset`。
 
 ## 2026-09-25 第十六轮更新：接入真实 tldraw Canvas
 
 ### 已完成
 
-- 为 `DreamForge.Desktop` 接入 `Microsoft.Web.WebView2`，使用 WebView2 承载 `DreamForge.Canvas/dist` 的真实 React/tldraw 页面。
+- 为 `YEEYEEYEE.Desktop` 接入 `Microsoft.Web.WebView2`，使用 WebView2 承载 `YEEYEEYEE.Canvas/dist` 的真实 React/tldraw 页面。
 - Canvas 入口同时支持浏览器 `postMessage` 和 WebView2 `window.chrome.webview` 消息通道。
 - 桌面端通过 `DesktopCanvasTransport` 和 `HostBridge` 完成 Canvas 握手、`host/init` 和 Job 消息转发。
 - 新增 `HostBridge.SendSceneReset()`，点击“新建画布”时向 tldraw 发送 `host/scene.reset` 并清空当前场景。
@@ -608,8 +617,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 ### 本轮验证
 
 - `npm run build`：通过，TypeScript 检查和 Vite 构建均成功。
-- `dotnet build DreamForge.Desktop/DreamForge.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.Desktop/YEEYEEYEE.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 
 ### 当前边界
 
@@ -630,9 +639,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.Desktop/DreamForge.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.Desktop/YEEYEEYEE.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 修正输入端口拖出删除连线逻辑，并阻止重复连线。
 - 尚未进行人工 WinForms UI 操作验收；需要重点验证节点拖动、端口连线、缩放、平移和重启恢复。
 
@@ -667,9 +676,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.Desktop/DreamForge.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.Desktop/YEEYEEYEE.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收。
 
 ### 当前边界
@@ -691,7 +700,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- 新增 `AiProviderSettings`：AI 配置保存在 `%LocalAppData%\DreamForge\ai-config.json`，并支持 `DREAMFORGE_AI_ENDPOINT`、`DREAMFORGE_AI_MODEL`、`DREAMFORGE_AI_KEY` 环境变量覆盖。
+- 新增 `AiProviderSettings`：AI 配置保存在 `%LocalAppData%\YEEYEEYEE\ai-config.json`，并支持 `YEEYEEYEE_AI_ENDPOINT`、`YEEYEEYEE_AI_MODEL`、`YEEYEEYEE_AI_KEY` 环境变量覆盖。
 - 新增 `OpenAiCompatibleProvider`：调用 OpenAI 兼容的 `/chat/completions` 接口；提示词要求模型只返回 JSON（`output`、`question`、`proposals`）；返回内容会剥离 Markdown 代码块后再解析；模型未按约定返回 JSON 时，原文作为内容返回，不猜测结构。
 - 新增 `AiProviderFactory`：已配置 endpoint 与 model 时使用真实 Provider，否则回落到 `LocalAiProvider`。
 - 新增 `AiNodeProposal`，`AiGenerationResult` 增加 `Proposals`，生成结果可以携带下游节点建议。
@@ -703,8 +712,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未使用真实模型凭据做端到端调用验证；`OpenAiCompatibleProvider` 的请求与 JSON 解析尚未经过真实服务或单元测试覆盖。
 - 未进行人工 WinForms UI 操作验收。
 
@@ -727,12 +736,12 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- 新增 [ImageGeneration.cs](DreamForge.Desktop/ImageGeneration.cs)：
+- 新增 [ImageGeneration.cs](YEEYEEYEE.Desktop/ImageGeneration.cs)：
   - `IImageProvider`、`ImageGenerationResult`、`ImageGenerationStatus`。
-  - `OpenAiCompatibleImageProvider` 调用 OpenAI 兼容 `/images/generations`，支持 `b64_json` 与 `url` 两种返回，图片保存到 `%LocalAppData%\DreamForge\assets`。
+  - `OpenAiCompatibleImageProvider` 调用 OpenAI 兼容 `/images/generations`，支持 `b64_json` 与 `url` 两种返回，图片保存到 `%LocalAppData%\YEEYEEYEE\assets`。
   - `UnconfiguredImageProvider` 在未配置时明确返回“未配置”，**不生成占位图片**，也不写入节点。
   - `ImageProviderFactory` 按配置选择实现。
-- `AiProviderConfig` 增加 `ImageEndpoint`、`ImageModel`、`ImageSize`，并提供 `IsImageConfigured`；新增环境变量 `DREAMFORGE_IMAGE_ENDPOINT`、`DREAMFORGE_IMAGE_MODEL`。
+- `AiProviderConfig` 增加 `ImageEndpoint`、`ImageModel`、`ImageSize`，并提供 `IsImageConfigured`；新增环境变量 `YEEYEEYEE_IMAGE_ENDPOINT`、`YEEYEEYEE_IMAGE_MODEL`。
 - 设置对话框增加图像模型、图像接口地址（留空复用文本接口）、图像尺寸三项。
 - 属性面板新增“生成参考图”按钮：以节点内容（空则用标题）作为提示词，成功后把文件路径写入 `AssetPaths`，记录 `imagePrompt` / `imageProvider` / `imageModel` 参数，来源标记为 API，状态置为已完成。
 - 画布支持图像节点缩略图：
@@ -743,8 +752,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未配置真实图像模型，因此未做端到端出图验证；`OpenAiCompatibleImageProvider` 未经过真实服务或单元测试覆盖。
 - 未进行人工 WinForms UI 操作验收。
 
@@ -779,8 +788,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；历史对话框、回滚与资产打开均未手工验证。
 
 ### 当前边界
@@ -809,8 +818,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；避让效果未手工确认。
 
 ### 当前边界
@@ -838,15 +847,15 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 - 新增 `ComfyUiImageProvider`：节点出图走共享执行服务提交 `text-to-image` 任务，复用 Host 的 `ComfyUiWorkflowFactory`，等待 Job 终态后把 `asset://` 输出解析为本地资产路径；超时会取消任务。
 - 图像 Provider 选择顺序调整为：ComfyUI（已配置且执行服务可用）→ OpenAI 兼容图像接口 → 未配置。
 - 桌面 Session 用户 ID 改为固定的 `DesktopUserId`，保证任务提交与 Job 列表过滤一致。
-- `AiProviderConfig` 增加 `ComfyUiBaseUrl`、`ComfyUiCheckpoint`、`ComfyUiClientId` 与 `IsComfyUiConfigured`，支持 `DREAMFORGE_COMFYUI_BASEURL`、`DREAMFORGE_COMFYUI_CHECKPOINT` 环境变量。
+- `AiProviderConfig` 增加 `ComfyUiBaseUrl`、`ComfyUiCheckpoint`、`ComfyUiClientId` 与 `IsComfyUiConfigured`，支持 `YEEYEEYEE_COMFYUI_BASEURL`、`YEEYEEYEE_COMFYUI_CHECKPOINT` 环境变量。
 - 设置对话框增加 ComfyUI 地址与 checkpoint；保存后若 ComfyUI 启用状态发生变化，会重建执行服务并切换 Job 列表。
 - 顶栏状态改为显示文本模型与出图后端（ComfyUI checkpoint 或图像模型）。
 - 表单关闭时释放执行宿主与后台轮询。
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未连接真实 ComfyUI 实例，节点出图与任务区提交均未端到端验证。
 - 未进行人工 WinForms UI 操作验收。
 
@@ -882,8 +891,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未连接真实 ComfyUI 或图像接口，参数是否真正生效未端到端验证。
 - 未进行人工 WinForms UI 操作验收。
 
@@ -905,18 +914,18 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 已完成
 
-- `DesktopExecutionHost` 接入 `SqliteJobStore`，默认数据库位置为 `%LocalAppData%\DreamForge\jobs.db`。
+- `DesktopExecutionHost` 接入 `SqliteJobStore`，默认数据库位置为 `%LocalAppData%\YEEYEEYEE\jobs.db`。
   - 内存执行器与 ComfyUI 执行链路都会持久化 Job，任务记录可跨重启恢复。
   - 数据库初始化失败时回退为不持久化，并在任务区显示“任务记录未持久化（原因）”，不再静默失败。
-- 新增 `DREAMFORGE_JOB_DB` 环境变量覆盖数据库路径，便于便携部署或受限环境。
+- 新增 `YEEYEEYEE_JOB_DB` 环境变量覆盖数据库路径，便于便携部署或受限环境。
 - 宿主释放时一并释放 SQLite 连接（`IJobStore.Dispose`）。
 - 重启恢复遵循 Host 既有语义：未完成的 Job 会被标记为 `Failed`（`HOST_RESTARTED`），不会静默重试。
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
-- **实际启动桌面程序验证持久化**：把 `DREAMFORGE_JOB_DB` 指向可写路径后启动程序，`jobs.db` 被成功创建（20480 字节），验证后已删除该临时文件。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- **实际启动桌面程序验证持久化**：把 `YEEYEEYEE_JOB_DB` 指向可写路径后启动程序，`jobs.db` 被成功创建（20480 字节），验证后已删除该临时文件。
 - 默认的 `%LocalAppData%` 路径在本次开发沙箱中被禁止写入，SQLite 返回“unable to open database file”；已确认这是环境限制而非代码缺陷，且回退路径工作正常、程序未崩溃。
 - 未提交真实任务做“重启后任务记录仍在”的端到端验证（需要人工操作界面）。
 - 未进行人工 WinForms UI 操作验收。
@@ -951,15 +960,15 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未在真实资产图片上验证跨机器迁移；本次沙箱禁止写入默认的 `%LocalData%`，无法端到端演练出图与画布保存。
 - 未进行人工 WinForms UI 操作验收。
 
 ### 当前边界
 
 - 只保存引用，不会复制或打包资产文件；换机器仍需自行同步资产目录。
-- 资产目录固定在 `%LocalAppData%\DreamForge\assets`，没有随画布迁移或自定义位置的入口。
+- 资产目录固定在 `%LocalAppData%\YEEYEEYEE\assets`，没有随画布迁移或自定义位置的入口。
 
 ## 2026-09-26 第二十七轮更新：按现有功能收敛 Canvas UI
 
@@ -973,12 +982,12 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 ### 本轮验证
 
 - `npm.cmd run build`：通过，TypeScript 检查和 Vite 构建均通过。
-- `dotnet build DreamForge.Desktop\DreamForge.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Agent.Tests\DreamForge.Agent.Tests.csproj --no-restore`：通过，38 项测试全部通过。
+- `dotnet build YEEYEEYEE.Desktop\YEEYEEYEE.Desktop.csproj --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Agent.Tests\YEEYEEYEE.Agent.Tests.csproj --no-restore`：通过，38 项测试全部通过。
 
 ### 当前边界
 
-- `DreamForge.Desktop` 当前使用 WinForms `WorkflowCanvasControl` 作为实际可编辑画布，React Canvas 没有接入桌面项目。
+- `YEEYEEYEE.Desktop` 当前使用 WinForms `WorkflowCanvasControl` 作为实际可编辑画布，React Canvas 没有接入桌面项目。
 - `HostBridge` 当前仍未处理 `canvas/op.batch`，React Canvas 因此只读展示协议场景，不自行伪造编辑同步。
 - React 展示层当前按协议记录的通用字段读取标题、内容和坐标；复杂的 C# 节点附件、引用和生成历史仍由桌面端属性面板展示。
 
@@ -1003,8 +1012,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 ### 已完成
 
 - 资产目录统一收敛到 `AssetStore.Directory`：
-  - 默认仍为 `%LocalAppData%\DreamForge\assets`。
-  - 可在“设置”中指定，或用 `DREAMFORGE_ASSET_DIR` 环境变量覆盖。
+  - 默认仍为 `%LocalAppData%\YEEYEEYEE\assets`。
+  - 可在“设置”中指定，或用 `YEEYEEYEE_ASSET_DIR` 环境变量覆盖。
   - `ImageProviderFactory.AssetsDirectory` 已移除，出图保存、ComfyUI 下载目录、缩略图解析统一使用该目录。
 - 新增 `CanvasPackage`：把画布 JSON 与引用的图片资产一起导出/导入。
   - 导出：写入 `canvas.json` 与 `assets/`，画布内是 `asset://` 引用，包可直接拷贝到其他机器。
@@ -1017,9 +1026,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
-- **实际启动程序验证路径覆盖**：设置 `DREAMFORGE_ASSET_DIR` 与 `DREAMFORGE_JOB_DB` 指向工作区路径后启动，`assets` 目录与 `jobs.db`（20480 字节）均被创建，验证后已删除该临时目录。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- **实际启动程序验证路径覆盖**：设置 `YEEYEEYEE_ASSET_DIR` 与 `YEEYEEYEE_JOB_DB` 指向工作区路径后启动，`assets` 目录与 `jobs.db`（20480 字节）均被创建，验证后已删除该临时目录。
 - 导出/导入需要人工选择目录，未做端到端演练。
 - 未进行人工 WinForms UI 操作验收。
 
@@ -1051,8 +1060,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；整理后的实际观感与示例模板的排布效果未人工确认。
 
 ### 当前边界
@@ -1075,7 +1084,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 ### 已完成
 
 - 新增配置 `AutoGenerationRounds`：AI 自动展开下游节点的轮数，**默认 2 轮，设为 0 表示不限制**。
-  - 可在“设置”中调整（0–20），或用 `DREAMFORGE_AUTO_ROUNDS` 环境变量覆盖。
+  - 可在“设置”中调整（0–20），或用 `YEEYEEYEE_AUTO_ROUNDS` 环境变量覆盖。
 - 属性面板新增“自动生成下游”：从选中节点开始逐轮展开。
   - 每轮对当前层每个节点调用 AI，采纳结果写入内容与生成历史，并按建议创建下游节点。
   - 下一轮以本轮新建的节点为输入，直到用尽轮数或不再有新的下游建议。
@@ -1087,8 +1096,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；自动展开的真实节点数量与轮数行为未人工确认。
 - 未使用真实大模型验证多轮展开；不限制轮数在真实模型下的收敛性取决于模型是否持续给出新建议。
 
@@ -1124,8 +1133,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；取消按钮、上限截断与关闭窗口时的取消行为均未人工确认。
 
 ### 当前边界
@@ -1148,7 +1157,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 ### 已完成
 
 - 新增 `CanvasLibrary`：画布以 JSON 文件存放在本机目录，支持列出、保存、载入、删除。
-  - 目录默认 `%LocalAppData%\DreamForge\canvases`，可用 `DREAMFORGE_CANVAS_DIR` 覆盖。
+  - 目录默认 `%LocalAppData%\YEEYEEYEE\canvases`，可用 `YEEYEEYEE_CANVAS_DIR` 覆盖。
   - 文件名由画布标题生成并做非法字符替换与长度截断。
   - 列出时读取每个文件的标题与修订号，按修改时间倒序返回。
 - 侧边栏改造成画布库面板：
@@ -1167,9 +1176,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
-- **实际启动程序验证**：设置 `DREAMFORGE_CANVAS_DIR`、`DREAMFORGE_JOB_DB`、`DREAMFORGE_ASSET_DIR` 指向工作区后启动，程序正常运行且无异常输出，说明侧边栏改造与画布库初始化不会导致启动失败；验证后已清理临时目录。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- **实际启动程序验证**：设置 `YEEYEEYEE_CANVAS_DIR`、`YEEYEEYEE_JOB_DB`、`YEEYEEYEE_ASSET_DIR` 指向工作区后启动，程序正常运行且无异常输出，说明侧边栏改造与画布库初始化不会导致启动失败；验证后已清理临时目录。
 - 保存、打开、删除画布这些需要点击界面的流程未端到端验证。
 - 未进行人工 WinForms UI 操作验收。
 
@@ -1212,8 +1221,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；删除节点/删除画布后的询问、回收站移动、存储对话框清空任务记录均未人工验证。
 
 ### 当前边界
@@ -1248,8 +1257,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；重命名三种分支、文件改名与旧文件清理均未人工验证。
 
 ### 当前边界
@@ -1279,8 +1288,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；冲突提示与覆盖分支未人工验证。
 
 ### 当前边界
@@ -1314,8 +1323,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；批量应用、设为默认与设置对话框的字段保留均未人工验证。
 
 ### 当前边界
@@ -1349,8 +1358,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；资产列表内容、引用来源显示与单张回收站操作均未人工验证。
 
 ### 当前边界
@@ -1375,7 +1384,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 - 画布库与草稿的关系明确化，不再是两套互不相干的状态：
   - 画布只有“已绑定画布库文件”和“未保存”两种状态，顶栏标题在未绑定时会显示“（未保存）”。
   - 新增 `SetCurrentCanvasPath`，所有绑定变化都会同步写入工作区记录。
-- 新增 `workspace.json`（`%LocalAppData%\DreamForge`）：记录当前画布路径，使绑定跨重启保留。
+- 新增 `workspace.json`（`%LocalAppData%\YEEYEEYEE`）：记录当前画布路径，使绑定跨重启保留。
   - `CanvasLibrary.LoadCurrentCanvasPath` 会校验文件仍存在，文件被删除时返回 null。
 - 启动恢复顺序明确为：绑定的画布库文件 → 最近画布草稿 → 画布库中最近修改的画布 → 空白画布。
 - 画布库为空时显示引导文案（“点击新建开始，再用保存存入画布库”），列表与引导互斥显示，不再是一片空白。
@@ -1383,9 +1392,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
-- **实际启动程序验证**：把 `DREAMFORGE_CANVAS_DIR`、`DREAMFORGE_JOB_DB`、`DREAMFORGE_ASSET_DIR` 指向工作区后启动，程序正常运行、无异常输出，覆盖了启动恢复、画布库扫描与空状态分支；验证后已清理临时目录。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- **实际启动程序验证**：把 `YEEYEEYEE_CANVAS_DIR`、`YEEYEEYEE_JOB_DB`、`YEEYEEYEE_ASSET_DIR` 指向工作区后启动，程序正常运行、无异常输出，覆盖了启动恢复、画布库扫描与空状态分支；验证后已清理临时目录。
 - 绑定持久化在本次沙箱中无法验证：`workspace.json` 位于 `%LocalAppData%`，该路径在当前环境被禁止写入，写入失败会被静默忽略。
 - 未进行人工 WinForms UI 操作验收。
 
@@ -1418,8 +1427,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过。
 - 未进行人工 WinForms UI 操作验收；任务详情的打开产出、取消任务与悬停提示均未人工验证。
 - 未提交真实任务做端到端验证；当前环境下提交任务需要人工点击界面。
 
@@ -1454,9 +1463,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过（含 SQLite 持久化与恢复用例，旧库补列路径未被破坏）。
-- **实际启动程序验证**：把 `DREAMFORGE_JOB_DB` 指向工作区后启动，`jobs.db`（20480 字节）成功建立，说明包含 `inputs_json` 的建表语句与补列逻辑正常执行；验证后已清理临时文件。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，16 项测试全部通过（含 SQLite 持久化与恢复用例，旧库补列路径未被破坏）。
+- **实际启动程序验证**：把 `YEEYEEYEE_JOB_DB` 指向工作区后启动，`jobs.db`（20480 字节）成功建立，说明包含 `inputs_json` 的建表语句与补列逻辑正常执行；验证后已清理临时文件。
 - 未提交真实任务验证输入参数的写入与回读（提交需要人工点击界面）。
 - 未进行人工 WinForms UI 操作验收。
 
@@ -1491,8 +1500,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-restore`：通过，**17 项测试全部通过**（新增用例真实覆盖了工具/能力/通道/输入参数的写入与回读）。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，5 个项目，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-restore`：通过，**17 项测试全部通过**（新增用例真实覆盖了工具/能力/通道/输入参数的写入与回读）。
 - 未进行人工 WinForms UI 操作验收；“按相同参数重新发起”按钮本身未端到端点击验证。
 - 未连接真实 ComfyUI，重新发起后的执行结果未验证。
 
@@ -1528,9 +1537,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误（去类型化改造后首次编译通过）。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常；未进行人工 WinForms UI 点击验收。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误（去类型化改造后首次编译通过）。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常；未进行人工 WinForms UI 点击验收。
 
 ### 当前边界
 
@@ -1564,9 +1573,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**，本轮只改界面层，未触及 Core 与 Host。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常；未进行人工 WinForms 点击验收。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**，本轮只改界面层，未触及 Core 与 Host。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常；未进行人工 WinForms 点击验收。
 
 ### 当前边界
 
@@ -1607,10 +1616,10 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**（Core 与 Host 未改动）。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常；设定库抽屉在启动时即完成构建，说明控件树与列定义无误。
-- 未尽验证：`DreamForge.Core.Tests` 目标框架为 `net10.0`，无法引用 WinForms 的 `DreamForge.Desktop`，因此场景布局的提示词拼装与画布 JSON 往返**未纳入自动化测试**，仅经编译与启动验证。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**（Core 与 Host 未改动）。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常；设定库抽屉在启动时即完成构建，说明控件树与列定义无误。
+- 未尽验证：`YEEYEEYEE.Core.Tests` 目标框架为 `net10.0`，无法引用 WinForms 的 `YEEYEEYEE.Desktop`，因此场景布局的提示词拼装与画布 JSON 往返**未纳入自动化测试**，仅经编译与启动验证。
 
 ### 当前边界
 
@@ -1651,9 +1660,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**（本轮未触及 Core 与 Host）。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**（本轮未触及 Core 与 Host）。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常。
 - 未尽验证：引用选择对话框、引用后卡片变化与提示词拼接均为人工点击路径，未做自动化测试，也未做人工点击验收。
 
 ### 当前边界
@@ -1718,7 +1727,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 五、插件宿主与三个扩展点
 
-- 契约：`IDreamForgePlugin`（Id / Name / Version / Register）与 `IPluginHost`（右键菜单、左侧图标、注册窗口与打开窗口、运行技能、只读访问当前画布、请求刷新）。
+- 契约：`IYEEYEEYEEPlugin`（Id / Name / Version / Register）与 `IPluginHost`（右键菜单、左侧图标、注册窗口与打开窗口、运行技能、只读访问当前画布、请求刷新）。
 - 边界：插件只挂界面入口，内容生产一律通过 `RunSkillAsync` 交给技能；插件不直接改写画布数据。
 - 装载：`PluginLoader` 扫描插件目录下的一级子目录，读取 `plugin.json` + 程序集，用可卸载的 `AssemblyLoadContext` 加载，宿主与框架程序集回落到默认上下文以保证接口类型一致；`apiVersion` 不匹配直接拒绝加载。
 - 失败隔离：单个插件的清单错误、加载异常、注册异常都只记录到该插件条目，宿主与其它插件继续运行；插件面板会显示错误原因。
@@ -1733,13 +1742,13 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 - 内置插件 `ThreeViewMenuPlugin` 把「人物一键三视图」挂到变体与变体参考图的右键菜单上（`用这张图生成三视图`）。
 - 内置技能 `character-three-view`：正面立绘文生图 → 侧面、背面各以正面图为底图的图生图（denoise 0.55），三步全部成功才写回变体参考图。
-- 目录覆盖：技能与插件目录支持 `DREAMFORGE_SKILL_DIR` / `DREAMFORGE_PLUGIN_DIR`，与既有的画布/资产/任务库覆盖保持一致。
+- 目录覆盖：技能与插件目录支持 `YEEYEEYEE_SKILL_DIR` / `YEEYEEYEE_PLUGIN_DIR`，与既有的画布/资产/任务库覆盖保持一致。
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**（含改动过的 ComfyUI 工作流用例）。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常；把技能目录指向该临时目录后，确认 `character-three-view.json`（1608 字节）被正确生成，说明技能装载与目录创建链路可用。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**（含改动过的 ComfyUI 工作流用例）。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常；把技能目录指向该临时目录后，确认 `character-three-view.json`（1608 字节）被正确生成，说明技能装载与目录创建链路可用。
 - 发现的环境限制：本机沙箱禁止写入 `%LocalAppData%`，因此默认技能/插件目录在沙箱内不可用；程序对此已做容错（目录不可写只是没有技能），并补齐了环境变量覆盖。
 - 未尽验证：技能出图、图生图、版本提交与引用升级、插件右键菜单均为人工点击路径，**未做端到端点击验收**；图生图需要真实 ComfyUI 或支持 `/images/edits` 的服务，当前环境无法验证。
 
@@ -1754,7 +1763,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 - 插件是进程内任意代码，没有沙箱；只应安装可信插件。宿主只提供受控 API，但插件仍可通过 `System.Windows.Forms` 直接改界面。
 - 插件注册的左侧图标需要重启才能出现；「重新加载」只对右键菜单与窗口生效。
 - 内置三视图插件是代码内置的（非 dll），用于演示扩展点用法；外部 dll 插件机制已实现但**未做真实 dll 的加载验证**。
-- `DREAMFORGE_SKILL_DIR` / `DREAMFORGE_PLUGIN_DIR` 是本轮新增，其它文档尚未同步。
+- `YEEYEEYEE_SKILL_DIR` / `YEEYEEYEE_PLUGIN_DIR` 是本轮新增，其它文档尚未同步。
 
 ### 下一步
 
@@ -1787,9 +1796,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常。
 - 未尽验证：版本对比与回滚、多引用添加与管理均为人工点击路径，未做端到端点击验收；旧画布的单引用迁移逻辑经过编译与启动验证，但**未用真实旧画布文件验证迁移结果**。
 
 ### 当前边界
@@ -1852,10 +1861,10 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**
   （ComfyUI 工作流用例覆盖了单图与文生图路径）。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常。
 - 未尽验证：多图路径（ComfyUI 多图上传、`/images/edits` 的 `image[]`）**没有真实后端可验证**；
   多图时「只用了第 1 张」的回报逻辑也未经端到端点击。
 
@@ -1881,7 +1890,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 - 新增 `ReferenceCapacity(MaxImages, Description)`：`MaxImages` 为 0 表示不限，`CanUseMultiple` 表示是否具备分步合成的前提（至少能同时吃两张）。
 - `IImageProvider` 新增 `ReferenceCapacity`：
   - ComfyUI 由 **工作流模板** 决定，新增 `ComfyUiReferenceModes` 目录声明（当前只有 `img2img`，上限 1 张）。
-  - OpenAI 兼容接口由配置声明，新增 `ImageMaxReferenceImages`（默认 1，可在设置里调，也支持 `DREAMFORGE_IMAGE_MAX_REFS`），因为能吃几张取决于所用模型，无法自动探测。
+  - OpenAI 兼容接口由配置声明，新增 `ImageMaxReferenceImages`（默认 1，可在设置里调，也支持 `YEEYEEYEE_IMAGE_MAX_REFS`），因为能吃几张取决于所用模型，无法自动探测。
 - 新增模板时只需在 `ComfyUiReferenceModes` 加一条声明 + 在 `ComfyUiWorkflowFactory` 加一个 `referenceMode` 分支，**画布、请求、执行器、技能都不用改**。
 
 ### 二、分步合成：把 N 张参考图逐步并成一张底图
@@ -1906,9 +1915,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行；确认技能目录里新增了 `reference-merge-two.json`（750 字节），且原有的 `character-three-view.json` 未被覆盖，说明「只补缺失内置示例」的逻辑生效。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行；确认技能目录里新增了 `reference-merge-two.json`（750 字节），且原有的 `character-three-view.json` 未被覆盖，说明「只补缺失内置示例」的逻辑生效。
 - 离线兜底规划的输出经手工推演符合预期：3 张参考图、上限 2 张 → 步骤 s1 = `ref:0,ref:1`，步骤 s2 = `s1,ref:2`。
 - 未尽验证：分步合成的实际出图、超限预检弹窗、AI 规划弹窗均为人工点击路径，**未做端到端点击验收**；AI 规划需要真实大模型接口才能验证 JSON 解析质量。
 
@@ -1969,9 +1978,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常。
 - **未验证（重要）**：本环境既没有 ComfyUI 也没有可用的图像/视频接口，因此
   `/object_info` 与 `/models` 的解析逻辑**没有对真实后端跑过**；只能保证不可达时的降级路径
   （返回「无法连接 + 原因」而不是崩溃）符合预期。
@@ -2043,13 +2052,13 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 - **配置重建丢字段**：图像参数的「设为默认」会重建 `AiProviderConfig`，
   此前漏掉了 `ImageMaxReferenceImages`（上一轮新增的字段），本轮补上，同时保留新增的两个接入字段。
   这是同一类坑第二次出现（第一次是丢失默认图像参数），因此这次把新字段一起列进去核对。
-- 配置文件路径新增 `DREAMFORGE_CONFIG` 覆盖，与其它 `DREAMFORGE_*` 保持一致。
+- 配置文件路径新增 `YEEYEEYEE_CONFIG` 覆盖，与其它 `YEEYEEYEE_*` 保持一致。
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
-- **实际启动程序验证**：先写入一份 `ProviderChoiceMade: true` 的配置并指向 `DREAMFORGE_CONFIG`，
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
+- **实际启动程序验证**：先写入一份 `ProviderChoiceMade: true` 的配置并指向 `YEEYEEYEE_CONFIG`，
   启动后程序正常运行，且配置文件未被程序改写——说明配置路径覆盖与读取链路生效、跳过引导的分支不会崩。
 - **未验证**：接入引导的实际弹出与「测试连接」、Agent 对话的收发、采纳到节点均为人工点击路径，
   **未做端到端点击验收**；对话功能需要真实大模型接口才能验证返回质量。
@@ -2100,9 +2109,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常。
 - **未验证**：Agent 面板的展开/收起、发送与采纳、以及各设置窗口的实际层级表现均为人工点击路径，
   **未做端到端点击验收**。
 
@@ -2169,10 +2178,10 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
   （过程中修掉一个真实警告：`AgentPane.Refresh()` 隐藏了 `Control.Refresh()`，已改名 `RefreshState`。）
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常。
 - **未验证**：动作解析、审批勾选与应用、工作文件夹选择、文件写入与越界拒绝
   全部是**依赖真实大模型的交互路径**，本轮未做端到端点击验收。
   解析器与执行器的逻辑没有单元测试覆盖。
@@ -2259,9 +2268,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
-- **实际启动程序验证**：指向 `%TEMP%\dreamforge-demo` 启动桌面端，程序正常运行无异常。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
+- **实际启动程序验证**：指向 `%TEMP%\yeeeyee-demo` 启动桌面端，程序正常运行无异常。
 - **未验证**：审批勾选 → 待提交 → 虚影 → 提交 → 撤销这条链路是**依赖真实大模型的交互路径**
   （本地模拟 Provider 不产出 `actions`），本轮未做端到端点击验收。
   `CanvasPreviewBuilder` 与 `PendingChanges` 位于 WinForms 项目（`net10.0-windows`），
@@ -2340,8 +2349,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `dotnet run --project DreamForge.Core.Tests/DreamForge.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `dotnet run --project YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj --no-build`：**17 项测试全部通过**。
 - **实际启动程序验证**：接入引导弹出正常，预设与模型列表按预期回填。
 - **未验证**：两种协议的请求报文**都没有用真实密钥跑过**——
   OpenAI Chat 分支是既有行为的延续，Anthropic 分支完全按文档实现，未经验证。
@@ -2386,7 +2395,7 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 ### 三、操作层离线校验：23 项，全部通过
 
 这几轮的「未验证」有个具体障碍：解析器、执行器、预览都在 WinForms 项目（`net10.0-windows`），
-而 `DreamForge.Core.Tests` 是 `net10.0`，引用不到——所以操作层一直没有测试。
+而 `YEEYEEYEE.Core.Tests` 是 `net10.0`，引用不到——所以操作层一直没有测试。
 
 本轮用一个**临时校验工程**（放在 `%TEMP%\df-agent-check`，**不进仓库**）通过 `ProjectReference`
 直接调用操作层，覆盖：
@@ -2404,8 +2413,8 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。
 - **操作层离线校验：23 项通过**（临时工程，见上）。
 - 实际启动程序：正常，无异常。
 - **仍未验证**：真实模型是否按协议输出 `actions`（提示词遵约率），
@@ -2420,19 +2429,19 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 下一步
 
-1. 把 `%TEMP%\df-agent-check` 提升为仓库内的正式测试工程（建议 `DreamForge.Agent.Tests`），
+1. 把 `%TEMP%\df-agent-check` 提升为仓库内的正式测试工程（建议 `YEEYEEYEE.Agent.Tests`），
    让这 23 项进入回归——它是目前唯一能覆盖 Agent 操作层的路径。
 2. 真实模型实测提示词遵约率（这是最后一个没被验证的核心假设）。
 3. 给 Agent 补上「加附件 / 加设定引用」等其余画布能力。
 
 ## 2026-09-26 第五十六轮更新：Agent 测试工程进入仓库
 
-### 一、新增 `DreamForge.Agent.Tests`
+### 一、新增 `YEEYEEYEE.Agent.Tests`
 
-上一轮的校验工程在 `%TEMP%` 里，换机器就没了。本轮把它搬进仓库并纳入 `DreamForge.slnx`：
+上一轮的校验工程在 `%TEMP%` 里，换机器就没了。本轮把它搬进仓库并纳入 `YEEYEEYEE.slnx`：
 
-- 目标框架 `net10.0-windows`（必须与 `DreamForge.Desktop` 一致），`ProjectReference` 指向桌面端。
-- 沿用与 `DreamForge.Core.Tests` 相同的控制台测试风格：`(名称, 动作)` 表 + `Expect` 断言，
+- 目标框架 `net10.0-windows`（必须与 `YEEYEEYEE.Desktop` 一致），`ProjectReference` 指向桌面端。
+- 沿用与 `YEEYEEYEE.Core.Tests` 相同的控制台测试风格：`(名称, 动作)` 表 + `Expect` 断言，
   失败打印 `FAIL` 并置 `Environment.ExitCode = 1`，**不带入新的测试框架依赖**。
 - 共 **14 项测试（内部 23 个断言）**，全部离线，不访问网络、不需要模型：
   提议解析、同批建节点+连线、重复连线与自环拒绝、预检提示、按方向删边、
@@ -2446,9 +2455,9 @@ Agent 面板改造（模型选择下移、发送/停止合一、用量显示、�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx`：通过，0 个警告，0 个错误。
-- `DreamForge.Agent.Tests`：**14 项全部通过**，退出码 0。
-- `DreamForge.Core.Tests`：**17 项全部通过**，退出码 0。
+- `dotnet build YEEYEEYEE.slnx`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Agent.Tests`：**14 项全部通过**，退出码 0。
+- `YEEYEEYEE.Core.Tests`：**17 项全部通过**，退出码 0。
 - 反向验证：故意造一个失败断言 → `FAIL` + 退出码 1，确认失败会被捕获。
 - 新增工程首次构建需要先 `dotnet restore`（`--no-restore` 会报 `NETSDK1004` 缺 assets 文件）。
 
@@ -2507,9 +2516,9 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。
-- `DreamForge.Agent.Tests`：**23 项通过**（新增 9 项）：
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。
+- `YEEYEEYEE.Agent.Tests`：**23 项通过**（新增 9 项）：
   图片转 data URL 且能还原原始字节、超限图片拒绝、文本读取与截断、二进制如实拒绝、
   文本拼正文与图片收集、OpenAI 报文图片块形状、Anthropic 报文图片块与 system 分离、
   system 消息绝不带图片、未开启图片输入时的可读报错。
@@ -2571,9 +2580,9 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。
-- `DreamForge.Agent.Tests`：**24 项通过**。新增「整批预检能看见同批新建的节点」，
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。
+- `YEEYEEYEE.Agent.Tests`：**24 项通过**。新增「整批预检能看见同批新建的节点」，
   它同时断言四件事：旧行为确实会误报（留作回归证据）、整批预检不误报、
   真实警告（节点锁定）不被整批预检洗掉、预检不修改真实画布。
 - 真实模型 3 次请求：协议遵约 3/3，图片通道 1/1。
@@ -2600,7 +2609,7 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 | --- | --- | --- |
 | 加密数据库方案 | 对话与用量放在 **SQLCipher 4 加密**的数据库里（AES-256-CBC / PBKDF2-HMAC-SHA512 / 25.6 万次迭代），库密钥首次启动随机生成、只存在进程内存 | 社区逆向工具证明：**同机同用户只要进程活着，扫内存 0.2 秒就能拿到那把密钥** |
 | 配置文件方案 | 密钥写 `$HOME/.credentials.yaml`（**本身不加密**），`settings.yaml` 只存**引用**（`apiKeyEnv`）；界面 **write-only**，保存后无法回读明文 | 官方主推环境变量；明确要求「不要把 key 贴进 prompt、仓库文件、截图或提交的插件配置」 |
-| 我们（改前） | 明文 JSON，且**界面会把密钥明文回显** | 已支持 `DREAMFORGE_AI_KEY`，但没有 UI 引导 |
+| 我们（改前） | 明文 JSON，且**界面会把密钥明文回显** | 已支持 `YEEYEEYEE_AI_KEY`，但没有 UI 引导 |
 
 **结论**：加密挡的是「文件被拷走」，**挡不住同机进程**——这条不该被当成能解决的问题。
 真正该修的是另外三件：**界面回读**、**文件被抄走/误提交**、**旧明文一直躺着**。
@@ -2626,9 +2635,9 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 三、验证（含在真实配置上实测）
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。
-- `DreamForge.Agent.Tests`：**28 项通过**（新增 4 项）：
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。
+- `YEEYEEYEE.Agent.Tests`：**28 项通过**（新增 4 项）：
   加密往返、拒绝二次加密、脱敏不泄露完整密钥、非法 base64 返回 null；
   **落盘是密文 / 读回是明文 / 内存仍是明文**；损坏密文降级为空密钥并标记、且不影响其它配置项；
   旧明文配置在读取时就地加密。
@@ -2641,13 +2650,13 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 - **DPAPI 绑定当前 Windows 账户**：换账户或换机器配置就解不开，需要重新填密钥。
   这是刻意的取舍（挡住拷走），界面已明确写出。
 - **同机同账户的进程仍可解密**：与加密数据库方案被内存扫描的结论一致，不是本方案能解决的问题。
-- **未做「环境变量模式」**：`DREAMFORGE_AI_KEY` 已支持，但没有 UI 引导，
+- **未做「环境变量模式」**：`YEEYEEYEE_AI_KEY` 已支持，但没有 UI 引导，
   配置里也没有「只存变量名、密钥完全不落盘」的选项——这是配置文件方案主推的环境变量模式，列为下一步。
 - **其它字段仍是明文**（ComfyUI 地址、工作文件夹等）：它们不是密钥，本轮的加密只覆盖 `ApiKey`。
 
 ### 下一步
 
-1. 环境变量模式：配置里只存 `DREAMFORGE_AI_KEY` 这个变量名，密钥完全不落盘。
+1. 环境变量模式：配置里只存 `YEEYEEYEE_AI_KEY` 这个变量名，密钥完全不落盘。
 2. 多轮追问下的协议遵约与上下文累积。
 3. 流式输出与取消。
 
@@ -2689,9 +2698,9 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 五、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。
-- `DreamForge.Agent.Tests`：**32 项通过**（新增 4 项）：
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。
+- `YEEYEEYEE.Agent.Tests`：**32 项通过**（新增 4 项）：
   OpenAI 格式增量分次回调且思考不混入正文、请求体带 `stream:true`；
   Anthropic 格式 `text_delta` / `thinking_delta` 分流；空事件流报错；
   操作块与围栏不进显示、普通回复不被误截。
@@ -2710,7 +2719,7 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 下一步
 
-1. 环境变量模式：配置里只存 `DREAMFORGE_AI_KEY` 这个变量名，密钥完全不落盘。
+1. 环境变量模式：配置里只存 `YEEYEEYEE_AI_KEY` 这个变量名，密钥完全不落盘。
 2. 多轮追问下的协议遵约与上下文累积（含图片留在历史里的 token 增长）。
 3. 从节点附件 / 实体变体参考图一键「发给模型看」。
 
@@ -2765,9 +2774,9 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 四、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。
-- `DreamForge.Agent.Tests`：**33 项通过**（新增「只收到思考没有正文也算失败」，
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。
+- `YEEYEEYEE.Agent.Tests`：**33 项通过**（新增「只收到思考没有正文也算失败」，
   并把思考断言从「信号次数」改为「思考增量文本」）。
 - 真实模型实测：见上表。
 
@@ -2784,7 +2793,7 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 下一步
 
-1. 环境变量模式：配置里只存 `DREAMFORGE_AI_KEY` 这个变量名，密钥完全不落盘。
+1. 环境变量模式：配置里只存 `YEEYEEYEE_AI_KEY` 这个变量名，密钥完全不落盘。
 2. 多轮追问下的协议遵约与上下文累积（含图片留在历史里的 token 增长）。
 3. 从节点附件 / 实体变体参考图一键「发给模型看」。
 
@@ -2825,9 +2834,9 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 四、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。
-- `DreamForge.Agent.Tests`：33 项通过（本轮改动集中在界面层，未新增自动化断言）。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。
+- `YEEYEEYEE.Agent.Tests`：33 项通过（本轮改动集中在界面层，未新增自动化断言）。
 - 实际启动程序：正常，无异常。
 
 ### 当前边界
@@ -2841,7 +2850,7 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 下一步
 
-1. 环境变量模式：配置里只存 `DREAMFORGE_AI_KEY` 这个变量名，密钥完全不落盘。
+1. 环境变量模式：配置里只存 `YEEYEEYEE_AI_KEY` 这个变量名，密钥完全不落盘。
 2. 多轮追问下的协议遵约与上下文累积（含图片留在历史里的 token 增长）。
 3. 从节点附件 / 实体变体参考图一键「发给模型看」。
 
@@ -2866,8 +2875,8 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 二、查到的真实原因（环境层面）
 
-`%LocalAppData%\DreamForge\` 里**没有 `ai-config.json`** ——
-用户的密钥一直在 `%TEMP%\dreamforge-demo\`（我为验证启动时用 `DREAMFORGE_CONFIG` 指过去的）。
+`%LocalAppData%\YEEYEEYEE\` 里**没有 `ai-config.json`** ——
+用户的密钥一直在 `%TEMP%\yeeeyee-demo\`（我为验证启动时用 `YEEYEEYEE_CONFIG` 指过去的）。
 所以**用户自己双击启动程序时读不到任何模型配置**，会走「本地模拟」；
 而本地模拟**只会回占位文本，永远不会产出改动提议**，表现就是「有回复但没有审批列表」。
 
@@ -2888,8 +2897,8 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 五、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。`DreamForge.Agent.Tests`：33 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。`YEEYEEYEE.Agent.Tests`：33 项通过。
 - 真实模型实测：流式路径下操作块完整保留、提交成功（见上表）。
 
 ### 当前边界
@@ -2901,7 +2910,7 @@ DeepSeek 的图像理解**只跟 `deepseek-flash` 走**，`deepseek-v4-pro` 是�
 
 ### 下一步
 
-1. 环境变量模式：配置里只存 `DREAMFORGE_AI_KEY` 这个变量名，密钥完全不落盘。
+1. 环境变量模式：配置里只存 `YEEYEEYEE_AI_KEY` 这个变量名，密钥完全不落盘。
 2. 多轮追问下的协议遵约与上下文累积（含图片留在历史里的 token 增长）。
 3. 从节点附件 / 实体变体参考图一键「发给模型看」。
 
@@ -2936,7 +2945,7 @@ AgentContext.ActionProtocol: 「…在回复的最后附上一个 JSON 代码块
    「讨论创作时直接给出内容；**当用户要求改动画布或写入文件时，必须按上下文中的操作协议输出改动块**，
    这类要求绝不能只用文字描述或正文内容代替」。
 2. **`AgentContext.Describe` 开头**加一句角色定位：
-   「你在 DreamForge 的画布助手里：既要讨论创作，也要把改动作为提议交出来；
+   「你在 YEEYEEYEE 的画布助手里：既要讨论创作，也要把改动作为提议交出来；
    用户要求改画布时，只写正文或只描述方案都不算完成。」
 3. **`ActionProtocol`** 补一个具体反例：
    「例如用户说「给第一章加个分镜节点」：你应当输出 `create_node` 提议，
@@ -2951,8 +2960,8 @@ AgentContext.ActionProtocol: 「…在回复的最后附上一个 JSON 代码块
 
 ### 五、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。`DreamForge.Agent.Tests`：33 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。`YEEYEEYEE.Agent.Tests`：33 项通过。
 - 真实模型实测：见上表。
 
 ### 当前边界
@@ -2967,7 +2976,7 @@ AgentContext.ActionProtocol: 「…在回复的最后附上一个 JSON 代码块
 
 ### 下一步
 
-1. 环境变量模式：配置里只存 `DREAMFORGE_AI_KEY` 这个变量名，密钥完全不落盘。
+1. 环境变量模式：配置里只存 `YEEYEEYEE_AI_KEY` 这个变量名，密钥完全不落盘。
 2. 多轮追问下的协议遵约与上下文累积（含图片留在历史里的 token 增长）。
 3. 从节点附件 / 实体变体参考图一键「发给模型看」。
 
@@ -3012,9 +3021,9 @@ AgentContext.ActionProtocol: 「…在回复的最后附上一个 JSON 代码块
 
 ### 六、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。
-- `DreamForge.Agent.Tests`：**37 项通过**（新增 4 项：反问解析出问题与选项、与 actions 共存、
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。
+- `YEEYEEYEE.Agent.Tests`：**37 项通过**（新增 4 项：反问解析出问题与选项、与 actions 共存、
   只有 ask 也算有效回复、ask 块同样不进对话区）。
 - **真实模型实测**：用户只说「帮我加个节点」时，模型给出
 
@@ -3036,7 +3045,7 @@ AgentContext.ActionProtocol: 「…在回复的最后附上一个 JSON 代码块
 
 ### 下一步
 
-1. 环境变量模式：配置里只存 `DREAMFORGE_AI_KEY` 这个变量名，密钥完全不落盘。
+1. 环境变量模式：配置里只存 `YEEYEEYEE_AI_KEY` 这个变量名，密钥完全不落盘。
 2. 多轮追问下的协议遵约与上下文累积（含图片留在历史里的 token 增长）。
 3. 从节点附件 / 实体变体参考图一键「发给模型看」。
 
@@ -3089,8 +3098,8 @@ AgentContext.ActionProtocol: 「…在回复的最后附上一个 JSON 代码块
 
 ### 六、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。`DreamForge.Agent.Tests`：37 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。`YEEYEEYEE.Agent.Tests`：37 项通过。
 - 实际启动程序：正常，无异常。
 - **界面观感未经我亲自验收**：我看不到渲染结果，需要用户实际看一眼。
 
@@ -3185,8 +3194,8 @@ AgentContext.ActionProtocol: 「…在回复的最后附上一个 JSON 代码块
 
 ### 七、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。`DreamForge.Agent.Tests`：37 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。`YEEYEEYEE.Agent.Tests`：37 项通过。
 - 实际启动程序并保持运行 20 秒以上：无异常（前两次启动分别暴露了上面两个崩溃）。
 - **界面观感未经我亲自验收**：我看不到渲染结果，需要用户实际看一眼。
 
@@ -3283,8 +3292,8 @@ FONT Theme.UiFont = Microsoft YaHei UI 9.5pt | Font.Height=25
 
 ### 六、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。`DreamForge.Agent.Tests`：37 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。`YEEYEEYEE.Agent.Tests`：37 项通过。
 - **界面自检：0 处文字被切**。三个窗口尺寸（1360x820 / 1100x700+抽屉 / 1920x1000）
   以及接入弹窗（840x1332）逐控件比对，无一条超出。
 - 实际启动程序：正常，无异常。
@@ -3298,7 +3307,7 @@ FONT Theme.UiFont = Microsoft YaHei UI 9.5pt | Font.Height=25
   需要重新评估这条（设计器会自己写 `AutoScaleDimensions`）。
 - **Popup 菜单（ToolStrip）不参与缩放**：它们的字体来自系统而不是窗体，
   所以菜单文字比界面其余部分小一号，不裁切但风格不统一。
-- **自检工具已删除**：它是本轮定位问题的手段（`DREAMFORGE_UI_AUDIT`），
+- **自检工具已删除**：它是本轮定位问题的手段（`YEEYEEYEE_UI_AUDIT`），
   不是产品功能。需要复查时可按本文档的"一、先量，不猜"重新接上。
 - **ComboBox 编辑区、RichTextBox 正文、ToolStrip 菜单文字**：自检覆盖不到这三类，
   只能说没有看到问题，不能说已验证。
@@ -3311,7 +3320,7 @@ FONT Theme.UiFont = Microsoft YaHei UI 9.5pt | Font.Height=25
 
 ## 2026-09-26 第六十九轮更新：所有配置文件改存到项目根文件夹
 
-用户要求：**所有配置文件全部存在项目根文件夹**（原来散在 `%LocalAppData%\DreamForge`）。
+用户要求：**所有配置文件全部存在项目根文件夹**（原来散在 `%LocalAppData%\YEEYEEYEE`）。
 
 ### 一、改之前散落在哪
 
@@ -3319,7 +3328,7 @@ FONT Theme.UiFont = Microsoft YaHei UI 9.5pt | Font.Height=25
 
 | 内容 | 原路径 |
 | --- | --- |
-| 大模型配置 | `%LocalAppData%\DreamForge\ai-config.json` |
+| 大模型配置 | `%LocalAppData%\YEEYEEYEE\ai-config.json` |
 | 任务库 | `…\jobs.db` |
 | 当前画布绑定 | `…\workspace.json` |
 | 未保存的草稿画布 | `…\last-canvas.json`（两处重复定义） |
@@ -3329,12 +3338,12 @@ FONT Theme.UiFont = Microsoft YaHei UI 9.5pt | Font.Height=25
 
 ### 二、新增 `AppPaths`：位置只有一个出口
 
-- `AppPaths.Root`：**从可执行文件所在目录逐级向上找 `DreamForge.slnx`** 来定位项目根。
+- `AppPaths.Root`：**从可执行文件所在目录逐级向上找 `YEEYEEYEE.slnx`** 来定位项目根。
   找不到时（例如把程序拷出去当绿色包用）退回可执行文件所在目录，程序照样能跑。
 - `AppPaths.Combine(name)`：项目根下的文件或目录。
 - 上面 9 处全部改为走它，顺带消掉了 `last-canvas.json` 的重复定义。
-- `DREAMFORGE_CONFIG` / `DREAMFORGE_JOB_DB` / `DREAMFORGE_CANVAS_DIR` / `DREAMFORGE_ASSET_DIR`
-  / `DREAMFORGE_SKILL_DIR` / `DREAMFORGE_PLUGIN_DIR` 这些覆盖**保持不变**，各自仍然优先。
+- `YEEYEEYEE_CONFIG` / `YEEYEEYEE_JOB_DB` / `YEEYEEYEE_CANVAS_DIR` / `YEEYEEYEE_ASSET_DIR`
+  / `YEEYEEYEE_SKILL_DIR` / `YEEYEEYEE_PLUGIN_DIR` 这些覆盖**保持不变**，各自仍然优先。
 
 ### 三、一次性搬迁，避免"东西没了"
 
@@ -3347,8 +3356,8 @@ FONT Theme.UiFont = Microsoft YaHei UI 9.5pt | Font.Height=25
 
 ### 四、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。`DreamForge.Agent.Tests`：37 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。`YEEYEEYEE.Agent.Tests`：37 项通过。
 - **实际启动程序后核对文件落点**（启动前项目根只有源码与文档）：
   启动后项目根出现 `ai-config.json`、`jobs.db`（20480 字节，SQLite 已建表）、
   `last-canvas.json`（202 字节，**与旧目录里那份字节数一致，说明搬迁成功**）、
@@ -3361,13 +3370,13 @@ FONT Theme.UiFont = Microsoft YaHei UI 9.5pt | Font.Height=25
   接入引导会重新弹一次（因为配置里没有 `ProviderChoiceMade`）。
   本轮启动时就遇到了这个情况：用户在弹窗里重新接入后，
   项目根下生成了新的 `ai-config.json`（密钥是 dpapi 密文）。
-- **旧目录没有主动删除**：搬迁是复制不是移动，`%LocalAppData%\DreamForge`
-  与更早的 `%TEMP%\dreamforge-demo\` 都还留着，需要用户自己清理。
+- **旧目录没有主动删除**：搬迁是复制不是移动，`%LocalAppData%\YEEYEEYEE`
+  与更早的 `%TEMP%\yeeeyee-demo\` 都还留着，需要用户自己清理。
 - **项目根不是 git 仓库、也没有 `.gitignore`**：所以本轮不存在"密钥被提交"的风险。
   将来若把项目纳入版本控制，`ai-config.json`、`jobs.db`、`assets/`、`canvases/`
   必须先进 `.gitignore`。
 - **`assets/` 可能与源码混在一起**：生成图会直接堆在项目根下的 `assets/`，
-  量大时建议在「设置」里把资产目录指到别处（该入口一直有，也支持 `DREAMFORGE_ASSET_DIR`）。
+  量大时建议在「设置」里把资产目录指到别处（该入口一直有，也支持 `YEEYEEYEE_ASSET_DIR`）。
 - **项目根不可写时**：配置保存失败会走既有提示路径（"本次只在当前会话生效"），不会崩。
 
 ## 2026-09-26 第七十轮更新：修「Agent 对话黑底黑字」+ 对话区改自绘消息列表
@@ -3419,8 +3428,8 @@ FONT Theme.UiFont = Microsoft YaHei UI 9.5pt | Font.Height=25
 
 ### 四、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。`DreamForge.Agent.Tests`：37 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。`YEEYEEYEE.Agent.Tests`：37 项通过。
 - **界面自检（临时工具，用完已删）新增了一项"对比度"检查**——把文字色和它实际压着的
   底色比一遍，距离太近就报出来。这正是"黑底黑字"这类问题的量化判据。
   结果：**0 处文字被切、0 处对比度不足**；对话区塞 4 条示例后量得内容高 727 / 可视高 630，
@@ -3438,7 +3447,7 @@ FONT Theme.UiFont = Microsoft YaHei UI 9.5pt | Font.Height=25
   但将来若做"字号可调"，这里要跟着改。
 - **`Theme.Apply` 仍是"启动时套一次"的模型**：本轮靠"按需创建的补一次"补上了窟窿，
   长期看更稳的是让新控件自己注册——没有做，因为改动面更大。
-- **旧目录仍未清理**：`%LocalAppData%\DreamForge` 与 `%TEMP%\dreamforge-demo\` 需要用户自己删。
+- **旧目录仍未清理**：`%LocalAppData%\YEEYEEYEE` 与 `%TEMP%\yeeeyee-demo\` 需要用户自己删。
 
 ### 下一步
 
@@ -3487,8 +3496,8 @@ ComposerPanel / RailStrip / 画布）就报出来**。这条判据能区分改�
 改前 `toolsRow` 是透明的，会一路找到自绘的 `ComposerPanel` 从而命中；改后停在
 不透明的 `toolsRow` 上，不再命中。
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。`DreamForge.Agent.Tests`：37 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。`YEEYEEYEE.Agent.Tests`：37 项通过。
 - 自检结果：**0 处"透明底压在自绘父容器上"、0 处对比度不足、0 处文字被切**。
 - 实际启动程序：正常，无异常。
 - **界面观感未经我亲自验收**：我看不到渲染结果，需要用户实际看一眼。
@@ -3569,8 +3578,8 @@ ComposerPanel / RailStrip / 画布）就报出来**。这条判据能区分改�
 
 ### 五、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。`DreamForge.Agent.Tests`：37 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。`YEEYEEYEE.Agent.Tests`：37 项通过。
 - 自检：**线程 STA ✓、剪贴板写入成功 ✓、0 处透明底压自绘父容器、0 处对比度不足、
   0 处文字被切**；对话区 4 条示例量得内容高 514 / 可视高 630。
 - 实际启动程序：正常，无异常。
@@ -3634,8 +3643,8 @@ ComposerPanel / RailStrip / 画布）就报出来**。这条判据能区分改�
 
 ### 四、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Core.Tests`：17 项通过。`DreamForge.Agent.Tests`：37 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Core.Tests`：17 项通过。`YEEYEEYEE.Agent.Tests`：37 项通过。
 - 自检：线程 STA ✓、剪贴板写入成功 ✓、输入区 554x37 ✓、提示可见且放得下（301/554）✓、
   0 处文字被切、0 处对比度不足、0 处透明底压自绘容器。
 - 实际启动程序：正常，无异常。
@@ -3648,7 +3657,7 @@ ComposerPanel / RailStrip / 画布）就报出来**。这条判据能区分改�
 - **协议修复靠动词表判断**（`LooksLikeChangeRequest`）：用户用别的说法要求改动时不会触发；
   反过来也可能在闲聊里被"生成"这类词误触发一次空跑。
 - **自检工具每次都删**：它已经连续四轮抓到关键问题（DPI、MTA、马赛克结构、输入框退化）。
-  建议把它正式留下来（`DREAMFORGE_UI_AUDIT` 环境变量开关），但用户没要求，所以仍然删掉了。
+  建议把它正式留下来（`YEEYEEYEE_UI_AUDIT` 环境变量开关），但用户没要求，所以仍然删掉了。
 - **提示标签盖在输入框上**：点击会先落到标签再转交焦点，光标位置由 TextBox 自己决定，
   点到文字中间不会把光标放到那一位（系统文本框的能力，自绘标签代替不了）。
 
@@ -3690,7 +3699,7 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 
 ### 三、用真实样本做回归测试
 
-把用户贴的那段原文（含未转义的引号）原样加进 `DreamForge.Agent.Tests`：
+把用户贴的那段原文（含未转义的引号）原样加进 `YEEYEEYEE.Agent.Tests`：
 `协议块：内容里的裸引号仍能解析（真实样本）`。这条测试在改之前必然失败，
 改之后验证：1 条 `create_entity`、标题与内容完整、内容里的引号原样保留、协议块从展示文本里剥离。
 
@@ -3698,8 +3707,8 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 
 ### 四、本轮验证
 
-- `dotnet build DreamForge.slnx --no-restore`：通过，0 个警告，0 个错误。
-- `DreamForge.Agent.Tests`：38 项通过（含新增的真实样本回归）。`DreamForge.Core.Tests`：17 项通过。
+- `dotnet build YEEYEEYEE.slnx --no-restore`：通过，0 个警告，0 个错误。
+- `YEEYEEYEE.Agent.Tests`：38 项通过（含新增的真实样本回归）。`YEEYEEYEE.Core.Tests`：17 项通过。
 - 实际启动程序：正常，无异常。
 
 ### 当前边界与未做
@@ -3759,7 +3768,7 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.Desktop\DreamForge.Desktop.csproj` → **成功，0 警告 0 错误**。
+- `dotnet build YEEYEEYEE.Desktop\YEEYEEYEE.Desktop.csproj` → **成功，0 警告 0 错误**。
 - 数据结构改动向后兼容：`WorkTreeKind` 只改成员名与追加成员，`WorkTreeItemId` 可空且不写 null。
 
 ### 遗留问题
@@ -3778,18 +3787,18 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 
 ### 已完成
 
-- 复核 `DreamForge.Core` / `Host` / `Web` / `Mcp` / `Desktop` 与 `DreamForge.Canvas` 的实际代码，重写四份设计文档：
+- 复核 `YEEYEEYEE.Core` / `Host` / `Web` / `Mcp` / `Desktop` 与 `YEEYEEYEE.Canvas` 的实际代码，重写四份设计文档：
   - `01_Project_Plan.md`（v6）：产品决策逐条标注实现状态；技术选型改为 WinForms 自绘画布；六层架构替换为实际分层；资产体系改为实际载体；AI 助手改为"一个面板 + 三种授权"；风险与待办按现状改写。
   - `02_Architecture.md`（v2）：项目清单与真实引用关系、进程拓扑、**两套协议**（宿主协议 vs Agent 协议）、执行链路（Job 状态机/单机执行服务/SQLite/ComfyUI/回调签名）、数据模型（字段级 + 枚举数值顺序 + 旧字段迁移）、文件布局、AI 与生成、安全边界，以及**文档与实现仍不一致的 9 项清单**。
   - `03_Skill_System.md`（v2）：先分清三个"技能"（生成技能 / 内置技能 / 角色能力），再写生成技能的数据模型、装载、执行流程与 `outputTarget`、插件体系、版本现状，并列出未实现项。
   - `04_Architecture_Mindmap_Mermaid.md`（v2）：Mermaid 与列表版全部按现状重画。
 - 本文件：修正头部基准与《总体进度》阶段表，新增《实现现状基准（2026-09-28 校正）》，补记第七十五～七十七轮。
-- **产品名统一**：文档中的旧产品名全部改为 **YEEYEEYEE**（寓意 **YES 工程师 · YES 艺术家**）；工程标识 `DreamForge`（程序集/解决方案/协议名）保持不变。
+- **产品名统一**：文档中的旧产品名全部改为 **YEEYEEYEE**（寓意 **YES 工程师 · YES 艺术家**）；工程标识 `YEEYEEYEE`（程序集/解决方案/协议名）保持不变。
 
 ### 本轮验证
 
 - 文档中每条事实都能在代码里找到依据（文件与行号见 `02_Architecture.md` 各节）；未使用任何"注释里的设想"作为事实。
-- 关键校正结论：桌面端已移除 WebView2 且未接入 TS 画布；`DreamForge.Web` 无画布；**视频生成未实现**；`DreamForge.Mcp` 未接入 Desktop 且不在 slnx；根目录 `05_Core_Contracts.cs` 未参与编译且与 Core 不兼容；协作/账号/审批/配额/审计均未开始。
+- 关键校正结论：桌面端已移除 WebView2 且未接入 TS 画布；`YEEYEEYEE.Web` 无画布；**视频生成未实现**；`YEEYEEYEE.Mcp` 未接入 Desktop 且不在 slnx；根目录 `05_Core_Contracts.cs` 未参与编译且与 Core 不兼容；协作/账号/审批/配额/审计均未开始。
   > 其中"未接入 TS 画布 / Web 无画布"已被**第七十八轮**推翻：Web 现在托管 TS 画布并转发桌面端推送的投影；本行保留为该轮的历史结论。
 
 ### 遗留问题
@@ -3807,10 +3816,10 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 
 ### 已完成
 
-1. **桌面 ↔ Web 画布通道**（新增 `DreamForge.Desktop\Canvas\NodeProjection.cs`；改 `MainForm.cs`、`DreamForge.Web\Program.cs`、`WebCanvasTransport.cs`、`HostBridge.cs`）
+1. **桌面 ↔ Web 画布通道**（新增 `YEEYEEYEE.Desktop\Canvas\NodeProjection.cs`；改 `MainForm.cs`、`YEEYEEYEE.Web\Program.cs`、`WebCanvasTransport.cs`、`HostBridge.cs`）
    - `NodeProjection.ProjectRecords`：`WorkflowNode` → 协议 records（`recordType` 按 `NodeCategory` 分层映射，`record` 带 `title/content/x/y/chapter/status/parentId/references[]`）；工作树里没有对应节点的 `Chapter` 条目投影成 `wt-<id>` 的 L3 record。
    - Desktop：新增 `PushCanvasToWebAsync`（画布变更 / 载入 / 切章 / 替换版本时 `POST /api/canvas/scene`）与 500ms 计时器里的 `PollResourceReplaceRequests`（`GET /api/canvas/resource-replace/next`）；地址是常量 `http://localhost:5000`，失败静默。
-   - Web：`UseStaticFiles` 托管 `..\DreamForge.Canvas\dist`、`MapGet("/")`、`/ws/canvas` 与 `/api/canvas/scene|nodes|resource-replace[/next|/result]`；`WebCanvasTransport` 从 `Console.WriteLine` 改为 **WebSocket 广播**（新连接补发最近一帧 `host/scene.reset`）；新增 `appsettings.json`（Kestrel `http://localhost:5000`）。
+   - Web：`UseStaticFiles` 托管 `..\YEEYEEYEE.Canvas\dist`、`MapGet("/")`、`/ws/canvas` 与 `/api/canvas/scene|nodes|resource-replace[/next|/result]`；`WebCanvasTransport` 从 `Console.WriteLine` 改为 **WebSocket 广播**（新连接补发最近一帧 `host/scene.reset`）；新增 `appsettings.json`（Kestrel `http://localhost:5000`）。
 2. **协议新增两条消息**（`Core\Protocol.cs`、`Host\HostBridge.cs` + TS 侧同构）
    - `canvas/resource.replace.request`（`recordId`/`entityId`/`variantId`/可空 `variantVersionId`，uuid 与字段严格校验）与 `host/resource.replace.result`（`requestId`/`ok`/`message`/`revision`）；消息总数 15 → **17**。
    - `HostBridge` 新增 `ResourceReplaceRequested` 事件、`SendScene`、`SendNodeUpdates`、`SendResourceReplaceResult`，以及 `RESOURCE_REPLACE_UNAVAILABLE`/`RESOURCE_REPLACE_FAILED` 两条错误回传。
@@ -3831,9 +3840,9 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx` → **成功，0 警告 0 错误**（6 个项目）。
-- `dotnet run --project DreamForge.Core.Tests` → **19 项全部通过**（含新增"资源版本替换协议""资源版本替换状态"）。
-- `dotnet run --project DreamForge.Agent.Tests` → **46 项全部通过**。
+- `dotnet build YEEYEEYEE.slnx` → **成功，0 警告 0 错误**（6 个项目）。
+- `dotnet run --project YEEYEEYEE.Core.Tests` → **19 项全部通过**（含新增"资源版本替换协议""资源版本替换状态"）。
+- `dotnet run --project YEEYEEYEE.Agent.Tests` → **46 项全部通过**。
 - TS 侧未跑 `npm run build` / `npm test`（本轮只核对代码，未构建前端）；`dist` 未生成，Web 端静态托管需先本地构建。
 - 文档侧：01（v6.2）、02、03、04（v2.1）、README、`protocol/PROTOCOL.md`、本文件已按上述改动同步。
 
@@ -3863,7 +3872,7 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 
 ### 任务
 
-新重构的 Avalonia 主端（`DreamForge.Desktop.Avalonia`）里，左侧「Agent 协作」只是一个占位提示
+新重构的 Avalonia 主端（`YEEYEEYEE.Desktop.Avalonia`）里，左侧「Agent 协作」只是一个占位提示
 （点击只改状态栏文字），右侧检查器只有静态的「Agent 摘要」。本轮把旧 WinForms 端的 Agent 窗口
 适配到新主端：能力对齐、视觉沿用冷蓝玻璃壳层，并且**两端共用同一份服务层源码**，不再各写一套协议。
 
@@ -3881,7 +3890,7 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 - **抽出画布几何**：新增 `Canvas/CanvasNodeGeometry.cs`（卡片宽高、`NodeHeightFor`、`NodeRect`、
   `AttachmentSummary`），`WorkflowCanvasControl` 只保留转发；`CanvasSwimlaneLayout`、`AgentActions`、
   `OpenAiCompatibleProvider` 改用 `CanvasNodeGeometry`——服务层因此不再依赖 WinForms 控件。
-  `AiNodeProposal` 的唯一定义留在 `DreamForge.Desktop.Core`，旧端用 Compile Link 引用，消掉同名类型冲突。
+  `AiNodeProposal` 的唯一定义留在 `YEEYEEYEE.Desktop.Core`，旧端用 Compile Link 引用，消掉同名类型冲突。
 - **新增 Avalonia Agent 窗口**：`Agent/AgentPanel.axaml(+.cs)`（对话流、输入区、附件、授权模式、
   审批卡、空态）、`Agent/IAgentSessionHost.cs`（宿主契约）、`Agent/AgentCommitReport.cs`
   （提交回滚点与结果）、`Agent/AgentSettingsDialog.cs`（模型接入设置，读写同一份 `ai-config.json`）。
@@ -3893,9 +3902,9 @@ content 里直接写了**英文双引号**（中文文案里很自然），整�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx` → **成功，0 错误**（5 条警告全是 Avalonia 既有 DragDrop 过时 API，本轮未新增）。
-- `dotnet build DreamForge.Desktop\DreamForge.Desktop.csproj`（确认旧端未被抽出动作破坏）→ **成功，0 警告 0 错误**。
-- `dotnet run --project DreamForge.Agent.Tests` → **154 项全部通过**（覆盖被抽出的共享服务层）。
+- `dotnet build YEEYEEYEE.slnx` → **成功，0 错误**（5 条警告全是 Avalonia 既有 DragDrop 过时 API，本轮未新增）。
+- `dotnet build YEEYEEYEE.Desktop\YEEYEEYEE.Desktop.csproj`（确认旧端未被抽出动作破坏）→ **成功，0 警告 0 错误**。
+- `dotnet run --project YEEYEEYEE.Agent.Tests` → **154 项全部通过**（覆盖被抽出的共享服务层）。
 - 桌面冒烟（实际运行 Avalonia 端）：启动无未处理异常；左侧「Agent 协作」与检查器入口都能打开面板；
   新建项目后可写状态与顶部模型标签同步刷新；发送一轮对话能落屏、解析协议并如实提示「本轮没有改动提议」；
   模型接入设置能打开，取消不再误报「已更新」。
@@ -3931,7 +3940,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 - **密钥保护改成门面 + 分档实现**（`SecretProtector` 重写、新增 `SecretCiphers.cs`）。四档各带前缀，
   读回按前缀分派：`dpapi:`（Windows DPAPI，当前用户作用域 + 与旧版同一个附加熵
-  `DreamForge.ApiKey.v1`，**密文格式与旧版本逐字节一致**，升级不用重填密钥）、
+  `YEEYEEYEE.ApiKey.v1`，**密文格式与旧版本逐字节一致**，升级不用重填密钥）、
   `keychain:`（macOS 钥匙串：`SecItem*` 存主密钥，配置文件里只放 AES-GCM 密文）、
   `aesgcm:`（本机密钥文件 + AES-256-GCM，密钥文件 `ai-key.bin` 在 Unix 上收 0600，
   先写临时文件再改名以免留下半截密钥）、`plain:`（兜底明文，只在前几档都写不出来时使用）。
@@ -3942,21 +3951,21 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
   `System.Security.Cryptography.ProtectedData`，目标框架从 `net10.0-windows` 回到单一 `net10.0`，
   删掉 `Microsoft.WindowsDesktop.App` 框架引用。多目标化因此不再必要——需要它只是为了拿到桌面框架里的那个类型。
 - **配置目录迁出程序目录**：新增 `AppPaths.UserConfigDirectory`
-  （macOS `~/Library/Application Support/DreamForge`、Windows `%LOCALAPPDATA%\DreamForge`、
-  其它平台 `$XDG_CONFIG_HOME/dreamforge`）与 `AppPaths.ResolveAppFile`（用户目录优先，
+  （macOS `~/Library/Application Support/YEEYEEYEE`、Windows `%LOCALAPPDATA%\YEEYEEYEE`、
+  其它平台 `$XDG_CONFIG_HOME/yeeeyee`）与 `AppPaths.ResolveAppFile`（用户目录优先，
   程序目录只作旧残留或便携回退，旧文件在首次读取时**搬**过去，不搬掉会留下两份各写各的）。
   `ai-config.json`、`recent-projects.json`、`ai-key.bin` 全部走这条规则；
-  `DREAMFORGE_CONFIG`（单份文件）、`DREAMFORGE_CONFIG_HOME`（整个目录）、
-  `DREAMFORGE_SECRET_KEYFILE`（密钥文件）与 `DREAMFORGE_SECRET_SCHEME`（强制某档方案）供便携部署与测试使用。
+  `YEEYEEYEE_CONFIG`（单份文件）、`YEEYEEYEE_CONFIG_HOME`（整个目录）、
+  `YEEYEEYEE_SECRET_KEYFILE`（密钥文件）与 `YEEYEEYEE_SECRET_SCHEME`（强制某档方案）供便携部署与测试使用。
 - **设置界面如实告知**：显示当前落盘方案（例如「Windows DPAPI（当前 Windows 账户）」），
   读到明文档时给出告警。
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx` → **成功，0 警告 0 错误**（新增的 CA1416 平台告警已通过在真正调用点做
+- `dotnet build YEEYEEYEE.slnx` → **成功，0 警告 0 错误**（新增的 CA1416 平台告警已通过在真正调用点做
   运行时判断消除；DPAPI 调用点先判 `OperatingSystem.IsWindows()`，非 Windows 直接返回「解不开」）。
-- `dotnet build DreamForge.Desktop\DreamForge.Desktop.csproj`（旧端 WinForms）→ **成功，0 警告 0 错误**。
-- `dotnet run --project DreamForge.Agent.Tests` → **160 项全部通过**（原 154 项 + 本轮新增 6 项）：
+- `dotnet build YEEYEEYEE.Desktop\YEEYEEYEE.Desktop.csproj`（旧端 WinForms）→ **成功，0 警告 0 错误**。
+- `dotnet run --project YEEYEEYEE.Agent.Tests` → **160 项全部通过**（原 154 项 + 本轮新增 6 项）：
   与旧版 `ProtectedData` 密文**双向互通**、本机密钥文件档往返且密钥文件丢失即报解不开、
   别的平台的密文报解不开、带冒号的普通密钥不被误判成密文、明文档带 `plain:` 前缀并被标记、
   应用级文件落在用户配置目录、程序旁的旧文件被**搬**（不是拷）过去。
@@ -3971,7 +3980,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 - **macOS 钥匙串档只做到「编译通过 + 失败可回退」**：本机没有 macOS，`SecretCiphers.cs` 里的
   CoreFoundation / `SecItem*` 互操作没有真机运行过。它失败会抛异常并自动退到本机密钥文件档，
   不会把用户卡死，但要在 Mac 上冒烟一次才算验收。
-- 钥匙串档的主密钥按服务名共用（`Service = DreamForge`、`Account = ai-master-key`），
+- 钥匙串档的主密钥按服务名共用（`Service = YEEYEEYEE`、`Account = ai-master-key`），
   同一台机器上多份配置文件共用一把主密钥，多配置场景行为待实测。
 - 迁移只覆盖 `ai-config.json` / `recent-projects.json` / `ai-key.bin`；旧端写到程序目录的诊断日志
   （`agent-diagnostics.log`）没有跟着搬（旧端只在 Windows 跑，不阻塞）。
@@ -4011,7 +4020,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx` → **成功，0 警告 0 错误**；`dotnet run --project DreamForge.Agent.Tests`
+- `dotnet build YEEYEEYEE.slnx` → **成功，0 警告 0 错误**；`dotnet run --project YEEYEEYEE.Agent.Tests`
   → **161 项全部通过**，新增「模型预设：地址能反推回同一家，预置模型元数据自洽」
   （校验每家地址唯一且可反推、最大输出不超过上下文窗口、本地模拟与自定义的语义、Kimi 不发送采样参数）。
 - 桌面冒烟（真机操作界面）：选「月之暗面 Kimi」→ 地址自动填 `https://api.moonshot.cn/v1`、
@@ -4026,7 +4035,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 - 预设里的模型元数据（上下文 / 最大输出 / 图像能力）沿用旧端那份「只填已核实值」的结论，
   本轮没有重新核对官方文档；服务商更新后需按同样口径维护（表在 `AiChat.cs`，两端共用）。
-- 旧端那份 `ai-config.json` 在 `DreamForge.Desktop\bin\Debug\...` 程序目录旁边，
+- 旧端那份 `ai-config.json` 在 `YEEYEEYEE.Desktop\bin\Debug\...` 程序目录旁边，
   而新主端的解析顺序是「用户配置目录 → 自己的程序目录」，**不会自动读到它**；
   要沿用旧配置需把该文件放到新主端目录旁（首次读取会自动搬到用户配置目录），或在设置里重填密钥。
 
@@ -4065,8 +4074,8 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx` → **成功，0 警告 0 错误**；旧端 `DreamForge.Desktop.csproj` → **成功，0 警告 0 错误**；
-  `DreamForge.Agent.Tests` → **163 项全部通过**（新增「预设换算两端共用一份」「选过服务商之后不再重复弹」两项）。
+- `dotnet build YEEYEEYEE.slnx` → **成功，0 警告 0 错误**；旧端 `YEEYEEYEE.Desktop.csproj` → **成功，0 警告 0 错误**；
+  `YEEYEEYEE.Agent.Tests` → **163 项全部通过**（新增「预设换算两端共用一份」「选过服务商之后不再重复弹」两项）。
 - 桌面冒烟（真机逐项操作）：
   首次启动自动弹引导并预选 DeepSeek、填好 `deepseek-flash` 与 `https://api.deepseek.com/v1`；
   不填密钥点「完成接入」→ 就地报「还没有填密钥」且不写配置；
@@ -4119,7 +4128,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 ### 本轮验证
 
-- `dotnet build DreamForge.slnx` → **成功，0 警告 0 错误**；`DreamForge.Agent.Tests` → **163 项全部通过**。
+- `dotnet build YEEYEEYEE.slnx` → **成功，0 警告 0 错误**；`YEEYEEYEE.Agent.Tests` → **163 项全部通过**。
 - 桌面冒烟（真机逐项操作）：
   启动后**只**显示启动页（无画布 / 工作树 / Agent 面板 / 设置）；
   填入名称新建 → 启动页消失、工作台加载该项目、随后才弹接入引导（顺序正确）；
@@ -4163,8 +4172,8 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 ### 本轮验证
 
-- 完整 Rebuild：`DreamForge.slnx` → **成功，0 警告 0 错误**；旧端 `DreamForge.Desktop.csproj` → **0 错误**；
-  `DreamForge.Agent.Tests` → **163 项全部通过**。
+- 完整 Rebuild：`YEEYEEYEE.slnx` → **成功，0 警告 0 错误**；旧端 `YEEYEEYEE.Desktop.csproj` → **0 错误**；
+  `YEEYEEYEE.Agent.Tests` → **163 项全部通过**。
 - 桌面冒烟：启动页呈现「LOGO + YES 工程师 + 标语」在上、最近项目与新建/打开在下；
   连续两张间隔 2.2 秒的截图对比，光环转角与光晕明暗都不同，确认动效在跑（入场动画跑完后元素可见，
   说明透明度过渡生效——若过渡没生效，整页会停在 Opacity=0 的空白状态）。
@@ -4182,7 +4191,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 ### 遗留问题
 
-- 品牌语只出现在启动页；窗口标题栏与关于信息仍是 DreamForge。要不要整体改成 YES 工程师需要先定品牌口径。
+- 品牌语只出现在启动页；窗口标题栏与关于信息仍是 YEEYEEYEE。要不要整体改成 YES 工程师需要先定品牌口径。
 - 动效没有做「尊重系统减少动态效果（prefers-reduced-motion）」的分支：目前无法关闭。
 - 启动页的最近项目卡片最多一屏可见若干张，超出靠横向滚动；没有搜索或分组。
 
@@ -4216,8 +4225,8 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 ### 本轮验证
 
-- `DreamForge.Desktop.Avalonia` → **0 错误**（5 条既有 CS0618 过时 API 警告，都在本轮未动的拖放代码里）；
-  旧端 `DreamForge.Desktop` → **0 警告 0 错误**；`DreamForge.Agent.Tests` → **164 项全部通过**
+- `YEEYEEYEE.Desktop.Avalonia` → **0 错误**（5 条既有 CS0618 过时 API 警告，都在本轮未动的拖放代码里）；
+  旧端 `YEEYEEYEE.Desktop` → **0 警告 0 错误**；`YEEYEEYEE.Agent.Tests` → **164 项全部通过**
   （新增 1 项：能力说明的措辞与「谁填能力值」这条共用规则）。
 - 桌面冒烟：应用可正常启动并以启动页呈现（本轮改的是两个对话框，需要用户点开设置 / 引导看版式）。
 
@@ -4274,13 +4283,13 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 - **两处旧约定要跟着改**：切标签会清空撤销 / 重做栈与「可撤销的 Agent 批次」
   （否则一点撤销就把 A 画布的快照套到 B 画布上）；`CanUndoLastCommit` 增加
   「当前画布就是这批改动所在的画布」判断，切回原画布时按钮自己回来（记录没丢）。
-- **共享源码**：`DreamForge.Desktop\CanvasTabRules.cs`（编号分配 + 空白画布造法）链接进新主端，
+- **共享源码**：`YEEYEEYEE.Desktop\CanvasTabRules.cs`（编号分配 + 空白画布造法）链接进新主端，
   由测试盯着——这条规则错了会覆盖别人的文件，不能只靠界面上的手点。
 
 ### 本轮验证
 
 - 构建：旧端 **0 警告 0 错误**；新主端 **0 错误**（5 条既有 CS0618 过时 API 警告在未改动的拖放代码里）；
-  `DreamForge.Agent.Tests` → **165 项全部通过**（新增 1 项：编号不与已有画布撞名 + 空白画布形状）。
+  `YEEYEEYEE.Agent.Tests` → **165 项全部通过**（新增 1 项：编号不与已有画布撞名 + 空白画布形状）。
 - **实际点出来的桌面冒烟**（每一步截图确认）：
   1）启动页点「新建项目」→ 工作台直接出现「画布1」标签，画布里有 1 个「开始」节点，状态栏「1 节点 / 1920 × 1080」；
   2）点标签条上的 ＋ → 出现「画布2」并成为活动标签（状态栏「已新建画布：画布2」），
@@ -4414,7 +4423,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 ### 本轮验证
 
-- 构建：新主端 **0 错误**（5 条既有 CS0618 在未改动的拖放代码里）；`DreamForge.Agent.Tests` → **166 项全部通过**。
+- 构建：新主端 **0 错误**（5 条既有 CS0618 在未改动的拖放代码里）；`YEEYEEYEE.Agent.Tests` → **166 项全部通过**。
 - **本轮没能完成桌面点选验证**：准备冒烟时桌面会话变得不可截图（`CopyFromScreen` 报 «The handle is invalid»，
   窗口句柄与位置都还正常，典型是屏幕被锁/会话断开），因此这五处的实际点击效果需要在下一次会话里补验。
   已经按代码路径逐条自查过（捕获位置、端口命中、菜单项绑定、树的节点负载、两个视图的数据来源）。
@@ -4500,7 +4509,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 ### 实现
 
-- **规则放哪儿**：新建共享的 UI-free 文件 `DreamForge.Desktop/NodeAssist.cs`（namespace `DreamForge.Desktop`），
+- **规则放哪儿**：新建共享的 UI-free 文件 `YEEYEEYEE.Desktop/NodeAssist.cs`（namespace `YEEYEEYEE.Desktop`），
   新主端用 `<Compile Include>` 链接同一份源码，测试工程也直接测它。
   为什么不让界面自己算：菜单文字、上游收集顺序、提示词模板都要能被测试钉住；
   旧端将来接同一套建议时不该再抄一份。
@@ -4537,7 +4546,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 - 构建：新主端 **0 错误**（5 条 CS0618 过时警告是既有的 `DataObject`/`DragEventArgs.Data`，与本次无关）；
   旧端 **0 警告 0 错误**；测试 **167 项全部通过**（新增「节点协助：沿连线收集上游设定并按类型给建议」）。
 - **真机右键验证**（PostMessage 直发窗口消息，不抢前景、不动用户文件）：
-  用 `DREAMFORGE_CONFIG_HOME` 把配置目录指到临时目录，造了个演示项目
+  用 `YEEYEEYEE_CONFIG_HOME` 把配置目录指到临时目录，造了个演示项目
   （故事企划 → 角色 → 章节，三节点两条线），应用全程只读这个临时配置，**用户的 `recent-projects.json` 与项目文件没被改写**。
   - 章节节点右键：菜单第一行「上游设定：2 条（故事企划 1 · 角色 1）· 最远 2 层」，
     下面是「查看上游设定…」「让 Agent 把这一章拆成分镜与角色/场景节点」「生成章节梗概提示词」，末两行「编辑节点…」「删除节点」。
@@ -4548,7 +4557,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
     下面是两张出角色图 + 设定提示词 + 补小传；点「出角色图（正面全身）」→ 提示词窗口多出「负面提示词」
     与「出图并挂到节点」按钮。
   - 点「出图并挂到节点」（当前没配图像模型）：状态栏如实显示
-    「还没配置图像模型：在设置里填「图像接口地址 / 图像模型」（或设 DREAMFORGE_IMAGE_MODEL），也可以先用「复制提示词」到别处出图」，
+    「还没配置图像模型：在设置里填「图像接口地址 / 图像模型」（或设 YEEYEEYEE_IMAGE_MODEL），也可以先用「复制提示词」到别处出图」，
     对话框关闭、**没有伪造成功、也没有往节点上挂空附件**。
 - **未验证**：真正接上可用图像接口之后的「出图 → 落盘 → 挂到节点 → 预览」这一整段（手头没有可用的图像接口凭据）。
   代码路径与旧端既有的出图链路共用同一套 provider，但仍建议配好模型后手动跑一次。
@@ -4593,7 +4602,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 ### 实现
 
-- **新增 `DialogShell`**（`DreamForge.Desktop.Avalonia/DialogShell.cs`）：弹窗外壳的唯一实现。
+- **新增 `DialogShell`**（`YEEYEEYEE.Desktop.Avalonia/DialogShell.cs`）：弹窗外壳的唯一实现。
   - 窗口属性与主窗口同一套：无边框、扩展客户区、无系统 chrome、透明背景、居中于属主、不进任务栏；
   - 内容 = 圆角玻璃底 + 顶部冷蓝光场 + 44px 自绘标题条（◈ 品牌标 + 标题 + ✕）+ 内容区；
   - 标题条可按左键拖动（按在按钮上不拖，否则点关闭会变成拖窗口）；
@@ -4854,7 +4863,7 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 ### 实现
 
-- **新增共享规则 `CanvasReferenceLayout`**（`DreamForge.Desktop\Canvas\`，两端同一份、纯计算）：
+- **新增共享规则 `CanvasReferenceLayout`**（`YEEYEEYEE.Desktop\Canvas\`，两端同一份、纯计算）：
   - **排序**：先按种类分组（角色 → 场景 → 道具，失效的排最后），**组内保留节点上引用的原始顺序**——
     种类相同的排在一起才叫「排好」，而组内不替作者重排（他写「老巷、林晚」是有意的）。
   - **落点**：一列纵向排在归属节点右边，纵向对齐它的中线；引用多到会伸到画布原点之上时夹回 0。
@@ -4912,11 +4921,11 @@ Windows，还顺带要求用户安装 Windows 桌面运行时。本轮把这件�
 
 #### 一、维护范围收敛（写进架构文档，避免以后又两头改）
 
-- 从今天起**只维护 `DreamForge.Desktop.Avalonia`**；旧 WinForms 端 `DreamForge.Desktop` **冻结**，保留为只读参考，
+- 从今天起**只维护 `YEEYEEYEE.Desktop.Avalonia`**；旧 WinForms 端 `YEEYEEYEE.Desktop` **冻结**，保留为只读参考，
   只要求继续能编译（同一解决方案里不能被共享源码带坏）。
-- 顺带把「共享源码」这个安排的副作用写清楚：一批 UI-free 规则**物理上仍在 `DreamForge.Desktop/` 目录里**，
+- 顺带把「共享源码」这个安排的副作用写清楚：一批 UI-free 规则**物理上仍在 `YEEYEEYEE.Desktop/` 目录里**，
   由 Avalonia 端 `<Compile Include>` 链过去，所以往那里加文件时——①它会被旧端按通配自动编一遍（只能放两端都能编译的 UI-free 代码）；
-  ②它也会被 Avalonia 端编一遍（只依赖两端共有的模型 API）。Avalonia 端自己的窗口/控件一律放 `DreamForge.Desktop.Avalonia/`。
+  ②它也会被 Avalonia 端编一遍（只依赖两端共有的模型 API）。Avalonia 端自己的窗口/控件一律放 `YEEYEEYEE.Desktop.Avalonia/`。
   将来要搬到中立目录属于**独立的一次搬迁**，不顺手做。
 
 #### 二、引用展开重做：先从「世界坐标」搬到「浮层」
@@ -5101,7 +5110,7 @@ Agent 的 `Commit` 在临时画布上**直接拒绝**并说明原因——它没
 
 #### 三、把配色收成一处口径
 
-- 新增共享 UI-free 的 `NodeKindPalette`（`DreamForge.Desktop/NodeKindPalette.cs`，Avalonia 端链接过去）：
+- 新增共享 UI-free 的 `NodeKindPalette`（`YEEYEEYEE.Desktop/NodeKindPalette.cs`，Avalonia 端链接过去）：
   颜色值本身是数据，放共享层才有测试盯着。Avalonia 侧只留一层 `NodeKindBrushes` 负责包成画刷。
 - 顺带把「引用的设定」也接到同一套色上：`ReferenceCard` 增加 `NodeCategory Category`
   （由 `NodeKindPalette.CategoryOf(EntityKind)` 算出），于是**画布节点、画布上的引用浮层、临时引用画布三处颜色一致**。
@@ -5207,7 +5216,7 @@ Agent 的 `Commit` 在临时画布上**直接拒绝**并说明原因——它没
 
 ### 实现
 
-- **新增共享 UI-free 的 `StoryTreePlanner`**（`DreamForge.Desktop\Canvas\StoryTreePlanner.cs`，Avalonia 端
+- **新增共享 UI-free 的 `StoryTreePlanner`**（`YEEYEEYEE.Desktop\Canvas\StoryTreePlanner.cs`，Avalonia 端
   以链接方式编译）：把一张画布算成 `StoryRow` 树，Avalonia 端只负责翻成界面行（标记形状、种类颜色、
   行尾标签、展开记忆）。层次：项目 → 章节 → 分镜 → 引用（场景/人物）→ 子引用（道具/服装），
   外加「本章出场（去重）」「未绑定节点」「资源库」三组。
@@ -5878,7 +5887,7 @@ Agent 的 `Commit` 在临时画布上**直接拒绝**并说明原因——它没
 
 ### 模型：`WorkflowAttachment` 加 `Prompt` / `NegativePrompt`
 
-**两份 Model 都要加**（`DreamForge.Desktop.Core` 与旧端的 `WorkflowCanvasControl.cs` 各有一份，
+**两份 Model 都要加**（`YEEYEEYEE.Desktop.Core` 与旧端的 `WorkflowCanvasControl.cs` 各有一份，
 两端共用同一批画布 JSON）。少写老端那一份不是「省一处改动」，而是**丢数据**：老端只要把画布读进来再存一次，
 Avalonia 端留下的提示词就被悄悄抹掉了（老端的 Model 里没有这个字段，序列化时自然写不出来）。
 老端那边注释写明了这是格式同步、不是给老端加功能。
@@ -6397,9 +6406,9 @@ ComfyUI 改成可达（图像工厂内置共享执行宿主），「测试连接
 
 ### 1. 安全的那一半做完了：把「跨项目借源码」变成一个正常的库
 
-- 新建 `DreamForge.Desktop.Shared`：Avalonia 端原先用 **42 条** `<Compile Include>` 从旧端
+- 新建 `YEEYEEYEE.Desktop.Shared`：Avalonia 端原先用 **42 条** `<Compile Include>` 从旧端
   「借」的那批无界面代码，现在收进一个正常的库（引用 Core，带 ProtectedData 包，TFM `net10.0`）。
-- Avalonia 端改成 `<ProjectReference>` 引用它，42 条链接全部删掉；`DreamForge.slnx` 里也登记了这个新项目。
+- Avalonia 端改成 `<ProjectReference>` 引用它，42 条链接全部删掉；`YEEYEEYEE.slnx` 里也登记了这个新项目。
 - **这一半语义等价**：编译单元仍然是「Core 的模型 + 同一批源码」，只是来源从跨项目借文件
   变成引用一个库——所以它不是重构，是搬家。两端构建 **0 错误**。
 
@@ -6407,7 +6416,7 @@ ComfyUI 改成可达（图像工厂内置共享执行宿主），「测试连接
 
 把测试项目临时切到 Shared（这一步本来是新计划里的第 3 步），立刻爆出几十个编译错误。查下来三类：
 
-1. **两份核心已经分叉，而且是双向的。** `DreamForge.Desktop.Core` 与旧端项目各自都有一整套模型与
+1. **两份核心已经分叉，而且是双向的。** `YEEYEEYEE.Desktop.Core` 与旧端项目各自都有一整套模型与
    工具类（WorkflowCanvasModels / WorkflowEntities / WorkTree / AppPaths / AssetStore / CanvasLibrary /
    ProjectContext / StorageMaintenance），成员并不相同。例如这些**只在旧端那份里有**：
    `CanvasLibrary.Rename`、`CanvasLibrary.FindByTitle`、`CanvasLibrary.LoadCurrentCanvasPath` /
@@ -6426,10 +6435,10 @@ ComfyUI 改成可达（图像工厂内置共享执行宿主），「测试连接
 
 决定是：旧端**先归档**（不删）；依赖 WinForms 的测试**直接删**。
 
-- **搬文件**（链接→真实文件，来源只剩一处）：53 个文件搬进 `DreamForge.Desktop.Shared`
+- **搬文件**（链接→真实文件，来源只剩一处）：53 个文件搬进 `YEEYEEYEE.Desktop.Shared`
   （`Agent\` 放服务层与技能，`Canvas\` 放画布纯逻辑）；9 个 Core 自己需要的
   （CanvasChapters / NodeProjection / CanvasMigration / CanvasIdentityValidator / CanvasStorage /
-  ProjectLibrary / CanvasReferenceScan / CanvasRecycleBin / UnifiedWorkTree）搬进 `DreamForge.Desktop.Core`。
+  ProjectLibrary / CanvasReferenceScan / CanvasRecycleBin / UnifiedWorkTree）搬进 `YEEYEEYEE.Desktop.Core`。
   两个项目里的跨项目 `<Compile Include>` 全部消失。
 - 三个测试项目改引用 Shared，解决方案构建 **0 错误**。
 - **合并两份分叉**（原则：以带完整链条的那一份为准，因为测试与现有功能都以它为准）：
@@ -6439,11 +6448,11 @@ ComfyUI 改成可达（图像工厂内置共享执行宿主），「测试连接
   - 补上 `CanvasLibrary.Rename`（只有旧端那份有）。
   - `StorageMaintenance` 整体搬进 Shared；Core 只留 `CoreStoragePaths.DraftCanvasPath`
     —— 原先两个**同名类**共用一个命名空间，正是「一份实现两处声明」的老毛病。
-  - `AppPaths` / `ProjectContext` 从 `DreamForge.Desktop.Core` 命名空间**并回** `DreamForge.Desktop`，
+  - `AppPaths` / `ProjectContext` 从 `YEEYEEYEE.Desktop.Core` 命名空间**并回** `YEEYEEYEE.Desktop`，
     删掉那个转发壳（`DesktopNamespaceAppPaths.cs`），顺带修掉两处过时 using。
   - 删掉 `CanvasPackage.cs` 里重复的 `RecentCanvasState`：两份同名类型并存时，本编译单元那份会盖住
     Core 的那份，于是出现「无法从 A 转换为 A」这种编译错误。
-  - `InternalsVisibleTo("DreamForge.Migration.Tests")` 从旧端那个只剩一行的文件搬到 **Core**
+  - `InternalsVisibleTo("YEEYEEYEE.Migration.Tests")` 从旧端那个只剩一行的文件搬到 **Core**
     （真正声明 internal 成员的程序集）。
   - 删掉 7 个依赖 WinForms 的测试：`AutoStageAppliesOnce`、三个版本状态文案
     （`KeepHistoricalVersionShowsStatus` / `AdoptedVersionShowsStatus` / `NewEffectiveVersionReopensConfirmation`）、
@@ -6471,7 +6480,7 @@ ComfyUI 改成可达（图像工厂内置共享执行宿主），「测试连接
 - **永久损失**：反编译丢掉了这些函数里的**中文注释**（约 55 个函数体）。断言与行为是完整的，
   注释要在以后动到它们时补回来；恢复出来的段落都有显式标注 `// ===== Recovered in round 127 =====`。
 - **同时暴露的一个测试卫生问题**：`ConfigEnvironment` 只还原了配置路径相关环境变量，而有个用例把
-  `DREAMFORGE_SECRET_SCHEME` 设成 `plain` 后**没还原** —— 它之后所有需要真加密的用例都拿到明文档，
+  `YEEYEEYEE_SECRET_SCHEME` 设成 `plain` 后**没还原** —— 它之后所有需要真加密的用例都拿到明文档，
   失败信息还长着一副「加密坏了」的样子。已改成成对存 / 还，并写了注释说明为什么。
 - **教训**：批量删除**绝不能**用「函数名 + 跨行非贪婪」这类模式。要么逐个人工改（有精确锚点时），
   要么用**行锚点脚本**（先算出声明行与配对大括号行，再按行号删）。这种操作前后各跑一次全量测试；
@@ -6480,9 +6489,9 @@ ComfyUI 改成可达（图像工厂内置共享执行宿主），「测试连接
 ### 本轮验证
 
 - 整个解决方案（Core / Shared / Avalonia / Host / Web）构建 **0 错误**。
-- `DreamForge.Agent.Tests`：**190 项全部通过**；断言覆盖与最后一次构建逐函数对齐（0 个更薄）。
-- `DreamForge.Migration.Tests`：`G6-V2: 8/8 scenarios passed`。
-- `DreamForge.G6V1.Tests`：通过。
+- `YEEYEEYEE.Agent.Tests`：**190 项全部通过**；断言覆盖与最后一次构建逐函数对齐（0 个更薄）。
+- `YEEYEEYEE.Migration.Tests`：`G6-V2: 8/8 scenarios passed`。
+- `YEEYEEYEE.G6V1.Tests`：通过。
 - 旧端已归档、不再参与构建；测试全程用临时目录，不碰用户真实工程与资产。
 - 按要求没有做点击测试。
 
@@ -6529,7 +6538,7 @@ Agent 改设定、以后还可能加别的），漏掉一个就永远不报—�
 
 ### 4. 老端那份模型里也补了同一个字段
 
-老端不引用 `DreamForge.Desktop.Core`，自己复制了一份模型（`WorkflowCanvasControl.cs`）。
+老端不引用 `YEEYEEYEE.Desktop.Core`，自己复制了一份模型（`WorkflowCanvasControl.cs`）。
 少写这个字段的话，**老端把画布读进来再存一次，Avalonia 端记下的依据就被抹掉了**——
 与 `Prompt` / `NegativePrompt` 当初要同步的理由完全相同（那份注释里写着这件事）。
 这一处重复等第 7 条（删掉旧端）落地后自然消失。

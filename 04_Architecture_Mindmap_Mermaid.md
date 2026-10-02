@@ -2,10 +2,11 @@
 
 > 当前基线：2026-10-02
 >
-> 版本：v2.3 · 2026-10-02
+> 版本：v2.4 · 2026-10-02
 > 两种格式：Mermaid 流程图版（可渲染） + Markdown 列表版（可导入 XMind / 幕布 / 飞书）
 > 上一版按"六层架构 + Avalonia WebView + 房间服务 + Yjs"绘制，与代码不符，已作废。
-> v2.3：旧 WinForms 端归档（源码在 `_legacy_winforms/`，不参与构建）；共享逻辑落到 `DreamForge.Desktop.Shared`；补站点与池子、智能导入、出图批次、引用过期、生成链自检。
+> v2.4：项目全量改名为 `YEEYEEYEE`（解决方案、项目文件夹、程序集、命名空间一起改），旧 WinForms 端删除，仓库里只剩一个桌面主端；下面每个节点名都能在源码里对上号。
+> v2.3：共享逻辑落到 `YEEYEEYEE.Desktop.Shared`；补站点与池子、智能导入、出图批次、引用过期、生成链自检。
 
 ---
 
@@ -13,7 +14,7 @@
 
 ```mermaid
 graph TD
-    ROOT["YEEYEEYEE · DreamForge"]
+    ROOT["YEEYEEYEE · YEEYEEYEE"]
 
     subgraph A[解决方案]
     A1["Core · net10.0<br/>协议 / Job / 枚举 / 权限 / 引用图"]
@@ -25,7 +26,6 @@ graph TD
     A7["Mcp · stdio 只读 4 工具<br/>未接入桌面端，不在 slnx"]
     A8["Canvas · React+Vite<br/>由 Web 托管；div 卡片，不在 slnx"]
     A9["测试：Core / Agent / Migration / G6V1 / Web<br/>控制台断言式"]
-    A10["_legacy_winforms<br/>旧 WinForms 端源码，已归档、不参与构建"]
     end
 
     subgraph B[主端表现层 · Avalonia]
@@ -162,7 +162,7 @@ graph TD
 ## Markdown 列表版（可导入 XMind / 幕布 / 飞书）
 
 ```
-YEEYEEYEE · DreamForge
+YEEYEEYEE · YEEYEEYEE
 ├─ 解决方案
 │  ├─ Core · 协议 / Job 状态机 / 能力枚举 / 权限 / 引用图（无第三方依赖）
 │  ├─ Host · 单机执行服务 / SQLite Job / ComfyUI（HTTP+WS）/ 轮询与回调签名
@@ -172,8 +172,8 @@ YEEYEEYEE · DreamForge
 │  ├─ Web · ASP.NET Core 作业服务 + ComfyUI 回调 + 托管 TS 画布（静态 dist / WS / API）
 │  ├─ Mcp · stdio 只读 4 工具，未接入桌面端，不在 slnx
 │  ├─ Canvas · React+Vite，由 Web 托管；div 卡片，tldraw 未使用，不在 slnx
-│  ├─ 测试 · Core / Agent / Migration / G6V1 / Web，控制台断言式，不在 slnx 之外独立跑
-│  └─ _legacy_winforms · 旧 WinForms 端源码，已归档、不参与构建
+│  ├─ 测试 · Core / Agent / Migration / G6V1 / Web，控制台断言式
+│  └─ 可执行主端只有桌面 Avalonia 一个；旧 WinForms 端已在第 128 轮删除
 ├─ 主端表现层 · Avalonia
 │  ├─ CanvasSurface · 节点 / 连线 / 缩放平移 / 泳道布局 / 候选窗口虚影 / 生成光效
 │  ├─ 面板 · 左栏工作树与项目文件 / 画布 / 右栏检查器与 Agent

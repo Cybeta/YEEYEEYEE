@@ -41,7 +41,7 @@
 而是从空白开始选 —— 悄悄换成别家的池子会直接变成「出的图不对，钱也花了」。
 **出视频的池子**在出视频执行方接入之前选了只会得到一句明确拒绝，不会偷偷起一个花钱的异步任务。
 
-**导入一个站点的产物是一个站点文件，不是一串技能文件**（旧 WinForms 端曾保持另一套行为，它已归档、不再维护）。
+**导入一个站点的产物是一个站点文件，不是一串技能文件**（旧 WinForms 端曾保持另一套行为，该端已在第 128 轮删除）。
 
 `WorkTreeKind.Ability` 曾使用 `Skill` 名称。`WorkTreeItem.ParseKind` 仍接受旧协议中的 `Skill`/`技能` 并映射到 `Ability`；枚举按数字落盘，只能追加，不能重排。角色能力与生成技能不共用类型。
 
@@ -49,7 +49,7 @@
 
 `SkillDefinition` 包含 `Id`、`Name`、`Description`、普通字符串 `Version`、`TargetKind`、`OutputTarget` 和 `Steps[]`。`SkillStep` 包含能力类型、提示词、负面提示词、参考来源、去噪、尺寸和输出名。当前支持 `TextToImage` 与 `ImageToImage`；参考来源可为变体、前置步骤或 `ref:N`。
 
-技能目录由 `DREAMFORGE_SKILL_DIR` 覆盖，否则使用项目根 `skills/`。`SkillLibrary.Load()` 逐个读取 JSON，单文件错误只记录该文件，不阻断其他技能；首次运行会写入人物三视图和参考图两两合成两个示例。校验拒绝空步骤和不匹配的 `TargetKind`，`Any` 放行。装载时会给每条技能补上 `FilePath`（不写进 JSON），启停与删除都要靠它。
+技能目录由 `YEEYEEYEE_SKILL_DIR` 覆盖，否则使用项目根 `skills/`。`SkillLibrary.Load()` 逐个读取 JSON，单文件错误只记录该文件，不阻断其他技能；首次运行会写入人物三视图和参考图两两合成两个示例。校验拒绝空步骤和不匹配的 `TargetKind`，`Any` 放行。装载时会给每条技能补上 `FilePath`（不写进 JSON），启停与删除都要靠它。
 
 **启停与删除（设置 → 技能管理）**：`SkillDefinition.Enabled` 默认 true，停用的技能保留配置与文件、只是不再被调用。`SkillLibrary.TrySetEnabled` 用 `JsonNode` **只改 `Enabled` 这一个键**——技能文件里可能有这一版不认识的字段，整体反序列化再写回会把它们抹掉，那是静悄悄的数据损失；写回时显式放宽 `Encoder`，否则中文全变成 `\uXXXX`，技能名与提示词从此没法读也没法 diff。`SkillLibrary.TryDelete` **只删这一个文件**：同一来源导入的其它文件（`OwnedFiles`）可能被同来源的其它技能共用，顺手删掉会把它们一起弄坏。界面上删除要先确认，因为技能文件删掉后没法从界面找回。
 
@@ -77,9 +77,9 @@
 
 ## 插件体系
 
-插件目录由 `DREAMFORGE_PLUGIN_DIR` 覆盖，否则使用项目根 `plugins/`。每个插件是一个一级子目录，包含 `plugin.json`；`ApiVersion` 必须为 1，程序集默认为 `plugin.dll`，也可由 `EntryType` 指定入口。
+插件目录由 `YEEYEEYEE_PLUGIN_DIR` 覆盖，否则使用项目根 `plugins/`。每个插件是一个一级子目录，包含 `plugin.json`；`ApiVersion` 必须为 1，程序集默认为 `plugin.dll`，也可由 `EntryType` 指定入口。
 
-`PluginLoader.LoadAll` 使用可卸载的 `AssemblyLoadContext` 逐个加载，入口必须实现 `IDreamForgePlugin`，单个插件失败不影响其他插件。`IPluginHost` 提供右键菜单、侧栏项目、窗口注册和打开、运行技能、当前画布及刷新画布能力。右键挂载点包括 `CanvasNode`、`CanvasBlank`、`Entity`、`Variant`、`VariantImage`。示例 `ThreeViewMenuPlugin` 在变体或参考图上挂载人物三视图入口，再调用 `RunSkillAsync`。
+`PluginLoader.LoadAll` 使用可卸载的 `AssemblyLoadContext` 逐个加载，入口必须实现 `IYEEYEEYEEPlugin`，单个插件失败不影响其他插件。`IPluginHost` 提供右键菜单、侧栏项目、窗口注册和打开、运行技能、当前画布及刷新画布能力。右键挂载点包括 `CanvasNode`、`CanvasBlank`、`Entity`、`Variant`、`VariantImage`。示例 `ThreeViewMenuPlugin` 在变体或参考图上挂载人物三视图入口，再调用 `RunSkillAsync`。
 
 ## Agent、版本与范围
 

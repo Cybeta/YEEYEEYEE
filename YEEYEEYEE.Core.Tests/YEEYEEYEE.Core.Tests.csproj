@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\YEEYEEYEE.Core\YEEYEEYEE.Core.csproj" />
+    <ProjectReference Include="..\YEEYEEYEE.Host\YEEYEEYEE.Host.csproj" />
+    <ProjectReference Include="..\YEEYEEYEE.Desktop.Core\YEEYEEYEE.Desktop.Core.csproj" />
+    <!-- Agent 操作层（AgentAction / AgentActionExecutor）在共享库里：
+         第 127 轮之前它住在旧 WinForms 端项目里，本工程当时就是引用那个项目拿到的；
+         那一轮有个改动把引用换成了 Desktop.Core，`AgentActionExecutor` 就找不到了（工作区一直是编译不过的状态）。 -->
+    <ProjectReference Include="..\YEEYEEYEE.Desktop.Shared\YEEYEEYEE.Desktop.Shared.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.9" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

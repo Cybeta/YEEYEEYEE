@@ -1,4 +1,4 @@
-# DreamForge 待办清单
+# YEEYEEYEE 待办清单
 
 这份文件只放**还没做的事**。已完成的内容、每轮的验证结果与判断留在 [PROGRESS.md](PROGRESS.md)，
 两边的分工是：PROGRESS 用于追溯「当时做了什么、跑没跑过」，这份用于回答「接下来要做什么」。
@@ -94,7 +94,7 @@
 <details>
 <summary>当初为什么先问 logo（保留备查）</summary>
 
-**第一件事实**：这个仓库里除了自家 logo（`DreamForge.Desktop/Assets/YeeYeeYee-logo.png`）
+**第一件事实**：这个仓库里除了自家 logo（原 `YEEYEEYEE.Desktop/Assets/YeeYeeYee-logo.png`，随旧端在第 128 轮一并删除）
 **一张图片资源都没有**——Avalonia 端连自家那个都没在用，标题栏那个「头像」是文字 `LM`。
 所以第三方厂家的 logo 一张都没有，「按厂家显示」得先决定图标从哪来。
 
@@ -119,8 +119,9 @@
 
 ## 7. 删除旧版桌面端（WinForms） ✅ 已完成（2026-10-02）
 
-**结果**：旧端已移入 `_legacy_winforms/`（带 README，不在任何构建里）；共享代码只有一份来源
-（`DreamForge.Desktop.Core` 放模型与画布基础设施，`DreamForge.Desktop.Shared` 放无界面逻辑）；
+**结果**：旧端先移入 `_legacy_winforms/`（带 README，不在任何构建里），第 128 轮确认无人引用后**整个删除**；
+共享代码只有一份来源
+（`YEEYEEYEE.Desktop.Core` 放模型与画布基础设施，`YEEYEEYEE.Desktop.Shared` 放无界面逻辑）；
 两份分叉的核心已按「以带完整链条的那一份为准」合并；三个测试项目改引用 Shared。
 解决方案构建 0 错误，Agent 测试 190 项全部通过（197 − 7 个删掉的 WinForms 测试），
 Migration `8/8`、G6V1 通过。完整过程（含一次误删与恢复）见 PROGRESS 第 127 轮。
@@ -131,7 +132,7 @@ Migration `8/8`、G6V1 通过。完整过程（含一次误删与恢复）见 PR
 - `CanvasLibrary.Rename` / `StorageMaintenance.FindUnreferenced` 等只在旧端那份里，现已并回。
 - 两个同名类共用一个命名空间（`StorageMaintenance`）、`AppPaths`/`ProjectContext` 被放在 `.Core`
   命名空间靠转发壳访问、`RecentCanvasState` 重复声明 —— 都清掉了。
-- **测试卫生**：有个用例把 `DREAMFORGE_SECRET_SCHEME` 设成 `plain` 后不还原，会污染它之后所有
+- **测试卫生**：有个用例把 `YEEYEEYEE_SECRET_SCHEME` 设成 `plain` 后不还原，会污染它之后所有
   需要真加密的用例（失败信息还伪装成「加密坏了」）。已改成成对存 / 还。
 
 **剩下的小事**（都不影响使用）：
@@ -139,7 +140,7 @@ Migration `8/8`、G6V1 通过。完整过程（含一次误删与恢复）见 PR
    恢复段落都有 `// ===== Recovered in round 127 =====` 标注。
 2. 被删掉的 7 个 WinForms 测试里，有两处**真正的覆盖损失**，将来想找回就得在共享层重写：
    版本状态的文案（`GetNodeVersionStatusSummary` 的三种说法）与画布控件「拒绝把自身状态当来源加载」。
-3. `_legacy_winforms/` 确认无用后可以整个删掉（或从 git 取历史版本）。
+3. ~~`_legacy_winforms/` 确认无用后可以整个删掉~~ → **第 128 轮已删**（连根目录三个空残留目录一起）。
 4. `02_Architecture.md` 里「桌面为 WinForms 自绘主端」那段基线描述需要跟着改（本轮已改，见该文件）。
 
 <details>
@@ -156,7 +157,7 @@ Migration `8/8`、G6V1 通过。完整过程（含一次误删与恢复）见 PR
 <details>
 <summary>当初的记录：两份核心是怎么分叉的（保留备查）</summary>
 
-**旧端那份不是副本，是另一份分叉，而且是双向的。** `DreamForge.Desktop.Core` 有自己的一整套模型与
+**旧端那份不是副本，是另一份分叉，而且是双向的。** `YEEYEEYEE.Desktop.Core` 有自己的一整套模型与
 工具类（WorkflowCanvasModels / WorkflowEntities / WorkTree / AppPaths / AssetStore / CanvasLibrary /
 ProjectContext / StorageMaintenance），旧端项目里**也有一套**，成员并不相同。例如只有**旧端那份**有
 `CanvasLibrary.Rename`、`CanvasLibrary.FindByTitle`、`CanvasLibrary.LoadCurrentCanvasPath` /
@@ -180,12 +181,12 @@ ProjectContext / StorageMaintenance），旧端项目里**也有一套**，成�
 <details>
 <summary>当初的初步判断（已被第 127 轮的核对修正，保留备查）</summary>
 
-- **现状（为什么不能直接删）**：旧端 `DreamForge.Desktop` **不是纯界面**——它里面装着共享的无界面代码。
+- **现状（为什么不能直接删）**：旧端 `YEEYEEYEE.Desktop` **不是纯界面**——它里面装着共享的无界面代码。
   两边的关系是「Avalonia 端用 `<Compile Include>` 链接旧项目里的文件」：
-  - `DreamForge.Desktop.Avalonia.csproj` 里有 **42 条**链接；
-  - 3 个测试项目直接引用旧项目：`DreamForge.Agent.Tests`、`DreamForge.Migration.Tests`、`DreamForge.G6V1.Tests`；
-  - `DreamForge.slnx` 里**已经**没有旧项目了（只有 Core / Desktop.Core / Avalonia / Host / Web）。
-  - 补：`DreamForge.Desktop.Core.csproj` 自己也链接了旧端的 **9 个**文件
+  - `YEEYEEYEE.Desktop.Avalonia.csproj` 里有 **42 条**链接；
+  - 3 个测试项目直接引用旧项目：`YEEYEEYEE.Agent.Tests`、`YEEYEEYEE.Migration.Tests`、`YEEYEEYEE.G6V1.Tests`；
+  - `YEEYEEYEE.slnx` 里**已经**没有旧项目了（只有 Core / Desktop.Core / Avalonia / Host / Web）。
+  - 补：`YEEYEEYEE.Desktop.Core.csproj` 自己也链接了旧端的 **9 个**文件
     （CanvasChapters / NodeProjection / CanvasMigration / CanvasIdentityValidator / CanvasStorage /
     ProjectLibrary / CanvasReferenceScan / CanvasRecycleBin / UnifiedWorkTree）。
 
@@ -216,9 +217,8 @@ ProjectContext / StorageMaintenance），旧端项目里**也有一套**，成�
 
 1. 第 1 条：抽卡特效播的时机与位置（每张出好 / 一批出完 / 保存时；候选窗口上 / 画布中央 / 全屏）？
 2. 第 2 条：版本从哪里取、怎么查？
-3. 第 7 条：新共享库叫什么、放哪一层（是否与 `DreamForge.Desktop.Core` 合并）？
-4. 第 8 条：质量档由谁判（视觉模型 / 本地启发式 / 两者混用），阈值谁来定？
-5. 第 6 条留下的口味问题：那枚右下角徽标**浮在画布上会挡住底下的节点**，要不要改成半透明 /
+3. 第 8 条：质量档由谁判（视觉模型 / 本地启发式 / 两者混用），阈值谁来定？
+4. 第 6 条留下的口味问题：那枚右下角徽标**浮在画布上会挡住底下的节点**，要不要改成半透明 /
    悬停才显形 / 挪进底部状态栏？
 
-（第 4、5、6 条已经做完，对应的问题已消掉。第 4 条腾出来的位置给了工作树；第 6 条按方案 B 做了字母徽标。）
+（第 3、4、5、6、7 条已经做完，对应的问题已消掉。第 4 条腾出来的位置给了工作树；第 6 条按方案 B 做了字母徽标。）

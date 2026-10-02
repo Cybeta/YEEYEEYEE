@@ -1,8 +1,0 @@
-<Solution>
-  <Project Path="DreamForge.Core/DreamForge.Core.csproj" />
-  <Project Path="DreamForge.Desktop.Core/DreamForge.Desktop.Core.csproj" />
-  <Project Path="DreamForge.Desktop.Shared/DreamForge.Desktop.Shared.csproj" />
-  <Project Path="DreamForge.Desktop.Avalonia/DreamForge.Desktop.Avalonia.csproj" />
-  <Project Path="DreamForge.Host/DreamForge.Host.csproj" />
-  <Project Path="DreamForge.Web/DreamForge.Web.csproj" />
-</Solution>

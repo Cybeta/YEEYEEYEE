@@ -1,0 +1,174 @@
+﻿namespace YEEYEEYEE.Desktop;
+
+public static class AppPaths
+{
+    private static string? projectRoot;
+    private static ProjectContext? currentProject;
+
+    // Application configuration lives beside the deployed program; project files live under the current project root.
+    public static string ProgramRoot => AppContext.BaseDirectory.TrimEnd(
+        Path.DirectorySeparatorChar,
+        Path.AltDirectorySeparatorChar);
+
+    public static string Root => projectRoot ?? throw new InvalidOperationException("尚未打开项目。");
+    public static ProjectContext CurrentProject => currentProject ?? throw new InvalidOperationException("尚未打开项目。");
+
+    public static void UseProject(ProjectContext project)
+    {
+        projectRoot = project.RootPath;
+        currentProject = project;
+        Directory.CreateDirectory(projectRoot);
+    }
+
+    public static string Combine(string name) => Path.Combine(Root, name);
+    public static string CombineProgram(string name) => Path.Combine(ProgramRoot, name);
+
+    /// <summary>
+    /// 用户级配置目录（按平台惯例）：
+    /// macOS 为 <c>~/Library/Application Support/YEEYEEYEE</c>，Windows 为 <c>%LOCALAPPDATA%\YEEYEEYEE</c>，
+    /// 其它平台为 <c>$XDG_CONFIG_HOME/yeeeyee</c>（未设置时 <c>~/.config/yeeeyee</c>）。
+    ///
+    /// **为什么不能继续写在程序旁边**：macOS 的程序在 .app 包内，那里不该被写入（签名也会因此失效）；
+    /// Windows 上程序目录也可能落在 Program Files 这类只读位置。
+    /// 便携部署或自动化测试可用 YEEYEEYEE_CONFIG_HOME 指定这个目录本身。
+    /// </summary>
+    public static string UserConfigDirectory =>
+        EnvCompat.Get("CONFIG_HOME") is { Length: > 0 } custom
+            ? Path.GetFullPath(custom)
+            : RenamedOrExistingSegment(UserConfigRoot, "YEEYEEYEE", "DreamForge");
+
+    /// <summary>
+    /// 改名后的目录名：**新名存在就用新名，否则旧名还在就用旧名，两个都没有才用新名**（准备新建）。
+    ///
+    /// 用户配置目录里放的是密钥与最近项目，用户项目目录里放的是他的工程。改名那一刻直接切到新目录，
+    /// 程序会表现得像「第一次运行」——密钥要重填、最近项目是空的、工程列表空了，而文件其实好好躺在旧目录里。
+    /// 两个目录名并存时以新名为准，用户把旧目录手工搬过去即可完成迁移。
+    /// </summary>
+    private static string RenamedOrExistingSegment(string root, string preferred, string legacy)
+    {
+        var next = Path.Combine(root, preferred);
+        if (Directory.Exists(next)) return next;
+        var previous = Path.Combine(root, legacy);
+        return Directory.Exists(previous) ? previous : next;
+    }
+
+    private static string UserConfigRoot
+    {
+        get
+        {
+            if (OperatingSystem.IsMacOS())
+                return Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    "Library",
+                    "Application Support");
+            if (OperatingSystem.IsWindows())
+            {
+                var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (!string.IsNullOrWhiteSpace(local)) return local;
+            }
+
+            var xdg = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
+            if (!string.IsNullOrWhiteSpace(xdg)) return xdg;
+
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            return string.IsNullOrWhiteSpace(home) ? ProgramRoot : Path.Combine(home, ".config");
+        }
+    }
+
+    /// <summary>
+    /// 应用级文件（<c>ai-config.json</c>、<c>recent-projects.json</c>、密钥文件等）的读写位置。
+    ///
+    /// 规则：**用户配置目录优先**，程序目录只作为旧版本残留或便携部署的回退。
+    /// 旧版本把文件写在程序旁边，这里在首次读取时就地搬进用户配置目录——不搬的话同一个应用
+    /// 会留下两份配置各写各的，用户改了其中一份不生效。搬迁失败（目录只读等）就继续用旧位置，
+    /// 迁移问题不该让用户丢配置。
+    /// 需要固定某一份文件（便携部署、自动化测试）用 YEEYEEYEE_CONFIG 显式指定路径。
+    /// </summary>
+    public static string ResolveAppFile(string fileName, bool migrateFromProgramRoot = true)
+    {
+        var user = Path.Combine(UserConfigDirectory, fileName);
+        if (File.Exists(user)) return user;
+
+        var portable = Path.Combine(ProgramRoot, fileName);
+        if (!File.Exists(portable)) return user;      // 两边都没有：新建的文件写用户配置目录
+        if (!migrateFromProgramRoot) return portable;
+
+        try
+        {
+            Directory.CreateDirectory(UserConfigDirectory);
+            File.Move(portable, user);
+            return user;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
+        {
+            return portable;
+        }
+    }
+
+    public static string UserProjectsRoot => Path.Combine(
+        RenamedOrExistingSegment(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            "YEEYEEYEE",
+            "DreamForge"),
+        "Projects");
+
+    public static bool CanWriteProgramRoot()
+    {
+        var probe = Path.Combine(ProgramRoot, $".write-probe-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllText(probe, string.Empty);
+            File.Delete(probe);
+            return true;
+        }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (IOException) { return false; }
+    }
+
+    public static string DefaultProjectsRoot => GetWritableProjectsRoot();
+
+    public static string GetWritableProjectsRoot()
+    {
+        var candidates = new[]
+        {
+            Path.Combine(ProgramRoot, "Projects"),
+            UserProjectsRoot,
+            Path.Combine(
+                RenamedOrExistingSegment(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "YEEYEEYEE",
+                    "DreamForge"),
+                "Projects")
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (CanWriteDirectory(candidate)) return candidate;
+        }
+
+        return candidates[0];
+    }
+
+    public static bool CanWriteDirectory(string directory)
+    {
+        var probe = Path.Combine(directory, $".write-probe-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(probe, string.Empty);
+            File.Delete(probe);
+            return true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    public static string SanitizeDirectoryName(string name)
+    {
+        var value = string.IsNullOrWhiteSpace(name) ? "未命名项目" : name.Trim();
+        foreach (var invalid in Path.GetInvalidFileNameChars()) value = value.Replace(invalid, '_');
+        return value.Length > 80 ? value[..80] : value;
+    }
+}

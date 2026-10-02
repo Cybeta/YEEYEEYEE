@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    共享的无界面代码（原先是 Avalonia 端用 42 条 <Compile Include> 从旧 WinForms 端「借」来的那一批）。
+
+    为什么要单独一个库：那批代码本来住在旧端项目里，而旧端同时在编译它自己那份**重复的模型**
+    （WorkflowCanvasControl.cs / WorkflowEntities.cs 里的 WorkflowNode / WorkflowEntity / …）。
+    于是同一份逻辑代码在两个项目里各自对着**不同的模型类型**编译：测试跑的是旧端那份模型，
+    应用跑的是 Core 那份。两份模型一旦有差异，就会出现「测试全绿、应用不对」。
+    把这个库抽出来之后，只有一份模型（YEEYEEYEE.Desktop.Core）+ 一份逻辑代码，这个问题消失。
+
+    目录约定：`Agent\` 放 Agent 服务层 / 密钥 / 出图出视频链路 / 技能与智能导入；
+    `Canvas\` 放画布上的纯逻辑（布局、自检、候选图批次、引用过期…）。文件都是真实文件，
+    没有跨项目链接——来源只有一处。
+
+    它刻意**不含**任何 Windows 专有依赖（WinForms / System.Drawing）：这样三端都能引用同一份。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\YEEYEEYEE.Desktop.Core\YEEYEEYEE.Desktop.Core.csproj" />
+  </ItemGroup>
+
+  <!-- DPAPI 只在 Windows 上可用，这里用 NuGet 形式的 ProtectedData（不是桌面框架里的同名类型）：
+       后者会把「必须安装 Windows 桌面运行时」变成整个应用的前置依赖，而我们只用它加解密一个字符串。 -->
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
+</Project>

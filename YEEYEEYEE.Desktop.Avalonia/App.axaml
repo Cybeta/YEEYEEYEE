@@ -1,0 +1,328 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="YEEYEEYEE.Desktop.Avalonia.App"
+             RequestedThemeVariant="Dark">
+  <Application.Resources>
+    <!-- 主题变体**必须钉死成 Dark**：整套配色（Df*）本来就是写死的暗色，
+         而 <FluentTheme/> 默认跟随系统——系统是浅色时，没被我们样式覆盖的控件
+         （TextBox 的聚焦 / 悬停底色、CheckBox 的字、下拉框、ToolTip…）会按浅色画，
+         跟写死的浅色字叠在一起就成了「底色和字色太接近，看不清」。
+         钉死之后 Fluent 只出暗色，两套颜色才是一套。 -->
+    <!-- Surfaces -->
+    <SolidColorBrush x:Key="DfBg" Color="#070A0F" />
+    <SolidColorBrush x:Key="DfSurface1" Color="#0D131B" />
+    <SolidColorBrush x:Key="DfSurface2" Color="#131B25" />
+    <SolidColorBrush x:Key="DfSurface3" Color="#1A2431" />
+    <SolidColorBrush x:Key="DfSurface4" Color="#202D3D" />
+    <SolidColorBrush x:Key="DfGlass" Color="#A60D131B" />
+    <SolidColorBrush x:Key="DfGlassClear" Color="#80090E15" />
+
+    <!-- Ink -->
+    <SolidColorBrush x:Key="DfInk" Color="#E9EFF7" />
+    <SolidColorBrush x:Key="DfInk2" Color="#93A1B3" />
+    <SolidColorBrush x:Key="DfInk3" Color="#5C6A7C" />
+
+    <!-- Lines -->
+    <SolidColorBrush x:Key="DfLine" Color="#1F2C3D" />
+    <SolidColorBrush x:Key="DfLineStrong" Color="#2C3D52" />
+    <SolidColorBrush x:Key="DfLineGlow" Color="#594D9BFF" />
+
+    <!-- Brand -->
+    <SolidColorBrush x:Key="DfPrimary" Color="#4D9BFF" />
+    <SolidColorBrush x:Key="DfPrimaryStrong" Color="#2F80ED" />
+    <SolidColorBrush x:Key="DfPrimarySoft" Color="#14263F" />
+
+    <!-- Glow -->
+    <SolidColorBrush x:Key="DfGlowFaint" Color="#124D9BFF" />
+    <SolidColorBrush x:Key="DfGlowWeak" Color="#294D9BFF" />
+    <SolidColorBrush x:Key="DfGlow" Color="#524D9BFF" />
+    <SolidColorBrush x:Key="DfGlowStrong" Color="#9E8CC5FF" />
+
+    <!-- States -->
+    <SolidColorBrush x:Key="DfSuccess" Color="#5CC99A" />
+    <SolidColorBrush x:Key="DfWarning" Color="#DFB45A" />
+    <SolidColorBrush x:Key="DfError" Color="#E0707E" />
+
+    <SolidColorBrush x:Key="DfGridLine" Color="#0E4D9BFF" />
+
+    <RadialGradientBrush x:Key="DfAurora" Center="50%,-10%" GradientOrigin="50%,-10%"
+                         RadiusX="72%" RadiusY="62%">
+      <GradientStop Offset="0" Color="#5C4D9BFF" />
+      <GradientStop Offset="0.42" Color="#1F4D9BFF" />
+      <GradientStop Offset="1" Color="#004D9BFF" />
+    </RadialGradientBrush>
+
+    <RadialGradientBrush x:Key="DfAuroraSoft" Center="50%,-10%" GradientOrigin="50%,-10%"
+                         RadiusX="80%" RadiusY="70%">
+      <GradientStop Offset="0" Color="#3D4D9BFF" />
+      <GradientStop Offset="0.45" Color="#144D9BFF" />
+      <GradientStop Offset="1" Color="#004D9BFF" />
+    </RadialGradientBrush>
+
+    <LinearGradientBrush x:Key="DfScan" StartPoint="0%,0%" EndPoint="0%,100%">
+      <GradientStop Offset="0" Color="#004D9BFF" />
+      <GradientStop Offset="0.46" Color="#214D9BFF" />
+      <GradientStop Offset="0.5" Color="#338CC5FF" />
+      <GradientStop Offset="0.54" Color="#214D9BFF" />
+      <GradientStop Offset="1" Color="#004D9BFF" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="DfEdgeLight" StartPoint="0%,0%" EndPoint="100%,0%">
+      <GradientStop Offset="0" Color="#004D9BFF" />
+      <GradientStop Offset="0.5" Color="#8C8CC5FF" />
+      <GradientStop Offset="1" Color="#004D9BFF" />
+    </LinearGradientBrush>
+
+    <!-- 输入框的状态色：Fluent 在 :pointerover / :focus 时会直接给 TextBox 模板里的
+         那个 Border 换底色，只在外层写 Background="Transparent" 是压不住的。
+         这里把这些键整组换成我们这套暗色，聚焦时就是「深底 + 亮字 + 蓝边」，
+         不会出现「底色一变、字就看不见」。 -->
+    <SolidColorBrush x:Key="TextControlBackground" Color="#131B25" />
+    <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="#1A2431" />
+    <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="#131B25" />
+    <SolidColorBrush x:Key="TextControlBackgroundDisabled" Color="#0D131B" />
+    <SolidColorBrush x:Key="TextControlForeground" Color="#E9EFF7" />
+    <SolidColorBrush x:Key="TextControlForegroundPointerOver" Color="#E9EFF7" />
+    <SolidColorBrush x:Key="TextControlForegroundFocused" Color="#E9EFF7" />
+    <SolidColorBrush x:Key="TextControlForegroundDisabled" Color="#5C6A7C" />
+    <SolidColorBrush x:Key="TextControlBorderBrush" Color="#1F2C3D" />
+    <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="#2C3D52" />
+    <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#4D9BFF" />
+    <SolidColorBrush x:Key="TextControlBorderBrushDisabled" Color="#1F2C3D" />
+    <SolidColorBrush x:Key="TextControlPlaceholderForeground" Color="#5C6A7C" />
+    <SolidColorBrush x:Key="TextControlPlaceholderForegroundPointerOver" Color="#93A1B3" />
+    <SolidColorBrush x:Key="TextControlPlaceholderForegroundFocused" Color="#5C6A7C" />
+    <SolidColorBrush x:Key="TextControlPlaceholderForegroundDisabled" Color="#3E4A5A" />
+    <SolidColorBrush x:Key="TextControlSelectionHighlightColor" Color="#594D9BFF" />
+
+    <!-- 勾选框：默认字色跟随主题，我们这套暗底上要显式给成二级文字色。 -->
+    <SolidColorBrush x:Key="CheckBoxForegroundUnchecked" Color="#93A1B3" />
+    <SolidColorBrush x:Key="CheckBoxForegroundChecked" Color="#E9EFF7" />
+    <SolidColorBrush x:Key="CheckBoxForegroundUncheckedPointerOver" Color="#E9EFF7" />
+    <SolidColorBrush x:Key="CheckBoxForegroundCheckedPointerOver" Color="#E9EFF7" />
+    <SolidColorBrush x:Key="CheckBoxForegroundUncheckedDisabled" Color="#5C6A7C" />
+    <SolidColorBrush x:Key="CheckBoxForegroundCheckedDisabled" Color="#5C6A7C" />
+  </Application.Resources>
+
+  <Application.Styles>
+    <FluentTheme />
+    <Style Selector="Window">
+      <Setter Property="Background" Value="{StaticResource DfBg}" />
+      <Setter Property="Foreground" Value="{StaticResource DfInk}" />
+      <Setter Property="FontFamily" Value="Inter, Microsoft YaHei UI, Segoe UI" />
+    </Style>
+
+    <Style Selector="TextBlock.muted"><Setter Property="Foreground" Value="{StaticResource DfInk2}" /></Style>
+    <Style Selector="TextBlock.dim"><Setter Property="Foreground" Value="{StaticResource DfInk3}" /></Style>
+    <Style Selector="TextBlock.heading"><Setter Property="Foreground" Value="{StaticResource DfInk}" /><Setter Property="FontWeight" Value="SemiBold" /></Style>
+    <Style Selector="TextBlock.mono"><Setter Property="FontFamily" Value="JetBrains Mono, Consolas, monospace" /></Style>
+
+    <!-- Immersive floating glass panel -->
+    <Style Selector="Border.glass">
+      <Setter Property="Background" Value="{StaticResource DfGlass}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLine}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="16" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="BoxShadow" Value="0 0 28 -12 #8C4D9BFF" />
+    </Style>
+    <Style Selector="Border.glassFlat">
+      <Setter Property="Background" Value="{StaticResource DfGlassClear}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLine}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="16" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+
+    <!-- Top edge light line on every panel -->
+    <Style Selector="Border.edgeTop">
+      <Setter Property="Height" Value="1" />
+      <Setter Property="Background" Value="{StaticResource DfEdgeLight}" />
+      <Setter Property="VerticalAlignment" Value="Top" />
+      <Setter Property="IsHitTestVisible" Value="False" />
+    </Style>
+
+    <Style Selector="Button.toolButton">
+      <Setter Property="Background" Value="Transparent" /><Setter Property="Foreground" Value="{StaticResource DfInk2}" />
+      <Setter Property="BorderBrush" Value="Transparent" /><Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="8" /><Setter Property="Padding" Value="9,6" /><Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="Button.toolButton:pointerover"><Setter Property="Background" Value="{StaticResource DfSurface2}" /><Setter Property="Foreground" Value="{StaticResource DfInk}" /><Setter Property="BorderBrush" Value="{StaticResource DfLine}" /></Style>
+
+    <Style Selector="Button.navButton">
+      <Setter Property="Background" Value="Transparent" /><Setter Property="Foreground" Value="{StaticResource DfInk2}" />
+      <Setter Property="BorderBrush" Value="Transparent" /><Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="10" /><Setter Property="Padding" Value="10,8" /><Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="Button.navButton:pointerover"><Setter Property="Background" Value="{StaticResource DfSurface2}" /><Setter Property="Foreground" Value="{StaticResource DfInk}" /></Style>
+    <Style Selector="Button.navButton.active">
+      <Setter Property="Background" Value="{StaticResource DfPrimarySoft}" />
+      <Setter Property="Foreground" Value="{StaticResource DfInk}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLineGlow}" />
+    </Style>
+
+    <Style Selector="Button.miniButton">
+      <Setter Property="Background" Value="Transparent" /><Setter Property="Foreground" Value="{StaticResource DfInk2}" /><Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="6" /><Setter Property="Padding" Value="8,5" /><Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="Button.miniButton:pointerover"><Setter Property="Background" Value="{StaticResource DfSurface2}" /><Setter Property="Foreground" Value="{StaticResource DfInk}" /></Style>
+    <Style Selector="Button.miniButton.active">
+      <Setter Property="Background" Value="{StaticResource DfPrimarySoft}" /><Setter Property="Foreground" Value="{StaticResource DfInk}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLineGlow}" />
+    </Style>
+
+    <!-- 窄面板里的小下拉。默认 ComboBox 是按整页表单的尺寸做的（最小高度 32、内边距宽、
+         字号 14），放进 336px 宽的 Agent 面板里又高又空，跟旁边 10-11 号字的按钮和说明完全不成比例。
+         这里压到 24 高、11 号字、更紧的内边距，底色用面板的二级面而不是默认的输入框色。 -->
+    <Style Selector="ComboBox.panelCombo">
+      <Setter Property="MinHeight" Value="24" /><Setter Property="Height" Value="24" />
+      <Setter Property="Padding" Value="8,0" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Background" Value="{StaticResource DfSurface2}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLine}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="ComboBox.panelCombo:pointerover">
+      <Setter Property="BorderBrush" Value="{StaticResource DfLineGlow}" />
+      <Setter Property="Background" Value="{StaticResource DfPrimarySoft}" />
+    </Style>
+    <Style Selector="ComboBox.panelCombo:focus">
+      <Setter Property="BorderBrush" Value="{StaticResource DfPrimary}" />
+    </Style>
+
+    <Style Selector="Button.windowButton">
+      <Setter Property="Width" Value="34" /><Setter Property="Height" Value="28" /><Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="Transparent" /><Setter Property="Foreground" Value="{StaticResource DfInk2}" />
+      <Setter Property="BorderBrush" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="CornerRadius" Value="6" />
+      <Setter Property="FontSize" Value="15" /><Setter Property="HorizontalContentAlignment" Value="Center" /><Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.windowButton:pointerover"><Setter Property="Background" Value="{StaticResource DfSurface2}" /><Setter Property="Foreground" Value="{StaticResource DfInk}" /></Style>
+    <Style Selector="Button.windowButton.closeButton:pointerover"><Setter Property="Background" Value="{StaticResource DfError}" /><Setter Property="Foreground" Value="White" /></Style>
+
+    <Style Selector="Button.primary">
+      <Setter Property="Background" Value="{StaticResource DfPrimary}" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfPrimaryStrong}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="12,7" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.primary:pointerover"><Setter Property="Background" Value="{StaticResource DfPrimaryStrong}" /></Style>
+
+    <Style Selector="Button.seg">
+      <Setter Property="Background" Value="Transparent" /><Setter Property="Foreground" Value="{StaticResource DfInk3}" />
+      <Setter Property="BorderBrush" Value="Transparent" /><Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="7" /><Setter Property="Padding" Value="12,6" /><Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="Button.seg:pointerover"><Setter Property="Foreground" Value="{StaticResource DfInk}" /></Style>
+    <Style Selector="Button.seg.active"><Setter Property="Background" Value="{StaticResource DfPrimarySoft}" /><Setter Property="Foreground" Value="{StaticResource DfInk}" /></Style>
+
+    <!-- 内联输入框（检查器里的名称 / 内容、搜索框、新建项目名、Agent 输入框）：
+         四周已经有自己的底色与边框包着，所以里面这一层要**始终**透明。
+         Background="Transparent" 只写在外层压不住 Fluent 的 :pointerover / :focus ——
+         它直接改模板里那个 Border（PART_BorderElement）的底色，聚焦时底色一变，
+         跟写死的浅色字叠在一起就看不清了。所以这里连模板子元素一起钉住。 -->
+    <Style Selector="TextBox.inlineInput">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="{StaticResource DfInk}" />
+      <Setter Property="SelectionBrush" Value="{StaticResource DfGlow}" />
+      <Setter Property="CaretBrush" Value="{StaticResource DfInk}" />
+    </Style>
+    <Style Selector="TextBox.inlineInput /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <Style Selector="TextBox.inlineInput:pointerover /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <Style Selector="TextBox.inlineInput:focus /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <Style Selector="TextBox.inlineInput /template/ TextBlock#PART_Watermark">
+      <Setter Property="Foreground" Value="{StaticResource DfInk3}" />
+    </Style>
+
+    <!-- 勾选框：字色显式给死，不跟随主题（浅色主题下会变成黑字，落在暗底上就看不见）。 -->
+    <Style Selector="CheckBox">
+      <Setter Property="Foreground" Value="{StaticResource DfInk2}" />
+    </Style>
+    <Style Selector="CheckBox:pointerover">
+      <Setter Property="Foreground" Value="{StaticResource DfInk}" />
+    </Style>
+    <Style Selector="CheckBox:disabled">
+      <Setter Property="Foreground" Value="{StaticResource DfInk3}" />
+    </Style>
+
+    <Style Selector="ScrollViewer">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <!-- Workflow node cards -->
+    <Style Selector="Border.node">
+      <Setter Property="Background" Value="{StaticResource DfSurface2}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLine}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Padding" Value="14,12" />
+    </Style>
+    <Style Selector="Border.node:pointerover">
+      <Setter Property="BorderBrush" Value="{StaticResource DfLineStrong}" />
+      <Setter Property="Background" Value="{StaticResource DfSurface3}" />
+    </Style>
+    <Style Selector="Border.node.active">
+      <Setter Property="Background" Value="{StaticResource DfSurface3}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLineGlow}" />
+      <Setter Property="BoxShadow" Value="0 0 0 1 #594D9BFF, 0 0 26 -6 #7A4D9BFF" />
+    </Style>
+    <Style Selector="Border.node.selected">
+      <Setter Property="BorderBrush" Value="{StaticResource DfPrimary}" />
+      <Setter Property="BorderThickness" Value="2" />
+      <Setter Property="BoxShadow" Value="0 0 0 1 #594D9BFF, 0 0 30 -6 #9E4D9BFF" />
+    </Style>
+
+    <Style Selector="Border.chip">
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Padding" Value="8,3" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Background" Value="{StaticResource DfSurface3}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLine}" />
+    </Style>
+
+    <!-- 制作阶段芯片：外观与 Border.chip 一致，但它**可以点**（点一下等于选中那个阶段） -->
+    <Style Selector="Button.chip">
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Padding" Value="10,4" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Background" Value="{StaticResource DfSurface3}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLine}" />
+      <Setter Property="Foreground" Value="{StaticResource DfInk2}" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="Button.chip:pointerover">
+      <Setter Property="Background" Value="{StaticResource DfSurface4}" />
+      <Setter Property="Foreground" Value="{StaticResource DfInk}" />
+    </Style>
+    <Style Selector="Button.chip.active">
+      <Setter Property="Background" Value="{StaticResource DfPrimarySoft}" />
+      <Setter Property="BorderBrush" Value="{StaticResource DfLineGlow}" />
+      <Setter Property="Foreground" Value="{StaticResource DfInk}" />
+    </Style>
+
+    <Style Selector="ProgressBar.thin">
+      <Setter Property="Height" Value="3" />
+      <Setter Property="Foreground" Value="{StaticResource DfPrimary}" />
+      <Setter Property="Background" Value="{StaticResource DfSurface4}" />
+      <Setter Property="CornerRadius" Value="2" />
+    </Style>
+  </Application.Styles>
+</Application>

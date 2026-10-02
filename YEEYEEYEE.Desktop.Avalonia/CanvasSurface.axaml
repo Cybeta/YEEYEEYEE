@@ -1,0 +1,50 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="YEEYEEYEE.Desktop.Avalonia.CanvasSurface"
+             Focusable="True">
+  <Panel x:Name="FxRoot" ClipToBounds="True" Background="#070A0F">
+
+    <!-- 背景光场：冷蓝极光 -->
+    <Border Background="{StaticResource DfAuroraSoft}" IsHitTestVisible="False" />
+
+    <!-- 屏幕空间光效层：扫描光带 + 光标聚光 -->
+    <Canvas x:Name="FxLayer" IsHitTestVisible="False" ClipToBounds="True">
+      <Border x:Name="ScanBand" Width="2400" Height="180" Canvas.Left="0" Canvas.Top="-260"
+              Background="{StaticResource DfScan}" Opacity="0.9" />
+      <Border x:Name="GlowSpot" Width="460" Height="460" CornerRadius="230" Opacity="0.85"
+              Canvas.Left="-400" Canvas.Top="-400">
+        <Border.Background>
+          <RadialGradientBrush>
+            <GradientStop Offset="0" Color="#3D4D9BFF" />
+            <GradientStop Offset="0.48" Color="#124D9BFF" />
+            <GradientStop Offset="1" Color="#004D9BFF" />
+          </RadialGradientBrush>
+        </Border.Background>
+      </Border>
+    </Canvas>
+
+    <!-- 视口：外层 Canvas 负责裁剪，内层世界画布按 DesiredSize 布局，保证世界坐标不被压缩 -->
+    <Canvas x:Name="ViewportHost" ClipToBounds="True" Background="Transparent">
+      <Canvas x:Name="NodeCanvas" Width="4200" Height="3000" Background="Transparent"
+              RenderTransformOrigin="0,0">
+        <TextBlock x:Name="EmptyStateText" IsVisible="False" />
+      </Canvas>
+    </Canvas>
+
+    <!-- 操作提示 -->
+    <Border x:Name="HintChip" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+            Margin="14" Background="#A60D131B" BorderBrush="{StaticResource DfLine}"
+            BorderThickness="1" CornerRadius="10" Padding="10,6" IsHitTestVisible="False">
+      <TextBlock x:Name="HintText" Text="拖拽平移 · 滚轮缩放 · 点击节点选中 · Delete 删除"
+                 Foreground="{StaticResource DfInk3}" FontSize="11" />
+    </Border>
+
+    <!-- 引用浮层：铺在**原画布之上**，并把原画布压暗。点空白处 / Esc / 收起按钮关掉。
+         它回答的是「这个节点引用了什么」——卡片不是画布节点，不参与保存、拖拽、框选与删除。
+         位置全部按视口坐标算，所以不管画布平移缩放、节点在哪，卡片都看得见。
+         注意：压暗是**围着源头节点的一圈**（四块蒙层），源头节点那块留空——它要能继续点到（双击进临时画布）。 -->
+    <Panel x:Name="ReferenceOverlay" IsVisible="False">
+      <Canvas x:Name="ReferenceLayer" ClipToBounds="True" />
+    </Panel>
+  </Panel>
+</UserControl>
