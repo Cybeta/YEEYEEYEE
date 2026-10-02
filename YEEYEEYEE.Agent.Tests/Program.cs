@@ -60,6 +60,7 @@ var tests = new (string Name, Action Run)[]
     ("更新：替换脚本只含 ASCII（PS5 会把无 BOM 的 UTF-8 当 ANSI 读）", UpdateSwapScriptIsAsciiOnly),
     ("更新：替换脚本实测——真换掉一个目录并留下结果文件", UpdateSwapScriptActuallyReplacesDirectory),
     ("出图批次：整批还在跑时单张一律不能操作（漏文件那条路的入口）", BatchSlotsAreNotActionableWhileRunning),
+    ("出图开奖：按张数排布（一行最多 3 张 / 4 张 2×2 / 卡片固定 2:3 / 末行按自己的张数居中）", GachaCardLayoutIsPinnedByCount),
     ("配置落盘：程序旁的旧文件会被搬到用户配置目录（搬不是拷）", LegacyProgramRootConfigIsMigrated),
     ("模型预设：地址能反推回同一家，预置模型元数据自洽", ProviderPresetCatalogIsConsistent),
     ("模型预设：预设换算两端共用一份（采样开关与型号覆盖都一致）", ProviderPresetValuesResolveIsConsistent),
@@ -1149,6 +1150,13 @@ static AiProviderConfig ConfigFor(AiApiFormat format) => new()
 };
 
 static void Expect(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
+
+/// <summary>这段调用该抛 ArgumentOutOfRangeException 吗。用来钉「越界必须报错，不能静默夹到边界」。</summary>
+static bool Throws(Action action)
+{
+	try { action(); return false; }
+	catch (ArgumentOutOfRangeException) { return true; }
+}
 
 // ── 目标 1.1：只读 ID 与引用校验 ─────────────────────────────────────────────
 
@@ -6861,6 +6869,67 @@ static void UpdateSwapScriptActuallyReplacesDirectory()
 // 于是「单张已出好、其余还在跑」时菜单直接给「用这一张」。点下去会把整批丢掉、却不取消还在跑的请求，
 // 那些请求跑完后仍会把图写进资产目录，可那时批次已经不在表里了——没人引用（漏文件）。
 // 这条测试钉住规则本身：它现在是模型里的唯一出处，菜单和动作都问它。
+static void GachaCardLayoutIsPinnedByCount()
+{
+	// 一行最多 3 张：6 张 = 上下两排、每排 3 张；4 张走 2×2（3+1 会显得上面挤、下面空）。
+	Expect(GachaCardLayout.PerRow(1) == 1 && GachaCardLayout.Rows(1) == 1, "1 张：一行一张");
+	Expect(GachaCardLayout.PerRow(2) == 2 && GachaCardLayout.Rows(2) == 1, "2 张：一行两张");
+	Expect(GachaCardLayout.PerRow(3) == 3 && GachaCardLayout.Rows(3) == 1, "3 张：一行三张");
+	Expect(GachaCardLayout.PerRow(4) == 2 && GachaCardLayout.Rows(4) == 2, "4 张：2×2");
+	Expect(GachaCardLayout.PerRow(5) == 3 && GachaCardLayout.Rows(5) == 2, "5 张：上三下二");
+	Expect(GachaCardLayout.PerRow(6) == 3 && GachaCardLayout.Rows(6) == 2, "6 张：上下两排、每排三张");
+
+	for (var count = 1; count <= 6; count++)
+	{
+		// 卡片是**固定的**竖长方形：不跟着图的比例走（否则一排里方的方、横的横，不像一手牌）。
+		Expect(Math.Abs(GachaCardLayout.Height(count) - GachaCardLayout.Width(count) * 1.5) < 0.001,
+			$"{count} 张：卡面是固定的 2:3 竖长方形");
+		Expect(GachaCardLayout.Width(count) > GachaCardLayout.Height(count) * 0.6,
+			$"{count} 张：竖卡，不是横的");
+		Expect(GachaCardLayout.PerRow(count) <= GachaCardLayout.MaxPerRow, $"{count} 张：一行不超过 3 张");
+		Expect(GachaCardLayout.Rows(count) * GachaCardLayout.PerRow(count) >= count,
+			$"{count} 张：行数够摆下");
+		// 一行摆开的总宽不能超过一张 1280 逻辑宽的屏幕——超了就得挤，挤了就成缩略图。
+		Expect(GachaCardLayout.RowWidth(count) <= 800, $"{count} 张：最宽的一行放得下");
+
+		for (var index = 0; index < count; index++)
+		{
+			var slot = GachaCardLayout.Slot(count, index);
+			Expect(slot.Row == index / GachaCardLayout.PerRow(count),
+				$"{count} 张的第 {index + 1} 张落在第 {slot.Row + 1} 行");
+			Expect(slot.Column == index % GachaCardLayout.PerRow(count),
+				$"{count} 张的第 {index + 1} 张落在第 {slot.Column + 1} 列");
+			Expect(slot.Rows == GachaCardLayout.Rows(count) && slot.PerRow == GachaCardLayout.PerRow(count),
+				$"{count} 张的第 {index + 1} 张拿到的行列数与整批一致");
+		}
+
+		// 末行正好排到最后一张，不会多出一个空列。
+		var last = GachaCardLayout.Slot(count, count - 1);
+		Expect(last.Column == count - last.Row * last.PerRow - 1,
+			$"{count} 张的末行正好排到最后一张");
+	}
+
+	// 末行张数少时，偏移要按**末行自己的张数**居中：5 张的末行两张应当关于中心对称。
+	// （按「每行三张」算的话，飞出来的起点会偏半格——飞完还是落到正确位置，所以只在飞的过程中看得出来。）
+	var left = GachaCardLayout.OffsetFromCentre(5, 3);
+	var right = GachaCardLayout.OffsetFromCentre(5, 4);
+	Expect(Math.Abs(left.X + right.X) < 0.001, "5 张的末行两张左右对称");
+	Expect(Math.Abs(left.Y - right.Y) < 0.001, "5 张的末行两张在同一行");
+	Expect(left.Y > 0, "末行在中心下方");
+
+	// 整手牌关于中心对称：第一张与最后一张的偏移应当互为相反数。
+	var firstOfSix = GachaCardLayout.OffsetFromCentre(6, 0);
+	var lastOfSix = GachaCardLayout.OffsetFromCentre(6, 5);
+	Expect(Math.Abs(firstOfSix.X + lastOfSix.X) < 0.001 && Math.Abs(firstOfSix.Y + lastOfSix.Y) < 0.001,
+		"6 张的第一张与最后一张关于中心对称");
+
+	// 越界要抛，不静默夹到边界——夹住了会把「算错了」伪装成「都摆好了」。
+	Expect(Throws(() => GachaCardLayout.Slot(6, 6)), "序号等于张数要抛");
+	Expect(Throws(() => GachaCardLayout.Slot(6, -1)), "负序号要抛");
+	Expect(Throws(() => GachaCardLayout.Slot(0, 0)), "零张要抛");
+	Expect(!Throws(() => GachaCardLayout.Slot(6, 5)), "最后一张是合法序号");
+}
+
 static void BatchSlotsAreNotActionableWhileRunning()
 {
 	NodeImageBatch running = new NodeImageBatch { NodeId = Guid.NewGuid(), NodeTitle = "雨夜追车", IsRunning = true };
