@@ -2,9 +2,9 @@
 
 > 当前基线：2026-10-02
 
-YEEYEEYEE 寓意 YES 工程师 · YES 艺术家。工程、程序集和协议标识仍为 `DreamForge`。当前主端是 Windows 优先的 Avalonia 桌面工作区：支持文本与图像生成、出图批次、技能与接口站池子、Agent 协作与项目文件管理。旧 WinForms 端已**归档**到 `_legacy_winforms/`（不在 `DreamForge.slnx` 里，也不参与构建）。Web 提供作业服务、桌面画布镜像及引用版本回写，尚不能独立完成创作。
+YEEYEEYEE 寓意 YES 工程师 · YES 艺术家。项目、解决方案、程序集、命名空间与协议标识统一为 `YEEYEEYEE`（早期代号 DreamForge 已完成全量替换，旧名只在环境变量与 Web 配置键上保留回退读取）。当前主端是 Windows 优先的 Avalonia 桌面工作区：支持文本与图像生成、出图批次、技能与接口站池子、Agent 协作与项目文件管理。旧 WinForms 端已**删除**（第 128 轮，源码可从 Git 历史取回），不再占用仓库。Web 提供作业服务、桌面画布镜像及引用版本回写，尚不能独立完成创作。
 
-共享代码只有一份来源：`DreamForge.Desktop.Core`（画布模型与画布基础设施）与 `DreamForge.Desktop.Shared`（无界面逻辑），界面只调用它们。详见 [架构](02_Architecture.md)。
+共享代码只有一份来源：`YEEYEEYEE.Desktop.Core`（画布模型与画布基础设施）与 `YEEYEEYEE.Desktop.Shared`（无界面逻辑），界面只调用它们。详见 [架构](02_Architecture.md)。
 
 最近一轮（第 114–127 轮）做了什么、每轮的验证与遗留，见 [PROGRESS](PROGRESS.md)；还没做的记在 [TODO](TODO.md)。
 
@@ -47,29 +47,31 @@ YEEYEEYEE 寓意 YES 工程师 · YES 艺术家。工程、程序集和协议标
 需要 Windows、.NET 10 SDK；Web 前端另需支持当前 Vite 工具链的 Node.js/npm。在仓库根目录执行：
 
 ```powershell
-dotnet build DreamForge.slnx
-dotnet run --project DreamForge.Desktop.Avalonia
+dotnet build YEEYEEYEE.slnx
+dotnet run --project YEEYEEYEE.Desktop.Avalonia
 ```
 
-启动后先在启动页选项目（新建 / 打开 / 最近项目），选定之前不展示画布与设置；进入工作台后会引导接入大模型，配置 Endpoint、Model 与 ApiKey，再使用设定库、工作树和 Agent。密钥按平台加密落盘（Windows 用当前用户 DPAPI，macOS 用钥匙串，都没有时退到本机密钥文件 + AES-GCM），配置文件 `ai-config.json` 在用户配置目录（Windows `%LOCALAPPDATA%\DreamForge`、macOS `~/Library/Application Support/DreamForge`）；旧版本写在程序目录旁的那一份会在首次读取时自动搬过去，也可用 `DREAMFORGE_CONFIG` 指定到别处。加密绑定账户与设备，换机器或换系统要重新填一次密钥。
+启动后先在启动页选项目（新建 / 打开 / 最近项目），选定之前不展示画布与设置；进入工作台后会引导接入大模型，配置 Endpoint、Model 与 ApiKey，再使用设定库、工作树和 Agent。密钥按平台加密落盘（Windows 用当前用户 DPAPI，macOS 用钥匙串，都没有时退到本机密钥文件 + AES-GCM），配置文件 `ai-config.json` 在用户配置目录（Windows `%LOCALAPPDATA%\YEEYEEYEE`、macOS `~/Library/Application Support/YEEYEEYEE`）；旧版本写在程序目录旁的那一份会在首次读取时自动搬过去，也可用 `YEEYEEYEE_CONFIG` 指定到别处。加密绑定账户与设备，换机器或换系统要重新填一次密钥。
+
+改名带来的一处过渡：若旧目录 `%LOCALAPPDATA%\DreamForge`（或 `文档\DreamForge\Projects`）还在、而新目录尚未建立，程序会继续用旧目录，密钥与已有项目不会因为改名而「消失」；把旧目录改名成新名字即可完成迁移。环境变量与 Web 配置键同理，`YEEYEEYEE_*` / `YEEYEEYEE:*` 优先，取不到时回退读 `DREAMFORGE_*` / `DreamForge:*`，所以写在启动脚本或 CI 里的旧覆盖项不会静默失效。
 
 可选 Web 镜像，先构建前端再启动 Web，随后打开桌面项目：
 
 ```powershell
-npm.cmd --prefix DreamForge.Canvas install
-npm.cmd --prefix DreamForge.Canvas run build
-dotnet run --project DreamForge.Web
+npm.cmd --prefix YEEYEEYEE.Canvas install
+npm.cmd --prefix YEEYEEYEE.Canvas run build
+dotnet run --project YEEYEEYEE.Web
 ```
 
 浏览器访问 `http://localhost:5000`。桌面端使用该硬编码地址推送 `/api/canvas/scene`，并每 500ms 轮询引用替换请求；Web 未启动时推送失败不阻断桌面使用。前端 `dist` 需单独构建，未纳入解决方案自动构建。
 
 ## 验证与已修复项
 
-2026-09-29 最终验证为 Agent 48 项、Core 19 项、TS 24 项测试全部通过；解决方案构建、前端 TypeScript 检查与 Vite 构建、`git diff --check` 均通过，命令与范围见 [PROGRESS](PROGRESS.md)。
+2026-10-02 全量改名后复核：Agent 190 项、Core 29 项、Migration `8/8`、G6V1 通过、Canvas TS 44 项、Web HTTP 回归通过；解决方案构建 0 错误（14 个既有警告），前端 TypeScript 检查与 Vite 构建通过。命令与范围见 [PROGRESS](PROGRESS.md)。
 
 - `AutoStage` 已改为准备动作→预览暂存→统一保存，避免同批重复执行。
 - `MarkVersionAdopted` 已解析；仅 JSON 布尔 `true` 开启采纳标记，已有回归用例。
-- 旧契约草稿、Core/Host 空类、tldraw 探针、类型声明及依赖已从当前工作树移除。原有代码改动尚在工作区，本次文档整理不改动它们。
+- 旧契约草稿、Core/Host 空类、tldraw 探针、类型声明及依赖已移除；旧 WinForms 端源码与根目录三个空残留目录已删除。
 
 ## 故障案例 新建项目被拒绝访问
 
@@ -77,7 +79,7 @@ dotnet run --project DreamForge.Web
 
 原记录中的证据：目标目录 ACL 允许修改、无 Deny ACE，无只读/重解析/加密标记；磁盘为 NTFS 且健康，受控文件夹访问关闭。同盘此前有成功创建的项目；沙箱内同路径写删均被拒绝，工作区内的 `Directory.CreateDirectory` 成功。沙箱允许清单的 104 条路径均在系统盘，没有目标盘路径。这些是历史现场记录，本轮未重新采集。
 
-源码中已保留两项修正：`AppPaths.CanWriteDirectory` 实际创建目录、写入并删除探针；启动页在失败时提示权限或安全策略拦截（旧端是 `ProjectStartupForm`，该端已归档；现在的启动页是 `DreamForge.Desktop.Avalonia/StartPageView.axaml`）。该次故障可通过资源管理器直接启动、选择允许写入的目录，或调整 IDE 允许列表绕过。
+源码中已保留两项修正：`AppPaths.CanWriteDirectory` 实际创建目录、写入并删除探针；启动页在失败时提示权限或安全策略拦截（旧端是 WinForms 的 `ProjectStartupForm`，该端已在第 128 轮删除；现在的启动页是 `YEEYEEYEE.Desktop.Avalonia/StartPageView.axaml`）。该次故障可通过资源管理器直接启动、选择允许写入的目录，或调整 IDE 允许列表绕过。
 
 同一错误也可能来自普通目录权限或安全软件，不能把所有拒绝访问都断言为沙箱问题。排查时先确认启动方式及目标目录是否可写，再检查 ACL 与系统策略。
 

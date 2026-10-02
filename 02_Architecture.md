@@ -2,41 +2,80 @@
 
 > 当前基线：2026-10-02
 
-工程、程序集与协议标识为 `DreamForge`。本文以源码为事实来源；产品方案见 [01](01_Project_Plan.md)，小目标与验收见 [PROGRESS](PROGRESS.md)，消息契约见 [protocol/PROTOCOL.md](protocol/PROTOCOL.md)。
+项目、解决方案、程序集、命名空间与协议标识统一为 `YEEYEEYEE`（第 128 轮完成全量改名，早期代号 DreamForge 已从代码与文档中清除）。本文以源码为事实来源；产品方案见 [01](01_Project_Plan.md)，小目标与验收见 [PROGRESS](PROGRESS.md)，消息契约见 [protocol/PROTOCOL.md](protocol/PROTOCOL.md)。
 
 ## 维护范围（2026-10-01 起；2026-10-02 收尾）
 
-**只维护 Avalonia 主端。** 旧 WinForms 端（`DreamForge.Desktop`）已**归档**到 `_legacy_winforms/`：
-不在 `DreamForge.slnx` 里、没有任何项目引用它、也不参与编译（原因与还原办法见那边的 README）。
+**只维护 Avalonia 主端。** 旧 WinForms 端已于第 128 轮**整体删除**（此前一轮先归档到 `_legacy_winforms/`，
+确认无人引用后连同根目录三个空残留目录一并移除；需要时从 Git 历史取回）。现在仓库里没有任何
+WinForms 代码，也没有第二个桌面端。
 
 共享代码现在只有**一份来源**：
 
 | 位置 | 放什么 |
 |---|---|
-| `DreamForge.Desktop.Core` | 画布模型（节点 / 边 / 实体 / 变体 / 版本 / 工作树）、存储与备份、迁移、章节身份、身份校验、资源扫描、回收站、资产包——「画布的真相」 |
-| `DreamForge.Desktop.Shared` | 无界面逻辑：Agent 协议与提交、密钥落盘、出图与出视频链路、技能与智能导入、站点池子、画布布局与自检（分 `Agent\` 与 `Canvas\` 两个子目录） |
-| `DreamForge.Desktop.Avalonia` | 主端界面：窗口、画布控件、面板、对话框 |
+| `YEEYEEYEE.Desktop.Core` | 画布模型（节点 / 边 / 实体 / 变体 / 版本 / 工作树）、存储与备份、迁移、章节身份、身份校验、资源扫描、回收站、资产包——「画布的真相」 |
+| `YEEYEEYEE.Desktop.Shared` | 无界面逻辑：Agent 协议与提交、密钥落盘、出图与出视频链路、技能与智能导入、站点池子、画布布局与自检（分 `Agent\` 与 `Canvas\` 两个子目录） |
+| `YEEYEEYEE.Desktop.Avalonia` | 主端界面：窗口、画布控件、面板、对话框 |
 
 新功能一律加进 Shared / Core，界面只调用它们；Avalonia 端自己的东西（窗口、控件、面板）放在
-`DreamForge.Desktop.Avalonia/`。**「同一份逻辑两处声明」不再接受**——第 127 轮花了整轮把历史遗留的
+`YEEYEEYEE.Desktop.Avalonia/`。**「同一份逻辑两处声明」不再接受**——第 127 轮花了整轮把历史遗留的
 两份分叉合并回一处（当时 `CanvasLibrary.Save` 有一条绕开备份的旁路、`StorageMaintenance` 有两个同名类，
 而测试跑的是旧端那份、应用跑的是 Core 那份）。
 
 | 项目 | 框架与职责 |
 |---|---|
-| `DreamForge.Core` | `net10.0`；协议、Job 状态机、能力与权限判定、引用图 |
-| `DreamForge.Host` | `net10.0`；执行编排、SQLite Job、ComfyUI、轮询与回调签名 |
-| `DreamForge.Desktop.Avalonia` | `net10.0`；**Avalonia 主端**（无边框自绘窗口、画布、Agent 面板、工作树、技能与插件），当前与以后的主端 |
-| `DreamForge.Desktop.Shared` | `net10.0`；共享的无界面逻辑（见上表），刻意不含 WinForms / System.Drawing |
-| `DreamForge.Desktop.Core` | `net10.0`；画布模型与画布基础设施 |
-| `DreamForge.Web` | ASP.NET Core；作业服务、回调、静态前端托管及 HTTP/WebSocket 桥接 |
-| `DreamForge.Canvas` | 独立 React/Vite 工程；当前为 div 卡片画布，`dist` 单独构建，不在解决方案内 |
-| `DreamForge.Core.Tests` / `DreamForge.Agent.Tests` | 控制台断言式测试 |
-| `_legacy_winforms` | 已归档的旧 WinForms 端源码，**不在任何构建里** |
+| `YEEYEEYEE.Core` | `net10.0`；协议、Job 状态机、能力与权限判定、引用图 |
+| `YEEYEEYEE.Host` | `net10.0`；执行编排、SQLite Job、ComfyUI、轮询与回调签名 |
+| `YEEYEEYEE.Desktop.Avalonia` | `net10.0`；**Avalonia 主端**（无边框自绘窗口、画布、Agent 面板、工作树、技能与插件），当前与以后的主端 |
+| `YEEYEEYEE.Desktop.Shared` | `net10.0`；共享的无界面逻辑（见上表），刻意不含 WinForms / System.Drawing |
+| `YEEYEEYEE.Desktop.Core` | `net10.0`；画布模型与画布基础设施 |
+| `YEEYEEYEE.Web` | ASP.NET Core；作业服务、回调、静态前端托管及 HTTP/WebSocket 桥接 |
+| `YEEYEEYEE.Canvas` | 独立 React/Vite 工程；当前为 div 卡片画布，`dist` 单独构建，不在解决方案内 |
+| `YEEYEEYEE.Core.Tests` / `YEEYEEYEE.Agent.Tests` | 控制台断言式测试 |
 
-`DreamForge.Mcp` 是独立只读 stdio 服务，未接入桌面端，也不在 `DreamForge.slnx`。依赖关系为
-Host → Core；Desktop.Core → Host；Desktop.Shared → Desktop.Core；Desktop.Avalonia / Web → Host + Desktop.Core/Shared。
-桌面端不引用 Web 或 Mcp，也不使用 WebView2。桌面端是权威数据源，Web 当前是镜像和引用版本回写端。
+`YEEYEEYEE.Mcp` 是独立只读 stdio 服务，未接入桌面端，也不在 `YEEYEEYEE.slnx`。桌面端不引用 Web 或 Mcp，
+也不使用 WebView2。桌面端是权威数据源，Web 当前是镜像和引用版本回写端；逐条依赖见下面的「解耦现状」。
+
+### 改名后的旧名回退
+
+全量改名会碰掉三类「程序外面还记着旧名字」的东西，都保留了过渡读取，避免静默失效：
+
+| 东西 | 现在用 | 取不到时回退读 | 实现在哪 |
+|---|---|---|---|
+| 环境变量 | `YEEYEEYEE_*` | `DREAMFORGE_*` | `EnvCompat.Get`（Desktop.Core） |
+| Web 配置键 | `YEEYEEYEE:*` | `DreamForge:*` | `LegacyConfig.Text` / `.Flag`（Web） |
+| 用户配置目录 | `%LOCALAPPDATA%\YEEYEEYEE`、`~/Library/Application Support/YEEYEEYEE` | 旧目录还在就继续用 `…\DreamForge` | `AppPaths.RenamedOrExistingSegment` |
+
+第三项是唯一涉及**用户已有数据**的：配置目录里放着加密密钥与最近项目，用户项目目录（`文档\YEEYEEYEE\Projects`）
+里放着工程。规则是「新目录存在用新目录，否则旧目录还在就用旧目录，两个都没有才用新目录准备新建」，
+所以改名不会让密钥变成「没填过」、项目列表变空。把旧目录改名成新名字即完成迁移。写和文档只推新名。
+
+### 解耦现状（2026-10-02 按 csproj 与实际引用实测）
+
+下面这张表就是全部 `ProjectReference`，没有隐藏的跨项目源码链接（`<Compile Include>` 一条都不剩，
+只剩注释里对历史的说明）。依赖是单向的，没有环。
+
+| 项目 | 引用 |
+|---|---|
+| `YEEYEEYEE.Core` | 无（叶子） |
+| `YEEYEEYEE.Host` | Core |
+| `YEEYEEYEE.Desktop.Core` | Host |
+| `YEEYEEYEE.Desktop.Shared` | Desktop.Core |
+| `YEEYEEYEE.Desktop.Avalonia` | Desktop.Core、Desktop.Shared、Host |
+| `YEEYEEYEE.Web` | Host、Desktop.Core |
+| `YEEYEEYEE.Mcp` | 无（孤立） |
+| `YEEYEEYEE.Agent.Tests` / `G6V1.Tests` / `Migration.Tests` | Desktop.Shared |
+| `YEEYEEYEE.Core.Tests` | Core、Host、Desktop.Core、Desktop.Shared |
+| `YEEYEEYEE.Web.Tests` | Web |
+
+判读：
+
+- **界面层不被任何人依赖。** 没有任何项目引用 Avalonia 端，主端可以整体替换而不牵动逻辑层——这是这次改名与清理能一次做完的前提。
+- **共享层没有 Windows 专有依赖。** `Desktop.Shared` 里出现的 `System.Drawing` 只用到 `PointF` / `RectangleF`，来自 `System.Drawing.Primitives`（基础框架自带），不是 GDI+；全仓已无 `System.Windows.Forms`、`UseWindowsForms`、WebView2。所以三端能引用同一份代码。
+- **唯一残留的跨端耦合是 Web → Desktop.Core**，而且只有一处：`YEEYEEYEE.Web\ProjectCanvasSceneStore.cs` 里的 `using YEEYEEYEE.Desktop;`，用途是读桌面项目的画布文件。这是「桌面端是权威数据源」的直接后果，不是意外耦合；要让 Web 彻底独立，前提是先完成项目级资源库与稳定 ID 迁移。
+- **`Mcp` 是一座孤岛**：没有任何项目引用它，它也不引用任何项目，且不在 `YEEYEEYEE.slnx`。删除或接入都不会牵动别处。
+- **`YEEYEEYEE.Canvas` 是独立的 npm 工程**（不是 csproj），只通过协议与 Web/Host 通信，`dist` 由 `npm run build` 单独产出。
 
 ## 领域数据与三种关联
 
@@ -55,7 +94,7 @@ Host → Core；Desktop.Core → Host；Desktop.Shared → Desktop.Core；Deskto
 
 ## ID 生命周期、迁移与导入
 
-`DreamForge.Desktop.Core` 里的画布基础设施（第 127 轮从 `DreamForge.Desktop/Canvas` 搬入）构成一条只读校验 → 迁移 → 备份写入 → 复制 → 导入的链路，UI 只调用这一层的用例方法，不在界面里做数据判定。
+`YEEYEEYEE.Desktop.Core` 里的画布基础设施（第 127 轮从 `YEEYEEYEE.Desktop/Canvas` 搬入）构成一条只读校验 → 迁移 → 备份写入 → 复制 → 导入的链路，UI 只调用这一层的用例方法，不在界面里做数据判定。
 
 | 文件 | 职责 |
 |---|---|
@@ -163,9 +202,9 @@ ID 作用域：节点、连线、工作树条目、实体、变体为画布级�
 
 ## 模型与媒体接口接入
 
-模型接入分三类，配置项都在全局配置文件（`ai-config.json`）：文本接口（OpenAI 兼容 `/chat/completions` 或 Anthropic `/v1/messages`）、画图接口（`ImageEndpoint`/`ImageModel`，走 OpenAI 兼容 `/images/generations`）、画视频接口（`VideoEndpoint`/`VideoModel`，异步任务：提交后轮询取结果）。三者都可留空地址表示复用主接口地址（`EffectiveImageEndpoint`/`EffectiveVideoEndpoint`），并有对应的 env 覆盖（`DREAMFORGE_IMAGE_*`、`DREAMFORGE_VIDEO_*`）。ComfyUI 是另一条链路：`ComfyUiBaseUrl` + `ComfyUiCheckpoint` 都填齐才启用，缺一不可，启用后优先于画图接口。**未配置画视频时只生成任务规格，不伪造视频结果**。
+模型接入分三类，配置项都在全局配置文件（`ai-config.json`）：文本接口（OpenAI 兼容 `/chat/completions` 或 Anthropic `/v1/messages`）、画图接口（`ImageEndpoint`/`ImageModel`，走 OpenAI 兼容 `/images/generations`）、画视频接口（`VideoEndpoint`/`VideoModel`，异步任务：提交后轮询取结果）。三者都可留空地址表示复用主接口地址（`EffectiveImageEndpoint`/`EffectiveVideoEndpoint`），并有对应的 env 覆盖（`YEEYEEYEE_IMAGE_*`、`YEEYEEYEE_VIDEO_*`）。ComfyUI 是另一条链路：`ComfyUiBaseUrl` + `ComfyUiCheckpoint` 都填齐才启用，缺一不可，启用后优先于画图接口。**未配置画视频时只生成任务规格，不伪造视频结果**。
 
-配置文件的位置按平台惯例走**用户配置目录**（`AppPaths.UserConfigDirectory`：macOS `~/Library/Application Support/DreamForge`、Windows `%LOCALAPPDATA%\DreamForge`、其它平台 `$XDG_CONFIG_HOME/dreamforge`），不再写在程序旁边——macOS 的程序在 `.app` 包内，那里不该被写入（签名也会因此失效）。旧版本留在程序目录旁的 `ai-config.json`、`recent-projects.json` 会在首次读取时**搬到**新位置（`AppPaths.ResolveAppFile`），不会留下两份各写各的；`DREAMFORGE_CONFIG`（单份文件）与 `DREAMFORGE_CONFIG_HOME`（整个目录）用于便携部署与自动化测试。
+配置文件的位置按平台惯例走**用户配置目录**（`AppPaths.UserConfigDirectory`：macOS `~/Library/Application Support/YEEYEEYEE`、Windows `%LOCALAPPDATA%\YEEYEEYEE`、其它平台 `$XDG_CONFIG_HOME/yeeeyee`），不再写在程序旁边——macOS 的程序在 `.app` 包内，那里不该被写入（签名也会因此失效）。旧版本留在程序目录旁的 `ai-config.json`、`recent-projects.json` 会在首次读取时**搬到**新位置（`AppPaths.ResolveAppFile`），不会留下两份各写各的；`YEEYEEYEE_CONFIG`（单份文件）与 `YEEYEEYEE_CONFIG_HOME`（整个目录）用于便携部署与自动化测试。
 
 服务商预设（`ProviderPreset.All`：DeepSeek / 月之暗面 Kimi / 阿里通义千问 / 智谱 GLM / 硅基流动 / OpenAI / 本地 Ollama / 自定义 / 本地模拟）是**两端共用的一张表**，定义在 `AiChat.cs`：选中一家即填好地址、接口格式、采样参数开关与推荐模型，并按已核实的数值填上下文档位、最大输出与图像能力（拿不到就留 0，不写猜测值）。旧端走接入引导（`AiSetupDialog`），新主端走设置窗口第一页（`SettingsModelPage`），两边只是界面不同，预设与配置读写都是同一份代码。地址用 `ProviderPreset.Match` 反推归属，用来在重新打开设置时回显当前是哪一家。
 
@@ -249,7 +288,7 @@ Agent 面板的**模型选择器**（`IAgentSessionHost.ModelChoices` / `SelectM
 顶部常驻一行账号余额（填完密钥自动查，最小测试后再查一次并算出本次消耗）。
 
 内核是共享的**逻辑，不是界面**：`ApiDocFetcher` / `ApiDocAnalysis` / `ApiSkillFactory` / `ApiDocRepair` /
-`ApiBilling` / `ProviderImport` 六份无界面源码住在 `DreamForge.Desktop.Shared/Agent/`；连**报告文本**
+`ApiBilling` / `ProviderImport` 六份无界面源码住在 `YEEYEEYEE.Desktop.Shared/Agent/`；连**报告文本**
 （`ApiImportSummary.RenderReport`）与**最小测试画幅**（`ApiMinimalTest.SmallestSize`）也在共享层——
 报告是用户按「创建技能」之前唯一能核对的依据，界面与内核各写一份必然分叉，那时「该信哪个」就成了没人能回答的问题。
 （第 127 轮之前它们是「Avalonia 端链接 WinForms 端目录里的文件」，现在是正常的项目引用；
@@ -480,7 +519,7 @@ Ask 模式算出的改动会**先画进画布、但只是虚影**（对齐旧版
 
 ## 协议边界
 
-`DreamForgeProtocol v1` 用于 Host/Web/TS 与测试，共 17 种消息，校验版本、方向、UUID、时间戳和能力声明；协议细节和实现差异保留在 [协议文档](protocol/PROTOCOL.md)。Avalonia 画布不直接使用该信封，而是通过 HTTP 推送投影并轮询引用替换请求（旧 WinForms 画布当时也是这条路径，它已归档）。
+`YEEYEEYEEProtocol v1` 用于 Host/Web/TS 与测试，共 17 种消息，校验版本、方向、UUID、时间戳和能力声明；协议细节和实现差异保留在 [协议文档](protocol/PROTOCOL.md)。Avalonia 画布不直接使用该信封，而是通过 HTTP 推送投影并轮询引用替换请求（旧 WinForms 画布当时也是这条路径，该端已删除）。
 
 当前 HostBridge 初始化时主动发送 `host/init`；收到 `canvas/hello` 只设置 ready，尚未按握手载荷版本重新初始化。接收分支处理 hello、invoke、resource.replace、job.cancel；op.batch、undo/redo、selection 和 diagnostic 尚无业务处理。资源替换已在 C# 与 TS 两侧实现，但共享夹具尚未补齐；TS 的 UUID 等细粒度校验也未完全对齐 C#。
 

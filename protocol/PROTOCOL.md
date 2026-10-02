@@ -1,14 +1,14 @@
-# DreamForge 画布 ⇄ 宿主消息协议（Canvas ⇄ Host Protocol）
+# YEEYEEYEE 画布 ⇄ 宿主消息协议（Canvas ⇄ Host Protocol）
 
 - 协议版本：`1`
 - 状态：信封、方向和基础载荷校验已在 C# 与 TS 两侧实现，资源替换桥接和控制台用例已存在；两侧的细粒度校验仍有差异，跨语言夹具尚未覆盖资源替换，当前只有部分宿主在用它，见下方适用范围
-- 适用范围：**任何画布侧实现与其 C# 宿主之间**。当前实际使用方为 `DreamForge.Host`（测试与桥接）、`DreamForge.Web`（作业服务及保留的 WebSocket 画布桥接；普通浏览器现走第 8 节 HTTP 路径）与 `DreamForge.Canvas`（TS 侧同构实现）；**桌面端 `DreamForge.Desktop` 的 WinForms 自绘画布不使用本协议**，其 Agent 使用独立 JSON actions 协议；桌面通过 HTTP 推送 records 并轮询引用替换请求（见 [桌面与 Web 数据通路](../02_Architecture.md#桌面与-web-数据通路)）
+- 适用范围：**任何画布侧实现与其 C# 宿主之间**。当前实际使用方为 `YEEYEEYEE.Host`（测试与桥接）、`YEEYEEYEE.Web`（作业服务及保留的 WebSocket 画布桥接；普通浏览器现走第 8 节 HTTP 路径）与 `YEEYEEYEE.Canvas`（TS 侧同构实现）；**桌面端 `YEEYEEYEE.Desktop.Avalonia` 的自绘画布不使用本协议**，其 Agent 使用独立 JSON actions 协议；桌面通过 HTTP 推送 records 并轮询引用替换请求（见 [桌面与 Web 数据通路](../02_Architecture.md#桌面与-web-数据通路)）
 - 不适用范围：C# 宿主之间、服务端内部调用、Yjs 房间内部同步（协作未实现）
 - **Goal7 待复核补充**：下方第 8 节记录现有 `/api/web` JSON/HTTP 接口；它不是此处版本 `v: 1` 的消息信封，也不继承 `canvas/*`、`host/*` 消息的校验/权限承诺。不要把 HTTP 状态码与 `host/error` 混用。
 
 ## 1. 设计约束
 
-1. 画布是独立的 TypeScript/React 包，不是 Razor 组件。C# 宿主与画布之间**只能**通过本协议通信，不得假设存在共享的 Razor 画布或共享 .NET 对象图。（注：当前参考实现 `DreamForge.Canvas` 渲染的是普通 div 卡片，未使用 tldraw，相关依赖已清理，前端工程也不在解决方案内。）
+1. 画布是独立的 TypeScript/React 包，不是 Razor 组件。C# 宿主与画布之间**只能**通过本协议通信，不得假设存在共享的 Razor 画布或共享 .NET 对象图。（注：当前参考实现 `YEEYEEYEE.Canvas` 渲染的是普通 div 卡片，未使用 tldraw，相关依赖已清理，前端工程也不在解决方案内。）
 2. 协议不承认画布上报的身份。画布**禁止**上报 `role`、`clientType`、`userId` 作为鉴权依据；宿主通过 `host/init` 下发由服务端会话派生的能力位（capabilities），画布只按能力位决定 UI 是否可编辑、可执行。
 3. 协议版本必须精确匹配。不匹配时宿主拒绝初始化（fail-closed），不得降级为"尽力兼容"或"忽略新字段继续跑"。
 4. 未知消息 `type` 一律 fail-closed：不得静默丢弃后继续处理后续消息，不得产生任何画布或数据变更。
@@ -117,22 +117,22 @@
 
 `protocol/fixtures/` 与 `protocol/fixtures/manifest.json` 是 C# 端与 TypeScript 端的**共同事实来源**：
 
-- C# 端 `DreamForge.Core.Tests` 与 TS 端 `vitest` 都读取 `manifest.json`；
+- C# 端 `YEEYEEYEE.Core.Tests` 与 TS 端 `vitest` 都读取 `manifest.json`；
 - 对 `valid: true` 的夹具，两端编解码后必须得到相同的 `type` 与 `payload` 关键字段；
 - 对 `valid: false` 的夹具，两端应抛出/返回 `manifest` 中声明的 `expectedErrorCode`；若两端当前校验深度不同，先补夹具和一致性用例，再收紧实现。
 
 任何新增消息类型必须先加夹具再改两端实现，禁止只改一端。
 
-> **当前偏差（待补）**：`canvas/resource.replace.request` 与 `host/resource.replace.result` 已在 C#（`DreamForge.Core\Protocol.cs`、`DreamForge.Host\HostBridge.cs`）与 TS（`VersionedMessages.ts`、`CanvasMessageCodec.ts`、`CanvasBridge.ts`）两侧落地，并有 C# 控制台用例覆盖，但 `protocol/fixtures/` 里**还没有对应的夹具与 manifest 条目**。此外，TS 尚未复现 C# 对资源 ID、Job 状态等字段的全部细粒度校验。下一步先补两条共享夹具和跨语言断言，再决定是否统一校验深度。
+> **当前偏差（待补）**：`canvas/resource.replace.request` 与 `host/resource.replace.result` 已在 C#（`YEEYEEYEE.Core\Protocol.cs`、`YEEYEEYEE.Host\HostBridge.cs`）与 TS（`VersionedMessages.ts`、`CanvasMessageCodec.ts`、`CanvasBridge.ts`）两侧落地，并有 C# 控制台用例覆盖，但 `protocol/fixtures/` 里**还没有对应的夹具与 manifest 条目**。此外，TS 尚未复现 C# 对资源 ID、Job 状态等字段的全部细粒度校验。下一步先补两条共享夹具和跨语言断言，再决定是否统一校验深度。
 
 ## 8. Goal7 本机 Web HTTP 契约（现有实现，待独立复核）
 
-本节只描述 `DreamForge.Web/WebSceneApi.cs`、`WebSkillJobApi.cs`、`ProjectCanvasSceneStore.cs` 当前路由；不属于上文 v1 信封及跨语言夹具。`/api/canvas/*` 和 `/ws/canvas` 是保留的桌面桥接路径，亦非 `/api/web` 的别名。所有三类路径目前由同一中间件先验证回环来源和配置的 `DreamForge:WebToken`：非回环 `403 LOCAL_ONLY`，令牌未配置 `503 TOKEN_NOT_CONFIGURED`，缺失/错误 Bearer `401 UNAUTHORIZED`。这只是一台机器的共享令牌边界，不是多用户身份体系；`/health` 和静态资源不在此中间件保护范围。成功体直接是 JSON，无 `v/id/type/ts/payload`；失败体为 `{ "code": "...", "message": "..." }`，以 HTTP 状态判定，而非 `host/error`。
+本节只描述 `YEEYEEYEE.Web/WebSceneApi.cs`、`WebSkillJobApi.cs`、`ProjectCanvasSceneStore.cs` 当前路由；不属于上文 v1 信封及跨语言夹具。`/api/canvas/*` 和 `/ws/canvas` 是保留的桌面桥接路径，亦非 `/api/web` 的别名。所有三类路径目前由同一中间件先验证回环来源和配置的 `YEEYEEYEE:WebToken`：非回环 `403 LOCAL_ONLY`，令牌未配置 `503 TOKEN_NOT_CONFIGURED`，缺失/错误 Bearer `401 UNAUTHORIZED`。这只是一台机器的共享令牌边界，不是多用户身份体系；`/health` 和静态资源不在此中间件保护范围。成功体直接是 JSON，无 `v/id/type/ts/payload`；失败体为 `{ "code": "...", "message": "..." }`，以 HTTP 状态判定，而非 `host/error`。
 
 | 方法与路径 | 输入 | 成功响应与约束 |
 | --- | --- | --- |
 | `GET /api/web/scene` | 无 | `{revision,records}`；项目模式另有 `readOnly,formatVersion,migration,validation`。records 为投影项 `{recordId,recordType,record,...}`，只读获取不迁移写盘。 |
-| `PUT /api/web/records/{recordId}` | JSON `{baseRevision,title,content}` | 每次请求由服务端配置 `DreamForge:WebClaims` 重验 `canvas.edit`；仅 Bearer 不足以写入。通过后返回 `{revision,record}`；仅更新已有节点标题/内容，不改引用。独立模式 revision 为递增整数；项目模式为画布原始字节 SHA-256 前 6 字节的非负数值，保存后返回新字节对应值，不能混用两种修订。 |
+| `PUT /api/web/records/{recordId}` | JSON `{baseRevision,title,content}` | 每次请求由服务端配置 `YEEYEEYEE:WebClaims` 重验 `canvas.edit`；仅 Bearer 不足以写入。通过后返回 `{revision,record}`；仅更新已有节点标题/内容，不改引用。独立模式 revision 为递增整数；项目模式为画布原始字节 SHA-256 前 6 字节的非负数值，保存后返回新字节对应值，不能混用两种修订。 |
 | `GET /api/web/assets` | 无 | `{entities:[...]}`，读取配置的 `ProjectEntitiesPath` 中 `entities.json`；只读，当前服务端返回原实体数组，不提供创建、替换或删除端点。 |
 | `GET /api/web/skills` | 无 | `{skills:[...]}`；仅当服务端配置 `preapproved-local-image`、ComfyUI checkpoint 和 `skill.invoke` 声明同时满足时列出固定 `comfyui.text-to-image`。 |
 | `POST /api/web/skills/{skillId}/invoke` | 仅 `{prompt,idempotencyKey}`，非空且分别最多 4000/128 字符 | 返回任务视图；不接受客户端自选 tool/能力，键与既有调用输入冲突报 409；返回任务并不等于执行成功。 |

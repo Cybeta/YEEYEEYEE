@@ -8,8 +8,8 @@ obj/
 *.suo
 
 # ── 前端依赖与产物 ──
-DreamForge.Canvas/node_modules/
-DreamForge.Canvas/dist/
+YEEYEEYEE.Canvas/node_modules/
+YEEYEEYEE.Canvas/dist/
 
 # ── 本机运行时数据（含 DPAPI 密文密钥、最近项目、日志）──
 **/ai-config.json

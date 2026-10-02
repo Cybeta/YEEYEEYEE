@@ -1,0 +1,441 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:YEEYEEYEE.Desktop.Avalonia"
+        x:Class="YEEYEEYEE.Desktop.Avalonia.MainWindow"
+        Title="YEEYEEYEE · Avalonia 工作台"
+        SystemDecorations="None"
+        ExtendClientAreaToDecorationsHint="True"
+        ExtendClientAreaChromeHints="NoChrome"
+        ExtendClientAreaTitleBarHeightHint="0"
+        TransparencyLevelHint="Transparent"
+        Background="Transparent"
+        Width="1440" Height="900" MinWidth="1100" MinHeight="680">
+
+  <Border Background="{StaticResource DfBg}" CornerRadius="16" ClipToBounds="True">
+    <Panel>
+      <!-- 全屏冷蓝光场 -->
+      <Border Background="{StaticResource DfAuroraSoft}" IsHitTestVisible="False" />
+
+      <Grid x:Name="WorkbenchRoot" Margin="10" ColumnDefinitions="244,*,336" RowDefinitions="58,*,34">
+
+        <!-- ==================== 顶部命令条 ==================== -->
+        <Border x:Name="TitleBar" Grid.Row="0" Grid.ColumnSpan="3" Classes="glass"
+                Margin="0,0,0,10" Padding="14,0" PointerPressed="TitleBar_OnPointerPressed">
+          <Panel>
+            <Border Classes="edgeTop" />
+            <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto" VerticalAlignment="Center">
+              <!-- 品牌 -->
+              <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                <Border Width="28" Height="28" Background="{StaticResource DfSurface3}"
+                        BorderBrush="{StaticResource DfLineGlow}" BorderThickness="1" CornerRadius="8"
+                        BoxShadow="0 0 18 -6 #7A4D9BFF">
+                  <TextBlock Text="◈" Foreground="{StaticResource DfPrimary}" FontSize="15"
+                             HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock Text="YEEYEEYEE" Foreground="{StaticResource DfInk}" FontSize="14" FontWeight="SemiBold"
+                           VerticalAlignment="Center" />
+                <Border Classes="chip" Padding="7,1" VerticalAlignment="Center">
+                  <TextBlock Text="v0.9" Foreground="{StaticResource DfInk2}" FontSize="10" />
+                </Border>
+              </StackPanel>
+
+              <Border Grid.Column="1" Width="1" Height="22" Background="{StaticResource DfLine}" Margin="14,0" />
+
+              <!-- 面包屑 -->
+              <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <TextBlock x:Name="ProjectNameText" Text="雾港来信" Classes="muted" FontSize="12" />
+                <TextBlock Text="›" Classes="dim" FontSize="12" />
+                <TextBlock x:Name="CanvasTitleText" Text="第一章 · 雨夜码头" Foreground="{StaticResource DfInk}"
+                           FontSize="12" FontWeight="SemiBold" />
+              </StackPanel>
+
+              <!-- 视图分段：画布 / 时间轴 / 剧本 三种视图，切换的是中央区显示什么 -->
+              <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="2" Margin="18,0,0,0"
+                          VerticalAlignment="Center">
+                <Button x:Name="CanvasSegButton" Classes="seg active" Content="画布" Click="CanvasView_OnClick" />
+                <Button x:Name="TimelineSegButton" Classes="seg" Content="时间轴" Click="TimelineView_OnClick" />
+                <Button x:Name="ScriptSegButton" Classes="seg" Content="剧本" Click="ScriptView_OnClick" />
+              </StackPanel>
+
+              <!-- 右侧操作 -->
+              <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Border Background="{StaticResource DfSurface2}" BorderBrush="{StaticResource DfLine}"
+                        BorderThickness="1" CornerRadius="10" Height="34" Width="210" Padding="10,0">
+                  <Grid ColumnDefinitions="Auto,*">
+                    <Button Classes="toolButton" Content="⌕" Padding="6,4" Click="Search_OnClick"
+                            VerticalAlignment="Center" />
+                    <TextBox x:Name="SearchBox" Grid.Column="1" Classes="inlineInput" Margin="6,0,0,0"
+                             Watermark="搜索节点、工作树、设定库" KeyDown="SearchBox_OnKeyDown" />
+                  </Grid>
+                </Border>
+                <Button Classes="toolButton" Content="↶" ToolTip.Tip="撤销" Click="Undo_OnClick" />
+                <Button Classes="toolButton" Content="↷" ToolTip.Tip="重做" Click="Redo_OnClick" />
+                <Button Classes="toolButton" Content="◧" ToolTip.Tip="检查器" Click="InspectorToggle_OnClick" />
+                <Button Classes="primary" Content="生成章节工作树" Click="WorkTreeMenu_OnClick" />
+                <Button Classes="toolButton" Content="保存修订" Click="SaveCanvas_OnClick" />
+                <Border Width="28" Height="28" Background="{StaticResource DfSurface3}"
+                        BorderBrush="{StaticResource DfLineStrong}" BorderThickness="1" CornerRadius="14">
+                  <TextBlock Text="LM" Foreground="#BDD6EF" FontSize="11" FontWeight="Bold"
+                             HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <Border Width="1" Height="22" Background="{StaticResource DfLine}" Margin="4,0" />
+                <Button Classes="windowButton" Content="—" ToolTip.Tip="最小化" Click="MinimizeWindow_OnClick" />
+                <Button Classes="windowButton" Content="□" ToolTip.Tip="最大化/还原" Click="MaximizeWindow_OnClick" />
+                <Button Classes="windowButton closeButton" Content="×" ToolTip.Tip="关闭" Click="CloseWindow_OnClick" />
+              </StackPanel>
+            </Grid>
+          </Panel>
+        </Border>
+
+        <!-- ==================== 左侧指挥舱 ==================== -->
+        <Border Grid.Row="1" Grid.RowSpan="2" Grid.Column="0" Classes="glass" Margin="0,0,10,0">
+          <Panel>
+            <Border Classes="edgeTop" />
+            <DockPanel Margin="14">
+              <!-- 停靠顺序即视觉顺序：先停靠的贴最外沿，所以版本号在最底下，「设置」紧贴在它上方。 -->
+              <TextBlock DockPanel.Dock="Bottom" Text="v0.9.18 · 本地项目" Classes="dim" FontSize="11"
+                         Margin="4,12,0,0" />
+              <Button DockPanel.Dock="Bottom" Classes="navButton" HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Left" Margin="0,10,0,0" Click="Settings_OnClick"
+                      ToolTip.Tip="模型接入 / 生图生视频 / 技能管理">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Text="⚙" FontSize="13" Foreground="{StaticResource DfPrimary}"
+                             VerticalAlignment="Center" />
+                  <TextBlock Text="设置" FontSize="12" Foreground="{StaticResource DfInk}"
+                             VerticalAlignment="Center" />
+                </StackPanel>
+              </Button>
+
+              <!-- 项目卡 -->
+              <Button DockPanel.Dock="Top" Classes="navButton" HorizontalContentAlignment="Stretch"
+                      Padding="12,10" Background="{StaticResource DfSurface2}"
+                      BorderBrush="{StaticResource DfLine}" CornerRadius="10" Click="ProjectMenu_OnClick">
+                <Grid ColumnDefinitions="*,Auto">
+                  <StackPanel Spacing="3">
+                    <TextBlock x:Name="WorkTreeProjectLabel" Text="未选择项目" Foreground="{StaticResource DfInk}"
+                               FontWeight="SemiBold" FontSize="12" />
+                    <TextBlock x:Name="ProjectPathText" Text="尚未打开项目"
+                               Foreground="{StaticResource DfInk2}" FontSize="11" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1" Text="›" Classes="dim" VerticalAlignment="Center" />
+                </Grid>
+              </Button>
+
+              <!-- 项目操作 -->
+              <Grid DockPanel.Dock="Top" ColumnDefinitions="*,*,*" ColumnSpacing="6" Margin="0,8,0,0">
+                <Button Classes="miniButton" Content="新建项目" Click="NewProject_OnClick"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                <Button Grid.Column="1" Classes="miniButton" Content="打开项目" Click="OpenProject_OnClick"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                <Button Grid.Column="2" Classes="miniButton" Content="新建画布" Click="NewCanvas_OnClick"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+              </Grid>
+
+              <!-- 工作区：项目树与故事画布是同一棵树的两个视角（素材/资源库在项目树里），
+                   所以这里不再单列「素材库」——它本来就是那棵树的一部分。 -->
+              <TextBlock DockPanel.Dock="Top" Text="工 作 区" Classes="dim" FontSize="10" FontWeight="Bold"
+                         Margin="10,16,0,8" />
+              <StackPanel DockPanel.Dock="Top" Spacing="4">
+                <Button x:Name="ProjectTreeNavButton" Classes="navButton" HorizontalContentAlignment="Left"
+                        Content="项目树" Click="ProjectTree_OnClick" />
+                <Button x:Name="StoryCanvasNavButton" Classes="navButton active" HorizontalContentAlignment="Left"
+                        Content="故事画布" Click="StoryCanvas_OnClick" />
+                <Button Classes="navButton" HorizontalContentAlignment="Left" Content="Agent 协作"
+                        Click="AgentCollab_OnClick" />
+              </StackPanel>
+
+              <!-- 工作树 / 项目文件。
+                   这一块**不设 Dock**：DockPanel 的最后一个子元素会填满剩下的空间，于是去掉左栏那套
+                   阶段按钮之后腾出来的位置全部归它——以前这里写死 Height="240"，
+                   位置空出来了树也不会跟着长高。
+                   树本身不再限高，长内容由 TreeView 自己的滚动条处理；
+                   底部那两项（设置 / 版本号）在文档里声明在最前面，永远贴在底边。 -->
+              <TextBlock x:Name="ResourceSectionLabel" DockPanel.Dock="Top" Text="工 作 树 资 源" Classes="dim"
+                         FontSize="10" FontWeight="Bold" Margin="10,16,0,8" />
+              <Border Background="{StaticResource DfSurface1}"
+                      BorderBrush="{StaticResource DfLine}" BorderThickness="1" CornerRadius="10" Padding="8,8">
+                <TreeView x:Name="WorkTreeView" Background="Transparent" BorderThickness="0"
+                          SelectionChanged="WorkTree_OnSelectionChanged"
+                          DoubleTapped="WorkTree_OnDoubleTapped"
+                          PointerPressed="WorkTree_OnPointerPressed"
+                          PointerMoved="WorkTree_OnPointerMoved">
+                  <!-- 展开状态与行模型双绑：用户点开要记住（左栏会随画布变化整体重建），
+                       「画布选中 → 左栏定位」也要能把这一行和它的祖先逐级展开。
+                       这里用 ReflectionBinding：Style 的 Setter 里没有 x:DataType 上下文，
+                       编译期绑定（本项目的默认）在这种位置报 AVLN2100。 -->
+                  <TreeView.Styles>
+                    <Style Selector="TreeViewItem">
+                      <Setter Property="IsExpanded" Value="{ReflectionBinding IsExpanded, Mode=TwoWay}" />
+                    </Style>
+                  </TreeView.Styles>
+                  <TreeView.ItemTemplate>
+                    <TreeDataTemplate DataType="{x:Type local:MainWindow+WorkTreeViewNode}"
+                                      ItemsSource="{Binding Children}">
+                      <Grid ColumnDefinitions="Auto,*,Auto">
+                        <TextBlock Text="{Binding Marker}" Foreground="{Binding MarkerBrush}" FontSize="11"
+                                   VerticalAlignment="Center" Margin="0,0,5,0" />
+                        <TextBlock Grid.Column="1" Text="{Binding Header}" Foreground="{Binding HeaderBrush}"
+                                   FontSize="11" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="2" Text="{Binding TagText}" Foreground="{Binding TagBrush}"
+                                   FontSize="10" VerticalAlignment="Center" Margin="6,0,0,0" />
+                      </Grid>
+                    </TreeDataTemplate>
+                  </TreeView.ItemTemplate>
+                </TreeView>
+              </Border>
+
+              <!-- 制作阶段曾经在这里还有一套竖排按钮（「制 作 阶 段」标题 + StageButtonPanel）。
+                   已按用户要求去掉：同一件事在画布上方那排芯片上就能做，左栏留着它只是把树挤短。
+                   筛选规则（ProductionStageRules）与画布上方那排芯片都原样保留。 -->
+            </DockPanel>
+          </Panel>
+        </Border>
+
+        <!-- ==================== 中央工作流画布 ==================== -->
+        <Border Grid.Row="1" Grid.Column="1" Classes="glassFlat" Margin="0,0,10,10">
+          <Grid RowDefinitions="Auto,Auto,Auto,*">
+            <Border Classes="edgeTop" Grid.RowSpan="4" />
+
+            <!-- 画布标签条（浏览器标签式）：一张画布一个标签，点标签切换、双击重命名、＋ 新建、× 关闭。
+                 放不下时右边会露出「▾」把全部标签列成一个下拉——在窄条里横向拖着找比翻列表慢得多。 -->
+            <Border Grid.Row="0" Margin="12,12,12,0" Background="{StaticResource DfSurface1}"
+                    BorderBrush="{StaticResource DfLine}" BorderThickness="1" CornerRadius="10" Padding="4,3">
+              <Grid ColumnDefinitions="*,Auto">
+                <ScrollViewer x:Name="CanvasTabScroller" HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollBarVisibility="Disabled">
+                  <StackPanel x:Name="CanvasTabStrip" Orientation="Horizontal" Spacing="3" />
+                </ScrollViewer>
+                <Button x:Name="CanvasTabOverflowButton" Grid.Column="1" Classes="toolButton" Content="▾"
+                        ToolTip.Tip="全部画布标签" IsVisible="False" Padding="7,2" Margin="4,0,0,0"
+                        VerticalAlignment="Center" />
+              </Grid>
+            </Border>
+
+            <!-- 画布工具栏 -->
+            <Grid x:Name="CanvasToolbarRow" Grid.Row="1" ColumnDefinitions="*,Auto" Margin="12,10,12,0">
+              <Border HorizontalAlignment="Left" Background="{StaticResource DfSurface1}"
+                      BorderBrush="{StaticResource DfLine}" BorderThickness="1" CornerRadius="10" Padding="4">
+                <StackPanel Orientation="Horizontal" Spacing="2">
+                  <Button x:Name="SelectToolButton" Classes="miniButton active" Content="选择" Click="SelectTool_OnClick" />
+                  <Button x:Name="AddNodeButton" Classes="miniButton" Content="＋ 节点" Click="AddNodeMenu_OnClick" />
+                  <Button Classes="miniButton" Content="＋ 资源" Click="AddResourceReference_OnClick" />
+                  <Button x:Name="ConnectToolButton" Classes="miniButton" Content="连接" Click="ConnectTool_OnClick" />
+                  <Border Width="1" Height="18" Background="{StaticResource DfLine}" Margin="4,0" />
+                  <Button Classes="miniButton" Content="删除" ToolTip.Tip="删除选中的节点或连线（也可以按 Delete）"
+                          Click="DeleteNode_OnClick" />
+                  <Border Width="1" Height="18" Background="{StaticResource DfLine}" Margin="4,0" />
+                  <!-- 预览引用节点：勾上之后，有引用的节点卡下方会按引用顺序排出一串小小的预览框，
+                       图片给缩略图、视频给 ▶ 占位，点一下放大图片 / 播放视频。
+                       它只是**画法**开关：关掉不删任何东西，节点上的「引用 · …」标签照旧在。 -->
+                  <CheckBox x:Name="ReferencePreviewToggle" Content="预览引用节点" IsChecked="True"
+                            FontSize="11" VerticalAlignment="Center" Margin="6,0,4,0"
+                            ToolTip.Tip="在节点下方排出它引用的角色 / 场景 / 道具的媒体预览；点预览可放大图片、播放视频"
+                            Click="ReferencePreviewToggle_OnChanged" />
+                </StackPanel>
+              </Border>
+              <Border Grid.Column="1" HorizontalAlignment="Right" Background="{StaticResource DfSurface1}"
+                      BorderBrush="{StaticResource DfLine}" BorderThickness="1" CornerRadius="10" Padding="4">
+                <StackPanel Orientation="Horizontal" Spacing="2">
+                  <Button Classes="miniButton" Content="−" Click="ZoomOut_OnClick" />
+                  <TextBlock x:Name="ZoomText" Text="86%" Foreground="{StaticResource DfInk2}" FontSize="11"
+                             VerticalAlignment="Center" Margin="7,0" />
+                  <Button Classes="miniButton" Content="＋" Click="ZoomIn_OnClick" />
+                  <Button Classes="miniButton" Content="适应" Click="FitCanvas_OnClick" />
+                </StackPanel>
+              </Border>
+            </Grid>
+
+            <!-- 制作阶段进度条：每一步的**真实计数**在代码里算好填进来（ProductionStageRules.Summarize），
+                 点一下等于选中那个阶段。以前这里是写死的勾叉与「—」占位。 -->
+            <ScrollViewer x:Name="CanvasStageRow" Grid.Row="2" HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Disabled" Margin="12,10,12,0">
+              <StackPanel x:Name="StageChipPanel" Orientation="Horizontal" Spacing="6" />
+            </ScrollViewer>
+
+            <!-- 无限画布 -->
+            <Panel x:Name="CanvasViewHost" Grid.Row="3" Margin="12,10,12,12" ClipToBounds="True">
+              <Border Background="{StaticResource DfBg}" BorderBrush="{StaticResource DfLine}"
+                      BorderThickness="1" CornerRadius="12" ClipToBounds="True">
+                <local:CanvasSurface x:Name="CanvasSurfaceControl" Margin="0" />
+              </Border>
+            </Panel>
+
+            <!-- 时间轴视图：章节 / 分镜 / 工作树项 / 成品，全部读当前画布的真实数据 -->
+            <Border x:Name="TimelineViewHost" Grid.Row="1" Grid.RowSpan="3" Margin="12,10,12,12"
+                    Background="{StaticResource DfBg}" BorderBrush="{StaticResource DfLine}"
+                    BorderThickness="1" CornerRadius="12" ClipToBounds="True" IsVisible="False">
+              <ScrollViewer Padding="16,14" VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="TimelineContent" Spacing="12" />
+              </ScrollViewer>
+            </Border>
+
+            <!-- 剧本视图：把章节与分镜节点里的文字按顺序摊开 -->
+            <Border x:Name="ScriptViewHost" Grid.Row="1" Grid.RowSpan="3" Margin="12,10,12,12"
+                    Background="{StaticResource DfBg}" BorderBrush="{StaticResource DfLine}"
+                    BorderThickness="1" CornerRadius="12" ClipToBounds="True" IsVisible="False">
+              <ScrollViewer Padding="18,16" VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="ScriptContent" Spacing="10" />
+              </ScrollViewer>
+            </Border>
+          </Grid>
+        </Border>
+
+        <!-- ==================== 右侧栏：节点检查器 / Agent 协作 ==================== -->
+        <Panel Grid.Row="1" Grid.Column="2" Margin="0,0,0,10">
+          <Border x:Name="InspectorPanel" Classes="glass">
+            <Panel>
+              <Border Classes="edgeTop" />
+              <DockPanel>
+                <Grid DockPanel.Dock="Top" Height="50" ColumnDefinitions="*,Auto" Margin="16,0">
+                  <TextBlock Text="节点检查器" Classes="heading" FontSize="13" VerticalAlignment="Center" />
+                  <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button Classes="toolButton" Content="×" Click="InspectorClose_OnClick" />
+                    <Button Classes="toolButton" Content="•••" Click="InspectorToggle_OnClick" />
+                  </StackPanel>
+                </Grid>
+
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="18" Margin="16,0" Height="38">
+                  <Button Classes="toolButton" Content="节点详情" Foreground="{StaticResource DfInk}"
+                          FontWeight="SemiBold" BorderBrush="{StaticResource DfPrimary}" BorderThickness="0,0,0,2"
+                          CornerRadius="0" />
+                  <Button Classes="toolButton" Content="Agent 协作 ›" ToolTip.Tip="切到 Agent 协作面板"
+                        Click="AgentCollab_OnClick" />
+                </StackPanel>
+
+                <ScrollViewer Padding="16,16" VerticalScrollBarVisibility="Auto">
+                  <StackPanel Spacing="16">
+                    <StackPanel Spacing="7">
+                      <TextBlock Text="节点名称" Classes="dim" FontSize="11" />
+                      <Border Background="{StaticResource DfSurface2}" BorderBrush="{StaticResource DfLine}"
+                              BorderThickness="1" CornerRadius="8" Padding="10,8">
+                        <!-- 检查器是**可改**的：选中节点之后直接在这里改名称与内容，
+                             点「应用修改」写回画布（与双击节点的编辑窗口同一条写入路径）。
+                             原先两个都是只读 TextBlock，看见了却改不了，只能绕去双击。 -->
+                        <TextBox x:Name="InspectorNameText" Text="未选择节点" IsEnabled="False"
+                                 Classes="inlineInput" Padding="0" FontSize="12"
+                                 KeyDown="InspectorField_OnKeyDown" />
+                      </Border>
+                      <TextBlock Text="节点内容" Classes="dim" FontSize="11" Margin="0,6,0,0" />
+                      <Border Background="{StaticResource DfSurface2}" BorderBrush="{StaticResource DfLine}"
+                              BorderThickness="1" CornerRadius="8" Padding="10,8" MinHeight="76">
+                        <TextBox x:Name="InspectorSummaryText" IsEnabled="False"
+                                 Classes="inlineInput"
+                                 Watermark="这个节点还没有内容；在画布上选中一个节点后，可以直接在这一格里写"
+                                 Text="在画布上点击任意节点，这里会显示它的内容，并可以直接修改。"
+                                 AcceptsReturn="True" TextWrapping="Wrap" MinHeight="60" FontSize="12"
+                                 KeyDown="InspectorField_OnKeyDown" />
+                      </Border>
+                      <StackPanel Spacing="6">
+                        <!-- 说明单独占一行：里面会写「正在看哪一个节点」，长标题不能把按钮挤走。 -->
+                        <Button x:Name="InspectorApplyButton" Classes="miniButton" Content="应用修改"
+                                IsEnabled="False" HorizontalAlignment="Left" Click="InspectorApply_OnClick" />
+                        <TextBlock x:Name="InspectorEditHintText" Classes="dim" FontSize="10"
+                                   TextWrapping="Wrap"
+                                   Text="选中节点后可改；改完点「应用修改」或按 Ctrl+Enter 写回画布" />
+                      </StackPanel>
+                    </StackPanel>
+
+                    <Border Height="1" Background="{StaticResource DfLine}" />
+
+                    <!-- 所属章节与节点状态是可以由真实数据填的：章节来自节点的 Chapter，状态来自项目可写性。
+                         原先还摆着「出场角色 3 人 / 分镜 24 镜」两格，那两格没有任何数据源，先删掉。 -->
+                    <Grid ColumnDefinitions="*,*" RowDefinitions="Auto" ColumnSpacing="10">
+                      <Border Background="{StaticResource DfSurface2}" BorderBrush="{StaticResource DfLine}"
+                              BorderThickness="1" CornerRadius="8" Padding="10">
+                        <StackPanel>
+                          <TextBlock Text="所属章节" Classes="dim" FontSize="11" />
+                          <TextBlock x:Name="InspectorChapterText" Text="—" Foreground="{StaticResource DfInk}"
+                                     FontSize="12" FontWeight="SemiBold" Margin="0,5,0,0" />
+                        </StackPanel>
+                      </Border>
+                      <Border Grid.Column="1" Background="{StaticResource DfSurface2}"
+                              BorderBrush="{StaticResource DfLine}" BorderThickness="1" CornerRadius="8" Padding="10">
+                        <StackPanel>
+                          <TextBlock Text="节点状态" Classes="dim" FontSize="11" />
+                          <TextBlock x:Name="ProjectStatusText" Text="可编辑" Foreground="{StaticResource DfSuccess}"
+                                     FontSize="12" FontWeight="SemiBold" Margin="0,5,0,0" />
+                        </StackPanel>
+                      </Border>
+                    </Grid>
+
+                    <!-- 关联素材：先不做。原来这里摆着一张写死的演示卡片（「已建立工作树 42 / 8 / 2.4h」），
+                         没有任何代码更新它，摆着只会让人以为项目里已经有东西——已整块删掉。
+                         将来要显示的是选中节点真实引用的素材与设定（node.Attachments / node.References）。 -->
+                  </StackPanel>
+                </ScrollViewer>
+              </DockPanel>
+            </Panel>
+          </Border>
+
+          <!-- Agent 协作面板：与检查器共用右侧栏，二选一显示 -->
+          <local:AgentPanel x:Name="AgentWorkbenchPanel" IsVisible="False" />
+        </Panel>
+
+        <!-- ==================== 底部状态条 ==================== -->
+        <Border Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Classes="glass" Padding="14,0">
+          <Panel>
+            <Border Classes="edgeTop" />
+            <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+              <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                <TextBlock x:Name="StatusText" Text="就绪" Classes="muted" FontSize="11" />
+                <TextBlock Text="修订 —" Classes="dim" FontSize="11" />
+                <StackPanel Orientation="Horizontal" Spacing="5">
+                  <TextBlock Text="●" Foreground="{StaticResource DfPrimary}" FontSize="11" />
+                  <TextBlock Text="已同步" Foreground="{StaticResource DfPrimary}" FontSize="11" />
+                </StackPanel>
+              </StackPanel>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                <TextBlock x:Name="CanvasNodeCountText" Text="-- 节点" Classes="dim" FontSize="11" />
+                <TextBlock x:Name="CanvasEdgeCountText" Text="-- 条连线" Classes="dim" FontSize="11" />
+                <TextBlock x:Name="CanvasSizeText" Text="画布 --" Classes="dim" FontSize="11" />
+                <TextBlock x:Name="CanvasRevisionText" Text="版本 --" Classes="dim" FontSize="11" />
+                <TextBlock x:Name="ProjectModifiedText" Text="最后保存 --" Classes="dim" FontSize="11" />
+              </StackPanel>
+            </Grid>
+          </Panel>
+        </Border>
+
+      </Grid>
+
+      <!-- 右下角常驻的 Agent 入口：面板被「叉掉」之后还能把它叫回来
+           （以前叉掉就只剩右键菜单里那几条「交给 Agent」，没有一个看得见的入口）。
+           字母与颜色跟着当前模型的厂家走，是**自绘的字母徽标**，不是别家的 logo（理由见 ProviderBadges）。
+           放在启动页之前：没打开项目时它跟着工作台一起被启动页盖住，不抢注意力。 -->
+      <Button x:Name="AgentBadgeButton" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+              Width="46" Height="46" Margin="0,0,24,22" Padding="0"
+              Background="Transparent" BorderThickness="0" IsVisible="False" Click="AgentBadge_OnClick">
+        <!-- 圆环放在按钮**里面**的 Border 上：Avalonia 的 Button 自己没有 BoxShadow，
+             而光晕（BoxShadow）正是这枚徽标「亮着」的那一层。 -->
+        <Border x:Name="AgentBadgeRing" Width="42" Height="42" CornerRadius="21" BorderThickness="1">
+          <TextBlock x:Name="AgentBadgeText" Text="AI" FontSize="12" FontWeight="Bold"
+                     HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+      </Button>
+
+      <!-- 启动页：盖在工作台之上。选项目之前不展示画布、工作树、Agent 面板与设置，
+           工作台里那屏项目名 / 章节 / 分镜数字本来就是占位数据，先摆出来容易被当成已打开的项目。 -->
+      <local:StartPageView x:Name="StartPage" />
+      <!-- 无边框窗口没有系统缩放边框，所以边上拖不动。这里自己铺一圈透明抓手，
+           按下时交给系统做**真正的**拖拽缩放（角落的抓手压在边条之上，优先级更高）。
+           必须放在 WorkbenchRoot 之后：在它上面才收得到鼠标。 -->
+      <Grid>
+        <Border Height="6" VerticalAlignment="Top" Background="Transparent"
+                Cursor="SizeNorthSouth" Tag="North" PointerPressed="ResizeGrip_OnPointerPressed" />
+        <Border Height="6" VerticalAlignment="Bottom" Background="Transparent"
+                Cursor="SizeNorthSouth" Tag="South" PointerPressed="ResizeGrip_OnPointerPressed" />
+        <Border Width="6" HorizontalAlignment="Left" Background="Transparent"
+                Cursor="SizeWestEast" Tag="West" PointerPressed="ResizeGrip_OnPointerPressed" />
+        <Border Width="6" HorizontalAlignment="Right" Background="Transparent"
+                Cursor="SizeWestEast" Tag="East" PointerPressed="ResizeGrip_OnPointerPressed" />
+        <Border Width="14" Height="14" HorizontalAlignment="Left" VerticalAlignment="Top" Background="Transparent"
+                Cursor="TopLeftCorner" Tag="NorthWest" PointerPressed="ResizeGrip_OnPointerPressed" />
+        <Border Width="14" Height="14" HorizontalAlignment="Right" VerticalAlignment="Top" Background="Transparent"
+                Cursor="TopRightCorner" Tag="NorthEast" PointerPressed="ResizeGrip_OnPointerPressed" />
+        <Border Width="14" Height="14" HorizontalAlignment="Left" VerticalAlignment="Bottom" Background="Transparent"
+                Cursor="BottomLeftCorner" Tag="SouthWest" PointerPressed="ResizeGrip_OnPointerPressed" />
+        <Border Width="14" Height="14" HorizontalAlignment="Right" VerticalAlignment="Bottom" Background="Transparent"
+                Cursor="BottomRightCorner" Tag="SouthEast" PointerPressed="ResizeGrip_OnPointerPressed" />
+      </Grid>
+    </Panel>
+  </Border>
+</Window>

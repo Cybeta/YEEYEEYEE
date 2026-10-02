@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="YEEYEEYEE.Core/YEEYEEYEE.Core.csproj" />
+  <Project Path="YEEYEEYEE.Desktop.Core/YEEYEEYEE.Desktop.Core.csproj" />
+  <Project Path="YEEYEEYEE.Desktop.Shared/YEEYEEYEE.Desktop.Shared.csproj" />
+  <Project Path="YEEYEEYEE.Desktop.Avalonia/YEEYEEYEE.Desktop.Avalonia.csproj" />
+  <Project Path="YEEYEEYEE.Host/YEEYEEYEE.Host.csproj" />
+  <Project Path="YEEYEEYEE.Web/YEEYEEYEE.Web.csproj" />
+</Solution>
