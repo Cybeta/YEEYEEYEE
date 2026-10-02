@@ -23,7 +23,7 @@ var dll = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "YEEYEEYEE.Web
 if (!File.Exists(dll)) throw new Exception("Web assembly missing");
 Process? server = null;
 var port = 0;
-async Task Start(string? token = "secret-value", string claims = "canvas.edit,skill.invoke,job.cancel", string approval = "preapproved-local-image", bool standalone = true, string? projectCanvas = null, string? userDatabase = null, string? setupToken = null)
+async Task Start(string? token = "secret-value", string claims = "canvas.edit,skill.invoke,job.cancel", string approval = "preapproved-local-image", bool standalone = true, string? projectCanvas = null, string? userDatabase = null, string? setupToken = null, int? leaseSeconds = null)
 {
     SetClaims(claims);
     using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -47,6 +47,9 @@ async Task Start(string? token = "secret-value", string claims = "canvas.edit,sk
     start.Environment["YEEYEEYEE__UserDatabasePath"] = userDatabase ?? Path.Combine(root, "users.db");
     if (setupToken is null) start.Environment.Remove("YEEYEEYEE__SetupToken");
     else start.Environment["YEEYEEYEE__SetupToken"] = setupToken;
+    // 编辑锁的有效期可配：默认两分钟，测过期时缩到几秒，否则用例得干等两分钟。
+    if (leaseSeconds is null) start.Environment.Remove("YEEYEEYEE__EditLeaseLifetimeSeconds");
+    else start.Environment["YEEYEEYEE__EditLeaseLifetimeSeconds"] = leaseSeconds.Value.ToString();
     start.Environment["ComfyUI__BaseUrl"] = "http://127.0.0.1:8188";
     start.Environment["ComfyUI__Checkpoint"] = "offline-model.safetensors";
     // appsettings.json reloads in the running server, allowing real HTTP revocation tests.
@@ -487,8 +490,151 @@ try
         "空令牌不该被当成已配置");
     Assert((await Check(blank, HttpMethod.Post, "/api/auth/setup", 200, "{\"username\":\"lin\",\"password\":\"longenough\"}"))
         .GetProperty("user").GetProperty("role").GetString() == "Admin", "空令牌下首次建号应当直接成功");
+    // ---------- 编辑锁：谁在编辑、粒度、冲突、心跳、过期、强制接管 ----------
+    // 锁是**会话状态**，不是文档内容：挨着画布放在 <画布>.edits.json，不写进画布文件。
+    // 所以这里也断言它**不碰画布字节**。
+    Stop();
+    var leaseDatabase = Path.Combine(root, "users-lease.db");
+    foreach (var leftover in new[] { leaseDatabase, leaseDatabase + "-wal", leaseDatabase + "-shm" })
+        if (File.Exists(leftover)) File.Delete(leftover);
+    var leasePath = scenePath + ".edits.json";
+    if (File.Exists(leasePath)) File.Delete(leasePath);
+    await Start(userDatabase: leaseDatabase);
+
+    using var boss = CookieClient();
+    await Check(boss, HttpMethod.Post, "/api/auth/setup", 200, "{\"username\":\"lin\",\"password\":\"longenough\",\"displayName\":\"林晚\"}");
+    await Check(boss, HttpMethod.Post, "/api/auth/users", 200, "{\"username\":\"chenmo\",\"password\":\"longenough\",\"displayName\":\"陈默\",\"role\":\"Editor\"}");
+    await Check(boss, HttpMethod.Post, "/api/auth/users", 200, "{\"username\":\"suli\",\"password\":\"longenough\",\"displayName\":\"苏黎\",\"role\":\"Viewer\"}");
+    using var mate = CookieClient();
+    await Check(mate, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"chenmo\",\"password\":\"longenough\"}");
+    using var reader = CookieClient();
+    await Check(reader, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"suli\",\"password\":\"longenough\"}");
+    using var ghost = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+
+    var nodeA = Guid.Parse(id);
+    var nodeB = Guid.Parse(other);
+    var canvasBeforeLock = File.ReadAllBytes(scenePath);
+    string Lease(string scope, Guid? target, string? client = null, bool force = false) =>
+        JsonSerializer.Serialize(new { scope, targetId = target, client, force });
+
+    // 未登录连锁都查不了；只读账号能看不能占（否则只读也能把人挡在外面）。
+    Assert((await Check(ghost, HttpMethod.Get, "/api/web/edits", 401)).GetProperty("code").GetString() == "UNAUTHORIZED", "未登录不该能查锁");
+    Assert((await Check(reader, HttpMethod.Get, "/api/web/edits", 200)).GetProperty("leases").GetArrayLength() == 0, "一开始不该有锁");
+    Assert((await Check(reader, HttpMethod.Post, "/api/web/edits", 403, Lease("node", nodeA)))
+        .GetProperty("code").GetString() == "CANVAS_EDIT_FORBIDDEN", "只读账号不该能占锁");
+
+    // 申请节点锁：来源端由调用方声明，只影响「某某（桌面端）」这种文案。
+    var held = await Check(mate, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeA, "desktop"));
+    var heldA = held.GetProperty("lease").GetProperty("leaseId").GetGuid();
+    Assert(held.GetProperty("lease").GetProperty("scope").GetString() == "node" &&
+        held.GetProperty("lease").GetProperty("targetId").GetGuid() == nodeA, "节点锁的范围要如实回给前端");
+
+    // 同一目标重复申请是幂等的：连点两下不该把自己挡住。
+    Assert((await Check(mate, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeA)))
+        .GetProperty("lease").GetProperty("leaseId").GetGuid() == heldA, "重复申请应当幂等");
+
+    // 别人抢同一节点：409，并且必须告诉他等谁——否则界面只能说「被占用」，用户不知道该找谁。
+    var blocked = await Check(boss, HttpMethod.Post, "/api/web/edits", 409, Lease("node", nodeA));
+    Assert(blocked.GetProperty("code").GetString() == "EDIT_CONFLICT", "抢同一节点要回冲突");
+    Assert(blocked.GetProperty("holder").GetProperty("displayName").GetString() == "陈默" &&
+        blocked.GetProperty("holder").GetProperty("client").GetString() == "desktop", "冲突要带上持有者与来源端：" + blocked.GetRawText());
+    Assert(blocked.GetProperty("message").GetString()!.Contains("陈默（桌面端）", StringComparison.Ordinal), "冲突文案要能直接显示给用户");
+
+    // 不同节点可以并存；但有人持节点锁时，整棵树锁应当被挡。
+    var heldB = (await Check(boss, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeB))).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    Assert((await Check(mate, HttpMethod.Post, "/api/web/edits", 409, Lease("tree", null))).GetProperty("code").GetString() == "EDIT_CONFLICT", "节点锁应当挡住整棵树锁");
+
+    // 只读账号也要能看到「谁在编辑」，这是协作里最要紧的一条。
+    var visible = await Check(reader, HttpMethod.Get, "/api/web/edits", 200);
+    Assert(visible.GetProperty("leases").GetArrayLength() == 2, "两个节点锁都该列出来");
+    Assert(visible.GetProperty("leases")[0].GetProperty("displayName").GetString() is "陈默" or "林晚", "锁要带显示名");
+    Assert(visible.GetProperty("lifetimeSeconds").GetInt32() > 0, "要把有效期告诉前端，心跳才有个准");
+
+    // 心跳续期：自己续得上，别人续不了、也释放不了。
+    Assert((await Check(boss, HttpMethod.Put, $"/api/web/edits/{heldB}", 200)).GetProperty("lease").GetProperty("leaseId").GetGuid() == heldB, "持有者应当能续期");
+    Assert((await Check(mate, HttpMethod.Put, $"/api/web/edits/{heldB}", 403)).GetProperty("code").GetString() == "EDIT_LEASE_NOT_HOLDER", "别人不该能续别人的锁");
+    Assert((await Check(mate, HttpMethod.Delete, $"/api/web/edits/{heldB}", 403)).GetProperty("code").GetString() == "EDIT_LEASE_NOT_HOLDER", "别人不该能释放别人的锁");
+
+    // 释放之后别人能接手。先把外部持有的锁清空，才好单独验整棵树锁。
+    await Check(mate, HttpMethod.Delete, $"/api/web/edits/{heldA}", 200);
+    var takenOver = (await Check(boss, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeA))).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    await Check(boss, HttpMethod.Delete, $"/api/web/edits/{heldB}", 200);
+    await Check(boss, HttpMethod.Delete, $"/api/web/edits/{takenOver}", 200);
+
+    // 整棵树锁：挡住一切。顺带验证「自己原有的节点锁被整棵树锁吸收」——否则会留下没人续期的僵尸锁。
+    var mateB = (await Check(mate, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeB))).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    var treeLease = (await Check(mate, HttpMethod.Post, "/api/web/edits", 200, Lease("tree", null))).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    Assert((await Check(mate, HttpMethod.Get, "/api/web/edits", 200)).GetProperty("leases").GetArrayLength() == 1, "整棵树锁应当吸收掉自己原有的节点锁");
+    Assert((await Check(mate, HttpMethod.Put, $"/api/web/edits/{mateB}", 404)).GetProperty("code").GetString() == "EDIT_LEASE_NOT_FOUND", "被吸收的节点锁不该还能续期");
+    Assert((await Check(boss, HttpMethod.Post, "/api/web/edits", 409, Lease("node", nodeA))).GetProperty("code").GetString() == "EDIT_CONFLICT", "整棵树锁应当挡住节点锁");
+    Assert((await Check(boss, HttpMethod.Post, "/api/web/edits", 409, Lease("tree", null))).GetProperty("code").GetString() == "EDIT_CONFLICT", "整棵树锁不该被别人重复拿到");
+    Assert((await Check(mate, HttpMethod.Put, $"/api/web/edits/{treeLease}", 200)).GetProperty("lease").GetProperty("scope").GetString() == "tree", "树锁也要能续期");
+
+    // 非法输入要挡住，不能猜。
+    await Check(mate, HttpMethod.Post, "/api/web/edits", 400, "{}");
+    await Check(mate, HttpMethod.Post, "/api/web/edits", 400, Lease("node", null));
+    await Check(mate, HttpMethod.Post, "/api/web/edits", 400, Lease("tree", nodeA));
+    await Check(mate, HttpMethod.Post, "/api/web/edits", 400, Lease("node", nodeA, "phone"));
+    Assert((await Check(mate, HttpMethod.Put, "/api/web/edits/not-a-guid", 404)).GetProperty("code").GetString() == "EDIT_LEASE_NOT_FOUND", "认不出的锁 ID 当成不存在");
+    await Check(mate, HttpMethod.Delete, "/api/web/edits/not-a-guid", 404);
+
+    // 强制接管是管理员专属，而且要显式带 force：不提供「悄悄踢掉别人」的默认行为。
+    Assert((await Check(mate, HttpMethod.Post, "/api/web/edits", 403, Lease("node", nodeB, force: true))).GetProperty("code").GetString() == "ADMIN_REQUIRED", "非管理员不该能强制接管");
+    Assert((await Check(boss, HttpMethod.Delete, $"/api/web/edits/{treeLease}", 403)).GetProperty("code").GetString() == "EDIT_LEASE_NOT_HOLDER", "非持有者不该能释放别人的锁");
+    var taken = await Check(boss, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeB, force: true));
+    Assert(taken.GetProperty("displaced").GetArrayLength() == 1 &&
+        taken.GetProperty("displaced")[0].GetProperty("displayName").GetString() == "陈默", "强制接管要如实说出顶掉了谁");
+    Assert((await Check(mate, HttpMethod.Put, $"/api/web/edits/{treeLease}", 404)).GetProperty("code").GetString() == "EDIT_LEASE_NOT_FOUND", "被顶掉之后续期应当说「不在了」，让界面停下编辑");
+    var bossNode = taken.GetProperty("lease").GetProperty("leaseId").GetGuid();
+    Assert((await Check(mate, HttpMethod.Delete, $"/api/web/edits/{bossNode}?force=true", 403)).GetProperty("code").GetString() == "ADMIN_REQUIRED", "非管理员不该能强制释放");
+    await Check(boss, HttpMethod.Delete, $"/api/web/edits/{bossNode}?force=true", 200);
+
+    // 锁不写进画布：一路折腾下来画布字节必须一个都没变。
+    Assert(canvasBeforeLock.SequenceEqual(File.ReadAllBytes(scenePath)), "编辑锁不该改动画布字节");
+    Assert(File.Exists(leasePath), "锁应当落在画布旁边");
+
+    // 锁存在文件里：服务重启之后仍然生效（TTL 内），不会因为一次重启把所有人放进来。
+    var leaseSurvivor = (await Check(mate, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeA))).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    Stop();
+    await Start(userDatabase: leaseDatabase, leaseSeconds: 120);
+    using var restored = CookieClient();
+    await Check(restored, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"lin\",\"password\":\"longenough\"}");
+    var acrossRestart = await Check(restored, HttpMethod.Get, "/api/web/edits", 200);
+    Assert(acrossRestart.GetProperty("leases").GetArrayLength() == 1 &&
+        acrossRestart.GetProperty("leases")[0].GetProperty("displayName").GetString() == "陈默", "锁应当跨重启有效，且归属不变");
+    Assert((await Check(restored, HttpMethod.Put, $"/api/web/edits/{leaseSurvivor}", 403)).GetProperty("code").GetString() == "EDIT_LEASE_NOT_HOLDER", "重启后别人仍然不能续别人的锁");
+
+    // 锁文件损坏时按「没有锁」处理：宁可短暂放两个人进来，也不要让整张画布永远无法编辑。
+    File.WriteAllText(leasePath, "{ this is not json");
+    Assert((await Check(restored, HttpMethod.Get, "/api/web/edits", 200)).GetProperty("leases").GetArrayLength() == 0, "损坏的锁文件按没有锁处理");
+    var healed = (await Check(restored, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeA))).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    Assert((await Check(restored, HttpMethod.Get, "/api/web/edits", 200)).GetProperty("leases").GetArrayLength() == 1, "损坏之后应当能重新申请并自愈");
+    await Check(restored, HttpMethod.Delete, $"/api/web/edits/{healed}", 200);
+
+    // 过期：持有者续期要如实说「已过期」（不能硬写），别人则应当能直接接手。
+    Stop();
+    await Start(userDatabase: leaseDatabase, leaseSeconds: 2);
+    using var shortLived = CookieClient();
+    await Check(shortLived, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"chenmo\",\"password\":\"longenough\"}");
+    var expiring = (await Check(shortLived, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeA))).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    await Task.Delay(2500);
+    Assert((await Check(shortLived, HttpMethod.Put, $"/api/web/edits/{expiring}", 410)).GetProperty("code").GetString() == "EDIT_LEASE_EXPIRED", "过期之后续期要说「已过期」，而不是硬写");
+    using var inheritor = CookieClient();
+    await Check(inheritor, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"lin\",\"password\":\"longenough\"}");
+    var inherited = (await Check(inheritor, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeA))).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    Assert(File.ReadAllText(leasePath).Contains(inherited.ToString(), StringComparison.Ordinal), "锁要真的写进锁文件，重启后才能在");
+    await Check(inheritor, HttpMethod.Delete, $"/api/web/edits/{inherited}", 200);
+
+    // 场景模式不可用时，锁也跟着不可用——两边解出来的必须是同一张画布。
+    Stop();
+    await Start(standalone: false);
+    using var noModeLease = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+    noModeLease.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
+    Assert((await Check(noModeLease, HttpMethod.Get, "/api/web/edits", 503)).GetProperty("code").GetString() == "SCENE_MODE_NOT_CONFIGURED", "没有画布时锁接口也要如实报没配");
+
     Stop();
     Console.WriteLine("HTTP regression passed: auth, live canvas.edit revocation, byte-preserving denials, jobs, assets, conflicts, persistence, and project/standalone modes");
     Console.WriteLine("Auth regression passed: first user becomes admin, role-derived claims, session persistence, disable/password revocation, setup token");
+    Console.WriteLine("Edit-lease regression passed: node/tree granularity, idempotent acquire, holder identity, heartbeat renew, expiry vs missing, admin force takeover, corrupt-file self-healing, restart persistence, canvas bytes untouched");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }

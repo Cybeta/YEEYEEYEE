@@ -73,6 +73,8 @@ bridge.ResourceReplaceRequested += request => resourceReplaceRequests.Enqueue(ne
 WebAccessGuard.Map(app, users);
 AuthApi.Map(app, users);
 WebSceneApi.Map(app);
+// 编辑锁紧挨着场景接口注册：它按 WebCanvasMode 解出同一张画布，把锁文件放到画布旁边。
+EditLeaseApi.Map(app);
 WebSkillJobApi.Map(app);
 app.UseWebSockets();
 if (Directory.Exists(canvasDistPath))

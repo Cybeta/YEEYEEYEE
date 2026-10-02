@@ -20,6 +20,8 @@ startup-media.txt
 agent-diagnostics.log
 # 运行期任务库（各宿主各留一份，不入库）
 *.jobs.db
+# 编辑锁：挨着画布放的会话状态（谁在编辑），不是文档内容，不入库
+*.edits.json
 
 # ── 用户创作产物（项目数据不入库）──
 /Projects/

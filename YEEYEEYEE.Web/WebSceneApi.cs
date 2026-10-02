@@ -17,25 +17,16 @@ internal static class WebSceneApi
         // 它必须在这个方法之前注册。这里只管「解析出来的权限够不够改画布」。
         // A standalone JSON scene is not a desktop project canvas. Never silently fall back
         // to it when a project canvas is requested (or when no editor mode was selected).
-        var projectCanvasPath = LegacyConfig.Text(app.Configuration, "ProjectCanvasPath");
-        var standalonePath = LegacyConfig.Text(app.Configuration, "WebScenePath");
+        var mode = WebCanvasMode.Resolve(app.Configuration);
         WebSceneStore? store = null;
         ProjectCanvasSceneStore? projectStore = null;
-        IResult? unavailable = null;
-        if (!string.IsNullOrWhiteSpace(projectCanvasPath))
+        var unavailable = mode.Error;
+        if (mode.Error is null)
         {
-            try { projectStore = new ProjectCanvasSceneStore(projectCanvasPath, LegacyConfig.Text(app.Configuration, "ProjectEntitiesPath")); }
-            catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or InvalidOperationException)
-            {
-                unavailable = Error(503, "PROJECT_CANVAS_UNAVAILABLE", "项目上下文不可信，拒绝回退到独立 Web 场景：" + ex.Message);
-            }
+            // 解析在 WebCanvasMode 里（编辑锁接口共用同一份规则），这里只负责按模式建对应的存储。
+            if (mode.IsProject) projectStore = new ProjectCanvasSceneStore(mode.CanvasPath!, mode.EntitiesPath);
+            else store = new WebSceneStore(mode.CanvasPath!);
         }
-        else if (LegacyConfig.Flag(app.Configuration, "AllowStandaloneWebScene") != true)
-            unavailable = Error(503, "SCENE_MODE_NOT_CONFIGURED", "独立 Web 场景需显式启用；项目画布编辑当前不可用");
-        else if (string.IsNullOrWhiteSpace(standalonePath) || !Path.IsPathFullyQualified(standalonePath))
-            unavailable = Error(503, "SCENE_PATH_NOT_CONFIGURED", "独立 Web 场景需配置绝对路径");
-        else
-            store = new WebSceneStore(Path.GetFullPath(standalonePath));
         app.MapGet("/api/web/scene", () => projectStore is not null ? projectStore.Read() : store is not null ? store.Read() : unavailable!);
         app.MapPut("/api/web/records/{recordId}", (string recordId, HttpRequest request) =>
         {

@@ -14,21 +14,30 @@ internal sealed class ProjectCanvasSceneStore
     private static IResult Error(int status, string code, string message) =>
         Results.Json(new { code, message }, statusCode: status);
 
-    public ProjectCanvasSceneStore(string canvasPath, string? configuredEntitiesPath)
+    public ProjectCanvasSceneStore(string canvasPath, string? configuredEntitiesPath) =>
+        (path, entitiesPath) = ResolvePaths(canvasPath, configuredEntitiesPath);
+
+    /// <summary>
+    /// 校验并规范化画布与资源路径。**构造函数与「这张实例在看哪张画布」的解析共用这一处**，
+    /// 免得两套规则各自演化出差异（编辑锁的落点靠它决定）。
+    /// </summary>
+    internal static (string CanvasPath, string EntitiesPath) ResolvePaths(string canvasPath, string? configuredEntitiesPath)
     {
         if (!Path.IsPathFullyQualified(canvasPath)) throw new ArgumentException("画布路径必须是绝对路径");
-        path = Path.GetFullPath(canvasPath);
-        var directory = Path.GetDirectoryName(path)!;
+        var resolved = Path.GetFullPath(canvasPath);
+        var directory = Path.GetDirectoryName(resolved)!;
         var root = Directory.GetParent(directory)?.FullName ?? throw new ArgumentException("缺少项目根目录");
         if (!string.Equals(Path.GetFileName(directory), "canvases", StringComparison.OrdinalIgnoreCase) ||
             !File.Exists(Path.Combine(root, "project.json")))
             throw new ArgumentException("画布必须位于含 project.json 的项目 canvases 目录");
-        entitiesPath = Path.Combine(root, "project", "entities.json");
+        var entities = Path.Combine(root, "project", "entities.json");
         if (string.IsNullOrWhiteSpace(configuredEntitiesPath) || !Path.IsPathFullyQualified(configuredEntitiesPath) ||
-            !string.Equals(Path.GetFullPath(configuredEntitiesPath), entitiesPath, StringComparison.OrdinalIgnoreCase))
+            !string.Equals(Path.GetFullPath(configuredEntitiesPath), entities, StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("项目资源路径必须与画布属于同一个项目");
         if (ProjectContext.Open(root) is null) throw new ArgumentException("项目描述文件无效");
+        return (resolved, entities);
     }
+
 
     private static long Revision(byte[] bytes)
     {
