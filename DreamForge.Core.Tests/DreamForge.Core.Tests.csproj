@@ -1,9 +1,13 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\DreamForge.Core\DreamForge.Core.csproj" />
     <ProjectReference Include="..\DreamForge.Host\DreamForge.Host.csproj" />
-    <ProjectReference Include="..\DreamForge.Desktop\DreamForge.Desktop.csproj" />
+    <ProjectReference Include="..\DreamForge.Desktop.Core\DreamForge.Desktop.Core.csproj" />
+    <!-- Agent 操作层（AgentAction / AgentActionExecutor）在共享库里：
+         第 127 轮之前它住在旧 WinForms 端项目里，本工程当时就是引用那个项目拿到的；
+         那一轮有个改动把引用换成了 Desktop.Core，`AgentActionExecutor` 就找不到了（工作区一直是编译不过的状态）。 -->
+    <ProjectReference Include="..\DreamForge.Desktop.Shared\DreamForge.Desktop.Shared.csproj" />
   </ItemGroup>
 
   <ItemGroup>

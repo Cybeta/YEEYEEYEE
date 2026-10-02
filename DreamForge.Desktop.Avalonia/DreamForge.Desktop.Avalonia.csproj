@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- 单目标框架 net10.0：Windows / macOS / Linux 出同一份代码。
+         平台差异（密钥落盘方案、窗口外观）由**运行时**判断，不用条件编译，避免同一份源码在不同 TFM 下行为分叉。 -->
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DreamForge.Desktop.Core\DreamForge.Desktop.Core.csproj" />
+    <!-- 共享的无界面代码（Agent 服务层、密钥落盘、出图/出视频链路、智能导入、站点池子…）。
+         以前是这一端用 42 条 <Compile Include> 直接从旧 WinForms 端「借」源码；现在它们是
+         一个正常的库，来源只有一处（见 DreamForge.Desktop.Shared.csproj 里的说明）。 -->
+    <ProjectReference Include="..\DreamForge.Desktop.Shared\DreamForge.Desktop.Shared.csproj" />
+    <ProjectReference Include="..\DreamForge.Host\DreamForge.Host.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.9" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.9" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.9" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.9" />
+  </ItemGroup>
+</Project>

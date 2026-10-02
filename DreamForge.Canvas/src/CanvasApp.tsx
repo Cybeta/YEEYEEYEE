@@ -109,7 +109,10 @@ function computeLayout(records: ViewRecord[], collapsed: Set<string>): Map<strin
 }
 
 function resetView(scene: Scene): CanvasView {
-  return { revision: scene.revision, records: scene.snapshot.records as ViewRecord[] }
+  return {
+    revision: scene.revision,
+    records: mergeRecords([], scene.snapshot.records).filter((record) => !record.deleted)
+  }
 }
 
 const ENTITY_LABELS: Record<string, string> = { Character: '角色', Scene: '场景', Prop: '道具' }
@@ -167,8 +170,14 @@ export function CanvasApp({ transport }: { transport: CanvasBridgeTransport }) {
         setStatus(`场景已重置 · 修订 ${scene.revision}`)
       },
       onHostOps: (batch: HostOpBatch) => {
-        setView((current) => ({ revision: Math.max(current.revision, batch.revision), records: mergeRecords(current.records, batch.ops) }))
-        setStatus(`已收到宿主更新 · 修订 ${batch.revision}`)
+        setView((current) => {
+          if (batch.revision !== current.revision + 1) {
+            setStatus(`远端修订不连续（当前 ${current.revision}，收到 ${batch.revision}），等待场景重置`)
+            return current
+          }
+          setStatus(`已收到宿主更新 · 修订 ${batch.revision}`)
+          return { revision: batch.revision, records: mergeRecords(current.records, batch.ops) }
+        })
       },
       onResourceReplaceResult: (result) => {
         setStatus(result.ok
@@ -478,6 +487,9 @@ function items_in_layer(records: ViewRecord[], layer: number): number {
 
 function mergeRecords(current: ViewRecord[], incoming: OperationRecord[]): ViewRecord[] {
   const records = new Map(current.map((record) => [record.recordId, record]))
-  incoming.forEach((record) => records.set(record.recordId, record as ViewRecord))
+  incoming.forEach((record) => {
+    if (record.deleted) records.delete(record.recordId)
+    else records.set(record.recordId, record as ViewRecord)
+  })
   return [...records.values()]
 }
