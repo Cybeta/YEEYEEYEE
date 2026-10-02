@@ -2000,9 +2000,49 @@ public partial class CanvasSurface : UserControl
         Border? sweep = null;
         if (faceDown)
         {
+            // 卡背也要有层次，否则整排盖着的时候就是六块深色方格。这里的四层与开奖窗口里的
+            // 卡背是同一套语言（内衬细线 + 中央徽记 + 本色带），缩到 92×68 仍认得出是「一张盖着的卡」。
+            face.Children.Add(new Border
+            {
+                Margin = new Thickness(4),
+                CornerRadius = new CornerRadius(5),
+                BorderThickness = new Thickness(1),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(34, 255, 255, 255)),
+                IsHitTestVisible = false
+            });
+            face.Children.Add(new Border
+            {
+                Height = 3,
+                VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Top,
+                IsHitTestVisible = false,
+                Background = new LinearGradientBrush
+                {
+                    StartPoint = new global::Avalonia.RelativePoint(0, 0, global::Avalonia.RelativeUnit.Relative),
+                    EndPoint = new global::Avalonia.RelativePoint(1, 0, global::Avalonia.RelativeUnit.Relative),
+                    GradientStops =
+                    {
+                        new GradientStop(Color.FromArgb(210, 146, 176, 255), 0),
+                        new GradientStop(Color.FromArgb(60, 146, 176, 255), 1)
+                    }
+                }
+            });
+            face.Children.Add(new Border
+            {
+                Width = 34,
+                Height = 34,
+                CornerRadius = new CornerRadius(8),
+                BorderThickness = new Thickness(1),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(150, 146, 176, 255)),
+                HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center,
+                VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Center,
+                RenderTransformOrigin = global::Avalonia.RelativePoint.Center,
+                RenderTransform = new RotateTransform(45),
+                IsHitTestVisible = false
+            });
+
             var back = new StackPanel
             {
-                Spacing = 3,
+                Spacing = 2,
                 VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Center,
                 HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center,
                 IsHitTestVisible = false
