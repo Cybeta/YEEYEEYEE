@@ -14,7 +14,7 @@ import sys
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-WIDTH, HEIGHT = 1200, 630
+WIDTH, HEIGHT = 1280, 640
 BACKGROUND = (14, 14, 20)
 BRAND = (111, 111, 255)
 MARK = (232, 232, 240)
