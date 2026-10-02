@@ -40,15 +40,15 @@ internal sealed record GachaCard(int Index, string Path, SlotQuality? Quality);
 ///   这么分是有道理的：卡面一旦上色（上一版就是这么干的：彩色描边、彩色色带、彩色角标），
 ///   它就和自己要展示的那张图抢眼，看着"花"而不是"好"；把颜色挪到卡背后之后，
 ///   卡片安静下来，而颜色反而成了更好用的线索（扫一眼光就知道哪张是哪张）。
-/// · **形象是自有的**（那个 ◈ 标记 + 厂家缩写），不用任何厂家的 logo 或拟人形象——那些是各自的商标与
+/// · **形象默认是自有的**（那个 ◈ 标记 + 厂家缩写），不用任何厂家的 logo 或拟人形象——那些是各自的商标与
 ///   著作权作品，且拿了会让人以为有官方合作。厂家只体现为「两个字母 + 一个区分色」，与
-///   <see cref="ProviderBadges"/> 是同一份数据。
-/// · **光点数量暂时统一**，不按「金 / 紫 / 蓝」分档：质量判据还没定（TODO 第 8 条），
-///   凭空分档等于在界面上宣布一个不存在的评级。等判据定了，只改 <see cref="SparkCount"/> 的来源。
+///   <see cref="ProviderBadges"/> 是同一份数据；用户也可以自己放一张图（见 <see cref="ProviderAvatar"/>）。
+/// · **光点数量按档位来**（金/红/紫/蓝/白，见 <see cref="QualityJudgement.SparksFor"/>）：没判过档的批次
+///   走统一常数，「没有档位」与「白档」在界面上是两回事。
 /// · **许愿是仪式，不是因果**：图在这一层打开之前就已经全出好了。所以文案只陈述事实
 ///   （「这一批 N 张已出好」），不写「许愿会影响出图」这类不成立的话。
-/// · **光晕的颜色是「这张卡偏什么色」，不是「这张卡更好」**，所以它不承担任何评级含义
-///   （评级是待办第 8 条的事）。
+/// · **光晕的颜色是「这张卡偏什么色」，不是「这张卡更好」**——档位由分数决定（<see cref="SlotQuality"/>），
+///   颜色只表达色相。
 /// </summary>
 internal static class GachaRevealDialog
 {
@@ -155,8 +155,9 @@ internal static class GachaRevealDialog
         var omenSparks = omen is { } omenTier ? QualityJudgement.SparksFor(omenTier) : UngradedSparks;
         var omenPunch = omen switch
         {
-            QualityTier.Gold => 1.3,
-            QualityTier.Red => 1.15,
+            // 顺序是用户定的：红 > 金 > 紫 > 蓝 > 白，所以最烈的那一档是红，不是金。
+            QualityTier.Red => 1.3,
+            QualityTier.Gold => 1.15,
             QualityTier.Purple => 1.0,
             QualityTier.Blue => 0.88,
             QualityTier.White => 0.74,

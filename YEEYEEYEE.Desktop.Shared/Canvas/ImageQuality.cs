@@ -2,14 +2,19 @@ using System.Text.Json;
 
 namespace YEEYEEYEE.Desktop;
 
-/// <summary>抽卡用的质量档。**数值即高低**（白最低、金最高），档位之间的比较直接用这个顺序。</summary>
+/// <summary>
+/// 抽卡用的质量档。**数值即高低**（白最低、红最高），档位之间的比较直接用这个顺序。
+///
+/// **顺序是用户定的：红最好、金第二、紫第三，然后蓝、白。** 这与很多二游把「金」放最上面不同，
+/// 所以这里特意把数值写成「名次」而不是按颜色名字排——比较全靠数值，看一眼枚举就知道谁大谁小。
+/// </summary>
 public enum QualityTier
 {
     White = 0,
     Blue = 1,
     Purple = 2,
-    Red = 3,
-    Gold = 4
+    Gold = 3,
+    Red = 4
 }
 
 /// <summary>
@@ -108,19 +113,20 @@ public static class QualityJudgement
 
     /// <summary>档位的分数带，写给人看的一句话（设置页与文档里显示它）。</summary>
     public const string ScoreBandNote =
-        "按 0–10 分定档：9 分以上金、7–8 分红、5–6 分紫、3–4 分蓝、2 分以下白；踩中负面提示词的一律是裂纹卡。";
+        "按 0–10 分定档：9 分以上红、7–8 金、5–6 紫、3–4 蓝、2 分以下白；踩中负面提示词的一律是裂纹卡。";
 
     /// <summary>
     /// 分数 → 档位。**这是唯一一处定档的规则**，分数带就写在这里。
     ///
-    /// 带子按「用户能记住」来切：上界留得紧（金要 9 分以上），所以金是稀有的；
-    /// 中段宽（5–6 紫、7–8 红），因为「还行」与「不错」之间的差别本来就模糊，切太细会显得精确得没有道理。
+    /// 带子按「用户能记住」来切：上界留得紧（红要 9 分以上），所以红是稀有的；
+    /// 中段宽（5–6 紫、7–8 金），因为「还行」与「不错」之间的差别本来就模糊，切太细会显得精确得没有道理。
+    /// **最高的那一档是红**（用户定的顺序：红 > 金 > 紫 > 蓝 > 白）。
     /// </summary>
     public static QualityTier TierForScore(int score)
     {
         if (score < MinScore) return QualityTier.White;
-        if (score >= 9) return QualityTier.Gold;
-        if (score >= 7) return QualityTier.Red;
+        if (score >= 9) return QualityTier.Red;
+        if (score >= 7) return QualityTier.Gold;
         if (score >= 5) return QualityTier.Purple;
         if (score >= 3) return QualityTier.Blue;
         return QualityTier.White;
@@ -128,22 +134,22 @@ public static class QualityJudgement
 
     /// <summary>
     /// 每一档翻开发射的光点数。白档给得比「没判过」还少——白是**判出来的最低档**，
-    /// 而没判过是「不知道」，两者不该长得一样。
+    /// 而没判过是「不知道」，两者不该长得一样。红档最多（它是最高的那一档）。
     /// </summary>
     public static int SparksFor(QualityTier tier) => tier switch
     {
-        QualityTier.Gold => 12,
-        QualityTier.Red => 9,
+        QualityTier.Red => 12,
+        QualityTier.Gold => 9,
         QualityTier.Purple => 7,
         QualityTier.Blue => 5,
         _ => 3
     };
 
-    /// <summary>每一档卡背后那团光的加亮倍数。金档最亮，白档反而压一点。</summary>
+    /// <summary>每一档卡背后那团光的加亮倍数。红档最亮，白档反而压一点。</summary>
     public static double GlowFor(QualityTier tier) => tier switch
     {
-        QualityTier.Gold => 1.45,
-        QualityTier.Red => 1.3,
+        QualityTier.Red => 1.45,
+        QualityTier.Gold => 1.3,
         QualityTier.Purple => 1.18,
         QualityTier.Blue => 1.06,
         _ => 0.82

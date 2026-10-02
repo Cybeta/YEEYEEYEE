@@ -17,7 +17,9 @@ public sealed record ProviderBadge(string Abbreviation, string ColorHex, bool Is
 ///
 /// 颜色是**我们自己挑的区分色**（按各家给人的印象取的近似值），用途只有一个：在深色界面上
 /// 把它们彼此分开。它不是官方色值，也不要当品牌资产用——真要严谨的品牌色与 logo，
-/// 走「官方素材包」那条路（见 TODO 第 6 条）。
+/// 只能走「官方素材包」那条路（逐家读条款，不在这份数据里）。
+/// 开奖许愿那一拍的**形象图是另一回事**：那是用户自己放、或用自己的图像链路生成的，
+/// 见 `ProviderAvatar` / `ProviderAvatarStudio`。
 ///
 /// 放在共享层的原因与 <see cref="NodeKindPalette"/> 相同：颜色与缩写本身是数据，
 /// 要有测试盯着「表里的每一家都有徽标、且彼此颜色不同」——加了新厂家却忘了配徽标，

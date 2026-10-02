@@ -29,4 +29,15 @@
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.9" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.9" />
   </ItemGroup>
+
+  <!-- 每个厂家一张「形象」（开奖许愿那一拍用，见 ProviderAvatar）。放在仓库根目录的 provider-art/ 下，
+       构建时拷进输出目录，程序就从**程序目录旁的 provider-art/** 读到它们；用户配置目录里那一份优先，
+       所以用户自己换的图不会被版本更新覆盖掉。
+       CopyToOutputDirectory 用 PreserveNewest：重复构建不会每次重拷这几 MB。 -->
+  <ItemGroup>
+    <None Include="..\provider-art\**\*"
+          Link="provider-art\%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
+  </ItemGroup>
 </Project>
