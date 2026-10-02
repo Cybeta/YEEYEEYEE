@@ -54,6 +54,11 @@ var tests = new (string Name, Action Run)[]
     ("密钥保护：明文档如实带 plain: 前缀并被标记出来", PlaintextTierIsReportedHonestly),
     ("配置落盘：应用级文件在用户配置目录，不再写在程序旁边", AppFilesLiveInUserConfigDirectory),
     ("改名过渡：配置目录新名优先，但旧目录里有东西就用旧的", RenamedDirectoryPrefersTheOneWithData),
+    ("更新：版本标签解析（带 v / 两段式 / 预发布后缀 / 看不懂要报错）", VersionTagParsing),
+    ("更新：发行版比对（有新版 / 已最新 / 本地更新 / 看不懂的标签与坏 JSON 都报失败）", UpdateCheckComparesVersionsAndReportsFailures),
+    ("更新：重启标记能原样存回（前一版 / 目标版 / 更新内容）", UpdateMarkerRoundTrips),
+    ("更新：替换脚本只含 ASCII（PS5 会把无 BOM 的 UTF-8 当 ANSI 读）", UpdateSwapScriptIsAsciiOnly),
+    ("更新：替换脚本实测——真换掉一个目录并留下结果文件", UpdateSwapScriptActuallyReplacesDirectory),
     ("配置落盘：程序旁的旧文件会被搬到用户配置目录（搬不是拷）", LegacyProgramRootConfigIsMigrated),
     ("模型预设：地址能反推回同一家，预置模型元数据自洽", ProviderPresetCatalogIsConsistent),
     ("模型预设：预设换算两端共用一份（采样开关与型号覆盖都一致）", ProviderPresetValuesResolveIsConsistent),
@@ -6684,6 +6689,170 @@ static void RenamedDirectoryPrefersTheOneWithData()
 	{
 		try { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
 		catch (IOException) { }
+	}
+}
+
+// ===== 更新：版本号解析 / 发行版比对 / 更新包挑选 / 重启标记 / 替换脚本 =====
+
+// 版本号只有一处来源（程序集），但「怎么把 v0.2.0 这种标签读成可比较的版本」是纯逻辑，能离线钉住。
+static void VersionTagParsing()
+{
+	Expect(AppVersion.TryParse("v0.2.0", out var withV) && withV == new Version(0, 2, 0), "带 v 前缀的标签要能解析");
+	Expect(AppVersion.TryParse("0.2.0", out var bare) && bare == new Version(0, 2, 0), "不带 v 也要能解析");
+	Expect(AppVersion.TryParse("1.2", out var twoPart) && twoPart == new Version(1, 2, 0), "两段式补成三段");
+	Expect(AppVersion.TryParse("v0.2.0-beta.1", out var pre) && pre == new Version(0, 2, 0), "预发布后缀不参与大小比较");
+	Expect(AppVersion.TryParse("  0.3.1  ", out var padded) && padded == new Version(0, 3, 1), "两边空白要能容忍");
+	Expect(!AppVersion.TryParse("latest", out _), "看不懂的标签必须返回 false，不能当成 0.0.0");
+	Expect(!AppVersion.TryParse("", out _), "空串要返回 false");
+	Expect(!AppVersion.TryParse(null, out _), "null 要返回 false");
+	Expect(!AppVersion.TryParse("1", out _), "只有一段不算版本号");
+	Expect(!AppVersion.TryParse("1.2.3.4", out _), "四段不是发行版标签的写法");
+	Expect(AppVersion.Display.StartsWith('v'), "界面显示形式带 v 前缀：" + AppVersion.Display);
+	Expect(AppVersion.Text(new Version(0, 1, 0)) == "0.1.0", "三段式就是 0.1.0：" + AppVersion.Text(new Version(0, 1, 0)));
+	Expect(AppVersion.Text(new Version(0, 1, 2, 3)) == "0.1.2.3", "有修订号时写四段：" + AppVersion.Text(new Version(0, 1, 2, 3)));
+}
+
+// 「没有新版」与「查不到」必须分开：把查不到降级成已是最新，是最容易让人以为软件不再更新的写法。
+static void UpdateCheckComparesVersionsAndReportsFailures()
+{
+	const string newer = "{\"tag_name\":\"v0.9.0\",\"name\":\"YEEYEEYEE 0.9.0\",\"body\":\"改了什么\",\"html_url\":\"https://example.com/r\",\"published_at\":\"2026-10-02T02:20:02Z\",\"assets\":[{\"name\":\"yeeeyee-win-x64.zip\",\"browser_download_url\":\"https://example.com/a.zip\",\"size\":123}]}";
+
+	var available = UpdateChecker.Compare(new Version(0, 1, 0), newer);
+	Expect(available.State == UpdateCheckState.UpdateAvailable, "线上更新时应报有新版：" + available.Message);
+	Expect(available.Latest == new Version(0, 9, 0), "要解出最新版本号");
+	Expect(available.Release is { Assets.Count: 1 }, "发行包要解出来");
+	Expect(available.Release?.HtmlUrl == "https://example.com/r", "发布页地址要解出来");
+	Expect(UpdateChecker.FindPackage(available.Release)?.Name == "yeeeyee-win-x64.zip", "挑出 zip 包");
+
+	Expect(UpdateChecker.Compare(new Version(0, 9, 0), newer).State == UpdateCheckState.UpToDate, "同版本算已是最新");
+	Expect(UpdateChecker.Compare(new Version(1, 0, 0), newer).State == UpdateCheckState.UpToDate, "本地比线上新时不算有更新");
+
+	Expect(UpdateChecker.Compare(new Version(0, 1, 0), newer.Replace("\"v0.9.0\"", "\"latest\"")).State == UpdateCheckState.Failed,
+		"看不懂的标签要报失败，不能降级成「已是最新」");
+	Expect(UpdateChecker.Compare(new Version(0, 1, 0), "<html>502</html>").State == UpdateCheckState.Failed,
+		"不是 JSON 时要报失败");
+	Expect(UpdateChecker.Compare(new Version(0, 1, 0), "{}").State == UpdateCheckState.Failed,
+		"缺 tag_name 时要报失败，而不是当成没有新版");
+
+	var noPackage = UpdateChecker.Compare(new Version(0, 1, 0), newer.Replace("yeeeyee-win-x64.zip", "notes.txt"));
+	Expect(noPackage.State == UpdateCheckState.UpdateAvailable, "包名不相关时仍然是有新版");
+	Expect(UpdateChecker.FindPackage(noPackage.Release) is null, "没有 zip 也没有 exe 时挑不出更新包");
+	Expect(UpdateChecker.FindPackage(null) is null, "没有发行版信息时挑不出更新包");
+}
+
+// 重启后靠这个标记知道「这次更新到底换成了什么」，所以它必须能原样存回来。
+static void UpdateMarkerRoundTrips()
+{
+	string home = Path.Combine(Path.GetTempPath(), "yeeeyee-marker-" + Guid.NewGuid().ToString("N")[..8]);
+	string? previous = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME");
+	try
+	{
+		Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME", home);
+		UpdateInstaller.ClearMarker();
+		Expect(UpdateInstaller.ReadMarker() is null, "还没写过时读出来应是空");
+
+		UpdateInstaller.WriteMarker(new PendingUpdateInfo("0.1.0", "0.2.0", "这一版改了什么", "https://example.com/r"));
+		var info = UpdateInstaller.ReadMarker();
+		Expect(info is not null, "写下的标记要能读回来");
+		Expect(info!.FromVersion == "0.1.0" && info.ToVersion == "0.2.0", "前一版与目标版本要存住：" + info.ToVersion);
+		Expect(info.Notes == "这一版改了什么", "更新内容要存住，重启后靠它显示改了什么");
+
+		UpdateInstaller.ClearMarker();
+		Expect(UpdateInstaller.ReadMarker() is null, "清掉之后应为空");
+	}
+	finally
+	{
+		Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME", previous);
+		try { if (Directory.Exists(home)) Directory.Delete(home, recursive: true); }
+		catch (IOException) { }
+	}
+}
+
+// 替换脚本由 PowerShell 5 执行，而 PS5 会把**无 BOM 的 UTF-8 当 ANSI 读**——写成中文就成了乱码甚至语法错。
+// 这个坑本轮踩过两次（一个脚本解析失败、一次把中文全读成问号），所以这里钉死「只含 ASCII」。
+static void UpdateSwapScriptIsAsciiOnly()
+{
+	var nonAscii = UpdateInstaller.SwapScript.Where(ch => ch > 127).Select(ch => ((int)ch).ToString("X4")).Distinct().ToArray();
+	Expect(nonAscii.Length == 0, "替换脚本必须只含 ASCII，出现了这些码位：" + string.Join(" ", nonAscii));
+	Expect(UpdateInstaller.SwapScript.Contains("$WaitPid", StringComparison.Ordinal), "脚本要接收「等哪个进程退出」");
+	Expect(UpdateInstaller.SwapScript.Contains("Write-Result", StringComparison.Ordinal), "脚本要把执行结果写出来供重启后读取");
+	Expect(UpdateInstaller.SwapScript.Contains("Move-Item", StringComparison.Ordinal), "脚本要真的搬目录");
+	Expect(UpdateInstaller.SwapScript.Contains("RESTORE ALSO FAILED", StringComparison.Ordinal),
+		"回滚也失败时必须留下路径，不能只说一句失败");
+}
+
+// 真跑一遍替换脚本。整个升级链路里**只有这一步会动用户磁盘**，所以不能只测「脚本文本对不对」。
+// 用 hostname.exe 冒充主程序（跑完就退，不弹界面），用一个大到不存在的 PID 跳过等待。
+static void UpdateSwapScriptActuallyReplacesDirectory()
+{
+	string root = Path.Combine(Path.GetTempPath(), "yeeeyee-swap-" + Guid.NewGuid().ToString("N")[..8]);
+	string target = Path.Combine(root, "app");
+	string staging = Path.Combine(root, "staging");
+	string result = Path.Combine(root, "last-update.json");
+	string script = Path.Combine(root, "apply-update.ps1");
+	try
+	{
+		Directory.CreateDirectory(target);
+		Directory.CreateDirectory(staging);
+
+		var hostname = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "hostname.exe");
+		if (!File.Exists(hostname))
+		{
+			Expect(condition: true, "这台机器上没有 hostname.exe，跳过替换脚本实测");
+			return;
+		}
+
+		File.Copy(hostname, Path.Combine(target, "app.exe"));
+		File.WriteAllText(Path.Combine(target, "old.txt"), "旧版");
+		File.Copy(hostname, Path.Combine(staging, "app.exe"));
+		File.WriteAllText(Path.Combine(staging, "new.txt"), "新版");
+
+		File.WriteAllText(script, UpdateInstaller.SwapScript, new System.Text.UTF8Encoding(false));
+
+		var start = new System.Diagnostics.ProcessStartInfo
+		{
+			FileName = "powershell.exe",
+			UseShellExecute = false,
+			CreateNoWindow = true,
+			RedirectStandardOutput = true,
+			RedirectStandardError = true
+		};
+		foreach (var argument in new[]
+		{
+			"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
+			"-TargetDir", target,
+			"-SourceDir", staging,
+			"-ExeName", "app.exe",
+			"-WaitPid", int.MaxValue.ToString(),
+			"-ResultPath", result,
+			"-FromVersion", "0.1.0",
+			"-ToVersion", "0.2.0"
+		})
+		{
+			start.ArgumentList.Add(argument);
+		}
+
+		using var process = System.Diagnostics.Process.Start(start);
+		Expect(process is not null, "应该能把替换脚本拉起来");
+		if (process is null) return;
+		Expect(process.WaitForExit(120000), "替换脚本应在 120 秒内跑完");
+
+		Expect(File.Exists(result), "脚本要写出执行结果文件：" + result);
+		if (!File.Exists(result)) return;
+
+		var applied = System.Text.Json.JsonSerializer.Deserialize<UpdateApplyResult>(File.ReadAllText(result));
+		Expect(applied is not null, "结果文件要能读懂（键名映射错了就会读成空）");
+		Expect(applied!.Ok, "替换应报成功，实际失败原因：" + applied.Error);
+		Expect(applied.FromVersion == "0.1.0" && applied.ToVersion == "0.2.0", "结果里要带上前后版本号");
+		Expect(File.Exists(Path.Combine(target, "new.txt")), "目标目录应已换成新内容");
+		Expect(!File.Exists(Path.Combine(target, "old.txt")), "旧内容应被换走");
+		Expect(File.Exists(Path.Combine(target, "app.exe")), "换完之后主程序要在目标目录里");
+	}
+	finally
+	{
+		try { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+		catch (IOException) { }
+		catch (UnauthorizedAccessException) { }
 	}
 }
 

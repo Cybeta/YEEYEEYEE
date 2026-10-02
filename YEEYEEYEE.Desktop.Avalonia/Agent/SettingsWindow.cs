@@ -183,6 +183,25 @@ internal static class SettingsWindow
         // 每页都重复一遍太吵，收到一处又一直看得见。
         navPane.Children.Add(Note($"配置文件：\n{AiProviderSettings.ConfigFilePath}"));
 
+        // 版本与「检查更新」也收在左栏底部：这里是「我现在跑的是哪一版、能不能升」的唯一落点。
+        // 版本号读程序集，不在界面上写死。
+        var updateButton = new Button
+        {
+            Content = "检查更新",
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Left
+        };
+        updateButton.Classes.Add("miniButton");
+        navPane.Children.Add(new StackPanel
+        {
+            Spacing = 6,
+            Children =
+            {
+                new TextBlock { Text = "当前版本 " + AppVersion.Display, FontSize = 11, Foreground = Brush("DfInk2") },
+                updateButton
+            }
+        });
+
         var contentHost = new Panel();
         foreach (var root in roots) contentHost.Children.Add(root);
 
@@ -232,6 +251,8 @@ internal static class SettingsWindow
         layout.Children.Add(footer);
 
         var window = DialogShell.Create("设  置", layout, ShellWidth, ShellHeight);
+
+        updateButton.Click += async (_, _) => await UpdateFlow.CheckManuallyAsync(window);
 
         save.Click += (_, _) =>
         {

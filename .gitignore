@@ -6,6 +6,8 @@ obj/
 .idea/
 *.user
 *.suo
+# 发布打包产物（tools/publish-release.ps1 的输出，发版时上传到 GitHub）
+/artifacts/
 
 # ── 前端依赖与产物 ──
 YEEYEEYEE.Canvas/node_modules/
