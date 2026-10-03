@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseLayoutPlan, ghostMoves, movingIds, scopeLabel } from '../src/shell/layoutPlan'
-import { clientLabel, describeLease, isMine, leaseCovering, nodeLease, parseLeases, treeLease } from '../src/shell/locks'
+import { clientLabel, describeLease, holderOf, isMine, leaseCovering, nodeLease, parseLease, parseLeases, shouldHoldNodeLease, treeLease } from '../src/shell/locks'
 
 /**
  * 编辑锁与整理计划的读取口径。
@@ -74,6 +74,27 @@ describe('编辑锁的解析与归属', () => {
     expect(isMine(mine, 'me')).toBe(true)
     expect(isMine(mine, 'someone-else')).toBe(false)
     expect(isMine(null, 'me')).toBe(false)
+  })
+
+  it('单把锁与冲突里的持有者用同一套校验', () => {
+    expect(parseLease(lease())?.targetId).toBe(NODE_A)
+    expect(parseLease({ leaseId: 'x' })).toBeNull()
+    expect(parseLease(lease({ scope: 'node', targetId: null }))).toBeNull()
+    // 409 的响应体里带着持有者：界面要显示「等谁保存」，不能只有一句「被占用」
+    expect(holderOf({ code: 'EDIT_CONFLICT', message: '被占用', holder: lease({ displayName: '陈默' }) })?.displayName).toBe('陈默')
+    expect(holderOf({ code: 'EDIT_CONFLICT', message: '被占用' })).toBeNull()
+    expect(holderOf(null)).toBeNull()
+  })
+
+  it('该不该去占锁：光选中不算，真的打算改才算', () => {
+    // 选中一个节点、既没聚焦也没改：不占——否则点着看一圈就撒一地锁
+    expect(shouldHoldNodeLease({ editable: true, focused: false, dirty: false })).toBe(false)
+    // 焦点进了编辑框：占
+    expect(shouldHoldNodeLease({ editable: true, focused: true, dirty: false })).toBe(true)
+    // 焦点走了但草稿还在：继续占着，否则一移开焦点别人就能进来改
+    expect(shouldHoldNodeLease({ editable: true, focused: false, dirty: true })).toBe(true)
+    // 没权限或只读：不占（占了也只是白挨一个 403）
+    expect(shouldHoldNodeLease({ editable: false, focused: true, dirty: true })).toBe(false)
   })
 })
 

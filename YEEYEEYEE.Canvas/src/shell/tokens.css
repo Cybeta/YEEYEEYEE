@@ -885,6 +885,13 @@ textarea.df-input {
   font-size: 10px;
 }
 
+/* 自己握着的时候换成主色：黄色读作「有人占着」，蓝色读作「是你占着」，别混 */
+.df-lock-pill.is-mine {
+  background: rgba(94, 168, 255, 0.14);
+  border-color: rgba(94, 168, 255, 0.45);
+  color: var(--df-primary);
+}
+
 /* 画布左上角那枚「谁在编辑」（桌面端的 HintChip 用在左下角，这里避开它） */
 .df-who {
   position: absolute;
@@ -919,7 +926,13 @@ textarea.df-input {
   border: 1px solid var(--df-line-glow);
   box-shadow: var(--df-glow-shadow);
   font-size: 11px;
+  /* width: max-content 是必须的，不是修饰：绝对定位只给了 left 时，
+     shrink-to-fit 的可用宽度是「中心点到右边界」——正好只有一半容器宽，
+     内容会被挤成三行竖着堆。max-width 兜住窄窗口，translateX(-50%) 再把它摆正。 */
+  width: max-content;
   max-width: calc(100% - 28px);
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 .df-layout-bar.is-blocked {

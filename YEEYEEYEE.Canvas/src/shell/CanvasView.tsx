@@ -272,6 +272,7 @@ export function CanvasView(props: CanvasViewProps) {
               dimmed={activeIds !== null && !activeIds.has(node.recordId)}
               moving={movingIds.has(node.recordId)}
               lock={nodeLease(leases, node.recordId)}
+              myUserId={props.myUserId}
               assets={assets}
               assetsReady={assetsReady}
               showReferences={showReferencePreviews}
@@ -320,12 +321,13 @@ export function CanvasView(props: CanvasViewProps) {
   )
 }
 
-function NodeCard({ node, selected, dimmed, moving, lock, assets, assetsReady, showReferences, onSelect }: {
+function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, onSelect }: {
   node: ViewRecord
   selected: boolean
   dimmed: boolean
   moving: boolean
   lock: Lease | null
+  myUserId?: string
   assets: Asset[]
   assetsReady: boolean
   showReferences: boolean
@@ -334,6 +336,7 @@ function NodeCard({ node, selected, dimmed, moving, lock, assets, assetsReady, s
   const kind = kindOf(node.recordType)
   const meta = NODE_KINDS[kind]
   const references = recordReferences(node)
+  const mine = isMine(lock, myUserId)
   return (
     <button
       type="button"
@@ -349,8 +352,14 @@ function NodeCard({ node, selected, dimmed, moving, lock, assets, assetsReady, s
       </span>
       <span className="df-node-title">{recordTitle(node)}</span>
       <span className="df-node-body">{recordContent(node) || '暂无内容'}</span>
-      {/* 别人正在编辑这个节点：徽标挂在卡片上，不用点开检查器才知道 */}
-      {lock && <span className="df-lock-pill">◉ {describeLease(lock)} 正在编辑</span>}
+      {/* 别人正在编辑这个节点：徽标挂在卡片上，不用点开检查器才知道。
+          自己握着的时候也要显示——但说的不是「有人占着」，而是「你在编辑」，
+          这两句在界面上是两件事，颜色也分开。 */}
+      {lock && (
+        <span className={`df-lock-pill${mine ? ' is-mine' : ''}`}>
+          {mine ? '◉ 你在编辑' : `◉ ${describeLease(lock)} 正在编辑`}
+        </span>
+      )}
       {showReferences && references.length > 0 && (
         <span className="df-node-refs">
           {references.map((reference, index) => {

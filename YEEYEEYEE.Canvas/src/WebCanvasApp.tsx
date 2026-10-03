@@ -9,10 +9,11 @@ import { AgentPanel, type WebJob, type WebSkill } from './shell/AgentPanel'
 import { ChapterTree } from './shell/ChapterTree'
 import { InspectorPanel } from './shell/InspectorPanel'
 import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layoutPlan'
-import { describeLease, leaseCovering } from './shell/locks'
+import { describeLease, leaseCovering, shouldHoldNodeLease } from './shell/locks'
 import { RightDock } from './shell/RightDock'
-import { canvasBounds, chapterGroups, isEditableRecord, parseScene, recordContent, recordTitle, type ShellScene } from './shell/records'
+import { canvasBounds, chapterGroups, isEditableRecord, kindOf, parseScene, recordContent, recordTitle, type ShellScene } from './shell/records'
 import { useLeases } from './shell/useLeases'
+import { useNodeLease } from './shell/useNodeLease'
 import { Workspace } from './shell/Workspace'
 import {
   WorkbenchShell, type DockMode, type RailSection, type StatusFacts, type WorkbenchChrome, type WorkbenchView
@@ -65,6 +66,8 @@ export function WebCanvasApp() {
   const [layoutPlan, setLayoutPlan] = useState<LayoutPlan | null>(null)
   const [layoutScope, setLayoutScope] = useState<LayoutScope>('all')
   const [layoutBusy, setLayoutBusy] = useState(false)
+  /** 检查器的编辑框是否拿到焦点——它是「打算改」的信号，用来决定要不要去占锁。 */
+  const [editorFocused, setEditorFocused] = useState(false)
   const generation = useRef(0)
   // 编辑锁只能轮询：服务端还没有变更推送。锁坏了不影响画布，错误单独显示。
   const { leases, error: leaseError, invalidCount: leaseInvalidCount, refresh: refreshLeases } = useLeases(!!auth?.user)
@@ -79,7 +82,20 @@ export function WebCanvasApp() {
   const myUserId = auth?.user?.id ?? ''
   // 选中节点上的锁：别人持有的（含整棵树锁）会让写入与检查器都变成只读。
   const selectedLease = selected ? leaseCovering(leases, selected.recordId) : null
-  const blockedBy = selectedLease && selectedLease.userId !== myUserId ? selectedLease : null
+  const polledBlocked = selectedLease && selectedLease.userId !== myUserId ? selectedLease : null
+
+  // 网页端自己持锁：焦点进了编辑框、或草稿还没保存，才去占（见 shouldHoldNodeLease）。
+  // 光选中不算——点着看一圈就撒一地锁，等于把别人挡在外面而自己什么也没改。
+  const holdLease = shouldHoldNodeLease({ editable, focused: editorFocused, dirty })
+  const nodeLeaseState = useNodeLease({
+    recordId: selected?.recordId ?? '',
+    wanted: holdLease,
+    // 拿到/还回锁之后立刻刷新一次锁列表：否则自己那张卡的徽标要等下一次轮询才出现。
+    onChanged: () => void refreshLeases()
+  })
+  // 申请被拒时拿到的持有者是**刚刚发生**的冲突，比 15 秒轮询那份新；两边取其一即可。
+  const blockedBy = nodeLeaseState.blockedBy ?? polledBlocked
+  const heldByMe = nodeLeaseState.held
 
   /**
    * 选中 / 取消选中。传 null 是「在画布上点了空白处」——桌面端也是按空白先取消选中再进入平移。
@@ -121,7 +137,10 @@ export function WebCanvasApp() {
       setScene(parsed)
       setNotice({
         kind: 'success',
-        message: `画布加载成功：修订 ${parsed.revision}，${parsed.records.filter(isEditableRecord).length} 个节点、${parsed.records.length - parsed.records.filter(isEditableRecord).length} 条工作树章节。${parsed.readOnly ? ' 服务端把它标成了只读。' : ''}`
+        // 章节数按**种类**数，不拿「非可编辑记录」当代理：章节可以是工作树行（recordId 是 wt-，
+        // 不算可编辑记录），也可以是真实的章节节点（是 UUID，算可编辑记录）。
+        // 拿后者反推前者，会在「章节已经是节点」的画布上数出 0，而左边的树里明明有好几章。
+        message: `画布加载成功：修订 ${parsed.revision}，${parsed.records.filter(isEditableRecord).length} 个节点、${parsed.records.filter((item) => kindOf(item.recordType) === 'chapter').length} 个章节。${parsed.readOnly ? ' 服务端把它标成了只读。' : ''}`
       })
     } catch (error) {
       setNotice({ kind: 'error', message: `画布加载失败：${errorMessage(error)}` })
@@ -388,15 +407,17 @@ export function WebCanvasApp() {
   const inspectorHint = !selected
     ? '在画布上点一个节点后可以改它的名称与内容'
     : blockedBy ? `${describeLease(blockedBy)} 正在编辑这个节点，等他保存或让管理员接管`
-      : readOnly ? '这张画布被服务端标成只读，改不了'
-        : !canEdit(role) ? '你的账号是只读，改不了画布'
-          : dirty ? '改完点「应用修改」或按 Ctrl+Enter 写回画布' : '没有未保存的修改'
+      : heldByMe ? '锁在你手上：离开编辑框后会自动还回去'
+        : readOnly ? '这张画布被服务端标成只读，改不了'
+          : !canEdit(role) ? '你的账号是只读，改不了画布'
+            : dirty ? '改完点「应用修改」或按 Ctrl+Enter 写回画布' : '点进编辑框会先占锁，别人这时改不了这个节点'
 
   // 锁这一路自己的问题。它不该把画布变成不可用，但也不能悄悄吞掉——
   // 否则界面上的「没有人编辑」会被读成「现在没人编辑」。
-  const leaseNotice = leaseError
-    ? `编辑锁暂时读不到：${leaseError}`
-    : leaseInvalidCount > 0 ? `有 ${leaseInvalidCount} 条锁记录格式不对，已跳过` : ''
+  const leaseNotice = nodeLeaseState.error
+    ? `编辑锁：${nodeLeaseState.error}`
+    : leaseError ? `编辑锁暂时读不到：${leaseError}`
+      : leaseInvalidCount > 0 ? `有 ${leaseInvalidCount} 条锁记录格式不对，已跳过` : ''
 
   return (
     <WorkbenchShell
@@ -452,6 +473,8 @@ export function WebCanvasApp() {
                 canEdit={canEdit(role)}
                 hint={inspectorHint}
                 blockedBy={blockedBy}
+                heldByMe={heldByMe}
+                onEditingChange={setEditorFocused}
                 assets={assets}
                 assetsReady={assetsReady}
                 onTitle={setTitle}
