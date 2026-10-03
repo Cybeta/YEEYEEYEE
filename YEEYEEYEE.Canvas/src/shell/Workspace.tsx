@@ -7,7 +7,7 @@ import { ghostMoves, type LayoutMove, type LayoutPlan, type LayoutScope } from '
 import { describeLease, treeLease, type Lease } from './locks'
 import {
   chapterGroups, isEditableRecord, PLANNING_GROUP_ID, recordContent, recordTitle, scriptEntries,
-  stageSummaries, UNFILED_GROUP_ID, type ViewRecord
+  stageSummaries, UNFILED_GROUP_ID, type ShellEdge, type ViewRecord
 } from './records'
 import { ScriptView, TimelineView } from './views'
 import type { WorkbenchView } from './WorkbenchShell'
@@ -16,8 +16,9 @@ import type { WorkbenchView } from './WorkbenchShell'
  * 中央工作流画布：标签条 + 工具栏 + 制作阶段芯片 + 三个视图。
  *
  * 桌面端这里是一个 Grid(RowDefinitions="Auto,Auto,Auto,*")，四个区的顺序与边距都一样。
- * 工具栏里有几个按钮在服务端还没有对应接口（新建节点、加资源、连接、删除），
+ * 工具栏里还有几个动作在服务端没有对应接口（加资源、连接、删除），
  * 这里做成**可见但不可点并给出原因**——占位成可点、点了没反应，比灰着更让人困惑。
+ * （新建与删除节点已经有了，但入口在工作树与检查器上，不是这几个按钮。）
  */
 
 export type WorkspaceProps = {
@@ -46,6 +47,8 @@ export type WorkspaceProps = {
   onLayoutPlan: (scope: LayoutScope) => void
   onLayoutApply: (overrideManual: boolean) => void
   onLayoutCancel: () => void
+  /** 画布上的连线（服务端投影的）。画布会自己再按「两端都画得出来」筛一遍。 */
+  edges?: ShellEdge[]
 }
 
 const STAGE_FILTERS: Array<{ key: string; label: string; match: (layer: number) => boolean }> = [
@@ -67,10 +70,12 @@ export function matchesSearch(record: ViewRecord, search: string): boolean {
 // 模块级空默认值：写在组件里的 `?? []` 每次都是新数组，会让 useMemo 白白重算。
 const EMPTY_LEASES: Lease[] = []
 const EMPTY_GHOSTS: LayoutMove[] = []
+const EMPTY_EDGES: ShellEdge[] = []
 
 export function Workspace(props: WorkspaceProps) {
   const { view, records, selectedId, onSelect, search, canvasTitle, activeChapter, onChapter, readOnly, canEdit, assets, assetsReady } = props
   const leases = props.leases ?? EMPTY_LEASES
+  const edges = props.edges ?? EMPTY_EDGES
   const [stage, setStage] = useState('all')
   const [showReferencePreviews, setShowReferencePreviews] = useState(true)
   const [zoom, setZoom] = useState(0.86)
@@ -119,11 +124,11 @@ export function Workspace(props: WorkspaceProps) {
       <div className="df-row-between" style={{ margin: '10px 12px 0' }}>
         <div className="df-cluster df-wrap">
           <button type="button" className="df-mini-button is-active">选择</button>
-          <button type="button" className="df-mini-button" disabled title="网页端只开放「改标题与内容」这一条写路径，新建节点尚未接入">＋ 节点</button>
+          <button type="button" className="df-mini-button" disabled title="新建节点的入口在工作树顶上（这里不再重复开一个）">＋ 节点</button>
           <button type="button" className="df-mini-button" disabled title="新增引用尚未接入服务端">＋ 资源</button>
-          <button type="button" className="df-mini-button" disabled title="连线未投影到网页端，也无法新建">连接</button>
+          <button type="button" className="df-mini-button" disabled title="连线画得出来了，但拖一根新的还没有写路径">连接</button>
           <span className="df-divider-v" style={{ height: 18, margin: '0 4px' }} />
-          <button type="button" className="df-mini-button" disabled title="删除节点尚未接入服务端">删除</button>
+          <button type="button" className="df-mini-button" disabled title="删除节点的入口在检查器里（这里不再重复开一个）">删除</button>
           <span className="df-divider-v" style={{ height: 18, margin: '0 4px' }} />
           {/* 桌面端界面里**没有**手动整理的入口——那份泳道引擎只有 Agent 与测试在用，
               所以这个按钮是新增能力，不是复刻。服务端接口已经就位，且用的是同一份引擎。 */}
@@ -193,6 +198,7 @@ export function Workspace(props: WorkspaceProps) {
             myUserId={props.myUserId}
             channelNotice={props.channelNotice}
             ghosts={ghosts}
+            edges={edges}
           />
         )}
         {view === 'timeline' && (

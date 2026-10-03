@@ -112,6 +112,8 @@ function looksLikeRecord(value: unknown): value is ViewRecord {
 export type ShellScene = {
   revision: number
   records: ViewRecord[]
+  /** 连线。两端都是画布上真实存在的节点（服务端只投影这样的）；独立场景模式不带这个字段。 */
+  edges: ShellEdge[]
   /** 服务端判定这张画布只能读（高版本格式、校验有错、迁移有歧义）。独立场景模式不带这个字段。 */
   readOnly: boolean
   formatVersion?: number
@@ -129,7 +131,7 @@ export type ShellScene = {
  */
 export function parseScene(value: unknown): ShellScene {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('响应格式不正确')
-  const raw = value as { revision?: unknown; records?: unknown; readOnly?: unknown; formatVersion?: unknown; projectName?: unknown; canvasTitle?: unknown }
+  const raw = value as { revision?: unknown; records?: unknown; edges?: unknown; readOnly?: unknown; formatVersion?: unknown; projectName?: unknown; canvasTitle?: unknown }
   const revision = numberOf(raw.revision)
   if (revision === undefined || revision < 0) throw new Error('响应格式不正确')
   if (!Array.isArray(raw.records) || !raw.records.every(looksLikeRecord)) throw new Error('响应格式不正确')
@@ -138,11 +140,45 @@ export function parseScene(value: unknown): ShellScene {
   return {
     revision,
     records: raw.records,
+    edges: parseEdges(raw.edges),
     readOnly: raw.readOnly === true,
     formatVersion: numberOf(raw.formatVersion),
     projectName: projectName.length > 0 ? projectName : undefined,
     canvasTitle: canvasTitle.length > 0 ? canvasTitle : undefined
   }
+}
+
+/** 一条连线：两端都指向画布上真实存在的节点（服务端只投影这样的）。 */
+export type ShellEdge = { edgeId: string; sourceId: string; targetId: string }
+
+/**
+ * 解析连线。**坏的那一条跳过，不炸整份场景**：连线与画布是两层信息，
+ * 为一条读不懂的连线让整张画布打不开，是拿次要的东西换主要的东西。
+ */
+function parseEdges(value: unknown): ShellEdge[] {
+  if (!Array.isArray(value)) return []
+  const result: ShellEdge[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const raw = item as { edgeId?: unknown; sourceId?: unknown; targetId?: unknown }
+    const edgeId = text(raw.edgeId).trim()
+    const sourceId = text(raw.sourceId).trim()
+    const targetId = text(raw.targetId).trim()
+    if (edgeId.length === 0 || sourceId.length === 0 || targetId.length === 0) continue
+    result.push({ edgeId, sourceId, targetId })
+  }
+  return result
+}
+
+/**
+ * 画得出来的连线：**两端都得在当前画布上**。
+ *
+ * 服务端已经只投影两端都存在的连线，但画布还会按阶段芯片与搜索筛掉节点——
+ * 少了一端的线画不出来，也不该画：画出去就是一根悬在半空的线，比不画更费解。
+ */
+export function visibleEdges(edges: ShellEdge[], records: ViewRecord[]): ShellEdge[] {
+  const present = new Set(records.filter(isEditableRecord).map((record) => record.recordId))
+  return edges.filter((edge) => present.has(edge.sourceId) && present.has(edge.targetId))
 }
 
 /** 企划层不进章节泳道（它们本来就在章节之外），与桌面端的泳道语义一致。 */

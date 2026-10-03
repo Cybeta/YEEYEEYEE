@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { recordReferences, resolveReference, type Asset } from '../assets'
 import { ALL_CHAPTERS_ID } from '../ChapterView'
 import type { LayoutMove } from './layoutPlan'
 import { describeLease, isMine, nodeLease, treeLease, type Lease } from './locks'
 import {
   canvasBounds, chapterGroups, isEditableRecord, kindOf, NODE_KINDS, nodeX, nodeY,
-  recordContent, recordStatus, recordTitle, type ViewRecord
+  recordContent, recordStatus, recordTitle, visibleEdges, type ShellEdge, type ViewRecord
 } from './records'
 
 /**
@@ -18,8 +18,8 @@ import {
  * 卡片用普通流式布局，缩放平移交给一条 transform。
  *
  * 两点如实说明，不假装有：
- *   - 连线没有投影到网页端（NodeProjection 只投影节点），所以这里画不出连线；
- *   - 网页端目前只有「改标题与内容」这一条写路径，增删节点与连线都没有接口。
+ *   - 连线**画得出来了**（服务端会投影连线，只投影两端都还在的），但**拖一根新的**还没有接口；
+ *   - 网页端的写路径是「改标题与内容 / 新建与删除节点 / 整理布局」，改类别与移动单个节点还没有。
  */
 
 export type Pan = { x: number; y: number }
@@ -55,6 +55,8 @@ export type CanvasViewProps = {
   myUserId?: string
   /** 整理布局的虚影。只画不动——桌面端的预览层同样不参与命中测试。 */
   ghosts?: LayoutMove[]
+  /** 画布上的连线（服务端只投影两端都还在的那些）。 */
+  edges?: ShellEdge[]
 }
 
 const MIN_ZOOM = 0.25
@@ -98,11 +100,17 @@ const NODE_CARD_HEIGHT = 104
 // 空默认值放在模块级：写成 `?? []` 会让 useMemo 每次拿到新数组，白白重算一遍。
 const EMPTY_LEASES: Lease[] = []
 const EMPTY_GHOSTS: LayoutMove[] = []
+const EMPTY_EDGES: ShellEdge[] = []
+
+// 箭头标记的 id 要在一页里唯一：同一个 id 出现两次时浏览器只认第一份，
+// 第二张画布上的箭头就会跟着第一张的配色走。用自增序号而不是写死的常量。
+let edgeArrowSeq = 0
 
 export function CanvasView(props: CanvasViewProps) {
   const { records, selectedId, activeChapter, assets, assetsReady, showReferencePreviews, zoom, pan, onZoom, onPan, onSelect, apiRef } = props
   const leases = props.leases ?? EMPTY_LEASES
   const ghosts = props.ghosts ?? EMPTY_GHOSTS
+  const [arrowId] = useState(() => `df-edge-arrow-${++edgeArrowSeq}`)
   const viewportRef = useRef<HTMLDivElement>(null)
   const panning = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null)
 
@@ -110,6 +118,35 @@ export function CanvasView(props: CanvasViewProps) {
   const nodes = useMemo(() => records.filter(isEditableRecord), [records])
   const movingIds = useMemo(() => new Set(ghosts.map((ghost) => ghost.recordId)), [ghosts])
   const others = useMemo(() => leases.filter((lease) => !isMine(lease, props.myUserId)), [leases, props.myUserId])
+
+  /**
+   * 连线的**端点**：取卡片中心，与虚影连线同一套算法、同一份尺寸常量。
+   *
+   * 终点往回收半个卡片宽：这一层画在卡片**下面**，落在卡片里的箭头等于没画。
+   * 这是个近似（卡片是方的，按方向往回让），但泳道布局的连线基本都是横的，
+   * 近似结果与真实卡片边缘只差几个像素——够用，也不必为此把几何算成矩形求交。
+   */
+  const lines = useMemo(() => {
+    const drawn = visibleEdges(props.edges ?? EMPTY_EDGES, records)
+    if (drawn.length === 0) return []
+    const byId = new Map(nodes.map((node) => [node.recordId, node]))
+    return drawn.flatMap((edge) => {
+      const from = byId.get(edge.sourceId)
+      const to = byId.get(edge.targetId)
+      if (!from || !to) return []
+      const dx = nodeX(to) - nodeX(from)
+      const dy = nodeY(to) - nodeY(from)
+      const span = Math.hypot(dx, dy)
+      const back = span > 0 ? Math.min(span, NODE_CARD_WIDTH / 2 + 6) : 0
+      return [{
+        edgeId: edge.edgeId,
+        x1: nodeX(from) + NODE_CARD_WIDTH / 2,
+        y1: nodeY(from) + NODE_CARD_HEIGHT / 2,
+        x2: nodeX(to) + NODE_CARD_WIDTH / 2 - (span > 0 ? (dx / span) * back : 0),
+        y2: nodeY(to) + NODE_CARD_HEIGHT / 2 - (span > 0 ? (dy / span) * back : 0)
+      }]
+    })
+  }, [props.edges, records, nodes])
 
   /** 画布左上角那句「谁在编辑」。自己的锁不写在这里——自己当然知道自己刚点了什么。 */
   const whoLines = useMemo(() => {
@@ -264,6 +301,35 @@ export function CanvasView(props: CanvasViewProps) {
       <div className="df-viewport" ref={viewportRef}>
         <div className="df-world" style={{ width: bounds.width, height: bounds.height, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
           <div className="df-world-grid" />
+          {/* 连线层：铺在网格之上、卡片之下。整层不可点——线不参与命中测试，
+              点在线上等于点在空白处（与桌面端一致）。 */}
+          {lines.length > 0 && (
+            <svg className="df-edge-layer" width={bounds.width} height={bounds.height} aria-hidden="true">
+              <defs>
+                <marker
+                  id={arrowId}
+                  viewBox="0 0 8 8"
+                  refX="7"
+                  refY="4"
+                  markerWidth="6"
+                  markerHeight="6"
+                  orient="auto"
+                >
+                  <path d="M0,0 L8,4 L0,8 Z" />
+                </marker>
+              </defs>
+              {lines.map((line) => (
+                <line
+                  key={line.edgeId}
+                  x1={line.x1}
+                  y1={line.y1}
+                  x2={line.x2}
+                  y2={line.y2}
+                  markerEnd={`url(#${arrowId})`}
+                />
+              ))}
+            </svg>
+          )}
           {nodes.map((node) => (
             <NodeCard
               key={node.recordId}
