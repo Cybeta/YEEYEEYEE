@@ -54,6 +54,10 @@
   --df-titlebar-height: 58px;
   --df-statusbar-height: 34px;
   --df-gap: 10px;
+  /* 中栏的最小宽度（工程债 #9）。不是随手取的数：桌面端 MainWindow 的 Window.MinWidth=1100，
+     减掉两边各 10 的边距再减掉 244 + 336 两条侧栏，正好是 500——**两端同一个数**。
+     窄到装不下时不压缩这一栏，改成整块横向滚动。 */
+  --df-center-min: 500px;
 
   --df-radius-glass: 16px;
   --df-radius-panel: 12px;
@@ -129,9 +133,13 @@ select {
   height: 100%;
   padding: var(--df-gap);
   display: grid;
-  grid-template-columns: var(--df-rail-width) minmax(0, 1fr) var(--df-dock-width);
+  /* 中栏给一个下限（minmax(0,1fr) 会把它压到 min-content，画布被挤成一条、工具栏竖着叠起来）。
+     装不下时不让它继续压缩：整块横向滚动——这是「两端同一个中栏最小值」在网页端的落法
+     （桌面端靠 Window.MinWidth，网页端管不住浏览器窗口，只能滚）。 */
+  grid-template-columns: var(--df-rail-width) minmax(var(--df-center-min), 1fr) var(--df-dock-width);
   grid-template-rows: var(--df-titlebar-height) minmax(0, 1fr) var(--df-statusbar-height);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 /* 全屏冷蓝光场：铺在工作台之下，不参与命中 */
@@ -142,9 +150,9 @@ select {
   pointer-events: none;
 }
 
-/* 收起右侧栏时把第三列压到 0：留着 336px 空栏比不收更难看 */
+/* 收起右侧栏时把第三列压到 0：留着 336px 空栏比不收更难看。中栏同样保留下限。 */
 .df-workbench.is-dock-closed {
-  grid-template-columns: var(--df-rail-width) minmax(0, 1fr) 0;
+  grid-template-columns: var(--df-rail-width) minmax(var(--df-center-min), 1fr) 0;
 }
 
 .df-row-1 {
