@@ -34,6 +34,22 @@ export const NODE_KINDS: Record<NodeKind, { label: string; hex: string; layer: n
   general: { label: '通用', hex: '#8FA6BD', layer: 0 }
 }
 
+/**
+ * 反向：网页端要**新建**节点时，把界面上的类别说回服务端的 recordType。
+ *
+ * 与 `kindOf` 互为反向（一个读进来、一个写出去），所以紧挨着它放：分开写迟早会出现
+ * 「读得懂、写不回」。取值与服务端 `NodeProjection` 那张表是一对。
+ * `chapter` 故意不在里面：章节是工作树条目，网页端这一版不能新建（服务端也会拒）。
+ */
+export const CREATABLE_RECORD_TYPES: { kind: keyof typeof NODE_KINDS; recordType: string; label: string }[] = [
+  { kind: 'storyboard', recordType: 'storyboard', label: '分镜' },
+  { kind: 'character', recordType: 'character', label: '出场角色' },
+  { kind: 'scene', recordType: 'scene-description', label: '场景' },
+  { kind: 'prop', recordType: 'prop', label: '道具' },
+  { kind: 'product', recordType: 'product', label: '成品' },
+  { kind: 'general', recordType: 'general', label: '通用' }
+]
+
 export function kindOf(recordType: string): NodeKind {
   const t = recordType.toLowerCase()
   if (t.includes('story') && t.includes('plan')) return 'plan'

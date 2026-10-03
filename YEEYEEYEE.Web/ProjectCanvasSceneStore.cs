@@ -265,6 +265,84 @@ internal sealed class ProjectCanvasSceneStore
     }
 
     /// <summary>
+    /// 新建一个节点（网页端的「新建」走这里）。
+    ///
+    /// 位置由**服务端**算：放在同一章节里最右那个节点的右边一列（没有同章节的节点就落在原点）。
+    /// 不让客户端送坐标——排版只该有一份规则，客户端再送一份就是第二个真相；
+    /// 真正「排好看」交给整理布局（它按同一份引擎重排，连 ManualPosition 也会被它覆盖）。
+    /// 节点的形态（Category / WaitingForUser / ManualPosition）与**桌面端新建节点时一致**。
+    /// </summary>
+    public IResult CreateNode(long baseRevision, NodeCategory category, string? title, Guid? chapterId)
+    {
+        if (category == NodeCategory.Chapter)
+            return Error(400, "CANVAS_CHAPTER_NOT_SUPPORTED",
+                "这一版还不能新建章节：章节是工作树条目（不是画布节点），得先在桌面端建好");
+
+        var created = Guid.Empty;
+        return Write(baseRevision, current =>
+            {
+                var canvas = current.Canvas;
+                if (canvas is null) return (null, Error(409, "CANVAS_EMPTY", "这张画布没有节点集合"));
+
+                // 锚点必须真的存在：写一个不存在的章节 ID，等于往画布里塞一个悬空引用。
+                if (chapterId is { } anchor && CanvasChapters.List(canvas).All(chapter => chapter.Id != anchor))
+                    return (null, Error(400, "CANVAS_UNKNOWN_CHAPTER", "指定的章节不在这张画布里"));
+
+                // 落点只是「别叠在一起」，不是排版结果——同章节的兄弟姐妹决定它往哪边放。
+                var siblings = canvas.Nodes
+                    .Where(node => CanvasChapters.ResolveChapterId(canvas, node) == chapterId)
+                    .ToList();
+                var node = new WorkflowNode
+                {
+                    Title = string.IsNullOrWhiteSpace(title) ? "新节点" : title.Trim(),
+                    Category = category,
+                    ExecutionStatus = NodeExecutionStatus.WaitingForUser,
+                    X = siblings.Count == 0 ? 0f : siblings.Max(item => item.X) + PlaceholderSpacing,
+                    Y = siblings.Count == 0 ? 0f : siblings.Max(item => item.Y),
+                    ManualPosition = true
+                };
+                // 章节锚点就是 WorkTreeItemId：章节在画布里是**工作树条目**，不是普通节点字段。
+                if (chapterId is { } target) node.WorkTreeItemId = target;
+                canvas.Nodes.Add(node);
+                created = node.Id;
+                return (canvas, null);
+            },
+            (next, bytes) => new { revision = Revision(bytes), nodeId = created, nodes = next.Canvas.Nodes.Count });
+    }
+
+    /// <summary>
+    /// 删掉一个节点，**连带删掉它的连线**。
+    ///
+    /// 与桌面端的删除是同一条语义（那边也是摘掉节点 + 把两头连着它的连线一起删）：
+    /// 留着悬空连线，画布校验会立刻拦下这次写入，而用户看到的会是「删了却保存不了」。
+    /// 引用完整性同样由校验把守（别人还引用着它时会如实拒绝，而不是留一份坏画布）。
+    /// </summary>
+    public IResult DeleteNode(long baseRevision, Guid nodeId)
+    {
+        var title = string.Empty;
+        return Write(baseRevision, current =>
+            {
+                var canvas = current.Canvas;
+                if (canvas is null) return (null, Error(409, "CANVAS_EMPTY", "这张画布没有节点集合"));
+
+                var node = canvas.Nodes.FirstOrDefault(item => item.Id == nodeId);
+                if (node is null) return (null, Error(404, "CANVAS_NODE_NOT_FOUND", "这个节点不在这张画布里"));
+                if (node.Category == NodeCategory.Chapter)
+                    return (null, Error(400, "CANVAS_CHAPTER_NOT_SUPPORTED",
+                        "这一版不能删章节：它挂着工作树与分章关系，请到桌面端删（那边有撤销）"));
+
+                title = node.Title;
+                canvas.Nodes.Remove(node);
+                canvas.Edges.RemoveAll(edge => edge.SourceNodeId == nodeId || edge.TargetNodeId == nodeId);
+                return (canvas, null);
+            },
+            (next, bytes) => new { revision = Revision(bytes), deleted = title, nodes = next.Canvas.Nodes.Count });
+    }
+
+    /// <summary>新节点的临时落点间距：它只是「别叠在一起」，摆好看是整理布局的事。</summary>
+    private const float PlaceholderSpacing = 320f;
+
+    /// <summary>
     /// 整理布局的预览：**只算不写**，返回泳道划分与逐节点改动。
     ///
     /// 用的是桌面端同一份 <see cref="CanvasSwimlaneLayout"/>（Desktop.Shared 里的那个引擎，
