@@ -250,7 +250,7 @@ internal static class SettingsMediaPage
 
         var testComfy = Secondary("测试连接");
         testComfy.HorizontalAlignment = HorizontalAlignment.Left;
-        testComfy.Click += (_, _) =>
+        testComfy.Click += async (_, _) =>
         {
             if (!saveToDisk())
                 report("配置没能写盘，测试用的是磁盘上旧的那份", YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Warning);
@@ -266,30 +266,31 @@ internal static class SettingsMediaPage
                 return;
             }
 
-            // ComfyUI 的测试只解析链路、不提交任务：ComfyUI 是异步出图，会真的排队跑工作流、
-            // 占显卡也占时间，一个「测试连接」按钮不该顺手起一个任务。这里如实报出实际解析到的链路。
-            if (provider.Name == "ComfyUI")
+            // ComfyUI 的测试只解析链路、**不提交任务**：ComfyUI 是异步出图，会真的排队跑工作流、
+            // 占显卡也占时间，一个「测试连接」按钮不该顺手起一个任务。
+            //
+            // 但「只解析链路」也证明不了地址通不通（工厂是照着配置回显的）。所以这里**只读地**
+            // 读一次服务器的工作流清单：那正是导入时拉工作流走的第一条接口，
+            // 能读到就说明地址、端口、鉴权这三件事都对得上，读不到就把原文报出来。
+            if (provider.Name == "ComfyUI" || config.IsComfyUiConfigured)
             {
-                report(
-                    $"链路就绪：ComfyUI（checkpoint={config.ComfyUiCheckpoint}）。本次只解析链路，没有提交生成任务。",
-                    YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Success);
-                return;
-            }
-
-            if (config.IsComfyUiConfigured)
-            {
-                // 地址与 checkpoint 都填了却没走到 ComfyUI：说明本地执行服务没起来（ComfyUI 没在跑），
-                // 或者地址 / checkpoint 对不上，工厂因此回落到了云端链路。这里如实报出实际走的是谁。
-                report(
-                    $"ComfyUI 已在配置里填好，但这次解析到的链路是「{provider.Name}」而不是 ComfyUI：" +
-                    "多半是 ComfyUI 没在运行（或地址 / checkpoint 对不上），本地执行服务起不来，于是回落到了云端链路。",
-                    YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Warning);
+                report($"链路就绪：ComfyUI（checkpoint={config.ComfyUiCheckpoint}）。"
+                    + "本次只解析链路，没有提交生成任务。正在只读地读一次工作流清单以确认地址可达…",
+                    YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Info);
+                var (ok, detail) = await ComfyUiLibrary.ProbeAsync(config.ComfyUiBaseUrl);
+                report((ok ? "地址可达：" : "地址读不到：") + detail
+                    + (ok
+                        ? "。工作流要在「智能导入」里拉一次才会存下来（设置 → 技能管理 → 站点与池子 里能看）。"
+                        : "。确认这台 ComfyUI 正在运行、地址填的是控制台首页（不要带 /object_info 这类路径）。"),
+                    ok
+                        ? YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Success
+                        : YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Warning);
                 return;
             }
 
             report(
-                $"还没配好 ComfyUI：填上「ComfyUI 地址」与「Checkpoint 文件名」后才会优先走本地链路。" +
-                $"当前解析到「{provider.Name}」。",
+                $"还没配好 ComfyUI：填上「ComfyUI 地址」与「Checkpoint 文件名」后才会优先走本地链路。"
+                + $"当前解析到「{provider.Name}」。",
                 YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Warning);
         };
         root.Children.Add(testComfy);
