@@ -304,26 +304,61 @@ internal sealed class ProjectCanvasSceneStore
 
             var attachment = EntityAssets.PreviewImage(content);
             if (attachment is null) return Error(404, "ASSET_NO_IMAGE", "这条设定还没有图片");
-
-            if (AgentAttachmentLoader.SplitDataUrl(attachment.Reference) is { } inline)
-            {
-                try { return Results.Bytes(Convert.FromBase64String(inline.Data), inline.MediaType); }
-                catch (FormatException) { return Error(500, "ASSET_INLINE_INVALID", "内嵌图片的 base64 解不开"); }
-            }
-
-            var file = AssetStore.Resolve(attachment.Reference);
-            if (file is null)
-                return Error(404, "ASSET_FILE_MISSING",
-                    "图片文件不在这个部署里：容器要把共享素材目录（ASSET_DIR）或项目目录挂进来");
-            if (!InsideAllowedRoots(file))
-                return Error(403, "ASSET_OUTSIDE_PROJECT",
-                    "这张图不在允许的目录里（共享素材目录或项目目录），拒绝服务");
-            return Results.File(file, AgentAttachmentLoader.ImageMediaType(file) ?? "application/octet-stream");
+            return AttachmentBytes(attachment);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
         {
             return Error(503, "PROJECT_CANVAS_READ_FAILED", "项目画布或项目资源无法安全读取：" + ex.Message);
         }
+    }
+
+    /// <summary>
+    /// 只读：一条记录上**某个产物**的字节（检查器里那些产物图）。
+    ///
+    /// 与设定缩略图走**同一条**出字节的路（<see cref="AttachmentBytes"/>）：内嵌 data URL 与项目内文件
+    /// 两种形式、以及那道「只服务项目内文件」的闸，只写一遍——两处各写一份，安全闸迟早会走散。
+    /// </summary>
+    public IResult AttachmentFile(Guid recordId, Guid attachmentId)
+    {
+        try
+        {
+            var current = Load();
+            CheckProjectAuthority(current.State);
+            var node = current.State.Canvas.Nodes.FirstOrDefault(item => item.Id == recordId);
+            if (node is null) return Error(404, "RECORD_NOT_FOUND", "这条记录不在这张画布里");
+            var attachment = node.Attachments.FirstOrDefault(item => item.Id == attachmentId);
+            if (attachment is null) return Error(404, "ASSET_ATTACHMENT_NOT_FOUND", "这个产物不在这条记录上");
+            // 只服务图片：视频 / 音频网页端还没有播放器，说清楚比丢一段读不了的字节好。
+            if (attachment.Kind != AttachmentKind.Image)
+                return Error(409, "ASSET_NOT_IMAGE", "这个产物不是图片（网页端暂时只显示图片）");
+            return AttachmentBytes(attachment);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
+        {
+            return Error(503, "PROJECT_CANVAS_READ_FAILED", "项目画布或项目资源无法安全读取：" + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 把一个附件引用变成字节：**两种形式在这里收口**——内嵌的 data URL，与项目内的文件。
+    /// 文件那一路带着「只服务允许目录」的闸，见 <see cref="InsideAllowedRoots"/>。
+    /// </summary>
+    private IResult AttachmentBytes(WorkflowAttachment attachment)
+    {
+        if (AgentAttachmentLoader.SplitDataUrl(attachment.Reference) is { } inline)
+        {
+            try { return Results.Bytes(Convert.FromBase64String(inline.Data), inline.MediaType); }
+            catch (FormatException) { return Error(500, "ASSET_INLINE_INVALID", "内嵌图片的 base64 解不开"); }
+        }
+
+        var file = AssetStore.Resolve(attachment.Reference);
+        if (file is null)
+            return Error(404, "ASSET_FILE_MISSING",
+                "图片文件不在这个部署里：容器要把共享素材目录（ASSET_DIR）或项目目录挂进来");
+        if (!InsideAllowedRoots(file))
+            return Error(403, "ASSET_OUTSIDE_PROJECT",
+                "这张图不在允许的目录里（共享素材目录或项目目录），拒绝服务");
+        return Results.File(file, AgentAttachmentLoader.ImageMediaType(file) ?? "application/octet-stream");
     }
 
     /// <summary>

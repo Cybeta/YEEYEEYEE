@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { entityThumbUrl } from '../src/shell/assetImages'
+import { attachmentFileUrl, entityThumbUrl } from '../src/shell/assetImages'
 
 /**
  * 引用徽标上那张缩略图的 URL。
@@ -23,5 +23,13 @@ describe('设定缩略图的 URL', () => {
 
   it('转义交给 URL 那一层，不靠「ID 恰好是 GUID」', () => {
     expect(entityThumbUrl('a/b', 'v 1')).toBe('/api/web/entities/a%2Fb/thumb?variantId=v+1')
+  })
+})
+
+/** 节点产物图（第 177 轮）：比设定缩略图多一层记录 ID，且**没有变体 / 版本**可选。 */
+describe('节点产物图的 URL', () => {
+  it('两条 ID 都进路径，各转义各的', () => {
+    expect(attachmentFileUrl('n1', 'a1')).toBe('/api/web/records/n1/attachments/a1/file')
+    expect(attachmentFileUrl('n/1', 'a 1')).toBe('/api/web/records/n%2F1/attachments/a%201/file')
   })
 })

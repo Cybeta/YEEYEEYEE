@@ -39,6 +39,22 @@ public static class NodeProjection
                 record["parentId"] = node.ParentNodeId.Value.ToString();
             if (references.Count > 0)
                 record["references"] = references;
+            // 节点出过哪些图 / 视频。**只投影元数据，不投影 Reference**——那一串是服务端的
+            // 文件路径（或一段 data URL），网页端既读不到也不该看到；取字节走按 ID 的那条接口。
+            // prompt / negativePrompt 也**故意不投影**：它们动辄上千字，而每一次 GET 场景都要带上
+            // 所有节点——真要看那两串时按附件单独取，不要为了「也许用得上」把每份场景都撑大。
+            if (node.Attachments.Count > 0)
+                record["attachments"] = node.Attachments
+                    .OrderByDescending(attachment => attachment.AddedAt)
+                    .Select(attachment => (object)new
+                    {
+                        id = attachment.Id.ToString(),
+                        kind = attachment.Kind.ToString(),
+                        name = attachment.Name,
+                        source = attachment.Source,
+                        addedAt = attachment.AddedAt
+                    })
+                    .ToList();
 
             records.Add(new
             {

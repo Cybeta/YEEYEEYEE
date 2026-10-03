@@ -1,4 +1,5 @@
-import { parseReferenceOption, recordReferences, referenceOptions, resolveReference, type Asset } from '../assets'
+import { parseReferenceOption, recordAttachments, recordReferences, referenceOptions, resolveReference, type Asset } from '../assets'
+import { attachmentFileUrl } from './assetImages'
 import { chapterIdOf } from '../ChapterView'
 import { describeLease, type Lease } from './locks'
 import {
@@ -66,6 +67,8 @@ export type InspectorProps = {
 
 export function InspectorPanel(props: InspectorProps) {
   const { selected, records, title, content, dirty, saving, readOnly, canEdit, hint, assets, assetsReady, onTitle, onContent, onApply } = props
+  // 「这个节点出过哪些图」：服务端投影过来的**元数据**（里面没有路径），取字节按 ID 走接口。
+  const attachments = selected ? recordAttachments(selected) : []
   const blockedBy = props.blockedBy ?? null
   const heldByMe = props.heldByMe === true
   const editable = !!selected && canEdit && !readOnly && !blockedBy
@@ -254,6 +257,36 @@ export function InspectorPanel(props: InspectorProps) {
               </div>
             )}
           </div>
+
+          {/* 这个节点出过哪些图。服务端只投影元数据（**没有路径**），图片按 ID 走接口取字节；
+              非图片（视频 / 音频）如实列出来、暂时不给播放器——列着但点不动，比假装没有好。 */}
+          {selected && attachments.length > 0 && (
+            <div className="df-section">
+              <span className="df-heading" style={{ fontSize: 12 }}>产物附件</span>
+              <span className="df-dim df-mono" style={{ fontSize: 10 }}>{attachments.length} 项 · 最近在前</span>
+              <div className="df-attachments">
+                {attachments.map((attachment) => (
+                  <div key={attachment.id} className="df-attachment">
+                    {attachment.kind === 'Image'
+                      ? (
+                        <img
+                          className="df-attachment-thumb"
+                          src={attachmentFileUrl(selected.recordId, attachment.id)}
+                          alt={attachment.name}
+                          loading="lazy"
+                          onError={(event) => { event.currentTarget.style.display = 'none' }}
+                        />
+                      )
+                      : <span className="df-attachment-kind">{attachment.kind}</span>}
+                    <div className="df-attachment-meta">
+                      <span className="df-attachment-name">{attachment.name}</span>
+                      <span className="df-dim" style={{ fontSize: 10 }}>{attachment.source || '来源未记'}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </>
       )}
 

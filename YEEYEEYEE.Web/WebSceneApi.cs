@@ -351,6 +351,14 @@ internal static class WebSceneApi
                 ? projectStore.EntityThumbnail(entityId, variantId, versionId)
                 : Error(409, "CANVAS_REQUIRES_PROJECT", "素材预览要的是项目画布；当前配置的是独立 Web 场景"));
 
+        // 只读：一条记录上**某个产物**的字节（检查器里那些产物图）。
+        // 与上面那条一样：只读投影，不取锁、不查 canvas.edit。出字节那一路两条接口共用同一个方法。
+        app.MapGet("/api/web/records/{recordId:guid}/attachments/{attachmentId:guid}/file",
+            (Guid recordId, Guid attachmentId) =>
+                projectStore is not null
+                    ? projectStore.AttachmentFile(recordId, attachmentId)
+                    : Error(409, "CANVAS_REQUIRES_PROJECT", "产物图要的是项目画布；当前配置的是独立 Web 场景"));
+
         app.MapGet("/api/web/assets", () =>
         {
             var entitiesPath = LegacyConfig.Text(app.Configuration, "ProjectEntitiesPath");

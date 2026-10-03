@@ -42,7 +42,7 @@ import './shell/tokens.css'
 
 // 既有用例从 WebCanvasApp 里取这三个函数，它们已经搬到 assets.ts；
 // 这里保留出口，免得一次搬迁就顺带改测试。
-export { mapAssets, recordReferences, resolveReference } from './assets'
+export { mapAssets, recordAttachments, recordReferences, resolveReference } from './assets'
 
 type Notice = { kind: 'success' | 'error' | 'info'; message: string }
 

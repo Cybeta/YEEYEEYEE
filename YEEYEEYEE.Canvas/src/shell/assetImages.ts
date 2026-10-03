@@ -20,3 +20,8 @@ export function entityThumbUrl(entityId: string, variantId?: string | null, vers
   const suffix = query.toString()
   return `/api/web/entities/${encodeURIComponent(entityId)}/thumb${suffix ? `?${suffix}` : ''}`
 }
+
+/** `GET /api/web/records/{recordId}/attachments/{attachmentId}/file`：节点某个产物的图片字节。 */
+export function attachmentFileUrl(recordId: string, attachmentId: string): string {
+  return `/api/web/records/${encodeURIComponent(recordId)}/attachments/${encodeURIComponent(attachmentId)}/file`
+}

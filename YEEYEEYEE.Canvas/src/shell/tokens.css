@@ -747,6 +747,61 @@ textarea.df-input {
   background: var(--df-surface-1);
 }
 
+/* ==================== 节点产物附件（检查器里那一格） ==================== */
+/* 缩略图与引用徽标那张同一条路：取不到图由组件把 img 收起来，所以这里不为「加载失败」留位置。 */
+.df-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.df-attachment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-small);
+  background: var(--df-surface-2);
+}
+
+.df-attachment-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--df-radius-small);
+  object-fit: cover;
+  flex: none;
+  background: var(--df-surface-1);
+}
+
+/* 非图片的产物（视频 / 音频 / 其他）：给一个同样大小的标记位，
+   免得那一列在「有图 / 没图」之间跳来跳去。 */
+.df-attachment-kind {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--df-radius-small);
+  border: 1px dashed var(--df-line-strong);
+  color: var(--df-ink-3);
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.df-attachment-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.df-attachment-name {
+  font-size: 11px;
+  color: var(--df-ink);
+  overflow-wrap: anywhere;
+}
+
 .df-ref-pill.is-missing {
   color: var(--df-error);
   border-color: rgba(224, 112, 126, 0.45);

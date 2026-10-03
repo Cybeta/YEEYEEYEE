@@ -32,6 +32,34 @@ export function recordReferences(item: OperationRecord): Reference[] {
   return raw.filter((ref): ref is Reference => !!ref && typeof ref === 'object' && typeof (ref as { entityId?: unknown }).entityId === 'string' && !!(ref as { entityId: string }).entityId.trim())
 }
 
+/** 节点出过的一个产物（图 / 视频 / 音频）。**里面没有路径**：取字节要按 ID 走接口。 */
+export type AttachmentSummary = { id: string; kind: string; name: string; source: string; addedAt?: string }
+
+/**
+ * 读节点的 `record.attachments`（服务端投影的产物元数据）。
+ *
+ * 与 `recordReferences` 同一个态度：坏的那条**跳过**，不让它把整份场景炸掉——
+ * 一条产物读不懂，用户还有别的可看；整份场景打不开就什么都没有了。
+ * 服务端**故意没投影** `reference`（那是服务端的路径 / 一段 data URL）与 `prompt`（动辄上千字，
+ * 每份场景都要带上所有节点），所以这里也不认这两项。
+ */
+export function recordAttachments(item: OperationRecord): AttachmentSummary[] {
+  const raw = item.record.attachments
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((entry): AttachmentSummary[] => {
+    if (!entry || typeof entry !== 'object') return []
+    const row = entry as Record<string, unknown>
+    if (typeof row.id !== 'string' || !row.id.trim()) return []
+    return [{
+      id: row.id,
+      kind: typeof row.kind === 'string' ? row.kind : 'Other',
+      name: typeof row.name === 'string' && row.name.trim() ? row.name : '未命名产物',
+      source: typeof row.source === 'string' ? row.source : '',
+      addedAt: typeof row.addedAt === 'string' ? row.addedAt : undefined
+    }]
+  })
+}
+
 export function resolveReference(ref: Reference, assets: Asset[], available = true): { asset?: Asset; variant?: Variant; version?: Version; error?: string; mode: string } {
   const mode = ref.variantVersionId ? '锁定版本' : '跟随最新'
   if (!available) return { mode, error: '资产库不可用，无法核对引用' }
