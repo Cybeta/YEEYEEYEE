@@ -313,6 +313,7 @@
                              原先两个都是只读 TextBlock，看见了却改不了，只能绕去双击。 -->
                         <TextBox x:Name="InspectorNameText" Text="未选择节点" IsEnabled="False"
                                  Classes="inlineInput" Padding="0" FontSize="12"
+                                 GotFocus="InspectorField_OnGotFocus" LostFocus="InspectorField_OnLostFocus"
                                  KeyDown="InspectorField_OnKeyDown" />
                       </Border>
                       <TextBlock Text="节点内容" Classes="dim" FontSize="11" Margin="0,6,0,0" />
@@ -323,6 +324,7 @@
                                  Watermark="这个节点还没有内容；在画布上选中一个节点后，可以直接在这一格里写"
                                  Text="在画布上点击任意节点，这里会显示它的内容，并可以直接修改。"
                                  AcceptsReturn="True" TextWrapping="Wrap" MinHeight="60" FontSize="12"
+                                 GotFocus="InspectorField_OnGotFocus" LostFocus="InspectorField_OnLostFocus"
                                  KeyDown="InspectorField_OnKeyDown" />
                       </Border>
                       <StackPanel Spacing="6">

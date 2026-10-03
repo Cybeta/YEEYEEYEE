@@ -25,9 +25,9 @@ internal static class SettingsServerPage
         var report = context.Report;
         void Say(string text, AgentNoteLevel level = AgentNoteLevel.Info) => report(text, level);
 
-        // 会话活到这个设置窗口关上为止：登录状态不跨窗口共享，也就不会悄悄留在内存里没人管。
-        CollaborationSession? session = null;
-        context.Owner.Closed += (_, _) => session?.Dispose();
+        // 会话是**应用持有**的那一个（画布那边占编辑锁用的是同一个），本页只是它的界面。
+        // 早先这里自己新建、关窗释放：那样登录状态活不过关窗，画布也就永远占不上锁。
+        var session = context.Collaboration;
 
         var (urlLabel, urlBox) = AgentDialogUi.Field("服务器地址", config.CollaborationServerUrl, "例如 http://127.0.0.1:5000；留空 = 不接协作");
         var (accountLabel, accountBox) = AgentDialogUi.Field("账号", config.CollaborationAccount, "网页端登录用的同一个账号");
@@ -44,14 +44,18 @@ internal static class SettingsServerPage
         void ShowStatus()
         {
             var lines = new List<string>();
-            if (session is { IsSignedIn: true } signedIn)
+            if (session is { IsSignedIn: true, User: { } me })
             {
-                lines.Add($"已登录：{CollaborationSession.Display(signedIn.User!)}（{signedIn.User!.RoleLabel}） @ {signedIn.BaseUrl}");
-                if (signedIn.Leases.Count == 0) lines.Add("当前没有人正在编辑。");
+                lines.Add($"已登录：{CollaborationSession.Display(me)}（{me.RoleLabel}） @ {session.BaseUrl}");
+                // 这一行是桌面端唯一能看见「我自己占着什么」的地方：画布上还没有锁的徽标。
+                lines.Add(session.HeldNodeLease is { } held
+                    ? $"你这台机器正占着节点 {held.TargetId?.ToString("N")[..8] ?? "—"}，别人这时候改不了它。"
+                    : "你这台机器没有占着任何节点。");
+                if (session.Leases.Count == 0) lines.Add("当前没有人正在编辑。");
                 else
                 {
-                    lines.Add($"当前 {signedIn.Leases.Count} 条编辑锁：");
-                    foreach (var lease in signedIn.Leases) lines.Add(Describe(lease));
+                    lines.Add($"当前 {session.Leases.Count} 条编辑锁：");
+                    foreach (var lease in session.Leases) lines.Add(Describe(lease));
                 }
             }
             else
@@ -74,9 +78,8 @@ internal static class SettingsServerPage
                 return;
             }
 
-            // 地址可能刚被改过，而会话的基地址在构造时就定了：每次登录按当前地址新建一个。
-            session?.Dispose();
-            session = new CollaborationSession(url);
+            // 地址可能刚被改过：换服务器会清掉旧身份与 cookie，这是有意的（旧会话对新服务器没有意义）。
+            session.UseServer(url);
             var result = await session.SignInAsync(accountBox.Text?.Trim() ?? string.Empty, passwordBox.Text ?? string.Empty);
             if (result.Ok)
             {
@@ -92,7 +95,7 @@ internal static class SettingsServerPage
         var signOut = AgentDialogUi.Secondary("退出");
         signOut.Click += async (_, _) =>
         {
-            if (session is null)
+            if (!session.IsSignedIn)
             {
                 Say("还没有登录。");
                 return;
@@ -106,7 +109,7 @@ internal static class SettingsServerPage
         var refresh = AgentDialogUi.Secondary("看谁在编辑");
         refresh.Click += async (_, _) =>
         {
-            if (session is not { IsSignedIn: true })
+            if (!session.IsSignedIn)
             {
                 Say("先登录才能看谁在编辑。", AgentNoteLevel.Warning);
                 return;
@@ -176,11 +179,8 @@ internal static class SettingsServerPage
     /// </summary>
     private static string Describe(CollaborationLease lease)
     {
-        var who = $"{lease.DisplayName}（{ClientLabel(lease.Client)}）";
+        var who = $"{lease.DisplayName}（{CollaborationSession.ClientLabel(lease.Client)}）";
         var target = lease.TargetId is { } id ? id.ToString("N")[..8] : "—";
         return lease.Scope == "tree" ? $"· {who} 正在编辑整棵画布（含结构）" : $"· {who} 正在编辑节点 {target}";
     }
-
-    /// <summary>来源端文案与服务端 <c>EditClient.Label</c> 同一套说法：认不出的算网页端。</summary>
-    private static string ClientLabel(string client) => client == "desktop" ? "桌面端" : "网页端";
 }

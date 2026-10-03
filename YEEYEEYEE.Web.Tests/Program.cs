@@ -922,6 +922,32 @@ try
         Assert(desktop.Leases[0].TargetId == Guid.Parse(editableId), "节点锁要带目标节点");
         await Check(arranger, HttpMethod.Delete, $"/api/web/edits/{webLease}", 200);
 
+        // 桌面端自己占住同一条锁：网页端的**别人**（林晚）应当被挡住，
+        // 而且要从冲突里看出「这是桌面端占的、持有者是陈默」。
+        // 用林晚而不是陈默去抢，是因为服务端允许同一个人跨端续期（自己不该挡自己）——
+        // 拿同一个人去试「挡住没有」，测的其实是「自己抢自己」，等于什么都没验。
+        var desktopNodeId = Guid.Parse(editableId);
+        var desktopLease = await desktop.AcquireNodeLeaseAsync(desktopNodeId);
+        Assert(desktopLease.Ok && desktop.HeldNodeLease?.TargetId == desktopNodeId, "桌面端要能占住节点锁：" + desktopLease.Message);
+        Assert(desktop.HeldNodeLease?.Client == "desktop", "来源端要声明成桌面端，别人看到的就是「某某（桌面端）」");
+
+        var blockedByDesktop = await Check(arranger, HttpMethod.Post, "/api/web/edits", 409,
+            "{\"scope\":\"node\",\"targetId\":\"" + editableId + "\",\"client\":\"web\"}");
+        Assert(blockedByDesktop.GetProperty("code").GetString() == "EDIT_CONFLICT", "桌面端占的锁要真的挡住网页端");
+        Assert(blockedByDesktop.GetProperty("holder").GetProperty("client").GetString() == "desktop", "冲突要说清是桌面端占的");
+        Assert(blockedByDesktop.GetProperty("holder").GetProperty("displayName").GetString() == "陈默", "冲突要说是谁占的");
+        Assert(blockedByDesktop.GetProperty("message").GetString()!.Contains("陈默"), "冲突文案要带持有者名字");
+
+        // 续期续的还是同一条锁；还回去之后别人就能占了。
+        var heldId = desktop.HeldNodeLease!.LeaseId;
+        Assert((await desktop.RenewHeldLeaseAsync()).Ok && desktop.HeldNodeLease?.LeaseId == heldId, "续期要保住同一条锁");
+        Assert((await desktop.ReleaseHeldLeaseAsync()).Ok && desktop.HeldNodeLease is null, "还回去要把本地记录也清掉");
+
+        var webRetry = (await Check(arranger, HttpMethod.Post, "/api/web/edits", 200,
+            "{\"scope\":\"node\",\"targetId\":\"" + editableId + "\",\"client\":\"web\"}"))
+            .GetProperty("lease").GetProperty("leaseId").GetGuid();
+        await Check(arranger, HttpMethod.Delete, $"/api/web/edits/{webRetry}", 200);
+
         // 退出之后本地身份与 cookie 都要清掉：不能拿着旧身份接着用。
         Assert((await desktop.SignOutAsync()).Ok && !desktop.IsSignedIn, "退出要清掉身份");
         Assert(!(await desktop.RefreshLeasesAsync()).Ok, "没登录就不该能看谁在编辑");

@@ -4061,7 +4061,11 @@ public partial class MainWindow : Window, IAgentSessionHost
         InspectorNameText.IsEnabled = editable;
         InspectorSummaryText.IsEnabled = editable;
         InspectorApplyButton.IsEnabled = editable;
-        InspectorEditHintText.Text = hint;
+        inspectorHint = hint;
+        // 不能编辑的时候（未选择节点、只读项目）不显示协作那句：
+        // 它说的是上一个节点的事，留着只会张冠李戴。
+        if (!editable) collaborationHint = string.Empty;
+        RefreshInspectorHint();
     }
 
     /// <summary>检查器里按 Ctrl+Enter 等于点「应用修改」：不改键位习惯，但省一次鼠标。</summary>
@@ -4107,6 +4111,115 @@ public partial class MainWindow : Window, IAgentSessionHost
         InspectorNameText.Text = node.Title;
         StatusText.Text = $"已更新节点：{node.Title}（记得点「保存修订」）";
     }
+
+    // ==================== 协作：编辑时占住节点锁 ====================
+
+    /// <summary>
+    /// 应用持有的协作会话（**只有一个**：设置页登录的、这里占锁的是同一个实例）。
+    /// 地址取自配置，没配就是空地址 = 不接协作——那不是错误状态，是默认状态。
+    /// </summary>
+    private CollaborationSession? collaboration;
+
+    private CollaborationSession Collaboration() =>
+        collaboration ??= new CollaborationSession(AiProviderSettings.Load().CollaborationServerUrl);
+
+    /// <summary>检查器下面那句提示 = 原有的一句 + 协作要说的一句。</summary>
+    private string inspectorHint = string.Empty;
+    private string collaborationHint = string.Empty;
+
+    /// <summary>占着锁的时候每 20 秒续一次（锁的 TTL 是两分钟，这个间隔够稳）。没占锁它就不跑。</summary>
+    private DispatcherTimer? collaborationHeartbeat;
+
+    private void RefreshInspectorHint() =>
+        InspectorEditHintText.Text = collaborationHint.Length == 0 ? inspectorHint : $"{inspectorHint} {collaborationHint}";
+
+    private void SetCollaborationHint(string text)
+    {
+        collaborationHint = text;
+        RefreshInspectorHint();
+    }
+
+    /// <summary>
+    /// 进编辑框就占住这个节点的编辑锁——**只有真的打算改才占**：点着看一圈不算，
+    /// 否则等于把别人挡在外面而自己什么也没改。
+    ///
+    /// 拿不到锁时**只有一种情况要说话**：别人正占着。其余（没配服务器、没登录、连不上服务器）
+    /// 都只是不占——桌面端是本地优先的，协作不可用不该让画布变得不能改。
+    /// </summary>
+    private async void InspectorField_OnGotFocus(object? sender, GotFocusEventArgs e)
+    {
+        if (!canEdit || CanvasSurfaceControl.SelectedNode is not { } node) return;
+
+        var session = Collaboration();
+        if (!session.IsSignedIn) return;
+
+        SetCollaborationHint(string.Empty);
+        if (session.HeldNodeLease is { TargetId: { } held } && held == node.Id) return;
+
+        // 换了节点：先把上一个还掉，别一手占两个。
+        if (session.HeldNodeLease is not null) await session.ReleaseHeldLeaseAsync();
+
+        var result = await session.AcquireNodeLeaseAsync(node.Id);
+        if (result.Ok)
+        {
+            EnsureCollaborationHeartbeat().Start();
+            return;
+        }
+
+        if (result.Code == "EDIT_CONFLICT" && result.Holder is { } holder)
+        {
+            // 如实说是谁在编辑，照服务端那句的意思说。**但不阻止本地编辑**：
+            // 桌面端写的是本地文件，这条锁在这里是「告诉别人、也告诉用户」，还不是权限。
+            SetCollaborationHint($"{DescribeHolder(holder)}正在编辑这个节点，你现在的改动可能会盖掉他的。");
+            return;
+        }
+
+        if (result.Code is "UNAUTHORIZED" or "NOT_SIGNED_IN")
+            SetCollaborationHint("协作登录已失效，这条锁没占上（去 设置 → 协作）。");
+    }
+
+    /// <summary>
+    /// 离开编辑框就还回去。焦点在两个框之间移动时也会先失焦，
+    /// 所以等一次调度再判断：两个都不在焦点上，才算真的离开了这一格。
+    /// </summary>
+    private async void InspectorField_OnLostFocus(object? sender, RoutedEventArgs e)
+    {
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
+        if (InspectorNameText.IsFocused || InspectorSummaryText.IsFocused) return;
+        await ReleaseCollaborationLeaseAsync();
+    }
+
+    private async Task ReleaseCollaborationLeaseAsync()
+    {
+        collaborationHeartbeat?.Stop();
+        if (collaboration is not { HeldNodeLease: not null } session) return;
+        await session.ReleaseHeldLeaseAsync();
+    }
+
+    private DispatcherTimer EnsureCollaborationHeartbeat()
+    {
+        if (collaborationHeartbeat is { } existing) return existing;
+
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
+        timer.Tick += async (_, _) =>
+        {
+            if (collaboration is not { HeldNodeLease: not null } session)
+            {
+                timer.Stop();
+                return;
+            }
+
+            var result = await session.RenewHeldLeaseAsync();
+            // 续不上（被管理员接管、或已经过期）要说清楚，别让用户以为还占着。
+            // 连不上服务器不算：TTL 内锁还归我们，为这个惊动用户只会添乱。
+            if (!result.Ok && result.Code != "NETWORK") SetCollaborationHint(result.Message);
+        };
+        return collaborationHeartbeat = timer;
+    }
+
+    /// <summary>持有者的说法与服务端、网页端用同一套：名字 + 来源端。</summary>
+    private static string DescribeHolder(CollaborationLease holder) =>
+        $"{holder.DisplayName}（{CollaborationSession.ClientLabel(holder.Client)}）";
 
     /// <summary>
     /// 把检查器里改过的名称与描述写回**这张引用卡指向的设定**（实体名 + 变体描述）。
@@ -5231,7 +5344,7 @@ public partial class MainWindow : Window, IAgentSessionHost
 
     public async Task<bool> OpenModelSettingsAsync()
     {
-        if (!await SettingsWindow.ShowAsync(this, initialPage: 0)) return false;
+        if (!await SettingsWindow.ShowAsync(this, Collaboration(), initialPage: 0)) return false;
         StatusText.Text = "模型配置已保存，下一轮对话生效";
         // 这一页里也可能改了「出图观感」那个开关（它跟模型配置同在一个窗口），重新取一次并重画。
         RefreshRevealPreferences();
@@ -5248,7 +5361,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// </summary>
     private async void Settings_OnClick(object? sender, RoutedEventArgs e)
     {
-        if (!await SettingsWindow.ShowAsync(this)) return;
+        if (!await SettingsWindow.ShowAsync(this, Collaboration())) return;
         StatusText.Text = "设置已保存";
         // 「出图观感」那个开关就在这个窗口里：改了它要立刻反映到画布上那排候选卡的画法。
         RefreshRevealPreferences();
