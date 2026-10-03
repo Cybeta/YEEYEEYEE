@@ -142,6 +142,7 @@ var tests = new (string Name, Action Run)[]
     ("真实入口冒烟：打开→保存重开→复制→重复导入", RealEntrySmokeOpenSaveCopyImport),
     ("返工 R5：空 ID 旧来源的导入身份稳定", ReworkEmptyIdSourceImportIdentityIsStable),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
+    ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
     ("返工 R7：备份失败中止保存且不覆盖", ReworkBackupFailureAbortsSave),
     ("返工 R8：保存失败不改动调用方对象", ReworkFailedSaveLeavesInputUntouched),
     ("返工 R9：旧格式包资产会随导入复制", ReworkLegacyPackageAssetsAreImported),
@@ -1763,6 +1764,50 @@ static void MigrationBacksUpAndRestoresOnFailure()
     Expect(CanvasOpenService.TryOpen(path, out var restored, out _) && restored.State.Title == "第一版", "恢复后的内容应是备份那一版");
     Expect(CanvasBackup.ListFor(path).Count >= 1, "应能列出该画布的备份");
     Expect(CanvasBackup.Prune(1) >= 0, "清理备份不应抛错");
+}
+
+/// <summary>
+/// 备份躺在**画布文件旁边**（TryBackup 写在那儿），而 <c>CanvasBackup.Directory</c> 指的是
+/// 「应用那本画布库」的备份目录——画布库目录本身还是环境相关的（配了项目就是项目的 canvases）。
+/// 两处不是同一个地方，于是项目画布的备份**既列不出来也清不掉**；清理那一侧过去还额外判
+/// 「写的这份是不是当前项目」，那个条件在 Web 服务里永远不成立，备份就只涨不落（工程债 #9）。
+///
+/// 这条钉三件事：按画布自己的位置**列得出**、按画布自己的位置**清得掉**（只留最新 10 份）、
+/// 以及**清一张画布不得碰另一张画布的备份**（删备份是最容易误伤的操作，范围必须小）。
+/// </summary>
+static void ProjectCanvasBackupsAreListedAndPruned()
+{
+    var root = Path.Combine(Path.GetTempPath(), "yeeeyee-backup-" + Guid.NewGuid().ToString("N"));
+    var directory = Path.Combine(root, "canvases");
+    var canvas = Path.Combine(directory, "main.json");
+    var other = Path.Combine(directory, "other.json");
+    System.IO.Directory.CreateDirectory(directory);
+    try
+    {
+        File.WriteAllText(canvas, "{\"a\":1}");
+        File.WriteAllText(other, "{\"b\":1}");
+        for (var index = 0; index < 12; index++)
+            Expect(CanvasBackup.TryBackup(canvas, out var error) is not null, $"第 {index} 次备份应成功：{error}");
+        for (var index = 0; index < 3; index++)
+            Expect(CanvasBackup.TryBackup(other, out _) is not null, "另一张画布的备份也应成功");
+
+        // 列得出：以前这里按「画布库目录」找，项目画布拿回来的永远是空表。
+        Expect(CanvasBackup.ListFor(canvas).Count == 12, $"应列出画布旁边的 12 份备份，实际 {CanvasBackup.ListFor(canvas).Count}");
+        Expect(CanvasBackup.ListFor(other).Count == 3, "另一张画布应有 3 份备份");
+
+        // 清得掉：只留最新 10 份。
+        Expect(CanvasBackup.PruneFor(canvas) == 2, "应删掉超出 10 份的那 2 份");
+        Expect(CanvasBackup.ListFor(canvas).Count == 10, $"清理后应剩 10 份，实际 {CanvasBackup.ListFor(canvas).Count}");
+        Expect(CanvasBackup.ListFor(other).Count == 3, "清一张画布不得碰另一张画布的备份");
+
+        // 清理是维护：没有备份目录时给 0，不抛。
+        Expect(CanvasBackup.PruneFor(Path.Combine(root, "nope", "nobody.json")) == 0, "没有备份目录时应返回 0");
+    }
+    finally
+    {
+        try { System.IO.Directory.Delete(root, recursive: true); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+    }
 }
 
 /// <summary>1.2：复制画布时全部换新 ID，集合内关系按映射改写，版本语义保持。</summary>

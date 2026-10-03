@@ -44,6 +44,20 @@ public static class CanvasBackup
     public static string Directory => Path.Combine(CanvasLibrary.Directory, FolderName);
 
     /// <summary>
+    /// 某个画布的备份目录：**画布文件旁边**那个 backups（<see cref="TryBackup"/> 就写在那儿）。
+    ///
+    /// 与 <see cref="Directory"/> 不是同一个地方：那个是「应用自己那本画布库」的备份目录，
+    /// 而画布库的目录本身是**环境相关**的（配了项目就用项目的 canvases，没有就回退到 AppPaths）。
+    /// 所以「列备份」与「清备份」一律要按**画布自己的位置**算，否则项目画布的备份既列不出来也清不掉——
+    /// 桌面端开着项目时看着是对的，Web 服务里则静默地什么都没发生（工程债 #9 就是这么来的）。
+    /// </summary>
+    public static string DirectoryFor(string canvasPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(canvasPath);
+        return Path.Combine(Path.GetDirectoryName(Path.GetFullPath(canvasPath))!, FolderName);
+    }
+
+    /// <summary>
     /// 备份现有文件；源文件不存在时返回 null（无需备份）。失败不抛出，返回 null 并给出原因，
     /// 由调用方决定是否继续写入。
     /// </summary>
@@ -53,7 +67,7 @@ public static class CanvasBackup
         try
         {
             if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
-            var backupDirectory = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, FolderName);
+            var backupDirectory = DirectoryFor(path);
             System.IO.Directory.CreateDirectory(backupDirectory);
             var name = Path.GetFileNameWithoutExtension(path);
             var target = Path.Combine(backupDirectory, $"{name}.{DateTime.Now:yyyyMMdd-HHmmss-fff}.{Guid.NewGuid():N}.json");
@@ -83,11 +97,46 @@ public static class CanvasBackup
         }
     }
 
-    /// <summary>在备份目录里找到某个画布的备份（按文件名前缀），用于“恢复备份”。</summary>
-    public static IReadOnlyList<string> ListFor(string canvasPath)
+    /// <summary>
+    /// 在备份目录里找到某个画布的备份（按文件名前缀），用于「恢复备份」。
+    /// **按画布自己的位置找**（见 <see cref="DirectoryFor"/>），不是按画布库的目录找。
+    /// </summary>
+    public static IReadOnlyList<string> ListFor(string canvasPath) => ListIn(DirectoryFor(canvasPath), canvasPath);
+
+    /// <summary>某个目录里属于这个画布的备份，最新在前；目录不存在或读不了就给空表。</summary>
+    private static IReadOnlyList<string> ListIn(string folder, string canvasPath)
     {
         var name = Path.GetFileNameWithoutExtension(canvasPath);
-        return List().Where(path => Path.GetFileName(path).StartsWith(name + ".", StringComparison.OrdinalIgnoreCase)).ToArray();
+        try
+        {
+            if (!System.IO.Directory.Exists(folder)) return Array.Empty<string>();
+            return System.IO.Directory.EnumerateFiles(folder, "*.json")
+                .Where(path => Path.GetFileName(path).StartsWith(name + ".", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>
+    /// 清理**某一个画布**的备份：只留最新的若干份（最新的在前，超出的删掉），返回删除数量。
+    /// 与 <see cref="Prune"/> 的区别见 <see cref="DirectoryFor"/>——那个清的是画布库，这个清的是
+    /// 「刚写的那份画布旁边」的备份。清理是维护，失败一律吞掉返回 0：不该让一次成功的保存看起来像失败。
+    /// </summary>
+    public static int PruneFor(string canvasPath, int keepPerCanvas = 10)
+    {
+        var stale = ListIn(DirectoryFor(canvasPath), canvasPath).Skip(keepPerCanvas).ToArray();
+        var removed = 0;
+        foreach (var path in stale)
+        {
+            try { File.Delete(path); removed++; }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+        }
+
+        return removed;
     }
 
     /// <summary>每个画布只保留最新的若干份备份，避免长期使用后无限增长；返回删除数量。</summary>
@@ -313,7 +362,7 @@ public static class CanvasSaveService
             validateUnderLease is null ? AssetStore.Exists : null);
         if (validateUnderLease is not null && validation.HasErrors)
             throw new CanvasSaveAbortedException("项目库快照刷新后画布引用校验失败，已中止保存。");
-        var (backup, writtenBytes) = WriteWithBackupBytes(path, migrated.State, prune: validateUnderLease is null);
+        var (backup, writtenBytes) = WriteWithBackupBytes(path, migrated.State);
         return new CanvasSaveOutcome(path, backup, migrated.Report, validation) { WrittenBytes = writtenBytes };
     }
 
@@ -332,7 +381,7 @@ public static class CanvasSaveService
     /// </summary>
     public static string? WriteWithBackup(string path, RecentCanvasState state) => WriteWithBackupBytes(path, state).Backup;
 
-    private static (string? Backup, byte[] Bytes) WriteWithBackupBytes(string path, RecentCanvasState state, bool prune = true)
+    private static (string? Backup, byte[] Bytes) WriteWithBackupBytes(string path, RecentCanvasState state)
     {
         string? backup = null;
         if (File.Exists(path))
@@ -343,14 +392,13 @@ public static class CanvasSaveService
         }
 
         var bytes = CanvasFileWriter.Write(path, state);
-        // Pruning is maintenance, not part of the commit. A failure must not turn a saved
-        // canvas into an apparent failed write.
-        try
-        {
-            if (prune && string.Equals(AppPaths.CurrentProject.RootPath,
-                Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(path))!), StringComparison.OrdinalIgnoreCase))
-                CanvasBackup.Prune();
-        }
+        // 清理是维护，不是提交的一部分：失败绝不能把一次已经落盘的保存变成看起来的失败写。
+        //
+        // 只管**刚写的那份画布旁边**的备份（PruneFor 按画布自己的位置找），不碰别的画布，
+        // 也不再判「写的这份是不是当前项目」——那个条件在 Web 服务里永远不成立，
+        // 于是项目画布的备份只涨不落（工程债 #9）。按画布自己的位置清理没有这个问题，
+        // 而且范围更小：一次写入只会动它自己的备份。
+        try { CanvasBackup.PruneFor(path); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException) { }
         return (backup, bytes);
     }

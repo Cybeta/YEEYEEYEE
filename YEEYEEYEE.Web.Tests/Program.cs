@@ -1471,6 +1471,22 @@ try
             await Check(ctAnonymous, HttpMethod.Put, $"/api/web/records/{ctTarget}/category", 401,
                 "{\"baseRevision\":" + ctDeniedBase + ",\"recordType\":\"prop\"}");
         }
+
+        // ---------- 备份不会无限增长（工程债 #9）----------
+        // 项目画布的备份以前只涨不落：清理判的是「写的这份是不是当前项目」，那个条件在 Web 服务里永不成立。
+        // 这里对同一份画布连写 12 次——不清理的话它旁边会多出 12 份备份。
+        {
+            var pruneBase = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64();
+            for (var index = 0; index < 12; index++)
+            {
+                var written = await Check(arranger, HttpMethod.Put, $"/api/web/records/{efSecond}", 200,
+                    JsonSerializer.Serialize(new { baseRevision = pruneBase, title = "Prune " + index, content = "x" }));
+                pruneBase = written.GetProperty("revision").GetInt64();
+            }
+
+            var keptBackups = Directory.GetFiles(Path.Combine(canvasDirectory, "backups"), "*.json").Length;
+            Assert(keptBackups <= 10, "项目画布旁边的备份应被压在 10 份以内，实际 " + keptBackups);
+        }
     }
 
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
