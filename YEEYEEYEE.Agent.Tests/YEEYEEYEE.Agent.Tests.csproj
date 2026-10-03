@@ -6,6 +6,12 @@
     <ProjectReference Include="..\YEEYEEYEE.Desktop.Shared\YEEYEEYEE.Desktop.Shared.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 真机取样：ComfyUI 的「网页格式」工作流 + 用户从网页导出的「API 格式」工作流 + 节点定义子集。
+         转换器就靠这几份逐字对拍验收（见 fixtures/comfyui/README 节说明）。 -->
+    <Content Include="fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>

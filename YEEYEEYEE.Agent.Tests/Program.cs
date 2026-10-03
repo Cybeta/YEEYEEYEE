@@ -3,6 +3,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using YEEYEEYEE.Core;
 using YEEYEEYEE.Desktop;
 using YEEYEEYEE.Host;
@@ -230,6 +231,9 @@ var tests = new (string Name, Action Run)[]
     ("裂纹卡自动重出：只挑裂纹那几张，且受轮数上限约束", CrackedRedrawPicksOnlyCrackedWithinCap),
     ("一键：时长与池子档位对不上要提醒，没写就交给服务端", OneClickDurationFollowsPoolTier),
     ("一键：补图与出视频两笔分开报再给合计，算不出来就说算不出来", OneClickCostAddsBothLines),
+    ("ComfyUI 转换：四份真机样本逐字对拍（网页格式 → API 格式）", ComfyUiConversionMatchesRealExports),
+    ("ComfyUI 转换：被绕过/静音与纯界面节点如实跳过并报出来", ComfyUiConversionReportsSkippedNodes),
+    ("ComfyUI 转换：控件按位置对齐（含「生成后固定」占位）且指向被跳过节点的连线整条删掉", ComfyUiConversionAlignsWidgetsAndPrunesDangling),
 };
 
 var failures = new List<string>();
@@ -1204,6 +1208,207 @@ static bool Throws(Action action)
 {
 	try { action(); return false; }
 	catch (ArgumentOutOfRangeException) { return true; }
+}
+
+// ── ComfyUI 工作流转换：网页格式 → API 格式 ─────────────────────────────────
+//
+// 规则不是我编的，是照搬官方前端 src/utils/executionUtil.ts 的 graphToPrompt()。
+// 验收靠真机取样：用户在这台 ComfyUI（0.37.0）里打开工作流、右键「导出（API）」，
+// 得到的 JSON 就是标准答案；网页格式那份从 /api/userdata 直接取。两边都存进
+// fixtures/comfyui/，测试逐字对拍。样本覆盖四种形态（纯文生图 / 三采流 / 角色三视图 /
+// 图生视频），其中一个整段被绕过（mode=4）——跳过规则也顺带钉住了。
+
+/// <summary>样本目录（随工程输出复制，见 csproj 的 Content 项）。</summary>
+static string ComfyUiFixtureDir()
+{
+    var dir = Path.Combine(AppContext.BaseDirectory, "fixtures", "comfyui");
+    Expect(Directory.Exists(dir), "ComfyUI 样本目录不存在：" + dir);
+    return dir;
+}
+
+/// <summary>节点定义子集（只收样本里出现过的类型，省得带着几千个类进仓库）。</summary>
+static JsonObject ComfyUiNodeDefs()
+{
+    var path = Path.Combine(ComfyUiFixtureDir(), "objectInfo.subset.json");
+    var subset = JsonNode.Parse(File.ReadAllText(path, Encoding.UTF8));
+    var defs = subset?["defs"] as JsonObject;
+    Expect(defs is not null && defs.Count > 50, "节点定义子集应含几十个类型，实际 " + (defs?.Count ?? 0));
+    return defs!;
+}
+
+static void ComfyUiConversionMatchesRealExports()
+{
+    var dir = ComfyUiFixtureDir();
+    var defs = ComfyUiNodeDefs();
+
+    foreach (var tag in new[] { "T01", "T03", "T04", "G01" })
+    {
+        var ui = File.ReadAllText(Path.Combine(dir, tag + ".ui.json"), Encoding.UTF8);
+        var expected = JsonNode.Parse(File.ReadAllText(Path.Combine(dir, tag + ".api.json"), Encoding.UTF8))!.AsObject();
+        var converted = ComfyUiWorkflowConversion.Convert(ui, defs);
+        var actual = converted.ApiWorkflow;
+
+        // 除两处已知差异外（理由见 IgnoreKnownGaps），每一项都必须与真机导出逐字一致。
+        var diff = FirstJsonDifference(expected, actual, tag, IgnoreKnownGaps);
+        Expect(diff is null, $"{tag} 的转换结果与真机导出不一致：{diff}");
+
+        // 标题虽然不比翻译，但必须挂在**正确的那一个节点**上：要么与真样本一致，
+        // 要么就是后端给的名字（我们不复刻前端的翻译表）。
+        foreach (var pair in expected)
+        {
+            if (pair.Value?["class_type"] is not JsonValue typeValue || !typeValue.TryGetValue<string>(out var type)) continue;
+            if (actual[pair.Key] is null) continue;
+            var actualTitle = ReadTitle(actual[pair.Key]!["_meta"]);
+            var expectedTitle = ReadTitle(pair.Value["_meta"]);
+            var backendName = DefDisplayName(defs, type);
+            Expect(!string.IsNullOrEmpty(actualTitle), $"{tag}.{pair.Key} 没有标题");
+            Expect(actualTitle == expectedTitle || actualTitle == backendName || actualTitle == type,
+                $"{tag}.{pair.Key} 标题张冠李戴：{actualTitle}（真样本 {expectedTitle}，后端名 {backendName}）");
+        }
+
+        if (tag == "T04")
+        {
+            var knownGapExpected = expected["107"]?["inputs"]?["text_0"];
+            var knownGapActual = actual["107"]?["inputs"]?["text_0"];
+            Expect(knownGapExpected is not null && knownGapActual is null,
+                "「节点类自己加的控件还原不了」这条已知缺口应当仍然成立；若已能还原，请删掉那条豁免");
+            Expect(converted.Notes.Any(note => note.Contains("107")),
+                "无名控件必须如实报出来，不能默默丢掉：" + converted.SkippedSummary);
+        }
+
+        if (tag == "G01")
+        {
+            // VHS 的 filename_prefix 里是 %date:yyyyMMdd%（前端控件导出时自己展开成当天日期）。
+            // 控件自己的取值变换属于节点包行为，不复刻；这里钉的是「原样透传」，而不是那个会随日期变的值。
+            var raw = JsonNode.Parse(ui)!["nodes"]!.AsArray()
+                .First(node => node?["id"]?.GetValue<int>() == 150)?["widgets_values"]?["filename_prefix"]?.GetValue<string>();
+            var actualPrefix = actual["150"]?["inputs"]?["filename_prefix"]?.GetValue<string>();
+            Expect(raw is not null && actualPrefix == raw,
+                $"G01 节点 150 的 filename_prefix 应当原样透传，期望 {raw}，实际 {actualPrefix}");
+        }
+    }
+}
+
+/// <summary>对拍时单独对待的两处，各自理由：
+/// 1) <c>_meta.title</c> 是前端翻译后的展示名（SaveImage → 保存图像），后端明确忽略这个字段，
+///    要复刻它得把前端的翻译资源也搬进来；
+/// 2) T04 节点 107（pysssss ShowText）的 <c>text_0</c> 是**节点类自己加的控件**，名字在节点定义里
+///    查不到（前端去重时合成的），纯 JSON 变换无法还原；转换器会把这种情况如实报出来，不编名字。
+/// 3) G01 节点 150（VHS_VideoCombine）的 <c>filename_prefix</c> 里是前端控件自己展开的日期模板
+///    （%date:yyyyMMdd% → 当天日期），同样属于节点包行为；我们原样透传，由节点执行时处理。
+/// 这几条都由测试钉住：一旦哪天能还原了（或行为变了），测试会失败，提醒把豁免删掉。</summary>
+static bool IgnoreKnownGaps(string path)
+    => path.EndsWith("._meta.title", StringComparison.Ordinal)
+       || path == "T04.107.inputs.text_0"
+       || path == "G01.150.inputs.filename_prefix";
+
+static string? ReadTitle(JsonNode? meta)
+    => meta?["title"] is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
+
+static string? DefDisplayName(JsonObject defs, string type)
+    => defs[type]?["display_name"] is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
+
+static void ComfyUiConversionReportsSkippedNodes()
+{
+    var dir = ComfyUiFixtureDir();
+    var defs = ComfyUiNodeDefs();
+
+    // T01：15 个节点里 4 个是 rgthree 的 Label（纯界面物件），不属于后端，必须跳过并说明。
+    var t01 = ComfyUiWorkflowConversion.Convert(File.ReadAllText(Path.Combine(dir, "T01.ui.json"), Encoding.UTF8), defs);
+    Expect(t01.ApiWorkflow.Count == 11, "T01 应转出 11 个节点，实际 " + t01.ApiWorkflow.Count);
+    Expect(t01.SkippedSummary.Contains("不是后端节点"), "T01 应说明跳过了纯界面节点：" + t01.SkippedSummary);
+
+    // T04：41 个节点里 22 个被绕过（mode=4），跳过 25 个后剩 16 个。
+    var t04 = ComfyUiWorkflowConversion.Convert(File.ReadAllText(Path.Combine(dir, "T04.ui.json"), Encoding.UTF8), defs);
+    Expect(t04.ApiWorkflow.Count == 16, "T04 应转出 16 个节点，实际 " + t04.ApiWorkflow.Count);
+    Expect(t04.SkippedSummary.Contains("绕过") || t04.SkippedSummary.Contains("静音"),
+        "T04 应说明跳过了被静音/绕过的节点：" + t04.SkippedSummary);
+}
+
+static void ComfyUiConversionAlignsWidgetsAndPrunesDangling()
+{
+    var defs = JsonNode.Parse("""
+    {"Echo":{"input":{"required":{"text":["STRING",{}],"seed":["INT",{"control_after_generate":true}]}}}}
+    """)!.AsObject();
+
+    // 节点 1：正常；节点 2：被绕过；节点 3：纯界面；节点 4：连到「被绕过」的节点上。
+    var ui = """
+    {"nodes":[
+      {"id":1,"type":"Echo","mode":0,"widgets_values":["hello",123,"fixed"]},
+      {"id":2,"type":"Echo","mode":4,"widgets_values":["bypassed",1,"fixed"]},
+      {"id":3,"type":"Label (rgthree)","mode":0},
+      {"id":4,"type":"Echo","mode":0,"widgets_values":["x",1,"fixed"],"inputs":[{"name":"text","link":7}]}
+    ],
+    "links":[[7,2,0,4,0,"STRING"]]}
+    """;
+
+    var result = ComfyUiWorkflowConversion.Convert(ui, defs);
+    Expect(result.ApiWorkflow.Count == 2, "被绕过与纯界面节点都不该进 API，应剩 2 个，实际 " + result.ApiWorkflow.Count);
+
+    var first = result.ApiWorkflow["1"]!["inputs"]!.AsObject();
+    Expect(first["text"]!.GetValue<string>() == "hello", "第一个控件值应给 text，实际 " + first["text"]!.ToJsonString());
+    Expect(first["seed"]!.GetValue<long>() == 123, "第二个控件值应给 seed 并归一化成数字，实际 " + first["seed"]!.ToJsonString());
+    Expect(first.Count == 2, "「生成后固定」那个占位值不得进 API，实际键：" + string.Join("、", first.Select(pair => pair.Key)));
+
+    var fourth = result.ApiWorkflow["4"]!["inputs"]!.AsObject();
+    Expect(!fourth.ContainsKey("text"), "指向被跳过节点的连线必须整条删掉，实际还留着：" + fourth["text"]?.ToJsonString());
+    Expect(fourth["seed"]!.GetValue<long>() == 1, "删线不该影响同一节点上的控件值");
+    Expect(result.SkippedSummary.Contains("绕过") && result.SkippedSummary.Contains("不是后端节点"),
+        "两种跳过原因都要如实报出来：" + result.SkippedSummary);
+}
+
+/// <summary>对拍用：返回第一处差异（路径 + 两边取值），完全一致返回 null。JSON 对象的键顺序不参与比较。
+/// <paramref name="ignore"/> 可以按路径豁免个别字段（理由写在调用处）。</summary>
+static string? FirstJsonDifference(JsonNode? expected, JsonNode? actual, string path, Func<string, bool>? ignore = null)
+{
+    if (ignore is not null && ignore(path)) return null;
+
+    if (expected is null || actual is null)
+    {
+        if (expected is null && actual is null) return null;
+        return $"{path}：期望 {(expected?.ToJsonString() ?? "null")}，实际 {(actual?.ToJsonString() ?? "null")}";
+    }
+
+    if (expected is JsonObject expectedObject && actual is JsonObject actualObject)
+    {
+        foreach (var key in expectedObject.Select(pair => pair.Key).Concat(actualObject.Select(pair => pair.Key)).Distinct())
+        {
+            // 豁免要在「这一项」的路径上判断，不能只在父层判断：键缺失/多出是在父层抛出的。
+            if (ignore is not null && ignore($"{path}.{key}")) continue;
+            var hasExpected = expectedObject.TryGetPropertyValue(key, out var expectedValue);
+            var hasActual = actualObject.TryGetPropertyValue(key, out var actualValue);
+            if (!hasActual) return $"{path}.{key}：少了这一项（期望 {expectedValue?.ToJsonString() ?? "null"}）";
+            if (!hasExpected) return $"{path}.{key}：多出这一项（实际 {actualValue?.ToJsonString() ?? "null"}）";
+            var nested = FirstJsonDifference(expectedValue, actualValue, $"{path}.{key}", ignore);
+            if (nested is not null) return nested;
+        }
+        return null;
+    }
+
+    if (expected is JsonArray expectedArray && actual is JsonArray actualArray)
+    {
+        if (expectedArray.Count != actualArray.Count) return $"{path}：数组长度 {expectedArray.Count} 对不上 {actualArray.Count}";
+        for (var index = 0; index < expectedArray.Count; index++)
+        {
+            var nested = FirstJsonDifference(expectedArray[index], actualArray[index], $"{path}[{index}]", ignore);
+            if (nested is not null) return nested;
+        }
+        return null;
+    }
+
+    // 数字按数值比：1 与 1.0 是同一个值，不该因为写法不同就判失败。
+    if (IsNumeric(expected, out var expectedNumber) && IsNumeric(actual, out var actualNumber))
+        return expectedNumber == actualNumber ? null : $"{path}：期望 {expected.ToJsonString()}，实际 {actual.ToJsonString()}";
+
+    var left = expected.ToJsonString();
+    var right = actual.ToJsonString();
+    return left == right ? null : $"{path}：期望 {left}，实际 {right}";
+}
+
+static bool IsNumeric(JsonNode node, out double value)
+{
+    value = 0;
+    return node is JsonValue jsonValue && jsonValue.TryGetValue<double>(out value);
 }
 
 // ── 目标 1.1：只读 ID 与引用校验 ─────────────────────────────────────────────

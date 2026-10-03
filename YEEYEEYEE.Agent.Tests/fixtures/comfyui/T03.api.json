@@ -1,0 +1,704 @@
+{
+  "2": {
+    "inputs": {
+      "shift": 3,
+      "sampling": "flow",
+      "model": [
+        "108",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "采样算法（AuraFlow）"
+    }
+  },
+  "4": {
+    "inputs": {
+      "samples": [
+        "13",
+        0
+      ],
+      "vae": [
+        "105",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "5": {
+    "inputs": {
+      "text": [
+        "114",
+        0
+      ],
+      "clip": [
+        "106",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "7": {
+    "inputs": {
+      "text": "泛黄，发绿，模糊，低分辨率，低质量图像，扭曲的肢体，诡异的外观，丑陋，AI感，噪点，网格感，JPEG压缩条纹，异常的肢体，水印，乱码，意义不明的字符，泛蓝,模糊，低分辨率，畸形，多余的肢体，手的结构错误，卡通，插画，文字，水印，logo，过度曝光，曝光不足，平光，生硬的阴影，面部丑陋，比例失调，手指畸形，眼睛畸形，耳朵畸形，鼻子畸形，嘴巴畸形，牙齿畸形，头发杂乱，衣服褶皱不自然，背景杂乱，构图混乱，透视错误，景深错误，对焦模糊，色彩失真，对比度低，饱和度低，质感差，塑料感，不真实。",
+      "clip": [
+        "106",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "10": {
+    "inputs": {
+      "width": [
+        "95",
+        0
+      ],
+      "height": [
+        "96",
+        0
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像"
+    }
+  },
+  "12": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": 274576422838456,
+      "steps": [
+        "17",
+        0
+      ],
+      "cfg": 2,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 0,
+      "end_at_step": [
+        "18",
+        0
+      ],
+      "return_with_leftover_noise": "enable",
+      "model": [
+        "2",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "10",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器（高级）"
+    }
+  },
+  "13": {
+    "inputs": {
+      "add_noise": "disable",
+      "noise_seed": 111722281625654,
+      "steps": [
+        "17",
+        0
+      ],
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": [
+        "18",
+        0
+      ],
+      "end_at_step": 10000,
+      "return_with_leftover_noise": "disable",
+      "model": [
+        "19",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "16",
+        0
+      ],
+      "latent_image": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器（高级）"
+    }
+  },
+  "16": {
+    "inputs": {
+      "conditioning": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "条件零化"
+    }
+  },
+  "17": {
+    "inputs": {
+      "Number": 12
+    },
+    "class_type": "Int",
+    "_meta": {
+      "title": "Int"
+    }
+  },
+  "18": {
+    "inputs": {
+      "Number": 4
+    },
+    "class_type": "Int",
+    "_meta": {
+      "title": "Int"
+    }
+  },
+  "19": {
+    "inputs": {
+      "shift": 3,
+      "sampling": "flow",
+      "model": [
+        "107",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "采样算法（AuraFlow）"
+    }
+  },
+  "35": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "46": {
+    "inputs": {
+      "images": [
+        "65",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "47": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "48": {
+    "inputs": {
+      "noise": [
+        "50",
+        0
+      ],
+      "guider": [
+        "52",
+        0
+      ],
+      "sampler": [
+        "47",
+        0
+      ],
+      "sigmas": [
+        "53",
+        0
+      ],
+      "latent_image": [
+        "59",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "49": {
+    "inputs": {
+      "samples": [
+        "48",
+        0
+      ],
+      "vae": [
+        "51",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "50": {
+    "inputs": {
+      "noise_seed": 876116031592913
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "51": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "52": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "63",
+        0
+      ],
+      "positive": [
+        "60",
+        0
+      ],
+      "negative": [
+        "61",
+        0
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFG引导器"
+    }
+  },
+  "53": {
+    "inputs": {
+      "steps": 4,
+      "width": [
+        "58",
+        0
+      ],
+      "height": [
+        "58",
+        1
+      ]
+    },
+    "class_type": "Flux2Scheduler",
+    "_meta": {
+      "title": "Flux2调度器"
+    }
+  },
+  "54": {
+    "inputs": {
+      "text": "4k，高清",
+      "clip": [
+        "62",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "55": {
+    "inputs": {
+      "conditioning": [
+        "54",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "条件零化"
+    }
+  },
+  "56": {
+    "inputs": {
+      "upscale_method": "nearest-exact",
+      "megapixels": 4,
+      "resolution_steps": 1,
+      "image": [
+        "69",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "缩放图像（像素）"
+    }
+  },
+  "57": {
+    "inputs": {
+      "pixels": [
+        "56",
+        0
+      ],
+      "vae": [
+        "51",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "58": {
+    "inputs": {
+      "image": [
+        "56",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "获取图像尺寸"
+    }
+  },
+  "59": {
+    "inputs": {
+      "width": [
+        "58",
+        0
+      ],
+      "height": [
+        "58",
+        1
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "空Latent图像（Flux2）"
+    }
+  },
+  "60": {
+    "inputs": {
+      "conditioning": [
+        "54",
+        0
+      ],
+      "latent": [
+        "57",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "参考Latent"
+    }
+  },
+  "61": {
+    "inputs": {
+      "conditioning": [
+        "55",
+        0
+      ],
+      "latent": [
+        "57",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "参考Latent"
+    }
+  },
+  "62": {
+    "inputs": {
+      "clip_name": "qwen_3_8b_fp8mixed.safetensors",
+      "type": "flux2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "63": {
+    "inputs": {
+      "unet_name": "flux/flux-2-klein-9b.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "64": {
+    "inputs": {
+      "method": "mkl",
+      "strength": 1,
+      "multithread": true,
+      "image_ref": [
+        "4",
+        0
+      ],
+      "image_target": [
+        "49",
+        0
+      ]
+    },
+    "class_type": "ColorMatch",
+    "_meta": {
+      "title": "Color Match"
+    }
+  },
+  "65": {
+    "inputs": {
+      "sharpen_radius": 1,
+      "sigma": 0.35,
+      "alpha": 0.35,
+      "image": [
+        "64",
+        0
+      ]
+    },
+    "class_type": "ImageSharpen",
+    "_meta": {
+      "title": "锐化图像"
+    }
+  },
+  "69": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": true,
+      "anything": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM V2",
+    "_meta": {
+      "title": "图层工具：清除VRAM V2"
+    }
+  },
+  "78": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "65",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "95": {
+    "inputs": {
+      "value": 1920
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "INT Constant"
+    }
+  },
+  "96": {
+    "inputs": {
+      "value": 1280
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "INT Constant"
+    }
+  },
+  "105": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "106": {
+    "inputs": {
+      "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+      "type": "krea2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "107": {
+    "inputs": {
+      "unet_name": "krea2/krea2_turbo_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "108": {
+    "inputs": {
+      "unet_name": "krea2/krea2_raw_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "109": {
+    "inputs": {
+      "prompt": "# Krea 2 独立模板：一句话变英文 Prompt\n\n> 启动词：`#Krea2需求转Prompt`  \n> 作用：把一句中文需求变成一段可直接复制到 Krea 2 的英文长提示词。  \n> 硬规则：最终只输出 Prompt 本身，不输出标题、解释、参数、拆解、表格、Markdown 代码块。\n\n---\n\n## 1. 调用方式\n\n```text\n#Krea2需求转Prompt：{一句中文需求}\n```\n\n或：\n\n```markdown\n#Krea2需求转Prompt\n需求：\n用途：\n画幅：\n风格：\n必须出现：\n必须避免：\n```\n\n---\n\n## 2. 最终输出硬规则\n\n调用本模板后，最终回答只能是一段英文 Prompt。\n\n禁止输出：\n\n- `## 判断`\n- `推荐设置`\n- `中文拆解`\n- `下一轮建议`\n- `Mode / Model / Creativity`\n- 表格\n- 解释\n- Markdown 代码块\n- 项目符号\n\n最终输出只允许：\n\n```text\n一整段英文 Prompt\n```\n\n长度要求：\n\n```text\n最终英文 Prompt 不少于 500 个英文单词。\n建议长度：500-750 个英文单词。\n如果用户明确要求更短，仍不得低于 500 个英文单词，除非用户再次明确要求压缩。\n```\n\n---\n\n## 3. 内部工作流\n\n收到用户一句中文需求后，内部执行以下步骤，但不要把步骤输出给用户：\n\n```text\n1. 判断主体是什么。\n2. 判断用途和画幅。\n3. 判断场景、时间、天气、环境。\n4. 判断构图、镜头距离、视角、主体占比。\n5. 判断光线类型、方向、软硬、色温、对比度。\n6. 判断情绪和商业目的。\n7. 判断图像媒介：摄影、产品摄影、电影剧照、动漫插画、概念艺术、建筑摄影。\n8. 补充材质、颜色、纹理、背景、前景、技术细节。\n9. 加入必要限制：no text, no logo, no watermark, no distorted anatomy, no clutter。\n10. 合并成一段自然流畅的英文长 Prompt。\n```\n\n---\n\n## 4. 内容占比分配\n\n最终 500+ 英文单词 Prompt 的信息量按下面比例分配。\n\n| 内容模块 | 占比 | 要写什么 |\n|---|---:|---|\n| 主体细节 | 20% | 主体身份、形态、数量、动作、状态、比例、关键特征 |\n| 场景环境 | 15% | 地点、时间、天气、背景、前景、空间层次 |\n| 构图镜头 | 15% | 画幅、镜头距离、视角、主体占比、焦点、留白 |\n| 光线影调 | 15% | 光源方向、软硬、色温、阴影、反射、对比度 |\n| 风格媒介 | 10% | 摄影 / 电影 / 产品 / 动漫 / 概念艺术 / 建筑摄影 |\n| 材质色彩 | 15% | 材质、纹理、色彩系统、表面反光、颗粒 |\n| 质量限制 | 10% | 清晰度、无文字、无 logo、无水印、避免错误 |\n\n---\n\n## 5. Prompt 结构\n\n最终英文 Prompt 应该是一段完整自然语言，不要分条。\n\n基础结构：\n\n```text\nCreate a {image type} featuring {main subject} ... The subject is ... The scene takes place ... The composition uses ... The lighting should ... The mood feels ... The visual style is ... Materials and colors include ... Technical qualities should include ... Avoid ...\n```\n\n不要写成：\n\n```text\nSubject: ...\nScene: ...\nLighting: ...\n```\n\n因为最终输出只能是一段可复制的 Prompt。\n\n---\n\n## 6. 场景识别词库\n\n根据用户中文需求自动选择英文表达。\n\n| 中文需求 | 英文视觉表达 |\n|---|---|\n| 高级 | premium, refined, restrained, elegant, clean commercial finish |\n| 电影感 | cinematic still, dramatic framing, controlled contrast, atmospheric depth |\n| 科技感 | futuristic design, cool rim light, clean geometry, metallic surfaces |\n| 商业感 | commercial photography, crisp focus, polished lighting, product clarity |\n| 真实 | photorealistic, natural texture, realistic lighting, believable scale |\n| 干净 | minimal background, clear silhouette, uncluttered composition |\n| 温暖 | warm light, soft shadows, inviting atmosphere, gentle color palette |\n| 复古 | muted film colors, subtle grain, analog texture, nostalgic tone |\n| 酷炫 | bold composition, strong lighting contrast, dynamic visual impact |\n| 梦幻 | soft glow, atmospheric haze, delicate highlights, ethereal mood |\n| 日系 | soft daylight, quiet emotional tone, delicate background details |\n| 赛博朋克 | neon reflections, rainy streets, dense urban detail, cool magenta-blue palette |\n\n---\n\n## 7. 用途适配规则\n\n### 产品图\n\nPrompt 必须强调：\n\n- product shape accuracy\n- commercial product photography\n- clean background\n- crisp focus\n- material detail\n- no text, no logo\n\n### 短视频封面\n\nPrompt 必须强调：\n\n- vertical composition\n- strong central subject\n- high visual impact\n- readable silhouette\n- dramatic lighting\n- optional empty space for title, but no actual text\n\n### 人像\n\nPrompt 必须强调：\n\n- face clarity\n- natural anatomy\n- pose and expression\n- skin texture\n- lens and depth of field\n- no distorted hands or facial features\n\n### 建筑室内\n\nPrompt 必须强调：\n\n- straight vertical lines\n- spatial layout\n- realistic materials\n- daylight direction\n- clean editorial composition\n\n### 动漫插画\n\nPrompt 必须强调：\n\n- character design\n- scene storytelling\n- cel shading or clean linework\n- background detail\n- emotional atmosphere\n\n### 概念艺术\n\nPrompt 必须强调：\n\n- worldbuilding\n- scale\n- atmosphere\n- cinematic composition\n- environmental storytelling\n\n---\n\n## 8. 最终 Prompt 示例\n\n用户输入：\n\n```text\n#Krea2需求转Prompt：做一张 9:16 的短视频封面，一个未来感机器人站在雨夜城市街头，要电影感\n```\n\n下面是结构示意，真实调用时必须扩展到不少于 500 个英文单词，并且不要附加任何解释：\n\nCreate a vertical 9:16 cinematic cover image featuring a futuristic humanoid robot standing alone on a rainy city street at night, designed as a high-impact short-video thumbnail with a strong central silhouette and immediate visual readability. The robot should appear full body or slightly three-quarter body, occupying the central portion of the frame with enough negative space around the upper area for possible title placement, but do not include any actual text, captions, symbols, logos, or watermarks. Its body should combine sleek brushed metal panels, dark graphite armor plates, subtle exposed mechanical joints, translucent illuminated details, and small blue status lights embedded into the chest, neck, and forearms. The posture should feel calm but powerful, with the robot standing upright, shoulders squared, head slightly tilted downward toward the viewer, as if it has just emerged from the storm. The street environment should be dense but not cluttered, with wet asphalt, shallow puddles, rain streaks, blurred neon storefronts, distant traffic lights, reflective glass facades, steam rising from vents, and a deep urban background that fades into atmospheric mist. Use a low camera angle at street level to make the robot feel tall and imposing, with a cinematic perspective that leads the eye from the reflective puddles in the foreground up to the robot and then into the glowing city depth behind it. Lighting should be low-key and dramatic, driven by cool blue rim light from one side, subtle magenta neon reflections from the opposite side, faint white highlights along the robot’s metal edges, and soft diffused rain glow in the background. The color palette should stay controlled: deep black, graphite gray, electric blue, muted cyan, restrained magenta, and small silver highlights, avoiding overly saturated rainbow colors. The mood should feel mysterious, tense, futuristic, cinematic, and premium rather than chaotic. Render it as photorealistic sci-fi photography with the texture of a high-end movie still, crisp focus on the robot’s face and torso, realistic raindrops on metal surfaces, believable reflections on the ground, subtle motion blur only in distant background lights, volumetric mist, shallow atmospheric depth, clean readable composition, no distorted anatomy, no extra limbs, no messy wires, no random text, no brand marks, no watermark, no cartoon style, no flat illustration, no overexposed highlights, no low-resolution artifacts.\n\n---\n\n## 9. 500 词扩写库\n\n当用户需求过短时，用下面模块扩写最终 Prompt。扩写只进入最终英文 Prompt，不以清单形式输出。\n\n主体扩写：写清主体的形状、比例、数量、动作、状态、表面细节、视觉优先级、与环境的关系，以及缩略图尺寸下是否仍然清晰可读。\n\n场景扩写：写清前景、中景、背景、空间深度、天气、时间、环境材质、反射、雾气、背景密度，以及哪些环境元素只做氛围不要抢主体。\n\n构图扩写：写清画幅、镜头高度、视角、主体占画面比例、居中或偏置、留白、引导线、焦点层级、裁切边界和画面重心。\n\n光线扩写：写清主光、辅光、轮廓光、阴影软硬、色温、对比度、反射控制、高光范围、低光区域，以及光线如何服务主体。\n\n材质扩写：写清 matte、glossy、brushed、translucent、ceramic、glass、metal、fabric、skin、wood、stone 等表面质感，以及细微划痕、边缘高光、纹理颗粒、真实瑕疵。\n\n限制扩写：按场景加入 no text, no logo, no watermark, no distorted anatomy, no extra limbs, no unreadable symbols, no random objects, no clutter, no low-resolution artifacts, no overexposed highlights。\n\n---\n\n## 10. 最终输出自检\n\n输出前内部检查，不要把检查结果输出：\n\n```text\n是否只有一段英文 Prompt？\n是否没有标题、解释、参数、表格、Markdown 代码块？\n是否不少于 500 个英文单词？\n是否详细写了主体、场景、构图、光线、风格、材质、限制？\n是否能直接复制到 Krea 2？\n```\n\n---\n\n## 11. 复制给 AI 的执行指令\n\n```markdown\n你是 `#Krea2需求转Prompt` 模板。\n\n当我调用该启动词时，你只输出一段英文 Prompt。\n不要输出标题、解释、参数、表格、拆解、Markdown 代码块或任何说明。\n最终英文 Prompt 不少于 500 个英文单词。\n你需要内部拆解主体、场景、构图、光线、情绪、风格媒介、材质色彩、技术细节和限制词，但不要把拆解过程输出。\n最终 Prompt 必须详细、自然、可直接复制到 Krea 2。\n```\n\n---\n\n## 12. 真实 500+ 词完整输出样例\n\n本节是长度标准参考。真实调用时，最终仍然只输出英文 Prompt，不输出本节标题。\n\nCreate a vertical 9:16 cinematic cover image featuring a futuristic humanoid robot standing alone on a rain-soaked city street at night, designed as a high-impact short-video thumbnail with a strong central silhouette, clear visual hierarchy, and immediate readability on a mobile screen. The robot should appear full body or slightly three-quarter body, placed near the center of the composition, occupying roughly sixty percent of the image height while leaving controlled negative space in the upper third for possible title placement, but do not include any actual text, typography, captions, symbols, brand marks, logos, or watermarks. Its design should combine sleek brushed metal panels, dark graphite armor plates, subtle exposed mechanical joints, translucent illuminated seams, small blue status lights embedded in the chest, neck, wrists, and forearms, and refined industrial details that feel engineered rather than decorative. The posture should feel calm, powerful, and slightly threatening, with squared shoulders, a stable stance, relaxed mechanical hands, and the head tilted just enough to suggest awareness of the viewer. The environment should be a dense but readable rainy urban street with wet asphalt, shallow puddles, blurred neon storefronts, distant traffic lights, reflective glass facades, steam rising from street vents, thin rain streaks catching light, and a deep background that fades into atmospheric mist without becoming visually cluttered. Use a low camera angle close to street level so the robot feels tall and imposing, with subtle leading lines from the curb, pavement reflections, crosswalk markings, and building edges guiding the eye toward the figure. Lighting should be low-key and cinematic, driven by a cool blue rim light from one side, restrained magenta neon reflections from the opposite side, soft diffused rain glow in the background, and small white highlights along the metal edges to reveal form. Shadows should be deep but not muddy, with enough front detail to keep the robot’s face, chest, and hands readable. The color palette should remain controlled: deep black, graphite gray, muted cyan, electric blue, restrained magenta, wet pavement silver, and small white specular highlights, avoiding rainbow neon chaos or excessive saturation. Add small believable details that enrich the scene without distracting from the robot, such as droplets clinging to armor seams, shallow ripples in puddles, faint reflections of passing vehicle lights, tiny scratches on metal panels, moisture gathering along mechanical joints, and distant silhouettes of buildings softened by rain haze. The background should suggest a larger futuristic city, but it must remain subordinate to the central figure through softened edges, atmospheric perspective, and restrained detail density. Render the image as photorealistic sci-fi movie-still photography with realistic raindrops on metal surfaces, believable reflections, crisp focus on the robot’s head and torso, subtle atmospheric depth, slight background motion blur only in distant lights, volumetric mist, clean edges, and a premium cinematic finish. Avoid distorted anatomy, extra limbs, messy wires, random floating objects, unreadable markings, visible text, logos, watermarks, cartoon style, flat illustration, overexposed highlights, low-resolution artifacts, cluttered background props, plastic materials, badly aligned joints, and any element that weakens the strong central cover composition.\n\n---\n\n## 附录：结构示意样例（非长度标准）\n\n下面样例用于校准输出密度。真实调用时，最终回答仍然只能输出英文 Prompt 本身，不要输出本节标题。\n\nCreate a vertical 9:16 cinematic cover image featuring a futuristic humanoid robot standing alone on a rain-soaked city street at night, designed as a high-impact short-video thumbnail with a strong central silhouette, clear visual hierarchy, and immediate readability on a mobile screen. The robot should appear full body or slightly three-quarter body, placed near the center of the composition, occupying roughly sixty percent of the image height while leaving controlled negative space in the upper third for possible title placement, but do not include any actual text, typography, captions, symbols, brand marks, logos, or watermarks. Its design should combine sleek brushed metal panels, dark graphite armor plates, subtle exposed mechanical joints, translucent illuminated seams, small blue status lights embedded in the chest and forearms, and refined industrial details that feel engineered rather than decorative. The posture should feel calm, powerful, and slightly threatening, with squared shoulders, a stable stance, and the head tilted just enough to suggest awareness of the viewer. The environment should be a dense but readable rainy urban street with wet asphalt, shallow puddles, blurred neon storefronts, distant traffic lights, reflective glass facades, steam rising from street vents, thin rain streaks catching light, and a deep background that fades into atmospheric mist without becoming visually cluttered. Use a low camera angle close to street level so the robot feels tall and imposing, with subtle leading lines from the curb, pavement reflections, and building edges guiding the eye toward the figure. Lighting should be low-key and cinematic, driven by a cool blue rim light from one side, restrained magenta neon reflections from the opposite side, soft diffused rain glow in the background, and small white highlights along the metal edges to reveal form. Shadows should be deep but not muddy, with enough front detail to keep the robot’s face and torso readable. The color palette should remain controlled: deep black, graphite gray, muted cyan, electric blue, restrained magenta, silver highlights, and wet pavement reflections, avoiding rainbow neon chaos or excessive saturation. Render the image as photorealistic sci-fi movie-still photography with realistic raindrops on metal surfaces, believable reflections, crisp focus on the robot’s head and chest, subtle atmospheric depth, slight background motion blur only in distant lights, volumetric mist, clean edges, and a premium cinematic finish. Avoid distorted anatomy, extra limbs, messy wires, random floating objects, unreadable markings, visible text, logos, watermarks, cartoon style, flat illustration, overexposed highlights, low-resolution artifacts, cluttered background props, and any element that weakens the strong central cover composition.\n\n\n\n"
+    },
+    "class_type": "CR Prompt Text",
+    "_meta": {
+      "title": "⚙️ CR Prompt Text"
+    }
+  },
+  "114": {
+    "inputs": {
+      "source": [
+        "124",
+        1
+      ]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "预览任意"
+    }
+  },
+  "115": {
+    "inputs": {
+      "prompt": "\"大师级赛璐璐风格，日系商业插画质感，手游立绘标准；长卷发大波浪，眼部特写，耳坠，很潮的发型，飘逸的头发，身段高挑且挺拔，摇滚风格服饰，中性背景，纯色背景，珠光，反光，暗夜，抽象，意识流，梦核，慵懒的姿态，神情高傲忧郁，隐藏身形于阴影中，纯色背景，充满张力的构图，新古典主义构图，窗格投影斜切构图，拍摄角度平视，七合一镜头，复古漫画，整体呈现朋克风格，低饱和度色调营造氛围感，三、视觉表现参数： 传统技法 网点纸：20Lpi； 手绘瑕疵：铅笔草稿线保留率12%； 色指定： 皮肤：日动画SK-02橙暖调； 阴影：群青+普鲁士蓝混合； 光影系统： 钨丝主光（3200K色温，硬边投影）； 霓虹环境光（RGB 255/0/0，强度0.6）；暗朦，光朦，泛白，褪色，漏光，胶片颗粒质感，层次丰富，电影质感，非常详细，深色背景，增强动作，光粒子复古彩绘，线条插画，精细钢笔\""
+    },
+    "class_type": "CR Prompt Text",
+    "_meta": {
+      "title": "⚙️ CR Prompt Text"
+    }
+  },
+  "116": {
+    "inputs": {
+      "model": "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf",
+      "mmproj": "Qwen3.6-35B-A3B-mmproj-BF16.gguf",
+      "chat_handler": "Qwen3.6-Thinking",
+      "n_ctx": 8192,
+      "vram_limit": -1,
+      "image_min_tokens": 0,
+      "image_max_tokens": 0,
+      "load_mtp": false
+    },
+    "class_type": "llama_cpp_model_loader",
+    "_meta": {
+      "title": "Llama-cpp Model Loader"
+    }
+  },
+  "117": {
+    "inputs": {
+      "max_tokens": 1024,
+      "top_k": 30,
+      "top_p": 0.9,
+      "min_p": 0.05,
+      "typical_p": 1,
+      "temperature": 0.8,
+      "repeat_penalty": 1,
+      "frequency_penalty": 0,
+      "present_penalty": 1,
+      "mirostat_mode": 0,
+      "mirostat_eta": 0.1,
+      "mirostat_tau": 5,
+      "state_uid": -1
+    },
+    "class_type": "llama_cpp_parameters",
+    "_meta": {
+      "title": "Llama-cpp Parameters"
+    }
+  },
+  "119": {
+    "inputs": {
+      "preset_prompt": "Normal - Describe",
+      "custom_prompt": [
+        "115",
+        0
+      ],
+      "system_prompt": [
+        "109",
+        0
+      ],
+      "inference_mode": "one by one",
+      "max_frames": 24,
+      "max_size": 256,
+      "seed": 105354602387492,
+      "force_offload": false,
+      "save_states": false,
+      "llama_model": [
+        "116",
+        0
+      ],
+      "parameters": [
+        "117",
+        0
+      ]
+    },
+    "class_type": "llama_cpp_instruct_adv",
+    "_meta": {
+      "title": "Llama-cpp Instruct"
+    }
+  },
+  "124": {
+    "inputs": {
+      "text": [
+        "119",
+        0
+      ],
+      "split_keyword": "Create a",
+      "remove_text": "",
+      "include_keyword": true
+    },
+    "class_type": "segment_text",
+    "_meta": {
+      "title": "📝文本分割"
+    }
+  }
+}

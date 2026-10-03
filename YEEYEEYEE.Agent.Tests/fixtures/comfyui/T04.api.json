@@ -1,0 +1,237 @@
+{
+  "29": {
+    "inputs": {
+      "filename_prefix": "COMFYUI",
+      "images": [
+        "54",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "51": {
+    "inputs": {
+      "text": [
+        "162",
+        0
+      ],
+      "clip": [
+        "56",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "52": {
+    "inputs": {
+      "width": 1920,
+      "height": 1080,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像"
+    }
+  },
+  "53": {
+    "inputs": {
+      "seed": [
+        "115",
+        0
+      ],
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "129",
+        0
+      ],
+      "positive": [
+        "51",
+        0
+      ],
+      "negative": [
+        "58",
+        0
+      ],
+      "latent_image": [
+        "52",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "54": {
+    "inputs": {
+      "samples": [
+        "53",
+        0
+      ],
+      "vae": [
+        "57",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "55": {
+    "inputs": {
+      "unet_name": "krea2/redcraftHybridH3A2A_30Krea2.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "56": {
+    "inputs": {
+      "clip_name": "qwen3vl_4b_uncensored_int8_convrot.safetensors",
+      "type": "krea2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "57": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "58": {
+    "inputs": {
+      "conditioning": [
+        "51",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "条件零化"
+    }
+  },
+  "107": {
+    "inputs": {
+      "text_0": "A professional clean four-view character turnaround benchmark sheet, on a single seamless pure white industrial studio background, no borders, no frames, no dividing lines, no panel edges, no rounded corners anywhere arranged horizontally side-by-side, seamless pure white industrial studio background, no shadows, technical reference model sheet, orthographic views, maximum consistency across all panels.\nCyberpunk underground beauty character design reference sheet, young Asian woman with cold avant-garde futuristic aesthetic, highly detailed character design reference sheet.\nPanel 1/4 (Head Close-up): Extreme close-up portrait from front, only head and shoulders, razor sharp 8K facial details, perfect reproduction of facial bone structure, pale cool skin tones with realistic pore texture, sharp graphic winged eyeliner in matte black, glossy clear lip gloss with high specular highlights, sleek straight hair with silver-gray front highlights and dark roots, small glowing blue circuit-pattern sticker adhered to the right cheekbone, neutral expression, clean shoulder and neck area fully visible, silver metallic choker around the neck with brushed metal texture and visible rivets, studio flat lighting.\nPanel 2/4 (Front Full Body): Full body front view, neutral standing pose, arms naturally hanging at sides, hands relaxed, straight posture, 1:1 realistic body proportions.\nPanel 3/4 (Side Full Body): Full body side view (profile), same neutral standing pose, arms naturally at sides, maintaining exact same body proportions and details.\nPanel 4/4 (Back Full Body): Full body back view, same neutral standing pose, arms naturally at sides, maintaining exact same body proportions and details.\nGlobal Consistency Constraints:\nPerfect 100% identity consistency across all four panels — identical face, exact same hairstyle and hair flow, identical body shape and proportions, identical clothing in every angle. Same fabric wear, stitching, tears, wrinkles, metallic sheen, and surface details visible from every view. No pose variation, no dramatic expression, no hand gestures that obscure body.\nClothing & Material Details:\nCharacter wearing complete cyberpunk slip dress outfit in all views, consisting of metallic silver slip dress with liquid-like iridescent finish, thin delicate spaghetti straps, smooth satin under-layer visible at edges, subtle water droplet residue on fabric surface simulating wet environment, silver metallic choker, glowing blue circuit-pattern sticker on cheek, sleek straight hair with silver-gray highlights, precise tailoring, visible stitching lines, realistic fabric folds, material wear and tear, metallic reflections and matte textures all consistently rendered.\nTechnical & Quality Constraints:\n8K ultra sharp resolution, infinite depth of field (F/32), zero bokeh, everything in perfect razor focus, flat diffuse studio lighting with even illumination from all angles, no strong shadows, no ambient color cast, pure technical white background, maximum material detail and surface fidelity, cinematic yet documentary reference style.\n**single continuous white backdrop with no panel borders or separations**.",
+      "text": [
+        "162",
+        0
+      ]
+    },
+    "class_type": "ShowText|pysssss",
+    "_meta": {
+      "title": "Show Text 🐍"
+    }
+  },
+  "115": {
+    "inputs": {
+      "seed": -1
+    },
+    "class_type": "Seed (rgthree)",
+    "_meta": {
+      "title": "Seed (rgthree)"
+    }
+  },
+  "121": {
+    "inputs": {
+      "prompt": "Create an edgy cinematic cyberpunk beauty portrait of a young woman in a metallic silver slip dress, shot in a neon-lit underground passage at night on 35mm Kodak Vision3 500T film, with fine grain, high-contrast dual neon lighting, and cold avant-garde futuristic atmosphere.\nShe has sleek straight hair with silver-gray front highlights, wearing sharp graphic winged eyeliner, glossy clear lip gloss, and a silver metallic choker around her neck. A small glowing blue circuit-pattern sticker rests on her cheekbone. She leans one shoulder against a wet concrete wall, one hand tucked into the waistband of her skirt, gaze locked on the camera with a cold, sharp, confident expression. Dual neon light sources hit her from both sides: cool cyan from the left, deep magenta from the right, carving bright colored rim light along her facial structure and the edges of her metallic dress, leaving the center of her face in soft cool shadow. Water droplets on the concrete wall reflect the neon light into tiny glowing spots.\nThe composition uses a wide cinematic 2.39:1 aspect ratio with solid black letterbox bars, framed as a medium bust shot from a slightly low angle. Shot with a 35mm prime lens at f/1.4, creating shallow depth of field that keeps her face sharp while the background passage and neon signs dissolve into soft round colored bokeh orbs. A subtle dark vignette darkens the frame edges, and fine film grain is prominent in shadow areas.\nLighting is dual-color hard neon side light with no front fill, creating high contrast and dramatic color separation across her face and body. The metallic dress fabric catches the neon to create iridescent color shifts. The overall color palette is cold and futuristic: silver gray, electric cyan, deep magenta, inky black, and pale cool skin tones, with rich saturated neon accents.\nThe visual style is edgy cyberpunk editorial beauty photography, with authentic 35mm night film grain, realistic neon light casting, and zero digital sharpening. "
+    },
+    "class_type": "CR Prompt Text",
+    "_meta": {
+      "title": "⚙️ CR Prompt Text"
+    }
+  },
+  "129": {
+    "inputs": {
+      "lora_name": "krea2/krea2-Cc风情万种-人像.safetensors",
+      "strength_model": 0.85,
+      "model": [
+        "55",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）"
+    }
+  },
+  "162": {
+    "inputs": {
+      "提示词": [
+        "121",
+        0
+      ],
+      "系统提示词": "Role: 影视级角色视觉真值 (Ground Truth) 提示词生成专家\nObjective: 将用户输入的简短角色设定，转化为结构极度严谨、专为 Krea 2 优化的高质量“四视图角色基准资产 (Character Benchmark Asset)”提示词。\nWorkflow:\n\n解析核心概念：提取用户输入的角色身份、性别、世界观背景及核心特征,如用户未提及面孔需要使用亚洲脸型。\n细节丰满化：根据世界观自动推演符合逻辑的面部特征、发型、服装材质、磨损细节及标志性道具。\n严格映射模板：填入以下为 Krea 2 优化的标准化结构。\n\nOutput Structure & Constraints（必须严格遵循）:\nA professional clean four-view character turnaround benchmark sheet, on a single seamless pure white industrial studio background, no borders, no frames, no dividing lines, no panel edges, no rounded corners anywhere arranged horizontally side-by-side, seamless pure white industrial studio background, no shadows, technical reference model sheet, orthographic views, maximum consistency across all panels.\n[角色核心定义与布局] [在此处结合用户设定，例如：赛博朋克世界的义体强化男黑客]，highly detailed character design reference sheet.\nPanel 1/4 (Head Close-up): Extreme close-up portrait from front, only head and shoulders, razor sharp 8K facial details, perfect reproduction of facial bone structure, [详细描述肤质特征，如：Her makeup is soft yet eye-catching: large, glossy eyes, a delicate pink blush, faint freckles across her cheeks, sharp eyeliner, and smooth gradient lips.], intricate [详细描述发型结构与质感]，neutral expression, clean shoulder and neck area fully visible, [详细描述领口/肩部服饰材质、剪裁和纹理]，studio flat lighting.\nPanel 2/4 (Front Full Body): Full body front view, neutral standing pose, arms naturally hanging at sides, hands relaxed, straight posture, 1:1 realistic body proportions.\nPanel 3/4 (Side Full Body): Full body side view (profile), same neutral standing pose, arms naturally at sides, maintaining exact same body proportions and details.\nPanel 4/4 (Back Full Body): Full body back view, same neutral standing pose, arms naturally at sides, maintaining exact same body proportions and details.\nGlobal Consistency Constraints:\nPerfect 100% identity consistency across all four panels — identical face, exact same hairstyle and hair flow, identical body shape and proportions, identical clothing in every angle. Same fabric wear, stitching, tears, wrinkles, metallic sheen, and surface details visible from every view. No pose variation, no dramatic expression, no hand gestures that obscure body.\nClothing & Material Details:\nCharacter wearing complete [设定风格] outfit in all views, consisting of [列举4-5个具体材质与配件，例如：matte black reinforced tactical jacket with carbon fiber panels, distressed leather pants, exposed cybernetic arm plating, glowing neon circuit accents, heavy combat boots], precise tailoring, visible stitching lines, realistic fabric folds, material wear and tear, metallic reflections and matte textures all consistently rendered.\nTechnical & Quality Constraints:\n8K ultra sharp resolution, infinite depth of field (F/32), zero bokeh, everything in perfect razor focus, flat diffuse studio lighting with even illumination from all angles, no strong shadows, no ambient color cast, pure technical white background, maximum material detail and surface fidelity, cinematic yet documentary reference style.\n**single continuous white backdrop with no panel borders or separations**.\nSystem Instructions:\n\n\n面部和服装描述必须具体到材质名称、物理状态、磨损程度和结构细节。\n最终输出仅包含生成的完整英文提示词，不要输出序言和评论。",
+      "最大边长": 1024,
+      "最大生成token": 1024,
+      "温度": 0.7,
+      "top_p": 0.9,
+      "top_k": 20,
+      "seed": 684631440196102,
+      "输出think块": false,
+      "生成后自动卸载": true,
+      "zealman模型": [
+        "163",
+        0
+      ]
+    },
+    "class_type": "ZealmanLLM_Generate",
+    "_meta": {
+      "title": "Zealman LLM"
+    }
+  },
+  "163": {
+    "inputs": {
+      "模型系列": "Qwen3.8-VL",
+      "主模型": "Qwen3.8-27B-Q4_K_M.gguf",
+      "视觉投影mmproj": "Qwen3.8-mmproj-BF16.gguf",
+      "启用思考": false,
+      "保留历史think": false,
+      "上下文长度": 32768,
+      "GPU层数": -1,
+      "KV缓存K类型": "默认(F16)",
+      "KV缓存V类型": "默认(F16)",
+      "Qwen3.8推理强度": "xhigh",
+      "MoE专家上CPU": false,
+      "前N层专家上CPU": 0
+    },
+    "class_type": "ZealmanLLM_ModelLoader",
+    "_meta": {
+      "title": "Zealman LLM 模型加载器"
+    }
+  },
+  "164": {
+    "inputs": {
+      "offload_model": true,
+      "offload_cache": true,
+      "anything": [
+        "54",
+        0
+      ]
+    },
+    "class_type": "VRAMCleanup",
+    "_meta": {
+      "title": "🎈VRAM-Cleanup"
+    }
+  }
+}
