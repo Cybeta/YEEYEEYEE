@@ -91,13 +91,17 @@ export function WebCanvasApp() {
   const role = auth?.user?.role ?? 'Viewer'
   const editable = canEdit(role) && !readOnly
 
-  function selectRecord(id: string) {
-    if (dirty && !window.confirm('当前编辑尚未保存，确定放弃修改并切换节点吗？')) return
-    const item = records.find((record) => record.recordId === id)
-    if (!item) return
-    setSelectedId(id)
-    setTitle(recordTitle(item))
-    setContent(recordContent(item))
+  /**
+   * 选中 / 取消选中。传 null 是「在画布上点了空白处」——桌面端也是按空白先取消选中再进入平移。
+   * 切换与取消都要过一遍未保存确认：把编辑框里的草稿丢掉是同样的一件事。
+   */
+  function selectRecord(id: string | null) {
+    const item = id === null ? null : records.find((record) => record.recordId === id) ?? null
+    if (id !== null && item === null) return
+    if (dirty && !window.confirm('当前编辑尚未保存，确定放弃修改吗？')) return
+    setSelectedId(item?.recordId ?? '')
+    setTitle(item ? recordTitle(item) : '')
+    setContent(item ? recordContent(item) : '')
   }
 
   async function loadScene() {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampZoom, zoomAround } from '../src/shell/CanvasView'
+import { clampZoom, wheelNotches, wheelZoomFactor, zoomAround } from '../src/shell/CanvasView'
 import {
   PLANNING_GROUP_ID, UNFILED_GROUP_ID, canvasBounds, chapterGroups, isEditableRecord, isPlanning,
   kindOf, NODE_KINDS, parseScene, scriptEntries, stageSummaries, type ViewRecord
@@ -171,10 +171,27 @@ describe('剧本与阶段统计', () => {
 })
 
 describe('缩放换算', () => {
-  it('缩放比例被夹在 20% 到 200% 之间', () => {
-    expect(clampZoom(0.01)).toBe(0.2)
-    expect(clampZoom(9)).toBe(2)
+  it('缩放比例被夹在与桌面端相同的 25%–220% 之间', () => {
+    expect(clampZoom(0.01)).toBe(0.25)
+    expect(clampZoom(9)).toBe(2.2)
     expect(clampZoom(0.86)).toBe(0.86)
+  })
+
+  it('滚轮一格约 1.1275 倍，方向与桌面端一致（向上滚放大）', () => {
+    // 浏览器向上滚 deltaY 为负 → 要放大；桌面端的曲线是一格 exp(0.12)。
+    expect(wheelZoomFactor(-100, 0)).toBeCloseTo(Math.exp(0.12), 9)
+    expect(wheelZoomFactor(-100, 0)).toBeGreaterThan(1)
+    expect(wheelZoomFactor(100, 0)).toBeLessThan(1)
+    // 两个方向互为倒数：连滚上去再滚下来应当回到原处
+    expect(wheelZoomFactor(-100, 0) * wheelZoomFactor(100, 0)).toBeCloseTo(1, 9)
+  })
+
+  it('像素 / 行 / 页三种 deltaMode 归一到同一格，倍率才不会被浏览器换掉', () => {
+    expect(wheelNotches(-100, 0)).toBeCloseTo(-1, 9)
+    expect(wheelNotches(-3, 1)).toBeCloseTo(-1, 9)
+    expect(wheelNotches(-1, 2)).toBeCloseTo(-1, 9)
+    expect(wheelZoomFactor(-3, 1)).toBeCloseTo(wheelZoomFactor(-100, 0), 9)
+    expect(wheelZoomFactor(-1, 2)).toBeCloseTo(wheelZoomFactor(-100, 0), 9)
   })
 
   it('缩放时光标下的那个世界坐标点停在原地', () => {
