@@ -47,6 +47,7 @@ internal static class WebLayoutApi
         var leases = mode.CanvasPath is null
             ? null
             : new EditLeaseStore(mode.CanvasPath, EditLeaseApi.LifetimeOf(app.Configuration));
+        var hub = app.Services.GetRequiredService<CanvasEventHub>();
 
         app.MapPost("/api/web/layout/plan", (PlanRequest body, HttpContext context) =>
         {
@@ -74,9 +75,27 @@ internal static class WebLayoutApi
                 return Results.Json(new { revision, moved = 0, summary, records = Array.Empty<object>() });
 
             // 确实要写，这时才去拿整棵树锁：自己持有就是续期，别人持有则如实回冲突与持有者。
+            var before = store.LastCommit;
             var lease = leases!.Acquire(EditScope.Tree, null, user!, client, force: false);
             if (lease.Status != EditLeaseStatus.Ok) return EditLeaseApi.Failure(lease);
-            return store.ApplyLayout(body.BaseRevision, body.Scope, body.OverrideManual == true);
+            IResult result;
+            try
+            {
+                result = store.ApplyLayout(body.BaseRevision, body.Scope, body.OverrideManual == true);
+            }
+            finally
+            {
+                // 拿到锁是为了让**这一次写入**与别人的结构改动排队，写完就该还回去。
+                // 整理布局是一次性动作，不像桌面端的编辑会话要一直握着；不还的话，
+                // 一次点击会把所有人的结构改动挡到锁过期（两分钟），而他们看不出是谁在挡。
+                leases.Release(lease.Lease!.LeaseId, user!, force: false);
+            }
+            // 只有真的落了盘才广播：干跑已经挡掉了「位置本来就排好」，这里是写入前最后一道兜底。
+            // 判据是提交序号而不是修订号——项目模式的修订号是内容哈希，比大小不成立。
+            var after = store.LastCommit;
+            if (after.Serial > before.Serial)
+                hub.CanvasChanged(after.Revision, null, WebAccessGuard.ActorName(context), "layout");
+            return result;
         });
     }
 }

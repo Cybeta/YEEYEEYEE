@@ -49,8 +49,8 @@ export type CanvasViewProps = {
   apiRef?: { current: CanvasApi | null }
   /** 当前有效的编辑锁：卡片上挂徽标，画布左上角说「谁在编辑」。 */
   leases?: Lease[]
-  /** 锁这一路自己的问题（读不到、有条目读不懂）。它不该让画布变得不可用，但必须说出来。 */
-  leaseNotice?: string
+  /** 通道自己的问题（编辑锁读不到、推送断开）。它不该让画布变得不可用，但必须说出来。 */
+  channelNotice?: string
   /** 当前账号的 ID：用来区分「你在编辑」与「别人在编辑」。 */
   myUserId?: string
   /** 整理布局的虚影。只画不动——桌面端的预览层同样不参与命中测试。 */
@@ -308,10 +308,10 @@ export function CanvasView(props: CanvasViewProps) {
           )}
         </div>
         <div className="df-scanband" aria-hidden="true" />
-        {(whoLines.length > 0 || props.leaseNotice) && (
+        {(whoLines.length > 0 || props.channelNotice) && (
           <div className="df-who">
             {whoLines.map((line) => <span key={line}>◉ {line}</span>)}
-            {props.leaseNotice && <span>◉ {props.leaseNotice}</span>}
+            {props.channelNotice && <span>◉ {props.channelNotice}</span>}
           </div>
         )}
       </div>

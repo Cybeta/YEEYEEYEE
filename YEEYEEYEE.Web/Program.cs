@@ -47,6 +47,8 @@ builder.Services.AddHostedService<ExternalTaskPollingHostedService>();
 var users = new UserStore(userDatabasePath);
 users.EnsureSchema();
 builder.Services.AddSingleton(users);
+// 变更推送的中枢：进程内广播，不持久化。没人在听时发布是空操作。
+builder.Services.AddSingleton<CanvasEventHub>();
 var callbackSecret = configuration["ComfyUI:CallbackSecret"];
 if (!string.IsNullOrWhiteSpace(callbackSecret))
     builder.Services.AddSingleton(_ => new HmacCallbackVerifier(new CallbackSignatureOptions { Secret = Convert.FromBase64String(callbackSecret) }));
@@ -77,6 +79,8 @@ WebSceneApi.Map(app);
 EditLeaseApi.Map(app);
 // 整理布局用的是桌面端那份泳道引擎（Desktop.Shared），所以两端对同一张画布排出来的结果一致。
 WebLayoutApi.Map(app);
+// 变更推送（SSE）：场景、锁、布局三处写成功之后往这里发一条「变了」，客户端据此刷新。
+WebEventApi.Map(app);
 WebSkillJobApi.Map(app);
 app.UseWebSockets();
 if (Directory.Exists(canvasDistPath))

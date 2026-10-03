@@ -12,8 +12,10 @@ import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layo
 import { describeLease, leaseCovering, shouldHoldNodeLease } from './shell/locks'
 import { RightDock } from './shell/RightDock'
 import { canvasBounds, chapterGroups, isEditableRecord, kindOf, parseScene, recordContent, recordTitle, type ShellScene } from './shell/records'
+import { canvasChangeText, isStaleRevision } from './shell/serverEvents'
 import { useLeases } from './shell/useLeases'
 import { useNodeLease } from './shell/useNodeLease'
+import { useServerEvents } from './shell/useServerEvents'
 import { Workspace } from './shell/Workspace'
 import {
   WorkbenchShell, type DockMode, type RailSection, type StatusFacts, type WorkbenchChrome, type WorkbenchView
@@ -68,8 +70,10 @@ export function WebCanvasApp() {
   const [layoutBusy, setLayoutBusy] = useState(false)
   /** 检查器的编辑框是否拿到焦点——它是「打算改」的信号，用来决定要不要去占锁。 */
   const [editorFocused, setEditorFocused] = useState(false)
+  /** 服务端说画布被改到了这个修订（且比我手上的新）。 */
+  const [staleRevision, setStaleRevision] = useState<{ revision: number; text: string } | null>(null)
   const generation = useRef(0)
-  // 编辑锁只能轮询：服务端还没有变更推送。锁坏了不影响画布，错误单独显示。
+  // 编辑锁读取：正常情况下靠推送立刻刷新，30 秒的轮询是兜底（推送断了、或锁因超时自然消失）。
   const { leases, error: leaseError, invalidCount: leaseInvalidCount, refresh: refreshLeases } = useLeases(!!auth?.user)
 
   const records = useMemo(() => scene?.records ?? [], [scene])
@@ -96,6 +100,23 @@ export function WebCanvasApp() {
   // 申请被拒时拿到的持有者是**刚刚发生**的冲突，比 15 秒轮询那份新；两边取其一即可。
   const blockedBy = nodeLeaseState.blockedBy ?? polledBlocked
   const heldByMe = nodeLeaseState.held
+
+  // 变更推送：锁变了立刻刷新锁列表；画布被改了就把「已同步」改成「有新版」。
+  // 推送只说「变了」，所以这里不自动重载画布——把整页视角与选中项一起抽走，比晚看到几秒更烦人。
+  const events = useServerEvents({
+    enabled: !!auth?.user,
+    onEditsChanged: () => void refreshLeases(),
+    onCanvasChanged: (event) => {
+      if (!isStaleRevision(scene?.revision, event)) return
+      const changed = event.recordId ? records.find((item) => item.recordId === event.recordId) : null
+      setStaleRevision({
+        revision: event.revision,
+        text: canvasChangeText(event, changed ? recordTitle(changed) : undefined)
+      })
+      // 整理预览的基准修订随之失效：收掉它，别让人点了「应用整理」才发现。
+      setLayoutPlan(null)
+    }
+  })
 
   /**
    * 选中 / 取消选中。传 null 是「在画布上点了空白处」——桌面端也是按空白先取消选中再进入平移。
@@ -135,6 +156,8 @@ export function WebCanvasApp() {
       if (sceneResult.status === 'rejected') throw sceneResult.reason
       const parsed = parseScene(sceneResult.value)
       setScene(parsed)
+      // 重新加载之后「有新版本」这件事就已经解决了，标记必须跟着清掉。
+      setStaleRevision(null)
       setNotice({
         kind: 'success',
         // 章节数按**种类**数，不拿「非可编辑记录」当代理：章节可以是工作树行（recordId 是 wt-，
@@ -363,13 +386,16 @@ export function WebCanvasApp() {
       : loading ? { label: '加载中', tone: 'busy' }
         : readOnly ? { label: '只读画布', tone: 'idle' }
           : dirty ? { label: '有未保存修改', tone: 'busy' }
-            : { label: '已同步', tone: 'ok' }
+            // 别人改了画布：说清楚是谁改的、改到第几修订，并给一个动作（下面那个按钮）。
+            : staleRevision ? { label: `有新版：${staleRevision.text}`, tone: 'stale' }
+              : { label: '已同步', tone: 'ok' }
 
   const status: StatusFacts = {
     text: notice.message,
     revision: `修订 ${scene?.revision ?? '—'}`,
     syncLabel: sync.label,
     syncTone: sync.tone,
+    syncAction: staleRevision ? { label: '重新加载', onClick: () => void loadScene() } : undefined,
     nodes: `${nodeCount} 节点`,
     // 连线没有被投影到网页端（NodeProjection 只投影节点），所以这里如实写出来，
     // 而不是显示一个永远是 0 的漂亮数字。
@@ -412,12 +438,14 @@ export function WebCanvasApp() {
           : !canEdit(role) ? '你的账号是只读，改不了画布'
             : dirty ? '改完点「应用修改」或按 Ctrl+Enter 写回画布' : '点进编辑框会先占锁，别人这时改不了这个节点'
 
-  // 锁这一路自己的问题。它不该把画布变成不可用，但也不能悄悄吞掉——
-  // 否则界面上的「没有人编辑」会被读成「现在没人编辑」。
-  const leaseNotice = nodeLeaseState.error
-    ? `编辑锁：${nodeLeaseState.error}`
-    : leaseError ? `编辑锁暂时读不到：${leaseError}`
-      : leaseInvalidCount > 0 ? `有 ${leaseInvalidCount} 条锁记录格式不对，已跳过` : ''
+  // 通道自己的问题。它不该把画布变成不可用，但也不能悄悄吞掉——
+  // 否则界面上的「没有人编辑」会被读成「现在没人编辑」，「已同步」会被读成「推送通着」。
+  const channelNotice = [
+    nodeLeaseState.error ? `编辑锁：${nodeLeaseState.error}` : '',
+    leaseError ? `编辑锁暂时读不到：${leaseError}` : '',
+    leaseInvalidCount > 0 ? `有 ${leaseInvalidCount} 条锁记录格式不对，已跳过` : '',
+    events.error
+  ].filter((line) => line.length > 0).join(' · ')
 
   return (
     <WorkbenchShell
@@ -449,7 +477,7 @@ export function WebCanvasApp() {
           assetsReady={assetsReady}
           leases={leases}
           myUserId={myUserId}
-          leaseNotice={leaseNotice}
+          channelNotice={channelNotice}
           layoutBusy={layoutBusy}
           layoutPlan={layoutPlan}
           layoutScope={layoutScope}

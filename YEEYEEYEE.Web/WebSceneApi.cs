@@ -27,8 +27,13 @@ internal static class WebSceneApi
             if (mode.IsProject) projectStore = new ProjectCanvasSceneStore(mode.CanvasPath!, mode.EntitiesPath);
             else store = new WebSceneStore(mode.CanvasPath!);
         }
+        // 变更推送的中枢：写成功之后往它发一条「画布变了」。
+        var hub = app.Services.GetRequiredService<CanvasEventHub>();
+        // 两个模式共用一句：谁都不是就回 (0,0)，序号比较自然不成立（也就不会广播）。
+        (long Serial, long Revision) CommitToken() => projectStore?.LastCommit ?? store?.LastCommit ?? (0, 0);
+
         app.MapGet("/api/web/scene", () => projectStore is not null ? projectStore.Read() : store is not null ? store.Read() : unavailable!);
-        app.MapPut("/api/web/records/{recordId}", (string recordId, HttpRequest request) =>
+        app.MapPut("/api/web/records/{recordId}", async (string recordId, HttpRequest request) =>
         {
             // Read the resolved permissions for every write; neither Bearer nor a session cookie alone
             // is edit authority. For a logged-in browser user they come from the role (Viewer gets none),
@@ -36,9 +41,17 @@ internal static class WebSceneApi
             // a claim takes effect on the next request without a restart).
             var claims = WebAccessGuard.Permissions(request.HttpContext);
             if (!claims.Contains("canvas.edit"))
-                return Task.FromResult(Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限"));
-            return projectStore is not null ? projectStore.Update(recordId, request) :
-                store is not null ? store.Update(recordId, request) : Task.FromResult(unavailable!);
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+            // 写入前后比一次提交序号：只有真的落了盘才广播。失败与「本来就无需改动」都不广播——
+            // 让所有人白刷一次的后果是，久了就没人信这条推送了。比的是序号而不是修订号：
+            // 项目模式的修订号是内容哈希，新哈希不保证比旧的大。
+            var before = CommitToken();
+            var result = projectStore is not null ? await projectStore.Update(recordId, request)
+                : store is not null ? await store.Update(recordId, request) : unavailable!;
+            var after = CommitToken();
+            if (after.Serial > before.Serial)
+                hub.CanvasChanged(after.Revision, recordId, WebAccessGuard.ActorName(request.HttpContext), "record");
+            return result;
         });
         app.MapGet("/api/web/assets", () =>
         {
@@ -65,6 +78,13 @@ internal static class WebSceneApi
     {
         private readonly object gate = new();
         private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+
+        /// <summary>
+        /// 最近一次成功提交的（提交序号，对外修订号）。与项目画布那份同理，只是这里简单得多：
+        /// 独立场景的修订号就是文件里那个整数，本来就单调，两个数一样能用。
+        /// 形状保持一致，接口层才不必为两种模式写两套判断。
+        /// </summary>
+        public (long Serial, long Revision) LastCommit { get; private set; }
 
         private static bool Valid(JsonNode? root)
         {
@@ -142,6 +162,7 @@ internal static class WebSceneApi
                         File.Move(temp, filePath, overwrite: true);
                     }
                     finally { if (File.Exists(temp)) File.Delete(temp); }
+                    LastCommit = (LastCommit.Serial + 1, current + 1);
                     return Results.Json(new { revision = current + 1, record = updated });
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)

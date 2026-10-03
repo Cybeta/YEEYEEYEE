@@ -21,13 +21,15 @@ import type { ReactNode } from 'react'
 export type WorkbenchView = 'canvas' | 'timeline' | 'script'
 export type DockMode = 'inspector' | 'agent'
 export type RailSection = 'project' | 'story'
-export type SyncTone = 'ok' | 'busy' | 'error' | 'idle'
+export type SyncTone = 'ok' | 'busy' | 'error' | 'idle' | 'stale'
 
 export type StatusFacts = {
   text: string
   revision: string
   syncLabel: string
   syncTone: SyncTone
+  /** 状态条上的动作（现在只用在「有新修订」时引导重新加载）。没有它就没有按钮。 */
+  syncAction?: { label: string; onClick: () => void }
   nodes: string
   edges: string
   canvasSize: string
@@ -83,7 +85,9 @@ const SYNC_COLORS: Record<SyncTone, string> = {
   ok: 'var(--df-primary)',
   busy: 'var(--df-warning)',
   error: 'var(--df-error)',
-  idle: 'var(--df-ink-3)'
+  idle: 'var(--df-ink-3)',
+  // 「别人改了」不是错，是提醒：用琥珀色，跟「正在忙」同一个色，但文案把差别说清楚。
+  stale: 'var(--df-warning)'
 }
 
 export function WorkbenchShell({ chrome, status, session, tree, workspace, dock, badge }: WorkbenchShellProps) {
@@ -225,6 +229,11 @@ export function WorkbenchShell({ chrome, status, session, tree, workspace, dock,
             <span aria-hidden="true">●</span>
             <span>{status.syncLabel}</span>
           </span>
+          {status.syncAction && (
+            <button type="button" className="df-mini-button" onClick={status.syncAction.onClick}>
+              {status.syncAction.label}
+            </button>
+          )}
           <div className="df-statusbar-right">
             <span className="df-dim">{status.nodes}</span>
             <span className="df-dim" title={status.edges}>{status.edges}</span>

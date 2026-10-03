@@ -11,6 +11,17 @@ internal sealed class ProjectCanvasSceneStore
     private readonly string entitiesPath;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    /// <summary>
+    /// 最近一次**成功提交**的（提交序号，对外修订号）。失败时两个都不动。
+    ///
+    /// 为什么要两个数：调用方得在请求前后各读一次才知道「这次到底写没写」——状态码不行，
+    /// 「本来就无需改动」这类请求也是 200，而它不该广播说画布变了。
+    /// 但**对外那个修订号不能拿来比大小**：项目模式下它是画布内容的哈希，
+    /// 新内容的哈希不保证比旧的大，拿它比「变大了没有」等于掷硬币。
+    /// 所以另给一个单调递增的序号当判据，修订号只当推送载荷用（它就是接口回报给客户端的那个数）。
+    /// </summary>
+    public (long Serial, long Revision) LastCommit { get; private set; }
+
     private static IResult Error(int status, string code, string message) =>
         Results.Json(new { code, message }, statusCode: status);
 
@@ -179,6 +190,10 @@ internal sealed class ProjectCanvasSceneStore
             catch (CanvasSaveAbortedException ex) when (ex.Message.Contains("其他进程", StringComparison.Ordinal))
             { return Error(409, "SCENE_REVISION_CONFLICT", ex.Message); }
             committed = true;
+            // 只在这里记：**落盘之后**才知道这次提交算数。调用方拿序号前后比一次就知道写没写；
+            // 修订号取的是刚落盘那份字节的哈希，与 respond 回给客户端的 `revision` 是同一个数——
+            // 客户端就是拿它和自己手上的比「谁更新」的，两边必须是同一把尺子。
+            LastCommit = (LastCommit.Serial + 1, Revision(saved.WrittenBytes));
             // Do not re-open the file after commit: another writer may already have replaced it.
             // Returning a failure after successful replacement would invite an unsafe retry.
             return Results.Json(respond(next, saved.WrittenBytes));

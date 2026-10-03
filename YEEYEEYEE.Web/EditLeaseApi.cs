@@ -74,6 +74,7 @@ internal static class EditLeaseApi
         var mode = WebCanvasMode.Resolve(app.Configuration);
         var store = mode.CanvasPath is null ? null : new EditLeaseStore(mode.CanvasPath, LifetimeOf(app.Configuration));
         var lifetimeSeconds = (int)(store?.Lifetime ?? EditLeaseStore.DefaultLifetime).TotalSeconds;
+        var hub = app.Services.GetRequiredService<CanvasEventHub>();
 
         app.MapGet("/api/web/edits", () =>
             store is null
@@ -103,9 +104,13 @@ internal static class EditLeaseApi
             if (force && user.Role != UserRole.Admin)
                 return Error(403, "ADMIN_REQUIRED", "强制接管别人的编辑锁需要管理员");
 
-            return From(store.Acquire(body.Scope!, body.TargetId, user, client, force));
+            var acquired = store.Acquire(body.Scope!, body.TargetId, user, client, force);
+            // 幂等的重复申请（同一个人同一个目标）也会广播一次。代价是别人的一次 GET，
+            // 换来的是服务端不用为了判断「是不是新锁」再读一遍锁文件——这笔账划算。
+            if (acquired.Status == EditLeaseStatus.Ok)
+                hub.EditsChanged(force ? "force" : "acquire", WebAccessGuard.ActorName(context));
+            return From(acquired);
         });
-
         app.MapPut("/api/web/edits/{leaseId}", (string leaseId, HttpContext context) =>
         {
             if (store is null) return mode.Error!;
@@ -115,6 +120,7 @@ internal static class EditLeaseApi
             if (!WebAccessGuard.Permissions(context).Contains("canvas.edit"))
                 return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
             // 认不出 LeaseId 的形状就当成「这个锁不在」，与「已被释放」在界面上是同一件事。
+            // 续期**不发广播**：它只把到期时间往后推，界面上没有任何东西会变。
             return Guid.TryParse(leaseId, out var parsed)
                 ? From(store.Renew(parsed, user))
                 : Error(404, "EDIT_LEASE_NOT_FOUND", "锁不存在或已过期");
@@ -134,9 +140,9 @@ internal static class EditLeaseApi
             if (!Guid.TryParse(leaseId, out var parsed))
                 return Error(404, "EDIT_LEASE_NOT_FOUND", "锁不存在或已过期");
             var result = store.Release(parsed, user, force);
-            return result.Status == EditLeaseStatus.Ok
-                ? Results.Json(new { released = Wire(result.Lease!) })
-                : From(result);
+            if (result.Status != EditLeaseStatus.Ok) return From(result);
+            hub.EditsChanged(force ? "force-release" : "release", WebAccessGuard.ActorName(context));
+            return Results.Json(new { released = Wire(result.Lease!) });
         });
     }
 }
