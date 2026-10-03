@@ -10,6 +10,7 @@ import { ChapterTree } from './shell/ChapterTree'
 import { InspectorPanel } from './shell/InspectorPanel'
 import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layoutPlan'
 import { describeLease, leaseCovering, shouldHoldNodeLease } from './shell/locks'
+import { buildNodeMenu, parseNodeAssist, type NodeAssistPlan, type NodeMenuItem } from './shell/nodeMenu'
 import { RightDock } from './shell/RightDock'
 import {
   canvasBounds, chapterGroups, isEditableRecord, kindOf, NODE_KINDS, nodeX, nodeY, parseScene, recordContent,
@@ -79,6 +80,11 @@ export function WebCanvasApp() {
    * 起点不单独存一份——存两份的话，「选中被清掉、起点还留着」这种半截状态就得靠额外的清理代码兜住。
    */
   const [connecting, setConnecting] = useState(false)
+  /**
+   * 节点右键菜单。`plan` 是服务端算出来的那份协助计划（与桌面端右键同一份来源），
+   * 菜单项在渲染时由 `buildNodeMenu` 拼——「有哪些建议」只有服务端一份，这里不留副本。
+   */
+  const [nodeMenu, setNodeMenu] = useState<{ recordId: string; x: number; y: number; plan: NodeAssistPlan } | null>(null)
   /** 服务端推来一条「画布变了」，且那个修订和我手上的不是同一个——我这份已经不是最新的了。 */
   const [remoteChange, setRemoteChange] = useState<{ revision: number; text: string } | null>(null)
   const generation = useRef(0)
@@ -553,9 +559,16 @@ export function WebCanvasApp() {
     }
   }
 
-  /** 结构级写入：删掉选中的节点（连带它的连线）。删之前问一句——服务端那边没有撤销。 */
-  async function deleteNode() {
-    const target = selected
+  /**
+   * 结构级写入：删掉一个节点（连带它的连线）。删之前问一句——服务端那边没有撤销。
+   *
+   * `targetRecordId` 只有右键菜单会给（它作用于**被右键的那一张**，不是「当前选中的那张」）：
+   * 菜单里点「删除节点」时选中的确实是它，但把「删谁」说清楚比依赖那次选中可靠。
+   */
+  async function deleteNode(targetRecordId?: string) {
+    const target = targetRecordId
+      ? records.find((item) => item.recordId === targetRecordId) ?? null
+      : selected
     if (!scene || !target) return
     if (!canEdit(role)) {
       setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
@@ -575,6 +588,66 @@ export function WebCanvasApp() {
       setNotice({ kind: 'error', message: `删除失败：${errorMessage(error)}` })
     } finally {
       setSaving(false)
+    }
+  }
+
+  /**
+   * 右键一张节点卡：先问服务端「这个节点能做什么」（协助计划），再摆菜单。
+   *
+   * 为什么要往返一次 HTTP 而不是本地拼菜单：**菜单的内容不是网页端定的**。它由共享的
+   * `NodeAssistPlanner` 按节点类型与上游素材算出来，桌面端右键用的是同一份——
+   * 网页端在这里抄一遍，等于把「有哪些建议」变成两份会各自演化的东西。
+   *
+   * 取不到就明说，不摆一个空菜单：空菜单看起来像「这个节点没什么可做的」，那是另一回事。
+   */
+  async function openNodeMenu(recordId: string, position: { x: number; y: number }) {
+    setNodeMenu(null)
+    try {
+      const plan = parseNodeAssist(await request<unknown>(`/api/web/records/${encodeURIComponent(recordId)}/assist`))
+      setNodeMenu({ recordId, x: position.x, y: position.y, plan })
+    } catch (error) {
+      setNotice({ kind: 'error', message: `读取这个节点能做些什么失败：${errorMessage(error)}` })
+    }
+  }
+
+  /**
+   * 菜单里的一项被选中。菜单**先关掉**：它是瞬时面板，动作失败也由 notice 说原因，
+   * 留着菜单反而盖住那条原因。
+   */
+  async function runNodeMenuItem(item: NodeMenuItem) {
+    const menu = nodeMenu
+    setNodeMenu(null)
+    if (!menu) return
+    if (item.action === 'editNode') {
+      // 「编辑节点…」在桌面端是开一个窗口；网页端没有窗口，对应物就是「切到检查器 + 光标进去」。
+      setDockOpen(true)
+      setDockMode('inspector')
+      setEditorFocused(true)
+      return
+    }
+    if (item.action === 'deleteNode') {
+      await deleteNode(menu.recordId)
+      return
+    }
+
+    const suggestion = menu.plan.suggestions.find((entry) => entry.id === item.id)
+    if (!suggestion) return
+    if (item.action === 'copyPrompt') {
+      try {
+        await navigator.clipboard.writeText(suggestion.prompt)
+        setNotice({ kind: 'success', message: '提示词已复制到剪贴板。' })
+      } catch {
+        setNotice({ kind: 'error', message: '复制失败：浏览器没有给剪贴板权限（要用 https 或 localhost）。' })
+      }
+      return
+    }
+    if (item.action === 'runImage') {
+      // **不直接出图**：桌面端这条路的规矩是「出图前让人看到会发出去的话」，
+      // 网页端的出图入口就是 Agent 面板，所以这里只把提示词填好并切过去，由人点「生成」。
+      setPrompt(suggestion.prompt)
+      setDockOpen(true)
+      setDockMode('agent')
+      setNotice({ kind: 'info', message: '提示词已填进 Agent 面板：确认后再点生成。' })
     }
   }
 
@@ -731,6 +804,7 @@ export function WebCanvasApp() {
   }
 
   return (
+    <>
     <WorkbenchShell
       chrome={chrome}
       status={status}
@@ -775,6 +849,7 @@ export function WebCanvasApp() {
           onConnectCancel={() => setConnecting(false)}
           onConnectTarget={(targetId) => { if (connectFrom) void createEdge(connectFrom, targetId) }}
           onConnectNodes={(sourceId, targetId) => void createEdge(sourceId, targetId)}
+          onNodeContextMenu={(recordId, position) => void openNodeMenu(recordId, position)}
           // 拖动与「改标题内容」同一档（记录级）：角色可编辑、画布不是只读就能拖；
           // 单个节点还会再看锁——那一条在画布里判，因为它要看每张卡各自的锁。
           draggable={editable}
@@ -833,6 +908,67 @@ export function WebCanvasApp() {
         onClick: () => { setDockOpen(true); setDockMode('agent') }
       }}
     />
+    {nodeMenu && (
+      <NodeContextMenu
+        x={nodeMenu.x}
+        y={nodeMenu.y}
+        items={buildNodeMenu(nodeMenu.plan, { imageSkillId: skills[0]?.id ?? null })}
+        onPick={(item) => void runNodeMenuItem(item)}
+        onClose={() => setNodeMenu(null)}
+      />
+    )}
+    </>
+  )
+}
+
+/**
+ * 节点右键菜单。**只有摆与收起**：菜单项从哪来（服务端那份协助计划）与点下去做什么
+ * （`runNodeMenuItem`）都在外面——这样它既不知道画布数据，也不知道写路径。
+ *
+ * 三条消失路径都要有（Esc / 点别处 / 滚动）：菜单是浮在画布上的，没有一条明确的消失路径时，
+ * 用户会去点它、然后以为点不动。
+ */
+function NodeContextMenu({ x, y, items, onPick, onClose }: {
+  x: number
+  y: number
+  items: NodeMenuItem[]
+  onPick: (item: NodeMenuItem) => void
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    // 用捕获阶段：画布那边也监听指针事件，先收菜单再让别的逻辑跑，免得一次点击既关了菜单又改了选中。
+    const onDown = () => onClose()
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('pointerdown', onDown, true)
+    window.addEventListener('wheel', onDown, { passive: true })
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('pointerdown', onDown, true)
+      window.removeEventListener('wheel', onDown)
+    }
+  }, [onClose])
+
+  return (
+    <div className="df-menu" style={{ left: x, top: y }} onPointerDown={(event) => event.stopPropagation()}>
+      {items.map((item, index) => (
+        <span key={item.id}>
+          {/* 分组之间切一条线：上面是「这个节点能做什么」，下面才是「对节点本身做什么」。 */}
+          {index > 0 && items[index - 1].group !== item.group && <span className="df-menu-sep" />}
+          {/* 灰着的原因既写在 title 上、也显示在项里：不说原因的话，「点不动」只会被读成菜单坏了。 */}
+          <button
+            type="button"
+            className="df-menu-item"
+            disabled={!item.enabled}
+            title={item.reason ?? item.label}
+            onClick={() => onPick(item)}
+          >
+            {item.label}
+            {item.reason && <span className="df-menu-reason">{item.reason}</span>}
+          </button>
+        </span>
+      ))}
+    </div>
   )
 }
 

@@ -88,6 +88,14 @@ public static class UiText
     public static string InspectorIdleHint => Text("inspector.idleHint");
 
     /// <summary>
+    /// 节点右键菜单里那两条节点操作。第 174 轮网页端也做了节点右键菜单，这两个标签从那时起
+    /// **两端都有**——同一样东西在两个菜单里叫两个名字，是这类界面最容易走散的地方。
+    /// </summary>
+    public static string NodeMenuEdit => Text("nodeMenu.edit");
+
+    public static string NodeMenuDelete => Text("nodeMenu.delete");
+
+    /// <summary>
     /// 编辑锁的来源端说法（wire 值只有 <c>web</c> / <c>desktop</c>）。**认不出的按「网页端」**——
     /// 这条规则过去在服务端 <c>EditClient.Label</c>、桌面端 <c>CollaborationSession.ClientLabel</c>
     /// 与网页端 <c>locks.ts</c> 各写了一遍，每处的注释都指着另一处。现在只有这一份。

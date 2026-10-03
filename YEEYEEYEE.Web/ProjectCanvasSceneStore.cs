@@ -174,6 +174,51 @@ internal sealed class ProjectCanvasSceneStore
     }
 
     /// <summary>
+    /// 只读：一个节点的「协助计划」——网页端节点右键那份菜单的内容，与桌面端右键菜单**同一份**来源。
+    ///
+    /// 建议**不是写死的**：由共享的 <see cref="NodeAssistPlanner"/> 沿入边收集上游设定、再按节点类型
+    /// 算出来。这里只做投影，所以不要锁、不写盘、任何人（含只读账号）都能取——「这个节点能做什么」
+    /// 是看一眼就知道的事，不该因为别人正占着编辑锁就问不出来。
+    /// </summary>
+    public IResult Assist(string recordId)
+    {
+        if (!Guid.TryParse(recordId, out var nodeId))
+            return Error(400, "CANVAS_RECORD_INVALID", "记录 ID 不是合法的 GUID");
+        try
+        {
+            var current = Load();
+            CheckProjectAuthority(current.State);
+            var node = current.State.Canvas.Nodes.FirstOrDefault(item => item.Id == nodeId);
+            if (node is null) return Error(404, "CANVAS_RECORD_NOT_FOUND", "这条记录不在这张画布里");
+
+            var plan = NodeAssistPlanner.BuildPlan(current.State.Canvas, node);
+            return Results.Json(new
+            {
+                recordId = nodeId.ToString(),
+                summary = plan.ContextSummary,
+                hasUpstream = plan.HasUpstream,
+                suggestions = plan.Suggestions.Select(item => new
+                {
+                    id = item.Id,
+                    title = item.Title,
+                    // 动作的**种类**由服务端说（两端共用同一个枚举），至于「这一端能不能跑」由客户端定：
+                    // 网页端现在只有一条出图技能，Agent / 视频两条执行方还没接。
+                    kind = item.Kind.ToString(),
+                    skillId = item.SkillId,
+                    prompt = item.Prompt,
+                    negativePrompt = item.NegativePrompt,
+                    blocked = item.Blocked,
+                    canRun = item.CanRun
+                })
+            });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
+        {
+            return Error(503, "PROJECT_CANVAS_READ_FAILED", "项目画布或项目资源无法安全读取：" + ex.Message);
+        }
+    }
+
+    /// <summary>
     /// 所有写入的唯一通道：修订校验 → 只读与校验闸门 → 项目库权威校验 → 变更 → 再校验 →
     /// 原子落盘（带备份与跨进程租约）。「改标题内容」与「整理布局」共用它——
     /// 两套写入规则各自演化出差异，是这类接口最典型的坏法。

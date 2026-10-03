@@ -294,6 +294,14 @@ internal static class WebSceneApi
                 hub.CanvasChanged(after.Revision, recordId, WebAccessGuard.ActorName(request.HttpContext), "record");
             return result;
         });
+        // 只读：节点右键菜单的「协助计划」（建议由共享的 NodeAssistPlanner 算，桌面端右键用的是同一份）。
+        // 它是投影不是写入，所以**不取锁、不查 canvas.edit**——「这个节点能做什么」看一眼就知道，
+        // 不该因为别人正占着编辑锁而问不出来。
+        app.MapGet("/api/web/records/{recordId}/assist", (string recordId) =>
+            projectStore is not null
+                ? projectStore.Assist(recordId)
+                : Error(409, "CANVAS_REQUIRES_PROJECT", "节点协助计划要的是项目画布；当前配置的是独立 Web 场景"));
+
         app.MapGet("/api/web/assets", () =>
         {
             var entitiesPath = LegacyConfig.Text(app.Configuration, "ProjectEntitiesPath");

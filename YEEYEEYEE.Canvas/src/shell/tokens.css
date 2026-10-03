@@ -982,6 +982,63 @@ textarea.df-input {
   border-style: dashed;
 }
 
+/* ==================== 节点右键菜单 ==================== */
+/* 菜单里有哪些项由服务端那份协助计划决定（见 shell/nodeMenu.ts），这里只管它长什么样。
+   position: fixed —— 它按鼠标的**屏幕坐标**摆；挂在画布坐标系里会被平移与缩放带着跑。
+   z-index 要压过卡片徽标与连线层。 */
+.df-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 220px;
+  max-width: 340px;
+  padding: 4px;
+  border: 1px solid var(--df-line-strong);
+  border-radius: var(--df-radius-control);
+  background: var(--df-surface-2);
+  box-shadow: var(--df-glow-shadow);
+  display: flex;
+  flex-direction: column;
+}
+
+.df-menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--df-radius-small);
+  background: transparent;
+  color: var(--df-ink);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.df-menu-item:hover:not(:disabled) {
+  background: var(--df-primary-soft);
+}
+
+/* 灰着的项**仍然显示原因**：只把它压暗、不说为什么，用户只会以为菜单坏了。 */
+.df-menu-item:disabled {
+  color: var(--df-ink-3);
+  cursor: default;
+}
+
+.df-menu-reason {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--df-ink-3);
+}
+
+.df-menu-sep {
+  display: block;
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--df-line);
+}
+
 /* ==================== 编辑锁 ==================== */
 
 .df-lock-pill {

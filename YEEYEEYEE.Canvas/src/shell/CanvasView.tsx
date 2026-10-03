@@ -106,6 +106,11 @@ export type CanvasViewProps = {
    * 与工具栏「连接」那条是**同一个动作**（同一个写路径、同一份规则），只是手势不同。
    */
   onConnectNodes?: (sourceId: string, targetId: string) => void
+  /**
+   * 右键一张节点卡：把「哪一张 + 屏幕坐标」交出去，菜单由调用方摆。
+   * 画布不认识菜单的内容——*有哪些选项*是从服务端那份协助计划来的，画布只管把事件递出去。
+   */
+  onNodeContextMenu?: (recordId: string, position: { x: number; y: number }) => void
 }
 
 const MIN_ZOOM = 0.25
@@ -528,7 +533,8 @@ export function CanvasView(props: CanvasViewProps) {
     <div className="df-viewport-shell">
       {/* 双击**不做**适应：桌面端的双击（落在节点上）是进引用画布，落在空白处没有动作。
           给它加一个桌面端没有的手势，等于让同一个动作在两端有两种含义。 */}
-      <div className="df-viewport" ref={viewportRef}>
+      {/* 画布上不给浏览器自己那份菜单（后退 / 查看源代码）：这里要的是节点右键菜单。 */}
+      <div className="df-viewport" ref={viewportRef} onContextMenu={(event) => event.preventDefault()}>
         <div className="df-world" style={{ width: bounds.width, height: bounds.height, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
           <div className="df-world-grid" />
           {/* 连线层：铺在网格之上、卡片之下。整层不可点——线不参与命中测试，
@@ -585,6 +591,7 @@ export function CanvasView(props: CanvasViewProps) {
               onPortStart={(event) => beginPortDrag(event, node)}
               onPortMove={movePortDrag}
               onPortEnd={endPortDrag}
+              onNodeContextMenu={props.onNodeContextMenu}
             />
           ))}
 
@@ -644,7 +651,7 @@ export function CanvasView(props: CanvasViewProps) {
   )
 }
 
-function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, onSelect, connectFrom, onConnectTarget, draggable, dragging, onDragStart, onDragMove, onDragEnd, consumeClick, showPort, onPortStart, onPortMove, onPortEnd }: {
+function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, onSelect, connectFrom, onConnectTarget, draggable, dragging, onDragStart, onDragMove, onDragEnd, consumeClick, showPort, onPortStart, onPortMove, onPortEnd, onNodeContextMenu }: {
   node: ViewRecord
   selected: boolean
   dimmed: boolean
@@ -671,6 +678,8 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
   onPortStart: (event: PortPointerEvent) => void
   onPortMove: (event: PortPointerEvent) => void
   onPortEnd: (event: PortPointerEvent, cancelled: boolean) => void
+  /** 右键这张卡：把「哪一张 + 屏幕坐标」交出去，菜单由调用方摆。 */
+  onNodeContextMenu?: (recordId: string, position: { x: number; y: number }) => void
 }) {
   const kind = kindOf(node.recordType)
   const meta = NODE_KINDS[kind]
@@ -699,6 +708,14 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
         if (consumeClick()) return
         if (armed) { onConnectTarget!(node.recordId); return }
         onSelect(node.recordId)
+      }}
+      onContextMenu={(event) => {
+        // 右键先**选中**再出菜单：菜单里那几项（编辑 / 删除）作用的是「这一张」，
+        // 不选中的话，第 2 秒看到的就是「右侧检查器还停在上一张」。
+        event.preventDefault()
+        event.stopPropagation()
+        onSelect(node.recordId)
+        onNodeContextMenu?.(node.recordId, { x: event.clientX, y: event.clientY })
       }}
       title={`${meta.label} · ${recordStatus(node)}${lock ? ` · ${describeLease(lock)} 正在编辑` : ''}${armed ? ' · 点它连到这里' : draggable ? ' · 按住可拖动' : ''}`}
     >

@@ -2180,7 +2180,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         menu.Items.Add(audit);
 
         menu.Items.Add(new Separator());
-        var edit = new MenuItem { Header = "编辑节点…" };
+        var edit = new MenuItem { Header = UiText.Text("nodeMenu.edit") };
         // 这里**不再**转给双击那条路：双击在临时画布里是「再钻一层」，
         // 而菜单里的「编辑节点…」意思一直很明确——就是要开那个窗口。
         edit.Click += async (_, _) =>
@@ -2189,7 +2189,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             await ShowNodeEditorAsync(request.Node);
         };
         menu.Items.Add(edit);
-        var remove = new MenuItem { Header = "删除节点" };
+        var remove = new MenuItem { Header = UiText.Text("nodeMenu.delete") };
         remove.Click += (_, _) =>
         {
             var message = CanvasSurfaceControl.DeleteSelection();

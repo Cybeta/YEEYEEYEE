@@ -64,6 +64,8 @@ export type WorkspaceProps = {
   onMove?: (recordId: string, x: number, y: number) => void
   /** 从卡片右缘的圆点拖到另一张卡上松手：请求把两者连起来（与「连接」按钮同一个动作）。 */
   onConnectNodes?: (sourceId: string, targetId: string) => void
+  /** 右键一张节点卡：把「哪一张 + 屏幕坐标」交出去。菜单的内容在调用方那边算（要问服务端）。 */
+  onNodeContextMenu?: (recordId: string, position: { x: number; y: number }) => void
 }
 
 const STAGE_FILTERS: Array<{ key: string; label: string; match: (layer: number) => boolean }> = [
@@ -232,6 +234,7 @@ export function Workspace(props: WorkspaceProps) {
             draggable={props.draggable === true}
             onMove={props.onMove}
             onConnectNodes={props.onConnectNodes}
+            onNodeContextMenu={props.onNodeContextMenu}
           />
         )}
         {view === 'timeline' && (
