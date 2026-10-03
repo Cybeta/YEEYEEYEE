@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { DRAG_THRESHOLD, clampZoom, dragDrop, wheelNotches, wheelZoomFactor, zoomAround } from '../src/shell/CanvasView'
+import {
+  DRAG_THRESHOLD, clampZoom, connectDropTarget, dragDrop, wheelNotches, wheelZoomFactor, zoomAround
+} from '../src/shell/CanvasView'
 import {
   PLANNING_GROUP_ID, UNFILED_GROUP_ID, canvasBounds, chapterGroups, isEditableRecord, isPlanning,
   kindOf, NODE_KINDS, parseScene, scriptEntries, stageSummaries, type ViewRecord
@@ -226,5 +228,27 @@ describe('拖动节点的落点', () => {
 
   it('阈值与桌面端是同一个数（同一个手势在两端不能被判成不同的事）', () => {
     expect(DRAG_THRESHOLD).toBe(3)
+  })
+})
+
+/**
+ * 从卡片右缘的圆点拖一根线出来、松手时该连到谁。
+ * 这里钉的是「什么时候当没连过」——它决定了会不会白跑一次必然被拒的 HTTP。
+ */
+describe('拖线松手的落点', () => {
+  it('落在另一张卡上就连到它', () => {
+    expect(connectDropTarget(GUID_A, GUID_B)).toBe(GUID_B)
+  })
+
+  it('落在自己身上当没连：自环在入口就拒，不必等一次 HTTP', () => {
+    expect(connectDropTarget(GUID_A, GUID_A)).toBeNull()
+  })
+
+  it('没落在任何卡片上（空白处、画布外）也当没连', () => {
+    expect(connectDropTarget(GUID_A, null)).toBeNull()
+  })
+
+  it('拿到一个空的 recordId 同样当没连，而不是拿它去请求', () => {
+    expect(connectDropTarget(GUID_A, '')).toBeNull()
   })
 })

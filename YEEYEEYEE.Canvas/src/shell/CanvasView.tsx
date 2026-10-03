@@ -21,7 +21,7 @@ import {
  *   - 连线**能读也能改了**：服务端投影连线（只投影两端都还在的），画布画得出来，
  *     新建与断开也接上了（新建走「连接模式」：点起点 → 点终点，见下面的 connectFrom）；
  *   - 网页端的写路径是「改标题与内容 / 移动单个节点 / 新建与删除节点 / 新建与删除连线 / 整理布局」，
- *     改类别还没有（也还没有拖拽式画线）。
+ *     改类别还没有。
  */
 
 export type Pan = { x: number; y: number }
@@ -43,6 +43,12 @@ type DragState = {
   y: number
   moved: boolean
 }
+
+/** 从卡片右缘的圆点拖一根线出来的现场。坐标都是世界坐标。 */
+type ConnectDrag = { pointerId: number; sourceId: string; fromX: number; fromY: number; toX: number; toY: number }
+
+/** 端口那几个处理器只用到坐标与指针捕获，元素是 button 还是 span 无所谓。 */
+type PortPointerEvent = React.PointerEvent<HTMLElement>
 
 /**
  * 画布对外的命令接口。工具栏上的「− / ＋ / 适应」要用它——
@@ -91,6 +97,11 @@ export type CanvasViewProps = {
    * 差一点点的那一下是点击，不该写盘。位置由调用方负责落库，画布只画。
    */
   onMove?: (recordId: string, x: number, y: number) => void
+  /**
+   * 从卡片右缘的圆点拖到另一张卡片上松手：请求把两者连起来。
+   * 与工具栏「连接」那条是**同一个动作**（同一个写路径、同一份规则），只是手势不同。
+   */
+  onConnectNodes?: (sourceId: string, targetId: string) => void
 }
 
 const MIN_ZOOM = 0.25
@@ -123,6 +134,16 @@ export function dragDrop(
     y: Math.max(0, origin.y + dy),
     moved: Math.abs(dx) + Math.abs(dy) >= DRAG_THRESHOLD
   }
+}
+
+/**
+ * 从起点拖出一根线，松手时该连到谁。
+ *
+ * 落在自己身上（或压根没落在任何卡片上）就当没连过——**自环在入口就该被拒**，
+ * 不必等一次 HTTP 换回服务端那句「不能连到自身」。服务端仍然会再判一次（那是权威）。
+ */
+export function connectDropTarget(sourceId: string, hitRecordId: string | null): string | null {
+  return hitRecordId !== null && hitRecordId.length > 0 && hitRecordId !== sourceId ? hitRecordId : null
 }
 
 /**
@@ -178,6 +199,9 @@ export function CanvasView(props: CanvasViewProps) {
   const dragState = useRef<DragState | null>(null)
   /** 松手之后紧跟的那次 click 要吃掉：否则一次拖动会顺带把节点选中（还可能弹一次未保存确认）。 */
   const swallowClick = useRef(false)
+  /** 正从哪张卡的右缘圆点拖一根线出来（null = 没在拖）。 */
+  const [connectDrag, setConnectDrag] = useState<ConnectDrag | null>(null)
+  const connectDragState = useRef<ConnectDrag | null>(null)
 
   /**
    * 拖动中的**预览**：把正在拖的那个节点的坐标换成手上的实时位置，其余原样。
@@ -261,6 +285,57 @@ export function CanvasView(props: CanvasViewProps) {
     if (!state.moved || cancelled) return
     swallowClick.current = true
     props.onMove?.(state.recordId, state.x, state.y)
+  }
+
+  /**
+   * 能不能从这张卡拉线出去。与「能不能拖它」同一套闸门，只多一条：
+   * 已经在连接模式里时不做（那时点卡片就是「选终点」，再叠一个拖线手势只会让人点错）。
+   */
+  function canStartConnect(recordId: string): boolean {
+    if (props.draggable !== true || !props.onConnectNodes) return false
+    if (props.connectFrom) return false
+    if (treeLease(others)) return false
+    return nodeLease(others, recordId) === null
+  }
+
+  /** 按住右缘的圆点：线从卡片右缘中点出发，与桌面端端口起手的位置一致。 */
+  function beginPortDrag(event: PortPointerEvent, record: ViewRecord) {
+    if (event.button !== 0 || !canStartConnect(record.recordId)) return
+    const fromX = nodeX(record) + NODE_CARD_WIDTH
+    const fromY = nodeY(record) + NODE_CARD_HEIGHT / 2
+    const state: ConnectDrag = { pointerId: event.pointerId, sourceId: record.recordId, fromX, fromY, toX: fromX, toY: fromY }
+    connectDragState.current = state
+    setConnectDrag(state)
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  function movePortDrag(event: PortPointerEvent) {
+    const state = connectDragState.current
+    const element = viewportRef.current
+    if (!state || state.pointerId !== event.pointerId || !element) return
+    const rect = element.getBoundingClientRect()
+    const next = {
+      ...state,
+      toX: (event.clientX - rect.left - pan.x) / zoom,
+      toY: (event.clientY - rect.top - pan.y) / zoom
+    }
+    connectDragState.current = next
+    setConnectDrag(next)
+  }
+
+  function endPortDrag(event: PortPointerEvent, cancelled: boolean) {
+    const state = connectDragState.current
+    if (!state || state.pointerId !== event.pointerId) return
+    connectDragState.current = null
+    setConnectDrag(null)
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    if (cancelled) return
+    // 落点用命中测试问「指针底下是哪张卡」，不自己算几何：卡片高度是内容撑出来的，
+    // 按矩形自己算迟早会和真实布局对不上。虚影层是 pointer-events:none，所以它不会被命中。
+    const hit = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-record-id]')
+    const target = connectDropTarget(state.sourceId, hit?.getAttribute('data-record-id') ?? null)
+    if (target) props.onConnectNodes?.(state.sourceId, target)
   }
 
   /** 卡片点进来先问这一句：刚拖完的那一下要吃掉（顺带把标记消费掉，只吃一次）。 */
@@ -502,8 +577,19 @@ export function CanvasView(props: CanvasViewProps) {
               onDragMove={moveCardDrag}
               onDragEnd={endCardDrag}
               consumeClick={consumeClick}
+              showPort={canStartConnect(node.recordId)}
+              onPortStart={(event) => beginPortDrag(event, node)}
+              onPortMove={movePortDrag}
+              onPortEnd={endPortDrag}
             />
           ))}
+
+          {/* 拖线时的虚影：画在卡片**上面**——线尖跟着指针走，压在卡片下面时线尖会被卡片吃掉。整层不可点。 */}
+          {connectDrag && (
+            <svg className="df-connect-layer" width={bounds.width} height={bounds.height} aria-hidden="true">
+              <line x1={connectDrag.fromX} y1={connectDrag.fromY} x2={connectDrag.toX} y2={connectDrag.toY} />
+            </svg>
+          )}
 
           {/* 整理布局的虚影：目标位置的虚线卡 + 从原位置过去的虚线。整层不可点。 */}
           {ghosts.length > 0 && (
@@ -546,13 +632,13 @@ export function CanvasView(props: CanvasViewProps) {
       <div className="df-hint">
         {props.connectFrom
           ? '连接模式：再点一个节点作为终点 · Esc 取消'
-          : '拖空白平移 · 滚轮缩放 · 拖节点挪位置 · 点击节点选中'}
+          : '拖空白平移 · 滚轮缩放 · 拖节点挪位置 · 拖右缘圆点连线 · 点击选中'}
       </div>
     </div>
   )
 }
 
-function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, onSelect, connectFrom, onConnectTarget, draggable, dragging, onDragStart, onDragMove, onDragEnd, consumeClick }: {
+function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, onSelect, connectFrom, onConnectTarget, draggable, dragging, onDragStart, onDragMove, onDragEnd, consumeClick, showPort, onPortStart, onPortMove, onPortEnd }: {
   node: ViewRecord
   selected: boolean
   dimmed: boolean
@@ -574,6 +660,11 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
   onDragEnd: (event: React.PointerEvent<HTMLButtonElement>, cancelled: boolean) => void
   /** 这次点击是不是刚拖完的那一下（是就得吃掉）。 */
   consumeClick: () => boolean
+  /** 右缘那个连线圆点给不给（能不能从这张卡拉线出去）。 */
+  showPort: boolean
+  onPortStart: (event: PortPointerEvent) => void
+  onPortMove: (event: PortPointerEvent) => void
+  onPortEnd: (event: PortPointerEvent, cancelled: boolean) => void
 }) {
   const kind = kindOf(node.recordType)
   const meta = NODE_KINDS[kind]
@@ -585,6 +676,7 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
   return (
     <button
       type="button"
+      data-record-id={node.recordId}
       className={`df-node${selected ? ' is-selected' : ''}${moving ? ' is-moving' : ''}${connecting ? ' is-connecting' : ''}${armed ? ' is-connectable' : ''}${draggable && !armed && !connecting ? ' is-draggable' : ''}${dragging ? ' is-dragging' : ''}`}
       style={{ left: nodeX(node), top: nodeY(node), width: NODE_CARD_WIDTH, minHeight: NODE_CARD_HEIGHT, opacity: dimmed ? 0.35 : moving ? 0.4 : 1 }}
       onPointerDown={(event) => {
@@ -634,6 +726,19 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
         <span className="df-mono">{recordStatus(node)}</span>
         <span className="df-mono" title={node.recordId}>{node.recordId.slice(0, 8)}</span>
       </span>
+      {/* 右缘的连线圆点。按住它拖到另一张卡上就是连线——与工具栏「连接」同一个动作，只是手势不同。
+          按下时先 stopPropagation：否则卡片自己那套「按住改位置」会先接手。 */}
+      {showPort && (
+        <span
+          className="df-port"
+          role="presentation"
+          title="按住这个圆点拖到另一个节点就能连线"
+          onPointerDown={(event) => { event.stopPropagation(); onPortStart(event) }}
+          onPointerMove={onPortMove}
+          onPointerUp={(event) => onPortEnd(event, false)}
+          onPointerCancel={(event) => onPortEnd(event, true)}
+        />
+      )}
     </button>
   )
 }

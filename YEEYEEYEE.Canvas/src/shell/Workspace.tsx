@@ -62,6 +62,8 @@ export type WorkspaceProps = {
   draggable?: boolean
   /** 拖动结束：把落点交出去（世界坐标）。落库由调用方负责。 */
   onMove?: (recordId: string, x: number, y: number) => void
+  /** 从卡片右缘的圆点拖到另一张卡上松手：请求把两者连起来（与「连接」按钮同一个动作）。 */
+  onConnectNodes?: (sourceId: string, targetId: string) => void
 }
 
 const STAGE_FILTERS: Array<{ key: string; label: string; match: (layer: number) => boolean }> = [
@@ -229,6 +231,7 @@ export function Workspace(props: WorkspaceProps) {
             onConnectTarget={props.onConnectTarget}
             draggable={props.draggable === true}
             onMove={props.onMove}
+            onConnectNodes={props.onConnectNodes}
           />
         )}
         {view === 'timeline' && (

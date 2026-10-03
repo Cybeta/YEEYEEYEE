@@ -578,14 +578,15 @@ export function WebCanvasApp() {
   }
 
   /**
-   * 结构级写入：从连接模式的起点连到刚点的这个节点。
+   * 结构级写入：把两个节点连起来。两个手势走的是同一条路——工具栏「连接」（点起点 → 点终点）
+   * 与卡片右缘那个圆点（按住拖过去）——所以统一收成「起点 + 终点」两个参数，
+   * 不让手势的差别渗进写入逻辑。
    *
    * 「许不许连」（自环、重复）由**服务端**用共享规则判——界面不先猜一遍：
    * 猜错了会把一次合法操作挡在门外，而界面上的判断没有一个会被回归钉住。
    * 失败的原因照服务端那句话显示（「这条连线已经存在」比「操作失败」有用得多）。
    */
-  async function createEdge(targetId: string) {
-    const sourceId = connectFrom
+  async function createEdge(sourceId: string, targetId: string) {
     if (!scene || !sourceId) return
     // 先退出连接模式：这一次点击的目的已经用掉了。失败也退——留在模式里，下一次点击会重复同一件事。
     setConnecting(false)
@@ -726,7 +727,8 @@ export function WebCanvasApp() {
           connectBlocked={connectBlocked}
           onConnectStart={() => setConnecting(true)}
           onConnectCancel={() => setConnecting(false)}
-          onConnectTarget={(targetId) => void createEdge(targetId)}
+          onConnectTarget={(targetId) => { if (connectFrom) void createEdge(connectFrom, targetId) }}
+          onConnectNodes={(sourceId, targetId) => void createEdge(sourceId, targetId)}
           // 拖动与「改标题内容」同一档（记录级）：角色可编辑、画布不是只读就能拖；
           // 单个节点还会再看锁——那一条在画布里判，因为它要看每张卡各自的锁。
           draggable={editable}
