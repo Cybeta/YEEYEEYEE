@@ -465,6 +465,67 @@ export function WebCanvasApp() {
     events.error
   ].filter((line) => line.length > 0).join(' · ')
 
+  /**
+   * 结构级写入：新建一个节点。
+   *
+   * 与「保存标题内容」分开走：那条路改的是一个节点的文字，这条改的是**画布结构**，
+   * 服务端按结构级对待（要账号、要 canvas.edit、要整棵树锁），所以它不是「保存」的一部分。
+   * 位置由服务端算（同一章里最右那个的右边一列），这里只交代「建在哪一章、什么类别」。
+   */
+  async function createNode(chapterId: string, recordType: string) {
+    if (!scene) return
+    if (!canEdit(role)) {
+      setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
+      return
+    }
+
+    setSaving(true)
+    setNotice({ kind: 'info', message: '正在新建节点…' })
+    try {
+      const created = await request<{ revision: number; nodeId: string }>('/api/web/records', {
+        method: 'POST',
+        body: JSON.stringify({
+          baseRevision: scene.revision,
+          recordType,
+          chapterId: chapterId === ALL_CHAPTERS_ID ? null : chapterId
+        })
+      })
+      if (!created?.nodeId) throw new Error('新建响应里没有节点 ID')
+      await loadScene()
+      selectRecord(created.nodeId)
+      setNotice({ kind: 'info', message: '已新建节点。' })
+    } catch (error) {
+      setNotice({ kind: 'error', message: `新建失败：${errorMessage(error)}` })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 结构级写入：删掉选中的节点（连带它的连线）。删之前问一句——服务端那边没有撤销。 */
+  async function deleteNode() {
+    const target = selected
+    if (!scene || !target) return
+    if (!canEdit(role)) {
+      setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
+      return
+    }
+    if (!window.confirm(`删掉「${recordTitle(target)}」？它的连线会一并删掉，服务端没有撤销。`)) return
+
+    setSaving(true)
+    setNotice({ kind: 'info', message: '正在删除…' })
+    try {
+      await request(`/api/web/records/${encodeURIComponent(target.recordId)}?baseRevision=${scene.revision}`, {
+        method: 'DELETE'
+      })
+      await loadScene()
+      setNotice({ kind: 'info', message: '已删除。' })
+    } catch (error) {
+      setNotice({ kind: 'error', message: `删除失败：${errorMessage(error)}` })
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <WorkbenchShell
       chrome={chrome}
@@ -477,6 +538,7 @@ export function WebCanvasApp() {
           selectedId={selectedId}
           onChapter={setActiveChapter}
           onSelect={selectRecord}
+          onCreate={(chapterId, recordType) => void createNode(chapterId, recordType)}
         />
       )}
       workspace={(
@@ -526,6 +588,7 @@ export function WebCanvasApp() {
                 onTitle={setTitle}
                 onContent={setContent}
                 onApply={() => void save()}
+                onDelete={canEdit(role) && selected !== null && isEditableRecord(selected) ? () => void deleteNode() : undefined}
               />
             )
             : (

@@ -29,6 +29,8 @@ export type InspectorProps = {
   heldByMe?: boolean
   /** 编辑框是否拿到焦点。界面用它决定「该不该去占锁」。 */
   onEditingChange?: (focused: boolean) => void
+  /** 删掉选中的这个节点（连带它的连线）。没给就不显示那个按钮。 */
+  onDelete?: () => void
   assets: Asset[]
   assetsReady: boolean
   onTitle: (value: string) => void
@@ -56,6 +58,15 @@ export function InspectorPanel(props: InspectorProps) {
 
   return (
     <div className="df-section" style={{ gap: 16 }}>
+      {/* 结构级动作与「改标题内容」分开摆：它动的是画布结构，服务端按结构级对待（要整棵树锁）。 */}
+      {props.onDelete && props.selected && (
+        <div className="df-section" style={{ gap: 6 }}>
+          <span className="df-label">画布结构</span>
+          <button type="button" className="df-mini-button" onClick={props.onDelete}>
+            删除这个节点（连同它的连线）
+          </button>
+        </div>
+      )}
       <div className="df-section">
         {/* 焦点进到这两个框里 = 「打算改」，这时才去占锁（见 shouldHoldNodeLease）。
             监听挂在这一层而不是逐个输入框：在名称与内容之间用 Tab 或鼠标切换时焦点没离开这个区域，

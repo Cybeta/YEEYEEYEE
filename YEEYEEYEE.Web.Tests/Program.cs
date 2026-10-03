@@ -1030,6 +1030,9 @@ try
         var editsPings = 0;
         Assert((await watcher.SignInAsync("chenmo", "longenough")).Ok, "订阅方先登录");
         watcher.StartWatching(notice => { lock (notices) notices.Add(notice); }, () => Interlocked.Increment(ref editsPings));
+        // 订阅是**后台**发起的（StartWatching 不阻塞），所以这里等它真的连上再写：
+        // 不然写入可能早于订阅注册，那一条推送就丢了——测出来的会是「没收到」，而不是「没推」。
+        await Task.Delay(300);
 
         // 网页端的林晚改一个节点：桌面端应当收到那条 canvas.changed。
         var subScene = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
@@ -1060,6 +1063,93 @@ try
             JsonSerializer.Serialize(new { baseRevision = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64(), title = "退出之后改的", content = "内容" }));
         await Task.Delay(1200);
         Assert(notices.Count == beforeSignOut, "退出登录之后不该再收到推送");
+    }
+
+    // ---------- 结构级写入：网页端新建 / 删除节点 ----------
+    // 这两件事改的是画布结构，所以按结构级对待：要账号、要 canvas.edit、要整棵树锁。
+    {
+        var stScene = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+        var stBase = stScene.GetProperty("revision").GetInt64();
+        var stNodes = stScene.GetProperty("records").EnumerateArray()
+            .Count(row => row.GetProperty("recordType").GetString() != "chapter");
+        var stChapter = stScene.GetProperty("records").EnumerateArray()
+            .First(row => row.GetProperty("recordType").GetString() == "chapter")
+            .GetProperty("record").GetProperty("chapterId").GetString()!;
+        var stChapterWord = stScene.GetProperty("records").EnumerateArray()
+            .First(row => row.GetProperty("recordType").GetString() == "chapter")
+            .GetProperty("recordId").GetString()!;
+
+        // 广播：结构改动也要推给别人，而且要说清这是结构级的。
+        using var stEvents = await rival.GetAsync("/api/web/events", HttpCompletionOption.ResponseHeadersRead);
+        var stReader = new StreamReader(await stEvents.Content.ReadAsStreamAsync());
+        var stPending = ReadFrame(stReader);
+
+        var stCreated = await Check(arranger, HttpMethod.Post, "/api/web/records", 200,
+            "{\"baseRevision\":" + stBase + ",\"recordType\":\"character\",\"title\":\"新角色\",\"chapterId\":\"" + stChapter + "\"}");
+        var stNodeId = stCreated.GetProperty("nodeId").GetString()!;
+        var stRevision = stCreated.GetProperty("revision").GetInt64();
+        Assert(Guid.TryParse(stNodeId, out _) && stRevision != stBase, "新建要回节点 ID 与推进后的修订");
+
+        var stReread = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+        var stAdded = stReread.GetProperty("records").EnumerateArray()
+            .FirstOrDefault(row => row.GetProperty("recordId").GetString() == stNodeId);
+        Assert(stAdded.ValueKind != JsonValueKind.Undefined, "新建的节点要出现在场景里");
+        Assert(stAdded.GetProperty("recordType").GetString() == "character" &&
+            stAdded.GetProperty("record").GetProperty("title").GetString() == "新角色",
+            "类别与标题要照说的建");
+        Assert(stAdded.GetProperty("record").GetProperty("chapterId").GetString() == stChapter, "要落在指定的章节里");
+        Assert(stReread.GetProperty("records").EnumerateArray()
+            .Count(row => row.GetProperty("recordType").GetString() != "chapter") == stNodes + 1, "节点数要多一个");
+
+        var stPushed = await Task.WhenAny(stPending, Task.Delay(5000)) == stPending ? await stPending : null;
+        Assert(stPushed is { Type: "canvas.changed" } stFrame && stFrame.Data.GetProperty("scope").GetString() == "structure",
+            "结构改动要广播，并说清是结构级的：" + (stPushed is { } got ? got.Data.GetRawText() : "(没收到)"));
+
+        // 认不出的类别、章节、不存在的锚点、陈旧修订：都如实拒绝，而不是猜着建。
+        Assert((await Check(arranger, HttpMethod.Post, "/api/web/records", 400,
+            "{\"baseRevision\":" + stRevision + ",\"recordType\":\"spaceship\"}")).GetProperty("code").GetString() == "CANVAS_UNKNOWN_RECORD_TYPE",
+            "认不出的类别要拒绝（猜一个 general 会静默地建错）");
+        Assert((await Check(arranger, HttpMethod.Post, "/api/web/records", 400,
+            "{\"baseRevision\":" + stRevision + ",\"recordType\":\"chapter\"}")).GetProperty("code").GetString() == "CANVAS_CHAPTER_NOT_SUPPORTED",
+            "章节还不能在网页端新建");
+        Assert((await Check(arranger, HttpMethod.Post, "/api/web/records", 400,
+            "{\"baseRevision\":" + stRevision + ",\"recordType\":\"prop\",\"chapterId\":\"" + Guid.NewGuid() + "\"}")).GetProperty("code").GetString() == "CANVAS_UNKNOWN_CHAPTER",
+            "锚点不存在的章节要拒绝");
+        await Check(arranger, HttpMethod.Post, "/api/web/records", 409,
+            "{\"baseRevision\":" + stBase + ",\"recordType\":\"prop\"}");
+
+        // 别人正占着节点时，结构改动要被挡住并说清等谁。
+        using (var stHolder = new YEEYEEYEE.Desktop.CollaborationSession($"http://127.0.0.1:{port}"))
+        {
+            Assert((await stHolder.SignInAsync("chenmo", "longenough")).Ok, "锁的持有者先登录");
+            Assert((await stHolder.AcquireNodeLeaseAsync(Guid.Parse(stNodeId))).Ok, "占住刚建的这个节点");
+            var stBlocked = await Check(arranger, HttpMethod.Post, "/api/web/records", 409,
+                "{\"baseRevision\":" + stRevision + ",\"recordType\":\"prop\"}");
+            Assert(stBlocked.GetProperty("code").GetString() == "EDIT_CONFLICT", "结构改动要受树的锁约束");
+            Assert(stBlocked.GetProperty("message").GetString()!.Contains("陈默"), "冲突要说清等谁");
+            await stHolder.ReleaseHeldLeaseAsync();
+        }
+
+        // 没身份连试都不用试：更外层的身份闸门先拦下（401）。
+        // 端点里那句 403「要账号」是留给**桌面桥**的（它有 canvas.edit 权限但没有用户身份），
+        // 匿名浏览器请求根本走不到那儿。
+        using (var stAnonymous = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") })
+        {
+            var stDenied = await Check(stAnonymous, HttpMethod.Post, "/api/web/records", 401,
+                "{\"baseRevision\":" + stRevision + ",\"recordType\":\"prop\"}");
+            Assert(stDenied.GetProperty("code").GetString() == "UNAUTHORIZED", "没身份不能建节点：" + stDenied.GetRawText());
+        }
+
+        // 章节是工作树条目、不是画布节点：从这条路删不到它（也就不可能误删）。
+        await Check(arranger, HttpMethod.Delete, $"/api/web/records/{stChapterWord}?baseRevision={stRevision}", 400);
+
+        // 删除：节点消失、节点数回到原样。
+        await Check(arranger, HttpMethod.Delete, $"/api/web/records/{stNodeId}?baseRevision={stRevision}", 200);
+        var stAfterDelete = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+        Assert(stAfterDelete.GetProperty("records").EnumerateArray().All(row => row.GetProperty("recordId").GetString() != stNodeId),
+            "删掉的节点不该还在场景里");
+        Assert(stAfterDelete.GetProperty("records").EnumerateArray()
+            .Count(row => row.GetProperty("recordType").GetString() != "chapter") == stNodes, "节点数要回到原样");
     }
 
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
@@ -1111,5 +1201,6 @@ try
     Assert(YEEYEEYEE.Desktop.AutoSync.ShouldPush(true, true, true, true, false),
         "开关打开、登录着、有改动、不忙：这才推");
     Console.WriteLine("Desktop subscribe regression passed: frames parsed and unknown ones dropped, real canvas.changed and edits.changed reach the desktop, sign-out stops the stream, auto-reload only when the local copy is clean and idle, auto-push only when the user turned it on");
+    Console.WriteLine("Structure regression passed: create lands in the named chapter with the asked category and broadcasts scope=structure, unknown category/chapter/missing anchor/stale revision all refused, another user's node lease blocks it, viewer refused, chapter entries not deletable through this path, delete removes the node");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }

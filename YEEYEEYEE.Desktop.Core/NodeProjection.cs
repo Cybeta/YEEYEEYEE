@@ -159,4 +159,25 @@ public static class NodeProjection
         NodeCategory.Product => "product",
         _ => "general"
     };
+
+    /// <summary>
+    /// 反向：网页端回传的 recordType 是什么类别。
+    ///
+    /// 与上面那张表**必须是一对**，所以紧挨着放——分开写迟早会出现「甲认得乙、乙认不得甲」。
+    /// 认不出的回 <c>null</c>：调用方据此如实拒绝，而不是猜一个 <c>general</c> 收下
+    /// （猜错了会静默地把一个角色节点变成通用节点）。
+    /// </summary>
+    public static NodeCategory? RecordTypeToCategory(string? recordType) => recordType switch
+    {
+        "story-plan" => NodeCategory.StoryPlan,
+        "story-outline" => NodeCategory.StoryOutline,
+        "chapter" => NodeCategory.Chapter,
+        "storyboard" => NodeCategory.Storyboard,
+        "character" => NodeCategory.Character,
+        "scene-description" => NodeCategory.Scene,
+        "prop" => NodeCategory.Prop,
+        "product" => NodeCategory.Product,
+        "general" => NodeCategory.General,
+        _ => null
+    };
 }

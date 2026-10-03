@@ -33,6 +33,98 @@ internal static class WebSceneApi
         (long Serial, long Revision) CommitToken() => projectStore?.LastCommit ?? store?.LastCommit ?? (0, 0);
 
         app.MapGet("/api/web/scene", () => projectStore is not null ? projectStore.Read() : store is not null ? store.Read() : unavailable!);
+
+        // 结构级写入（新建 / 删除节点）要**整棵树锁**：它们改的是画布结构（多一个节点、少几条连线），
+        // 别人正占着任何节点时都可能被这次改动影响——与整理布局同一条规矩。
+        var structureLeases = mode.CanvasPath is null
+            ? null
+            : new EditLeaseStore(mode.CanvasPath, EditLeaseApi.LifetimeOf(app.Configuration));
+
+        // 新建节点：position 由服务端算（见 ProjectCanvasSceneStore.CreateNode），
+        // 客户端只说「在哪一章建一个什么类别的」。
+        app.MapPost("/api/web/records", async (HttpRequest request) =>
+        {
+            if (projectStore is null || structureLeases is null)
+                return Error(409, "CANVAS_REQUIRES_PROJECT", "新建节点要的是项目画布；当前配置的是独立 Web 场景");
+            var user = WebAccessGuard.CurrentUser(request.HttpContext);
+            if (user is null)
+                return Error(403, "CANVAS_WRITE_REQUIRES_SESSION", "结构改动要记在某个账号名下，必须用账号登录");
+            if (!WebAccessGuard.Permissions(request.HttpContext).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+
+            JsonObject body;
+            try
+            {
+                if (await JsonNode.ParseAsync(request.Body, cancellationToken: request.HttpContext.RequestAborted) is not JsonObject parsed)
+                    return Error(400, "INVALID_REQUEST", "请求体要是一个 JSON 对象");
+                body = parsed;
+            }
+            catch (JsonException)
+            {
+                return Error(400, "INVALID_REQUEST", "请求体不是合法 JSON");
+            }
+
+            if (body["baseRevision"] is not JsonValue revisionValue || !revisionValue.TryGetValue<long>(out var baseRevision))
+                return Error(400, "INVALID_REQUEST", "缺少 baseRevision（你手上那份的修订号）");
+            var recordType = body["recordType"] is JsonValue typeValue && typeValue.TryGetValue<string>(out var typeText)
+                ? typeText : null;
+            // 认不出的类别**如实拒绝**，不猜一个 general 收下：猜错了会静默地建出一个错类别的节点。
+            if (YEEYEEYEE.Desktop.NodeProjection.RecordTypeToCategory(recordType) is not { } category)
+                return Error(400, "CANVAS_UNKNOWN_RECORD_TYPE", "认不出这个类别：" + (recordType ?? "(缺失)"));
+            var title = body["title"] is JsonValue titleValue && titleValue.TryGetValue<string>(out var titleText) ? titleText : null;
+            Guid? chapterId = body["chapterId"] is JsonValue chapterValue &&
+                              chapterValue.TryGetValue<string>(out var chapterText) && Guid.TryParse(chapterText, out var chapterGuid)
+                ? chapterGuid : null;
+
+            var before = CommitToken();
+            var lease = structureLeases.Acquire(EditScope.Tree, null, user, "web", force: false);
+            if (lease.Status != EditLeaseStatus.Ok) return EditLeaseApi.Failure(lease);
+
+            IResult result;
+            try { result = projectStore.CreateNode(baseRevision, category, title, chapterId); }
+            finally
+            {
+                // 与整理布局同理：锁只为这一次结构改动排队，写完就还回去。
+                structureLeases.Release(lease.Lease!.LeaseId, user, force: false);
+            }
+
+            var after = CommitToken();
+            if (after.Serial > before.Serial)
+                hub.CanvasChanged(after.Revision, null, WebAccessGuard.ActorName(request.HttpContext), "structure");
+            return result;
+        });
+
+        // 删除节点（连带它的连线）。章节是工作树条目、不在画布节点里，所以这里天生删不到它。
+        app.MapDelete("/api/web/records/{recordId}", (string recordId, long? baseRevision, HttpRequest request) =>
+        {
+            if (projectStore is null || structureLeases is null)
+                return Error(409, "CANVAS_REQUIRES_PROJECT", "删除节点要的是项目画布；当前配置的是独立 Web 场景");
+            var user = WebAccessGuard.CurrentUser(request.HttpContext);
+            if (user is null)
+                return Error(403, "CANVAS_WRITE_REQUIRES_SESSION", "结构改动要记在某个账号名下，必须用账号登录");
+            if (!WebAccessGuard.Permissions(request.HttpContext).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+            if (baseRevision is not { } revision)
+                return Error(400, "INVALID_REQUEST", "缺少 baseRevision（你手上那份的修订号）");
+            if (!Guid.TryParse(recordId, out var nodeId))
+                return Error(400, "INVALID_REQUEST", "这个 recordId 不是一个画布节点（章节是工作树条目，不从这条路删）");
+
+            var before = CommitToken();
+            var lease = structureLeases.Acquire(EditScope.Tree, null, user, "web", force: false);
+            if (lease.Status != EditLeaseStatus.Ok) return EditLeaseApi.Failure(lease);
+
+            IResult result;
+            try { result = projectStore.DeleteNode(revision, nodeId); }
+            finally
+            {
+                structureLeases.Release(lease.Lease!.LeaseId, user, force: false);
+            }
+
+            var after = CommitToken();
+            if (after.Serial > before.Serial)
+                hub.CanvasChanged(after.Revision, null, WebAccessGuard.ActorName(request.HttpContext), "structure");
+            return result;
+        });
         app.MapPut("/api/web/records/{recordId}", async (string recordId, HttpRequest request) =>
         {
             // Read the resolved permissions for every write; neither Bearer nor a session cookie alone
