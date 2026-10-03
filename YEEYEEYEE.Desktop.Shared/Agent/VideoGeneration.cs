@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -107,13 +108,17 @@ public static class VideoProviderFactory
 }
 
 /// <summary>
-/// 通过 OpenAI 兼容的**异步**视频接口出视频：**提交 → 轮询 → 下载**，落盘后返回本机路径。
+/// 通过**我们这家视频接口**（AnyAIAPI）出视频：**提交 → 轮询 → 下载**，落盘后返回本机路径。
+///
+/// 形状：`POST /videos/generations`（文生视频走 JSON、图生视频走 multipart 的 `image` 字段）
+/// → `GET /videos/{id}` 看 `status` → 服务端给的 `url`，没有就取 `GET /videos/{id}/content`。
+/// 字段名是 `model / prompt / duration / resolution`，**不是** OpenAI 那套 `seconds / size / input_reference`。
+/// 提交与轮询的路径都从「提交路径」推出来，所以站点池子换一家的路径时两条一起对。
 ///
 /// 为什么必须异步：视频生成几乎没有同步返回的，一次要几十秒到几分钟，HTTP 连接撑着不现实。
-/// 所以形状是「POST 建任务拿到 id」→「GET /videos/{id} 看状态」→「GET 取字节」。
 ///
 /// 三条刻意的做法：
-/// ① **不猜字段名**：各家把任务号叫 id / task_id / video_id，把下载地址叫 url / video_url / output_url……
+/// ① **不猜字段名也不猜状态词**：任务号在各家叫 id / task_id / video_id，下载地址叫 url / video_url / output_url……
 ///    这里按常见名字依次找；一个都找不到就**把返回体原文摘一段报出来**，而不是编一个结果或一直空转。
 /// ② **密钥不外送**：下载地址若是**另一个域**（预设签名的 CDN），绝不把我们的 API Key 附上去——
 ///    附上去等于把密钥交给了第三方。只有同源地址才带鉴权。
@@ -129,6 +134,9 @@ public sealed class HttpVideoProvider : IVideoProvider
 
     /// <summary>整个「提交 + 轮询 + 下载」的总时限。超了就如实报超时，不无限等下去。</summary>
     private static readonly TimeSpan CompletionTimeout = TimeSpan.FromMinutes(20);
+
+    /// <summary>轮询遇到「服务端忙」时最多重试几次（每次退避等待，见 <see cref="RetryDelay"/>）。</summary>
+    private const int TransientRetries = 3;
 
     private readonly AiProviderConfig config;
     private readonly HttpClient http;
@@ -151,10 +159,16 @@ public sealed class HttpVideoProvider : IVideoProvider
         // 与出图那条链同一条规矩，池子里的地址与密钥说了算，设置里的只当兜底。
         var baseUrl = (string.IsNullOrWhiteSpace(request.BaseUrl) ? config.EffectiveVideoEndpoint : request.BaseUrl)
             .Trim().TrimEnd('/');
-        var endpointPath = string.IsNullOrWhiteSpace(request.EndpointPath)
-            ? "/videos"
+        // 路径默认按**我们这家视频接口**（AnyAIAPI）的形状：
+        // POST /videos/generations 建任务 → GET /videos/{id} 轮询 → GET /videos/{id}/content 下载。
+        var submitPath = string.IsNullOrWhiteSpace(request.EndpointPath)
+            ? "/videos/generations"
             : OpenAiCompatibleImageProvider.NormalizePath(request.EndpointPath);
+        // 轮询与下载用的是**上一级**（/videos），不是提交那一级（/videos/generations）——
+        // 这条从提交路径推出来，所以池子改路径时轮询也跟着对。
+        var collectionPath = CollectionPathOf(submitPath);
         var apiKey = EffectiveApiKey(request);
+        var seconds = request.Seconds > 0 ? request.Seconds : config.VideoDefaultSeconds;
         var references = request.ReferenceImages
             .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
             .ToList();
@@ -165,7 +179,7 @@ public sealed class HttpVideoProvider : IVideoProvider
             budget.CancelAfter(CompletionTimeout);
             var token = budget.Token;
 
-            var probe = await SubmitAsync(baseUrl, endpointPath, apiKey, model, request, references, token);
+            var probe = await SubmitAsync(baseUrl, submitPath, apiKey, model, request, seconds, references, token);
             if (probe.Error.Length > 0) return Failed(probe.Error, request, model);
 
             if (probe.DownloadUrl.Length == 0)
@@ -173,11 +187,11 @@ public sealed class HttpVideoProvider : IVideoProvider
                 // 拿到的只有任务号：按 id 轮询到终态。
                 var statusUrl = probe.StatusUrl.Length > 0
                     ? probe.StatusUrl
-                    : $"{baseUrl}{endpointPath}/{Uri.EscapeDataString(probe.TaskId)}";
+                    : $"{baseUrl}{collectionPath}/{Uri.EscapeDataString(probe.TaskId)}";
                 while (true)
                 {
                     await Task.Delay(PollInterval, token).ConfigureAwait(false);
-                    probe = await PollAsync(baseUrl, apiKey, statusUrl, token).ConfigureAwait(false);
+                    probe = await PollAsync(baseUrl, collectionPath, apiKey, statusUrl, token).ConfigureAwait(false);
                     if (probe.Error.Length > 0) return Failed(probe.Error, request, model);
                     if (!probe.Pending) break;
                 }
@@ -211,70 +225,137 @@ public sealed class HttpVideoProvider : IVideoProvider
     }
 
     /// <summary>
-    /// 提交任务。带上参考帧时走 multipart（图生视频的首帧），否则走 JSON（文生视频）。
+    /// 提交任务。带上参考帧时走 multipart（图生视频的首帧，字段名 <c>image</c>），否则走 JSON。
     ///
-    /// 为什么带参考帧就换编码：多数实现把首帧当**文件**收，塞进 JSON 只能传 base64/URL，
-    /// 而这两样都要额外约定字段名——multipart 是这类接口更常见的形状。
+    /// 字段名按**我们这家接口**（AnyAIAPI）的约定：<c>model / prompt / duration / resolution</c>（+ 可选 fps）。
+    /// 注意它**不是** OpenAI 那套 <c>seconds / size / input_reference</c>——发错字段名多半换回一个 400，
+    /// 而 400 在这种「按次计费」的接口上不花钱，但会让人以为服务坏了。
     /// </summary>
     private async Task<VideoProbe> SubmitAsync(
-        string baseUrl, string endpointPath, string apiKey, string model,
-        VideoGenerationRequest request, IReadOnlyList<string> references, CancellationToken token)
+        string baseUrl, string submitPath, string apiKey, string model,
+        VideoGenerationRequest request, int seconds, IReadOnlyList<string> references, CancellationToken token)
     {
-        var url = $"{baseUrl}{OpenAiCompatibleImageProvider.AvoidDuplicatedPrefix(baseUrl, endpointPath)}";
-        using var message = new HttpRequestMessage(HttpMethod.Post, url);
-        OpenAiCompatibleImageProvider.ApplyAuth(message, apiKey, "bearer");
+        var url = $"{baseUrl}{OpenAiCompatibleImageProvider.AvoidDuplicatedPrefix(baseUrl, submitPath)}";
+        var resolution = ResolutionOf(request);
 
-        if (references.Count > 0)
+        async Task<HttpResponseMessage> PostAsync(bool durationAsText)
         {
-            var form = new MultipartFormDataContent
+            var message = new HttpRequestMessage(HttpMethod.Post, url);
+            OpenAiCompatibleImageProvider.ApplyAuth(message, apiKey, "bearer");
+
+            string DurationText() => durationAsText ? $"{seconds}s" : seconds.ToString();
+
+            if (references.Count > 0)
             {
-                { new StringContent(model), "model" },
-                { new StringContent(request.Prompt), "prompt" }
-            };
-            if (request.Seconds > 0) form.Add(new StringContent(request.Seconds.ToString()), "seconds");
-            if (request.Width > 0 && request.Height > 0) form.Add(new StringContent($"{request.Width}x{request.Height}"), "size");
-            var frame = await File.ReadAllBytesAsync(references[0], token).ConfigureAwait(false);
-            var file = new ByteArrayContent(frame);
-            file.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-            form.Add(file, "input_reference", Path.GetFileName(references[0]));
-            message.Content = form;
+                var form = new MultipartFormDataContent
+                {
+                    { new StringContent(model), "model" },
+                    { new StringContent(request.Prompt), "prompt" }
+                };
+                if (seconds > 0) form.Add(new StringContent(DurationText()), "duration");
+                if (resolution.Length > 0) form.Add(new StringContent(resolution), "resolution");
+                var frame = await File.ReadAllBytesAsync(references[0], token).ConfigureAwait(false);
+                var file = new ByteArrayContent(frame);
+                file.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+                form.Add(file, "image", Path.GetFileName(references[0]));
+                message.Content = form;
+            }
+            else
+            {
+                var payload = new Dictionary<string, object> { ["model"] = model, ["prompt"] = request.Prompt };
+                if (seconds > 0) payload["duration"] = durationAsText ? $"{seconds}s" : seconds;
+                if (resolution.Length > 0) payload["resolution"] = resolution;
+                message.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+            }
+
+            return await http.SendAsync(message, token).ConfigureAwait(false);
         }
-        else
+
+        var response = await PostAsync(durationAsText: false).ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
+        // 少数部署把 duration 当字符串收（文档里写的是「可重试 15s 形式」）：
+        // 只在 400 且带上了时长时重试一次，别的 400 直接如实报出来——重试改不了模型名写错这类问题。
+        if (response.StatusCode == HttpStatusCode.BadRequest && seconds > 0)
         {
-            var payload = new Dictionary<string, object> { ["model"] = model, ["prompt"] = request.Prompt };
-            if (request.Seconds > 0) payload["seconds"] = request.Seconds;
-            if (request.Width > 0 && request.Height > 0) payload["size"] = $"{request.Width}x{request.Height}";
-            message.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+            response.Dispose();
+            response = await PostAsync(durationAsText: true).ConfigureAwait(false);
+            body = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
         }
 
-        using var response = await http.SendAsync(message, token).ConfigureAwait(false);
-        var body = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
-            return VideoProbe.Fail($"视频接口提交返回 {(int)response.StatusCode}：{ExtractMessage(body)}");
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+                return VideoProbe.Fail($"视频接口提交返回 {(int)response.StatusCode}：{ExtractMessage(body)}"
+                    + ((int)response.StatusCode == 400
+                        ? "（检查必填的 duration、模型 id 与请求格式）"
+                        : string.Empty));
 
-        return ParseProbe(body, baseUrl, submitting: true);
+            return ParseProbe(body, baseUrl, CollectionPathOf(submitPath), submitting: true);
+        }
     }
 
-    /// <summary>轮询一次任务状态：还没好就是 Pending，好了带上下载地址，坏了带上原因。</summary>
-    private async Task<VideoProbe> PollAsync(string baseUrl, string apiKey, string statusUrl, CancellationToken token)
+    /// <summary>
+    /// 轮询一次任务状态：还没好就是 Pending，好了带上下载地址，坏了带上原因。
+    /// 429 / 503 / 504 是「服务端忙」，**有限重试**而不是立刻判死——视频任务动辄几分钟，一次限流不代表失败。
+    /// 409 表示还在处理，按 Pending 算。
+    /// </summary>
+    private async Task<VideoProbe> PollAsync(string baseUrl, string collectionPath, string apiKey, string statusUrl, CancellationToken token)
     {
-        using var message = new HttpRequestMessage(HttpMethod.Get, statusUrl);
-        OpenAiCompatibleImageProvider.ApplyAuth(message, apiKey, "bearer");
-        using var response = await http.SendAsync(message, token).ConfigureAwait(false);
-        var body = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
-            return VideoProbe.Fail($"查询视频任务状态返回 {(int)response.StatusCode}：{ExtractMessage(body)}");
+        for (var attempt = 0; ; attempt++)
+        {
+            using var message = new HttpRequestMessage(HttpMethod.Get, statusUrl);
+            OpenAiCompatibleImageProvider.ApplyAuth(message, apiKey, "bearer");
+            using var response = await http.SendAsync(message, token).ConfigureAwait(false);
+            var body = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
 
-        // 轮询阶段没给出状态字段、却已经带上了下载地址的，按「已完成」处理——那是终态的样子。
-        return ParseProbe(body, baseUrl, submitting: false);
+            if (response.StatusCode == HttpStatusCode.Conflict) return VideoProbe.Waiting(string.Empty, statusUrl);
+            if (IsTransient(response.StatusCode) && attempt < TransientRetries)
+            {
+                await Task.Delay(RetryDelay(attempt), token).ConfigureAwait(false);
+                continue;
+            }
+            if (!response.IsSuccessStatusCode)
+                return VideoProbe.Fail($"查询视频任务状态返回 {(int)response.StatusCode}：{ExtractMessage(body)}");
+
+            // 轮询阶段没给出状态字段、却已经带上了下载地址的，按「已完成」处理——那是终态的样子。
+            return ParseProbe(body, baseUrl, collectionPath, submitting: false);
+        }
     }
+
+    /// <summary>服务端忙：值得重试的状态码。</summary>
+    private static bool IsTransient(HttpStatusCode status) =>
+        status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout;
+
+    /// <summary>重试等多久：2s、4s、8s…… 不无限退避，因为外层还有总时限兜着。</summary>
+    private static TimeSpan RetryDelay(int attempt) => TimeSpan.FromSeconds(Math.Pow(2, attempt + 1));
+
+    /// <summary>
+    /// 从提交路径推出「集合路径」（轮询与内容下载用的那一级）：
+    /// <c>/videos/generations</c> → <c>/videos</c>；已经是一级（<c>/videos</c>）就原样保留。
+    /// </summary>
+    internal static string CollectionPathOf(string submitPath)
+    {
+        var trimmed = (submitPath ?? string.Empty).Trim().TrimEnd('/');
+        if (trimmed.Length == 0) return "/videos";
+        var lastSlash = trimmed.LastIndexOf('/');
+        if (lastSlash <= 0) return trimmed;
+        var parent = trimmed[..lastSlash];
+        return parent.Length == 0 ? "/videos" : parent;
+    }
+
+    /// <summary>
+    /// 画幅。有明确的宽高就发 <c>1280x720</c> 这种等效尺寸（接口文档里竖屏写 <c>720x1280</c>、横屏写 <c>1280x720</c>，
+    /// 是我们能确定表达的形状）；没有就不发，由服务端按模型的默认档位决定——**不替它猜一个档位**。
+    /// </summary>
+    private static string ResolutionOf(VideoGenerationRequest request) =>
+        request.Width > 0 && request.Height > 0 ? $"{request.Width}x{request.Height}" : string.Empty;
 
     /// <summary>
     /// 解析响应体。<paramref name="submitting"/> 区分两个阶段的容错口径：
     /// 提交时**必须**拿到任务号（或直接给出下载地址），否则说明这个接口的形状我们不认识，要报出来；
     /// 轮询时没状态也没地址才算「还在跑」。
     /// </summary>
-    private static VideoProbe ParseProbe(string body, string baseUrl, bool submitting)
+    private static VideoProbe ParseProbe(string body, string baseUrl, string collectionPath, bool submitting)
     {
         JsonElement root;
         try
@@ -300,9 +381,9 @@ public sealed class HttpVideoProvider : IVideoProvider
 
         if (IsSuccess(normalized))
         {
-            // 完成但没给地址：按 OpenAI 兼容约定回退到内容端点。
+            // 完成但没给地址：回退到集合路径下的内容端点（/videos/{id}/content）。
             if (downloadUrl.Length == 0)
-                downloadUrl = id.Length > 0 ? $"{baseUrl}/videos/{Uri.EscapeDataString(id)}/content" : string.Empty;
+                downloadUrl = id.Length > 0 ? $"{baseUrl}{collectionPath}/{Uri.EscapeDataString(id)}/content" : string.Empty;
             return VideoProbe.Done(downloadUrl);
         }
 

@@ -9429,7 +9429,7 @@ static void VideoProviderSubmitsPollsAndDownloads()
 				request.Headers.TryGetValues("Authorization", out var values) ? values.FirstOrDefault() : null,
 				request.Content?.ReadAsStringAsync().GetAwaiter().GetResult()));
 
-			if (url.EndsWith("/videos", StringComparison.Ordinal))
+			if (url.EndsWith("/videos/generations", StringComparison.Ordinal))
 				return JsonResponse("""{"id":"vid-1","status":"queued"}""");
 			if (url.EndsWith("/content", StringComparison.Ordinal))
 				return BytesResponse(Mp4Bytes());
@@ -9449,7 +9449,7 @@ static void VideoProviderSubmitsPollsAndDownloads()
 		var provider = new HttpVideoProvider(config, new HttpClient(handler));
 		Expect(provider.IsConfigured, "视频地址留空可复用主接口，加上模型名就算配置好了");
 
-		var result = provider.GenerateAsync(new VideoGenerationRequest { Prompt = "雨夜码头，林晚回头" })
+		var result = provider.GenerateAsync(new VideoGenerationRequest { Prompt = "雨夜码头，林晚回头", Seconds = 5 })
 			.GetAwaiter().GetResult();
 
 		Expect(result.Status == VideoGenerationStatus.Succeeded, "整条路应跑通：" + result.Error);
@@ -9459,17 +9459,28 @@ static void VideoProviderSubmitsPollsAndDownloads()
 			"ftyp 开头的应认成 mp4：" + result.FilePath);
 		Expect(string.Equals(Path.GetDirectoryName(result.FilePath), AssetStore.EnsureDirectory(), StringComparison.OrdinalIgnoreCase),
 			"视频要落在项目资产目录里，不能落在临时目录");
-		Expect(seen[0].Url == "https://api.example.com/v1/videos", "提交应打 /videos：" + seen[0].Url);
+		Expect(seen[0].Url == "https://api.example.com/v1/videos/generations",
+			"提交要打我们这家接口的 /videos/generations：" + seen[0].Url);
 		Expect(seen[0].Method == "POST" && seen[0].Body is not null, "提交应当是 POST 且带体");
 		// 按 JSON 取值而不是拿字符串找中文：序列化器会把中文转义成 \uXXXX，直接 Contains 会误判成「没带上」。
 		using (var submitted = JsonDocument.Parse(seen[0].Body!))
 		{
 			Expect(submitted.RootElement.GetProperty("model").GetString() == "veo-3", "提交体要带模型");
 			Expect(submitted.RootElement.GetProperty("prompt").GetString() == "雨夜码头，林晚回头", "提交体要带提示词原文");
+			// 字段名必须是这家的 duration，**不是** OpenAI 的 seconds / size：发错名字换回来的是 400。
+			Expect(submitted.RootElement.GetProperty("duration").GetInt32() == 5, "时长要按 duration 发");
+			Expect(!submitted.RootElement.TryGetProperty("seconds", out _), "不得再出现 seconds 这种别家的字段名");
+			Expect(!submitted.RootElement.TryGetProperty("resolution", out _), "没给画幅时不要替服务端猜一个档位");
 		}
 		Expect(polls == 2, "应轮询到终态才停（in_progress → completed），实际 " + polls + " 次");
 		Expect(seen[^1].Auth == "Bearer sk-secret", "同源下载地址应带上鉴权");
+		Expect(seen[^1].Url == "https://api.example.com/v1/videos/vid-1/content",
+			"轮询与内容下载用的是上一级 /videos，不是提交那一级：" + seen[^1].Url);
 		Expect(new FileInfo(result.FilePath).Length == Mp4Bytes().Length, "落盘的应是下载回来的那几字节");
+
+		// 提交路径推集合路径：/videos/generations → /videos；已经是一级就原样保留。
+		Expect(HttpVideoProvider.CollectionPathOf("/videos/generations") == "/videos", "提交路径要能推出轮询那一级");
+		Expect(HttpVideoProvider.CollectionPathOf("/videos") == "/videos", "已经是一级时原样保留");
 	}
 	finally { HttpVideoProvider.PollInterval = previousInterval; }
 }
@@ -9497,7 +9508,7 @@ static void VideoProviderReportsFailureAndUnknownShape()
 
 		// ② 任务失败：原因要来自接口，不能是「视频任务失败」四个字。
 		var failing = new HttpVideoProvider(config, new HttpClient(new StubHttpHandler(request =>
-			request.RequestUri!.AbsolutePath.EndsWith("/videos", StringComparison.Ordinal)
+			request.RequestUri!.AbsolutePath.EndsWith("/videos/generations", StringComparison.Ordinal)
 				? JsonResponse("""{"id":"vid-2","status":"queued"}""")
 				: JsonResponse("""{"id":"vid-2","status":"failed","error":{"message":"额度不足"}}"""))));
 		var failingResult = failing.GenerateAsync(new VideoGenerationRequest { Prompt = "x" }).GetAwaiter().GetResult();
@@ -9509,6 +9520,19 @@ static void VideoProviderReportsFailureAndUnknownShape()
 		var empty = new HttpVideoProvider(config, new HttpClient(new StubHttpHandler(_ => { called++; return JsonResponse("{}"); })));
 		var emptyResult = empty.GenerateAsync(new VideoGenerationRequest()).GetAwaiter().GetResult();
 		Expect(emptyResult.Status == VideoGenerationStatus.Failed && called == 0, "提示词为空时不得发出任何请求");
+
+		// ④ 少数部署把 duration 当字符串收：400 之后用 "5s" 再试一次（只重试一次，别的 400 直接报）。
+		var bodies = new List<string?>();
+		var durationAsText = new HttpVideoProvider(config, new HttpClient(new StubHttpHandler(request =>
+		{
+			bodies.Add(request.Content?.ReadAsStringAsync().GetAwaiter().GetResult());
+			return new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("duration 格式不对", Encoding.UTF8, "text/plain") };
+		})));
+		var retried = durationAsText.GenerateAsync(new VideoGenerationRequest { Prompt = "x", Seconds = 5 }).GetAwaiter().GetResult();
+		Expect(bodies.Count == 2, "带上时长遇到 400 应重试一次，实际 " + bodies.Count + " 次");
+		Expect(bodies[0] is not null && bodies[0]!.Contains("\"duration\":5"), "第一次按数字发：" + bodies[0]);
+		Expect(bodies[1] is not null && bodies[1]!.Contains("\"duration\":\"5s\""), "重试用 5s 形式：" + bodies[1]);
+		Expect(retried.Status == VideoGenerationStatus.Failed && retried.Error.Contains("400"), "两次都不成要如实报 400：" + retried.Error);
 	}
 	finally { HttpVideoProvider.PollInterval = previousInterval; }
 }
@@ -9528,7 +9552,7 @@ static void VideoProviderNeverSendsKeyToForeignHost()
 		var handler = new StubHttpHandler(request =>
 		{
 			var url = request.RequestUri!.ToString();
-			if (url.EndsWith("/videos", StringComparison.Ordinal))
+			if (url.EndsWith("/videos/generations", StringComparison.Ordinal))
 				return JsonResponse("""{"id":"vid-3","status":"queued"}""");
 			if (url.StartsWith("https://cdn.other.example.net/", StringComparison.Ordinal))
 			{

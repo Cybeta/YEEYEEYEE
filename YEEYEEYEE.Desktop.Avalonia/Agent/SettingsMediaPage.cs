@@ -371,26 +371,31 @@ internal static class SettingsMediaPage
             "两种模式下有一条是一样的：整批还在跑时都不能挑。中途挑会把整批丢掉，" +
             "而已经发出去的出图请求取消不了，它们跑完的图就没人认领了，所以统一等这一批出完。"));
 
-        // 让模型给这一批排名次（名次换成档位）。缺哪一条就说哪一条，不给一个点下去必然不生效的勾选框。
-        var judgeBlocked = config.UseLocalProvider
+        // 判档要一个能读图的模型。**模型不能读图时不再置灰**：判档是用户的意图，
+        // 能不能兑现由出图那一刻去问他（换多模态模型 / 这次跳过判档直接出图）——
+        // 直接置灰等于替他做了「不许判」的决定，而他要的可能只是先把图跑通。
+        var judgeUnavailable = config.UseLocalProvider
             ? "现在选的是本地模拟，判定不会真的发生。"
             : !config.IsConfigured
                 ? "还没有配置接口地址与模型。"
-                : !config.SupportsImageInput
-                    ? "当前模型没有开「支持图片输入」——请在接入设置的高级配置里勾上，或换一个能看图的模型。"
-                    : string.Empty;
+                : string.Empty;
+        var judgeNeedsVision = judgeUnavailable.Length == 0 && !config.SupportsImageInput;
         var judgeQuality = new CheckBox
         {
             Content = "出图后让模型判一下：照着你写的提示词与负面词逐张打分，分数换成档位（金 / 红 / 紫 / 蓝 / 白），开奖按档位出效果",
             IsChecked = config.JudgeImageQuality,
-            IsEnabled = judgeBlocked.Length == 0,
+            IsEnabled = judgeUnavailable.Length == 0,
             FontSize = 11,
             Foreground = Brush("DfInk2")
         };
         root.Children.Add(judgeQuality);
-        root.Children.Add(Note(judgeBlocked.Length > 0
-            ? "现在打不开这条：" + judgeBlocked
-            : "开着会**多花一次模型调用**（把这一批图连同出图要求、负面词、节点上下文发过去），所以默认关。"));
+        root.Children.Add(Note(judgeUnavailable.Length > 0
+            ? "现在打不开这条：" + judgeUnavailable
+            : judgeNeedsVision
+                ? "当前模型**没有开「支持图片输入」**，而判档要一个能读图的模型。出图时会问你一句："
+                  + "去接入设置里勾上「模型支持图片输入」（或换一个能看图的模型），还是**这次跳过判档、直接把图出完跑通**。"
+                  + "跳过的那一批没有档位，也就没有裂纹卡与自动重出。"
+                : "开着会**多花一次模型调用**（把这一批图连同出图要求、负面词、节点上下文发过去），所以默认关。"));
         root.Children.Add(Note(
             QualityJudgement.ScoreBandNote +
             "判的是**绝对分**，不是这一批里的名次——所以一张也能判，同一张图两次出图可以互相比较。" +
@@ -409,8 +414,8 @@ internal static class SettingsMediaPage
             Foreground = Brush("DfInk2")
         };
         root.Children.Add(autoRedraw);
-        root.Children.Add(Note(judgeBlocked.Length > 0
-            ? "现在打不开这条：" + judgeBlocked
+        root.Children.Add(Note(judgeUnavailable.Length > 0
+            ? "现在打不开这条：" + judgeUnavailable
             : "它**只在判档开着时才生效**——判档关着就没有「裂纹卡」这个结论，也就没有可重出的对象。"
               + "重出只针对踩中负面词的那几张，不推倒整批；同一批最多自动重出 "
               + $"{NodeImageBatch.MaxCrackedRedrawRounds} 次，到顶会如实说「还是裂纹，请人工改提示词」。"

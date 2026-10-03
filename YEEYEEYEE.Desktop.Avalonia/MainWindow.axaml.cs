@@ -3006,7 +3006,18 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 放在整批出完之后，而不是一张一张跟着出：名次要有可比的对象，单张自己排不出名次。
         // 它**不挡住挑图**——图早就出好了，判档只是给开奖添一层档位效果。
         var gradeNote = string.Empty;
-        if (judgeImageQuality && batch.DoneCount > 0)
+        var wantsGrading = judgeImageQuality && batch.DoneCount > 0;
+        // 判档要一个**能读图**的模型。模型读不了图时既不闷着跳过、也不硬拦：告诉他，让他选——
+        // ①去接入设置里换一个开了「支持图片输入」的模型；②这次跳过判档，把图直接出完跑通。
+        if (wantsGrading && AiProviderFactory.CreateImageJsonCompleter() is null)
+        {
+            var skip = await AskSkipGradingAsync();
+            wantsGrading = false;
+            gradeNote = skip
+                ? "这一批没有判档（按你的选择直接出图）：没有档位，也就没有裂纹卡与自动重出。"
+                : "这一批没有判档：当前模型不能读图。去「设置 → 模型接入」勾上「模型支持图片输入」或换一个能看图的模型，再出一次就有档位。";
+        }
+        if (wantsGrading)
         {
             batch.IsGrading = true;
             CanvasSurfaceControl.Refresh();
@@ -3047,6 +3058,44 @@ public partial class MainWindow : Window, IAgentSessionHost
                   + "：在节点上方那排窗口里挑——右键「用这一张」收进节点，「删除这一张」扔掉它，"
                   + "都不要就「全部不要，重做」；双击可以放大看。"
             : $"这一批 {count} 张都没出来：把鼠标停在格子上看原因，或点「重做这一批」。");
+    }
+
+    /// <summary>
+    /// 判档要一个能读图的模型，而当前模型没开图片输入时，问用户一句。
+    ///
+    /// 为什么问而不是直接跳过：这一批的档位、裂纹卡、自动重出全挂在判档上，
+    /// 悄悄跳过等于让用户以为「这一批很干净」，而其实根本没判过（与「没判过 ≠ 白档」同一条道理）。
+    /// 为什么也不硬拦：他没配多模态模型时，最需要的是**把图先出出来看一眼**，
+    /// 而不是被一句「需要一个开了图片输入的模型」挡在门外。
+    ///
+    /// 返回 true = 这次跳过判档、直接把图出完。
+    /// </summary>
+    private async Task<bool> AskSkipGradingAsync()
+    {
+        var body = new StackPanel { Margin = new Thickness(20), Spacing = 8 };
+        body.Children.Add(AgentDialogUi.Header("当前模型不能读图，这一批判不了档"));
+        body.Children.Add(AgentDialogUi.Note(
+            "判档（以及裂纹卡、自动重出）要一个**能读图的多模态模型**，而当前接入的模型没有开「支持图片输入」。\n"
+            + "· 想判档：去「设置 → 模型接入」勾上「模型支持图片输入」，或换一个能看图的模型，然后再出一次。\n"
+            + "· 不想折腾：这次直接跳过判档，图照出，只是这一批没有档位。",
+            AgentNoteLevel.Warning));
+
+        var goConfigure = AgentDialogUi.Primary("去换多模态模型");
+        var skip = AgentDialogUi.Secondary("这次跳过，直接出图");
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Spacing = 6,
+            Children = { goConfigure, skip }
+        };
+        var dialog = DialogShell.Create("这次不判档？", AgentDialogUi.Layout(body, AgentDialogUi.Footer(buttons)), 540, 320);
+
+        var skipChosen = false;
+        goConfigure.Click += (_, _) => dialog.Close();
+        skip.Click += (_, _) => { skipChosen = true; dialog.Close(); };
+        await dialog.ShowDialog(this);
+        return skipChosen;
     }
 
     /// <summary>
