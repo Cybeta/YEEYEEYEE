@@ -114,6 +114,14 @@ public sealed class AiProviderConfig
     public string CollaborationAccount { get; set; } = string.Empty;
 
     /// <summary>
+    /// 「改完自动同步」：改动静默一会儿就自动推给服务端（不需要点「保存修订」）。
+    ///
+    /// **默认关**。桌面端一直是「要不要落盘由『保存修订』决定」，那是刻意的设计；
+    /// 自动同步把落盘时机拿走了，所以只能由用户显式打开，不该悄悄改掉默认行为。
+    /// </summary>
+    public bool CollaborationAutoSync { get; set; }
+
+    /// <summary>
     /// 出图「开奖」：一批图出完后不直接把缩略图铺在画布上，而是留一排**背面朝上**的卡，
     /// 由用户点开，再走一段全屏揭晓（自有形象许愿 → 光点飞入 → 卡片依次翻面），挑一张收进节点。
     ///

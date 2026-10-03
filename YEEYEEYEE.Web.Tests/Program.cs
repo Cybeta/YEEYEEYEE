@@ -1098,6 +1098,18 @@ try
         YEEYEEYEE.Desktop.RemoteCanvasChange.Decide(false, true, false, true) == YEEYEEYEE.Desktop.RemoteChangeAction.NotifyOnly &&
         YEEYEEYEE.Desktop.RemoteCanvasChange.Decide(false, false, false, false) == YEEYEEYEE.Desktop.RemoteChangeAction.NotifyOnly,
         "有未保存改动、正在编辑/保存、或者根本没开画布：都只说不动");
-    Console.WriteLine("Desktop subscribe regression passed: frames parsed and unknown ones dropped, real canvas.changed and edits.changed reach the desktop, sign-out stops the stream, auto-reload only when the local copy is clean and idle");
+    // 「该不该自动推」同样是纯判断：开关默认关着，所以它平时永远该回 false——
+    // 而 false 不是「失败」，是「这事不归我管」。这条区分决定了关掉开关之后会不会有噪声。
+    Assert(!YEEYEEYEE.Desktop.AutoSync.ShouldPush(false, true, true, true, false),
+        "开关关着就永远不推（默认就是关的）");
+    Assert(!YEEYEEYEE.Desktop.AutoSync.ShouldPush(true, false, true, true, false) &&
+        !YEEYEEYEE.Desktop.AutoSync.ShouldPush(true, true, false, true, false),
+        "没配服务器、没登录都不推");
+    Assert(!YEEYEEYEE.Desktop.AutoSync.ShouldPush(true, true, true, false, false) &&
+        !YEEYEEYEE.Desktop.AutoSync.ShouldPush(true, true, true, true, true),
+        "没有未落盘的改动不推；正在保存或退避中也不推");
+    Assert(YEEYEEYEE.Desktop.AutoSync.ShouldPush(true, true, true, true, false),
+        "开关打开、登录着、有改动、不忙：这才推");
+    Console.WriteLine("Desktop subscribe regression passed: frames parsed and unknown ones dropped, real canvas.changed and edits.changed reach the desktop, sign-out stops the stream, auto-reload only when the local copy is clean and idle, auto-push only when the user turned it on");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }

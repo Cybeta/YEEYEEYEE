@@ -1077,7 +1077,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// · **服务器叫不到时退回本地写**，但把那句话说出口：桌面端本地优先，写盘不该被服务器绑住。
     /// · 服务端写完**再核对一次本地文件**：修订对得上，才算这次保存真的落在同一张画布上。
     /// </summary>
-    private async Task<string?> TrySaveCanvasThroughServerAsync()
+    private async Task<string?> TrySaveCanvasThroughServerAsync(bool allowLocalFallback = true)
     {
         // 临时引用画布、没有落盘的新画布、只读项目：都不归服务端管，走原来的路。
         if (referenceCanvas is not null || currentCanvas is null || string.IsNullOrWhiteSpace(currentCanvasPath)) return null;
@@ -1092,6 +1092,11 @@ public partial class MainWindow : Window, IAgentSessionHost
         var (serverRevision, handshakeError) = await session.CanvasRevisionAsync();
         if (serverRevision is null)
         {
+            // 自动同步这条路上**不许**退回本地写：打开那个开关的人要的是「推给协作者」，
+            // 不是「偷偷替我落盘」——「什么时候落盘由我决定」这条默认行为不该被它推翻。
+            if (!allowLocalFallback)
+                return "没联上服务器（" + handshakeError + "），这一轮没写；改动还在本地，点「保存修订」可以只写本地。";
+
             // 叫不到服务器（或会话失效）：不算错误，退回本地写，但说清楚这次没广播给协作者。
             TrySaveCanvas(out var fallback);
             return fallback + "（没联上服务器，这次只写了本地：" + handshakeError + "）";
@@ -4225,6 +4230,68 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// <summary>正在保存。保存期间来的推送不该触发自动重载：那会儿内存里的画布正要落盘。</summary>
     private bool savingCanvas;
 
+    /// <summary>设置里「改完自动同步」的当前值（只有设置页能改，所以只在打开设置回来时重读一次）。</summary>
+    private bool autoSyncEnabled;
+
+    /// <summary>自动同步的计时器（开关关着、或没登录时它不跑）。</summary>
+    private DispatcherTimer? autoSyncTimer;
+
+    /// <summary>自动同步失败后退避到什么时候（失败了就别每两秒再撞一次）。</summary>
+    private DateTimeOffset autoSyncBackoffUntil;
+
+    /// <summary>上一次自动同步说过的话（同一句不重复喊）。</summary>
+    private string autoSyncLastNote = string.Empty;
+
+    /// <summary>重读「改完自动同步」开关并据此起停计时器。</summary>
+    private void RefreshAutoSyncSetting()
+    {
+        autoSyncEnabled = AiProviderSettings.Load().CollaborationAutoSync;
+        var shouldRun = autoSyncEnabled && collaboration is { IsSignedIn: true, IsConfigured: true };
+        if (!shouldRun)
+        {
+            autoSyncTimer?.Stop();
+            return;
+        }
+
+        if (autoSyncTimer is null)
+        {
+            autoSyncTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            autoSyncTimer.Tick += AutoSyncTick;
+        }
+
+        if (!autoSyncTimer.IsEnabled) autoSyncTimer.Start();
+    }
+
+    /// <summary>
+    /// 改完自动同步：每 2 秒看一眼「有没有还没落盘的改动」，有就交给服务端。
+    ///
+    /// 只走服务端那一条路（<c>allowLocalFallback: false</c>）：服务器叫不到时**不改成写本地**——
+    /// 打开这个开关的人要的是「同步给协作者」，不是「偷偷替我落盘」。
+    /// 失败退避 30 秒，并且同一句话不重复喊：每两秒喊一遍同样的错是最吵的设计。
+    /// </summary>
+    private async void AutoSyncTick(object? sender, EventArgs e)
+    {
+        var session = collaboration;
+        var dirty = activeCanvasTab?.Dirty == true;
+        var busy = savingCanvas || DateTimeOffset.UtcNow < autoSyncBackoffUntil;
+        if (session is null ||
+            !AutoSync.ShouldPush(autoSyncEnabled, session.IsConfigured, session.IsSignedIn, dirty, busy)) return;
+
+        savingCanvas = true;
+        string? message;
+        try { message = await TrySaveCanvasThroughServerAsync(allowLocalFallback: false); }
+        finally { savingCanvas = false; }
+
+        // 「成了没有」看未保存标记有没有被撤掉——比去嗅一句话的内容可靠。
+        var ok = activeCanvasTab?.Dirty != true;
+        if (!ok) autoSyncBackoffUntil = DateTimeOffset.UtcNow.AddSeconds(30);
+        if (message is not null && message != autoSyncLastNote)
+        {
+            StatusText.Text = message;
+            autoSyncLastNote = message;
+        }
+    }
+
     private CollaborationSession Collaboration()
     {
         collaboration ??= new CollaborationSession(AiProviderSettings.Load().CollaborationServerUrl);
@@ -5519,8 +5586,9 @@ public partial class MainWindow : Window, IAgentSessionHost
     public async Task<bool> OpenModelSettingsAsync()
     {
         if (!await SettingsWindow.ShowAsync(this, Collaboration(), initialPage: 0)) return false;
-        // 设置里可能刚登录：回来之后再走一次，订阅据此起起来（退出时由会话自己停）。
+        // 设置里可能刚登录、或刚改「改完自动同步」：回来重读一遍开关，订阅与自动同步据此起停。
         Collaboration();
+        RefreshAutoSyncSetting();
         StatusText.Text = "模型配置已保存，下一轮对话生效";
         // 这一页里也可能改了「出图观感」那个开关（它跟模型配置同在一个窗口），重新取一次并重画。
         RefreshRevealPreferences();
@@ -5538,8 +5606,9 @@ public partial class MainWindow : Window, IAgentSessionHost
     private async void Settings_OnClick(object? sender, RoutedEventArgs e)
     {
         if (!await SettingsWindow.ShowAsync(this, Collaboration())) return;
-        // 设置里可能刚登录：回来之后再走一次，订阅据此起起来（退出时由会话自己停）。
+        // 设置里可能刚登录、或刚改「改完自动同步」：回来重读一遍开关，订阅与自动同步据此起停。
         Collaboration();
+        RefreshAutoSyncSetting();
         StatusText.Text = "设置已保存";
         // 「出图观感」那个开关就在这个窗口里：改了它要立刻反映到画布上那排候选卡的画法。
         RefreshRevealPreferences();
