@@ -4429,7 +4429,11 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
 
         var state = currentCanvas.Canvas;
-        var chapters = state.WorkTree.Where(item => item.Kind == WorkTreeKind.Chapter).OrderBy(item => item.Order).ThenBy(item => item.Name).ToList();
+        // 章节列表与归属都走共享的 CanvasChapters：身份是工作树里那些章节条目的 ID，章节名只用来显示。
+        // 早先这里是「章节名相同 **或** 锚点指向该章」——按名字绑定正是 C-4 明确禁止的猜法
+        // （同名章节会被串在一起、改个显示名就会换章），于是同一个节点在时间轴、画布泳道
+        // 与网页端的整理预览里可能落到不同的章。现在三处只有一条规则：稳定 ID。
+        var chapters = CanvasChapters.List(state);
         var shots = state.Nodes.Where(node => node.Category == NodeCategory.Storyboard).ToList();
         var products = state.Nodes.Where(node => node.Category == NodeCategory.Product).ToList();
 
@@ -4440,12 +4444,12 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         var sortedShots = shots.OrderBy(node => node.X).ToList();
         var lane = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
-        var unassigned = new List<WorkflowNode>();
+        var placed = new HashSet<Guid>();
 
         foreach (var chapter in chapters)
         {
-            var chapterNodes = sortedShots.Where(node => string.Equals(node.Chapter, chapter.Name, StringComparison.Ordinal) || node.WorkTreeItemId == chapter.Id).ToList();
-            unassigned.AddRange(chapterNodes);
+            var chapterNodes = sortedShots.Where(node => CanvasChapters.ResolveChapterId(state, node) == chapter.Id).ToList();
+            foreach (var node in chapterNodes) placed.Add(node.Id);
 
             var card = new Border
             {
@@ -4470,7 +4474,9 @@ public partial class MainWindow : Window, IAgentSessionHost
             lane.Children.Add(Label("这张画布还没有章节：在工作树里建一个章节，或放一个「章节」节点。", 11, "#5C6A7C"));
         TimelineContent.Children.Add(lane);
 
-        var loose = sortedShots.Where(node => !unassigned.Contains(node)).ToList();
+        // 只写了章节名、没有稳定锚点的分镜落在这里（诊断会报 CHAPTER_TEXT_WITHOUT_ANCHOR）。
+        // 这是如实的「还没归章」，不是把它猜进某一章——猜错了比承认没归章更坏。
+        var loose = sortedShots.Where(node => !placed.Contains(node.Id)).ToList();
         if (loose.Count > 0)
         {
             TimelineContent.Children.Add(Label("还没归章的分镜", 12, "#93A1B3", semiBold: true));
@@ -4492,7 +4498,9 @@ public partial class MainWindow : Window, IAgentSessionHost
             return;
         }
 
-        var nodes = currentCanvas.Canvas.Nodes
+        var state = currentCanvas.Canvas;
+        var chapters = CanvasChapters.List(state);
+        var nodes = state.Nodes
             .Where(node => !string.IsNullOrWhiteSpace(node.Content) || !string.IsNullOrWhiteSpace(node.Chapter))
             .ToList();
         if (nodes.Count == 0)
@@ -4503,15 +4511,43 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
 
         ScriptContent.Children.Add(Label($"{currentCanvas.Title} · 剧本", 14, "#E9EFF7", semiBold: true));
-        foreach (var group in nodes.GroupBy(node => string.IsNullOrWhiteSpace(node.Chapter) ? "未分章" : node.Chapter).OrderBy(group => group.Key))
+
+        // 分组键是稳定章节 ID，不是章节名：同名章节不会并成一组，改个显示名也不会换组。
+        // 组内按 X 排（画布从左到右就是阅读顺序），组间按共享的显式章节顺序——
+        // 早先这里按章节名的字符串排序，「第十章」会排到「第二章」前面。
+        var byChapter = new Dictionary<Guid, List<WorkflowNode>>();
+        var loose = new List<WorkflowNode>();
+        foreach (var node in nodes)
         {
-            ScriptContent.Children.Add(Label(group.Key, 13, "#A7C7EA", semiBold: true));
-            foreach (var node in group.OrderBy(node => node.X).ThenBy(node => node.Y))
+            var chapterId = CanvasChapters.ResolveChapterId(state, node);
+            if (chapterId is { } id && chapters.Any(chapter => chapter.Id == id))
             {
-                var body = string.IsNullOrWhiteSpace(node.Content) ? "（这个节点还没有内容）" : node.Content.Trim();
-                ScriptContent.Children.Add(Label($"{node.Title} · {StatusName(node.ExecutionStatus)}", 11, "#5C6A7C"));
-                ScriptContent.Children.Add(Label(body, 12, "#D6E2F0", wrap: true));
+                if (!byChapter.TryGetValue(id, out var members)) byChapter[id] = members = new List<WorkflowNode>();
+                members.Add(node);
             }
+            else loose.Add(node);
+        }
+
+        void AddEntry(WorkflowNode node)
+        {
+            var body = string.IsNullOrWhiteSpace(node.Content) ? "（这个节点还没有内容）" : node.Content.Trim();
+            ScriptContent.Children.Add(Label($"{node.Title} · {StatusName(node.ExecutionStatus)}", 11, "#5C6A7C"));
+            ScriptContent.Children.Add(Label(body, 12, "#D6E2F0", wrap: true));
+        }
+
+        foreach (var chapter in chapters)
+        {
+            if (!byChapter.TryGetValue(chapter.Id, out var members) || members.Count == 0) continue;
+            ScriptContent.Children.Add(Label(chapter.Name, 13, "#A7C7EA", semiBold: true));
+            foreach (var node in members.OrderBy(item => item.X).ThenBy(item => item.Y)) AddEntry(node);
+        }
+
+        if (loose.Count > 0)
+        {
+            // 只有章节名、没有稳定锚点的节点落在这里：如实说「未分章」。按名字猜进某一章，
+            // 猜错了比承认没归章更坏（同名章节会被并到一起，改个显示名还会整批换章）。
+            ScriptContent.Children.Add(Label("未分章", 13, "#A7C7EA", semiBold: true));
+            foreach (var node in loose.OrderBy(item => item.X).ThenBy(item => item.Y)) AddEntry(node);
         }
     }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   ALL_CHAPTERS_ID, chapterEntries, chapterIdOf, chapterLabelOf, chapterOrderOf,
-  filterByChapter, sortWithinChapters, type ViewRecord
+  filterByChapter, isPlanningLayer, sortWithinChapters, type ViewRecord
 } from '../src/ChapterView'
 
 function node(id: string, recordType: string, record: Record<string, unknown>): ViewRecord {
@@ -52,6 +52,42 @@ describe('章节视图按稳定 ID 对齐（C-4）', () => {
     const filtered = filterByChapter(records, chapterB)
     expect(filtered.map((record) => record.recordId)).toEqual(['plan', 'b1'])
     expect(filterByChapter(records, ALL_CHAPTERS_ID)).toHaveLength(4)
+  })
+
+  /**
+   * 这一条曾经是错的：判据写成 `layerOf(...) <= 2`，而 `layerOf` 对认不出来的类型返回 0，
+   * 于是角色 / 场景 / 道具 / 通用这些真实节点全被判成「企划层」——选第一章时它们赖在画面上不走，
+   * 看起来像「第一章里有三个角色」；剧本视图里还会被排到最前。
+   * 桌面端画的正是这一份（WebView 里的 `CanvasApp` 用 `filterByChapter`），所以这是真到用户眼前的。
+   */
+  it('企划层只认 L1 剧情与 L2 企划：认不出的类型（0）不是企划层', () => {
+    expect(isPlanningLayer(node('p', 'story-plan', {}))).toBe(true)
+    expect(isPlanningLayer(node('o', 'story-outline', {}))).toBe(true)
+    // 这三类是「资源」，引擎会把它们放进未分章泳道，而不是企划区。
+    expect(isPlanningLayer(node('c', 'Character', {}))).toBe(false)
+    expect(isPlanningLayer(node('s', 'Scene', {}))).toBe(false)
+    expect(isPlanningLayer(node('r', 'Prop', {}))).toBe(false)
+    // 认不出来的类型同样是 0：0 是「不知道」，不是「企划」。
+    expect(isPlanningLayer(node('x', 'something-new', {}))).toBe(false)
+  })
+
+  it('选某一章时，角色/场景/道具不会因为「被判成企划层」而留下', () => {
+    const records = [
+      node('plan', 'story-plan', { title: '剧情源' }),
+      node('hero', 'Character', { title: '林晚' }),
+      node('a1', 'storyboard', { title: 'A 分镜', chapterId: chapterA }),
+      node('b1', 'storyboard', { title: 'B 分镜', chapterId: chapterB })
+    ]
+    // 角色没有挂在这一章上，就该跟分镜一样被筛掉；只有企划层无条件保留。
+    expect(filterByChapter(records, chapterA).map((record) => record.recordId)).toEqual(['plan', 'a1'])
+  })
+
+  it('挂在这一章上的角色不会被筛掉——按 ID 归属，与层无关', () => {
+    const records = [
+      node('hero', 'Character', { title: '林晚', chapterId: chapterA }),
+      node('b1', 'storyboard', { title: 'B 分镜', chapterId: chapterB })
+    ]
+    expect(filterByChapter(records, chapterA).map((record) => record.recordId)).toEqual(['hero'])
   })
 
   it('章节内排序稳定：先工作树顺序，再坐标，最后标题', () => {

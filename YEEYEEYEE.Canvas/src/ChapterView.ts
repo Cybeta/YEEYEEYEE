@@ -59,9 +59,19 @@ export function chapterEntries(records: ViewRecord[]): ChapterEntry[] {
   )
 }
 
-/** 企划层（L1 剧情 / L2 企划）在章节筛选下始终保留，因为它们位于章节泳道之外。 */
+/**
+ * 企划层（L1 剧情 / L2 企划）在章节筛选下始终保留，因为它们位于章节泳道之外。
+ *
+ * 判据必须是**确切的两层**，不能写成 `layerOf(...) <= 2`：`layerOf` 对「认不出来的类型」返回 0，
+ * 于是角色 / 场景 / 道具 / 通用这些真实节点会一起被判成企划层——选一章的时候它们全都留在画面上，
+ * 看起来像「这一章里有三个角色」，其实它们只是没被认出来。0 是「不知道」，不是「企划」。
+ *
+ * 这条规则与桌面端泳道引擎的 `CanvasSwimlaneLayout.IsPlanningCategory`（StoryPlan / StoryOutline）
+ * 是同一条；外壳的 `records.isPlanning` 也直接用它，两处规则只有这一份。
+ */
 export function isPlanningLayer(record: ViewRecord): boolean {
-  return layerOf(record.recordType) <= 2
+  const layer = layerOf(record.recordType)
+  return layer === 1 || layer === 2
 }
 
 /**
