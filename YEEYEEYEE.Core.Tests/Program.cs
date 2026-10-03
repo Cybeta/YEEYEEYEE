@@ -14,6 +14,7 @@ var tests = new (string Name, Action Run)[]
     ("TypedReference 缺失引用拒绝", MissingReference),
     ("Job 状态和进度", JobLifecycle),
     ("幂等结果和单人撤销", IdempotencyAndUndo),
+    ("别人的编辑锁挡得住，自己不挡", RespectOthersLease),
     ("Job 取消和失败终态", JobCancellationAndFailure),
     ("任务重试与尝试链", JobRetryLifecycle),
     ("任务重试的权限与归属", JobRetryAuthorization),
@@ -133,6 +134,32 @@ static void IdempotencyAndUndo()
     var registry = new IdempotencyRegistry(); var user = Guid.NewGuid(); var result = new ExecutionResult { JobId = Guid.NewGuid(), IdempotencyKey = "k", State = JobState.Succeeded };
     registry.Store(user, "k", result); Expect(registry.TryGet(user, "k", out var found) && found.JobId == result.JobId, "幂等结果未复用");
     var undo = new LocalUndoStack(); var op = new OperationRecord(); undo.Push(op); Expect(undo.Pop()?.OperationId == op.OperationId && undo.Pop() is null, "本地撤销栈错误");
+}
+
+/// <summary>
+/// 别人的节点锁挡得住，自己不挡（第 182 轮：桌面端开始**遵守**锁）。
+///
+/// 这条判断是「别把别人的改动盖掉」的最后一道依据——桌面端的检查器可编辑性、节点编辑入口、
+/// 出图三条路都问它，所以它自己必须是对的：自己占的锁不算（否则自己都改不了自己锁着的节点），
+/// 整树锁也不算（它的目标是画布，不是某个节点）。
+/// </summary>
+static void RespectOthersLease()
+{
+    var me = Guid.NewGuid();
+    var other = Guid.NewGuid();
+    var node = Guid.NewGuid();
+    var now = DateTimeOffset.UtcNow;
+    var expires = now.AddMinutes(5);
+    var theirs = new YEEYEEYEE.Desktop.CollaborationLease(Guid.NewGuid(), "node", node, other, "林晚", "web", now, expires);
+    var mine = new YEEYEEYEE.Desktop.CollaborationLease(Guid.NewGuid(), "node", node, me, "我", "desktop", now, expires);
+    var tree = new YEEYEEYEE.Desktop.CollaborationLease(Guid.NewGuid(), "tree", Guid.NewGuid(), other, "林晚", "web", now, expires);
+    var elsewhere = new YEEYEEYEE.Desktop.CollaborationLease(Guid.NewGuid(), "node", Guid.NewGuid(), other, "林晚", "web", now, expires);
+
+    Expect(YEEYEEYEE.Desktop.CollaborationSession.HeldByOthersOf([theirs], me, node) == theirs, "别人的节点锁没挡住");
+    Expect(YEEYEEYEE.Desktop.CollaborationSession.HeldByOthersOf([mine], me, node) is null, "自己的锁把自己挡在门外了");
+    Expect(YEEYEEYEE.Desktop.CollaborationSession.HeldByOthersOf([elsewhere], me, node) is null, "把别的节点的锁算到了这个节点头上");
+    Expect(YEEYEEYEE.Desktop.CollaborationSession.HeldByOthersOf([tree], me, node) is null, "整树锁不该按节点算成只读");
+    Expect(YEEYEEYEE.Desktop.CollaborationSession.HeldByOthersOf([mine, theirs], me, node) == theirs, "两条锁同时在时没认出别人的那条");
 }
 
 static void JobCancellationAndFailure()

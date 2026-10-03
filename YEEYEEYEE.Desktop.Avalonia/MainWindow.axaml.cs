@@ -2186,6 +2186,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         edit.Click += async (_, _) =>
         {
             if (!canEdit || request.Node.IsLocked) { StatusText.Text = "项目只读或节点已锁定，不能编辑"; return; }
+            if (BlockedByOtherEditor(request.Node.Id)) return;
             await ShowNodeEditorAsync(request.Node);
         };
         menu.Items.Add(edit);
@@ -2221,6 +2222,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             StatusText.Text = "项目只读或节点已锁定，不能出图";
             return;
         }
+        if (BlockedByOtherEditor(node.Id)) return;
 
         // 预选上一次用过的那一个：这条路每次都要挑一次池子，记住能省掉一连串点击。
         var choice = await SitePoolPicker.ShowAsync(this, sites, node.Title, RememberedPool());
@@ -4139,10 +4141,15 @@ public partial class MainWindow : Window, IAgentSessionHost
             : $"这个节点还没有内容（{node.Chapter}）；可以直接在这一格里写";
         // 说明里带上**正在看哪一个节点**：正文只有一行字的时候，「面板到底跟着选中变了没有」
         // 要有一个不依赖正文的凭据。
-        SetInspectorEditable(canEdit && !node.IsLocked,
+        // 别人占着这个节点时，面板直接是只读的——锁的用处就在这里：不是等保存时才回一句，
+        // 而是**别让人白改一通**。（自己占的那条不算，见 `HeldByOthers`。）
+        var blockedBy = Collaboration().HeldByOthers(node.Id);
+        SetInspectorEditable(canEdit && !node.IsLocked && blockedBy is null,
             node.IsLocked
                 ? $"正在看「{node.Title}」（{NodeAssistPlanner.KindLabelOf(node.Category)}）· 节点已锁定，先在节点上解锁再改"
-                : $"正在看「{node.Title}」（{NodeAssistPlanner.KindLabelOf(node.Category)}）· {UiText.Text("inspector.applyHint")}");
+                : blockedBy is not null
+                    ? $"正在看「{node.Title}」（{NodeAssistPlanner.KindLabelOf(node.Category)}）· {DescribeHolder(blockedBy)}正在编辑这个节点，等他保存或让管理员接管"
+                    : $"正在看「{node.Title}」（{NodeAssistPlanner.KindLabelOf(node.Category)}）· {UiText.Text("inspector.applyHint")}");
         if (node.References.Count > 0) StatusText.Text = $"已选中 {node.References.Count} 个引用，双击节点进入临时引用画布";
 
         // 画布 → 左栏：选中一个节点就把故事画布展开、选中并滚到它那一行。
@@ -4519,6 +4526,22 @@ public partial class MainWindow : Window, IAgentSessionHost
         $"{holder.DisplayName}（{CollaborationSession.ClientLabel(holder.Client)}）";
 
     /// <summary>
+    /// 这个节点现在**该只读**吗——别人占着它的编辑锁就是。
+    ///
+    /// 写一个节点的三条路（检查器、节点编辑窗口、出图）都先问这一句，命中时统一说同一句话，
+    /// 不各自编措辞。返回 true 表示「已经在这里处理过了，调用方直接 return」。
+    ///
+    /// **只在真的要用到这个节点时问**，不做全局只读——别人的锁挡的是「改这个节点」，
+    /// 不是「打开这张画布看看」。
+    /// </summary>
+    private bool BlockedByOtherEditor(Guid nodeId)
+    {
+        if (Collaboration().HeldByOthers(nodeId) is not { } holder) return false;
+        StatusText.Text = $"{DescribeHolder(holder)}正在编辑这个节点，等他保存或让管理员接管";
+        return true;
+    }
+
+    /// <summary>
     /// 把检查器里改过的名称与描述写回**这张引用卡指向的设定**（实体名 + 变体描述）。
     ///
     /// 与「保存修订」是同一条写回路径：托管资源要落进项目库，写不进去就把内存改回去——
@@ -4570,6 +4593,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     private async void CanvasSurface_OnNodeDoubleClicked(object? sender, WorkflowNode node)
     {
         if (currentCanvas is null || !canEdit || node.IsLocked) { StatusText.Text = "项目只读、节点已锁定或画布不可编辑"; return; }
+        if (BlockedByOtherEditor(node.Id)) return;
         await ShowNodeEditorAsync(node);
     }
 

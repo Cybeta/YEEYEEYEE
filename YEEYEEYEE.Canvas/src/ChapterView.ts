@@ -75,15 +75,6 @@ export function isPlanningLayer(record: ViewRecord): boolean {
 }
 
 /**
- * 按稳定章节 ID 过滤。`ALL_CHAPTERS_ID` 返回全部；选中的章节只保留归属该章节的节点，
- * 加上企划层；没有稳定 ID 的节点不会因为名字相同而被算进该章节。
- */
-export function filterByChapter(records: ViewRecord[], chapterId: string): ViewRecord[] {
-  if (chapterId === ALL_CHAPTERS_ID) return records
-  return records.filter((record) => chapterIdOf(record) === chapterId || isPlanningLayer(record))
-}
-
-/**
  * 在章节内排序（C-1 的 Web 侧对齐）：同章节先按工作树显式顺序，再按当前坐标，
  * 最后按标题，保证渲染顺序稳定且不依赖名称。
  */

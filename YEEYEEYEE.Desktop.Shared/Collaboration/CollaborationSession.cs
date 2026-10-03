@@ -240,6 +240,29 @@ public sealed class CollaborationSession : IDisposable
     }
 
     /// <summary>
+    /// **别人**占着这个节点的那条锁；自己占的、或没人占都回 null。
+    ///
+    /// 为什么要单独一个方法：「谁在编辑」与「我能不能改这个节点」是两件事——后者得先把自己摘出去
+    /// （自己占的锁不该把自己挡在门外），再按目标筛。网页端也是这么分的（`locks.ts` 的 `holdsNode`），
+    /// 两边都从同一条租约列表读，规则只有这一份。
+    ///
+    /// 用法见 `MainWindow`：检查器的可编辑性、节点编辑入口、写回前都要先问它一句。
+    /// </summary>
+    public CollaborationLease? HeldByOthers(Guid nodeId) => HeldByOthersOf(Leases, User?.Id, nodeId);
+
+    /// <summary>
+    /// <see cref="HeldByOthers"/> 的纯函数版本：把「租约列表 + 我是谁 + 哪个节点」当输入，不碰会话状态。
+    ///
+    /// 单独拆出来是为了**能被测**：实例方法要读会话里那份私有的 <c>Leases</c>，
+    /// 而这条判断是「别把别人的节点改了」的依据，不该只靠人肉点。
+    ///
+    /// 注意它按 <paramref name="nodeId"/> 精确匹配 <c>TargetId</c>：整树锁（scope = tree）的目标是画布 ID，
+    /// 所以不会因为「有人整树在写」就把**每个**节点都判成只读——那属于保存时由服务端回 <c>EDIT_CONFLICT</c> 的那一类。
+    /// </summary>
+    public static CollaborationLease? HeldByOthersOf(IReadOnlyList<CollaborationLease> leases, Guid? meId, Guid nodeId) =>
+        leases.FirstOrDefault(lease => lease.TargetId == nodeId && (meId is not { } me || lease.UserId != me));
+
+    /// <summary>
     /// 续期。锁不在了（被别人接管、或已经过期）就把它忘掉——调用方据此**停下编辑**，
     /// 而不是接着写一个自己已经没有资格的节点。
     /// </summary>

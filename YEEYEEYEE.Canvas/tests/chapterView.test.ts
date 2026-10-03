@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  ALL_CHAPTERS_ID, chapterEntries, chapterIdOf, chapterLabelOf, chapterOrderOf,
-  filterByChapter, isPlanningLayer, sortWithinChapters, type ViewRecord
+  chapterEntries, chapterIdOf, chapterLabelOf, chapterOrderOf,
+  isPlanningLayer, sortWithinChapters, type ViewRecord
 } from '../src/ChapterView'
 
 function node(id: string, recordType: string, record: Record<string, unknown>): ViewRecord {
@@ -42,16 +42,27 @@ describe('章节视图按稳定 ID 对齐（C-4）', () => {
     expect(chapterOrderOf(records[0])).toBe(10)
   })
 
-  it('按 ID 筛选：同名文本不会串章节，企划层始终保留', () => {
+  it('按稳定 ID 归属：章节名相同也不会串，没挂 ID 的不属于任何章节', () => {
     const records = [
       node('plan', 'story-plan', { title: '剧情源' }),
       node('a1', 'storyboard', { title: 'A 分镜', chapter: '第1章', chapterId: chapterA }),
       node('b1', 'storyboard', { title: 'B 分镜', chapter: '第1章', chapterId: chapterB }),
       node('free', 'storyboard', { title: '未归档分镜', chapter: '第1章' })
     ]
-    const filtered = filterByChapter(records, chapterB)
-    expect(filtered.map((record) => record.recordId)).toEqual(['plan', 'b1'])
-    expect(filterByChapter(records, ALL_CHAPTERS_ID)).toHaveLength(4)
+    // 两条分镜的章节**名**一模一样，但归属看 ID：它们不是同一章。
+    expect(records.filter((record) => chapterIdOf(record) === chapterB).map((record) => record.recordId)).toEqual(['b1'])
+    // 只有名字、没有 ID 的，不属于任何章节——也不会因为名字相同被算进那一章。
+    expect(records.filter((record) => chapterIdOf(record) === '').map((record) => record.recordId)).toEqual(['plan', 'free'])
+  })
+
+  /** 第 181 轮删掉 `filterByChapter` 之后，这套「归属」判据只剩 `chapterIdOf` 这一个原语（外壳也用它）。 */
+  it('归属只看 ID，与节点是第几层无关', () => {
+    const records = [
+      node('hero', 'Character', { title: '林晚', chapterId: chapterA }),
+      node('b1', 'storyboard', { title: 'B 分镜', chapterId: chapterB })
+    ]
+    // 角色挂在这一章上就在这一章里——它是不是「资源」不影响归属。
+    expect(records.filter((record) => chapterIdOf(record) === chapterA).map((record) => record.recordId)).toEqual(['hero'])
   })
 
   /**
@@ -72,25 +83,6 @@ describe('章节视图按稳定 ID 对齐（C-4）', () => {
     expect(isPlanningLayer(node('r', 'Prop', {}))).toBe(false)
     // 认不出来的类型同样是 0：0 是「不知道」，不是「企划」。
     expect(isPlanningLayer(node('x', 'something-new', {}))).toBe(false)
-  })
-
-  it('选某一章时，角色/场景/道具不会因为「被判成企划层」而留下', () => {
-    const records = [
-      node('plan', 'story-plan', { title: '剧情源' }),
-      node('hero', 'Character', { title: '林晚' }),
-      node('a1', 'storyboard', { title: 'A 分镜', chapterId: chapterA }),
-      node('b1', 'storyboard', { title: 'B 分镜', chapterId: chapterB })
-    ]
-    // 角色没有挂在这一章上，就该跟分镜一样被筛掉；只有企划层无条件保留。
-    expect(filterByChapter(records, chapterA).map((record) => record.recordId)).toEqual(['plan', 'a1'])
-  })
-
-  it('挂在这一章上的角色不会被筛掉——按 ID 归属，与层无关', () => {
-    const records = [
-      node('hero', 'Character', { title: '林晚', chapterId: chapterA }),
-      node('b1', 'storyboard', { title: 'B 分镜', chapterId: chapterB })
-    ]
-    expect(filterByChapter(records, chapterA).map((record) => record.recordId)).toEqual(['hero'])
   })
 
   it('章节内排序稳定：先工作树顺序，再坐标，最后标题', () => {
