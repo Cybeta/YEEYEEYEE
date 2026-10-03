@@ -224,6 +224,14 @@
                   <Button Classes="miniButton" Content="删除" ToolTip.Tip="删除选中的节点或连线（也可以按 Delete）"
                           Click="DeleteNode_OnClick" />
                   <Border Width="1" Height="18" Background="{StaticResource DfLine}" Margin="4,0" />
+                  <!-- 整理布局：按章节泳道重排节点位置。用的是**桌面端自己那份共享引擎**
+                       （CanvasLayoutSession → CanvasSwimlaneLayout，与网页端服务端同一份代码），
+                       所以两端排出来的样子一致。手动摆放的节点默认不动，要一起动会先问一句。
+                       它只改内存里的坐标，「保存修订」时才落盘——与拖动节点、Agent 落位是同一条路子。 -->
+                  <Button Classes="miniButton" Content="整理布局"
+                          ToolTip.Tip="按章节泳道重排节点位置（与网页端用的是同一份引擎）；手动摆放的节点默认留在原位"
+                          Click="ArrangeLayout_OnClick" />
+                  <Border Width="1" Height="18" Background="{StaticResource DfLine}" Margin="4,0" />
                   <!-- 预览引用节点：勾上之后，有引用的节点卡下方会按引用顺序排出一串小小的预览框，
                        图片给缩略图、视频给 ▶ 占位，点一下放大图片 / 播放视频。
                        它只是**画法**开关：关掉不删任何东西，节点上的「引用 · …」标签照旧在。 -->

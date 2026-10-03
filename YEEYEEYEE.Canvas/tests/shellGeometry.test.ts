@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 /**
- * 工作台的窄窗口处理（工程债 #9）。
+ * 工作台的窄窗口处理（原工程债 #9，第 164 轮已修）。
  *
  * 这一条是**纯样式**：渲染出来长什么样只能靠眼睛看。但有两件事是死的、可以钉住——
  * ① 中栏得有一个下限（退回 `minmax(0, 1fr)` 就等于把这一条改回了坏的那版）；

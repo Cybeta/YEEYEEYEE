@@ -2029,6 +2029,60 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
     }
 
+    /// <summary>
+    /// 按章节泳道整理整张画布的位置。
+    ///
+    /// 用的是那个**无界面、两端共享**的泳道引擎（<see cref="CanvasLayoutSession"/> →
+    /// <see cref="CanvasSwimlaneLayout"/>）：网页端的服务端跑的是同一份代码，所以两端排出来的样子一致。
+    /// 在这之前它只有 Agent 与测试在用，桌面上一直没有手动入口——这条补的就是那个缺口。
+    ///
+    /// 三个与网页端对齐的规矩：阻断冲突整批拒绝（确认覆盖也不写——覆盖只解决「保护坐标」，不解决冲突）；
+    /// 手动摆放的节点默认不动、要一起动得显式点头；只改内存里的坐标，「保存修订」时才落盘
+    /// （与拖动节点、Agent 落位是同一条路子）。
+    /// </summary>
+    private async void ArrangeLayout_OnClick(object? sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (currentCanvas is null) { StatusText.Text = "请先新建画布"; return; }
+            if (referenceCanvas is not null) { StatusText.Text = "临时引用画布不参与整理（它不落盘）"; return; }
+
+            var session = new CanvasLayoutSession(currentCanvas.Canvas);
+            var plan = session.PreviewAll();
+            if (plan.HasBlockingConflicts)
+            {
+                StatusText.Text = "布局被阻断，画布未改动。" + session.LastSummary;
+                return;
+            }
+
+            var confirmManual = false;
+            if (plan.RequiresConfirmation)
+            {
+                confirmManual = await CanvasLayoutDialog.ConfirmOverrideManualAsync(
+                    this, plan.ProtectedNodeIds.Count, session.LastSummary);
+                if (!confirmManual)
+                {
+                    StatusText.Text = "已取消整理：手动摆放的节点留在原位，画布未改动。";
+                    return;
+                }
+            }
+
+            // 引擎自己给的理由（「没有产生改动」「计划已过期」）直接显示，不在这里另编一句。
+            if (!session.Apply(confirmManual)) { StatusText.Text = session.LastSummary; return; }
+
+            // 会话是写在**副本**上的，所以要把它换回当前画布——否则接着保存下去的还是旧坐标。
+            currentCanvas = currentCanvas with { Canvas = session.State };
+            CanvasSurfaceControl.Refresh();
+            if (currentCanvasPath is not null) UpdateCanvasUi(currentCanvasPath);
+            RefreshOpenCenterView();
+            StatusText.Text = session.LastSummary;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            StatusText.Text = $"整理失败：{error.Message}";
+        }
+    }
+
     private void CanvasSurface_OnReferenceSelected(object? sender, CanvasReferenceActivation activation)
     {
         StatusText.Text = activation.Content?.Label ?? "引用失效";

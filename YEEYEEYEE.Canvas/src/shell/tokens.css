@@ -54,7 +54,7 @@
   --df-titlebar-height: 58px;
   --df-statusbar-height: 34px;
   --df-gap: 10px;
-  /* 中栏的最小宽度（工程债 #9）。不是随手取的数：桌面端 MainWindow 的 Window.MinWidth=1100，
+  /* 中栏的最小宽度（原工程债 #9，第 164 轮已修）。不是随手取的数：桌面端 MainWindow 的 Window.MinWidth=1100，
      减掉两边各 10 的边距再减掉 244 + 336 两条侧栏，正好是 500——**两端同一个数**。
      窄到装不下时不压缩这一栏，改成整块横向滚动。 */
   --df-center-min: 500px;
