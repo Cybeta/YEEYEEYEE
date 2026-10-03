@@ -75,13 +75,13 @@ public partial class CanvasSurface : UserControl
     /// <summary>
     /// 待审批改动的虚影（旧桌面端的行为）：新增的节点画成半透明虚线卡、要改的要删的加虚线框、
     /// 连线用虚线。**只画不写**——审批后虚影消失、真实节点接上；丢弃则虚影直接消失。
-    /// 虚影不参与命中测试（点不中、框选不到），所以它不会让用户以为数据已经改了。
+    /// 虚影不参与命中测试（点不中），所以它不会让用户以为数据已经改了。
     /// </summary>
     private CanvasPreview? pendingPreview;
 
     /// <summary>
     /// 引用展开的归属节点：点一个有引用的节点，就把它的引用临时铺到画布右边（再点一次收起）。
-    /// 这些卡片**不是画布节点**——不写文件、不落盘、不参与命中测试与框选，只是给眼睛看的；
+    /// 这些卡片**不是画布节点**——不写文件、不落盘、不参与命中测试，只是给眼睛看的；
     /// 想真改引用得走「引用画布」（双击带引用的节点）。
     /// </summary>
     private WorkflowNode? referenceExpansionOwner;
@@ -695,7 +695,7 @@ public partial class CanvasSurface : UserControl
 
     /// <summary>
     /// 把待审批的改动画成虚影（旧桌面端的做法）：新增节点是半透明虚线卡、要改/要删的加虚线框、
-    /// 连线用虚线。整层 IsHitTestVisible=false——虚影点不中、也不会被框选，
+    /// 连线用虚线。整层 IsHitTestVisible=false——虚影点不中，
     /// 免得用户以为改动已经落进画布了。
     ///
     /// 可见性跟真实节点走同一条规则：当前阶段筛掉的节点，它的「将修改/将删除」也不显示，
@@ -848,7 +848,7 @@ public partial class CanvasSurface : UserControl
 
     /// <summary>
     /// 点一个有引用的节点：把它引用了什么铺到**画布之上的一层**（再点一次收起）。
-    /// 只改「画什么」——卡片不是画布节点，不写画布、不进保存、不参与拖拽与框选。
+    /// 只改「画什么」——卡片不是画布节点，不写画布、不进保存、不参与拖拽。
     /// </summary>
     private void ToggleReferenceExpansion(WorkflowNode node)
     {
@@ -1908,7 +1908,7 @@ public partial class CanvasSurface : UserControl
     /// 为什么浮在上方、而不是画进节点卡片里：一次出 N 张的目的是「挑一张」，而挑的时候必须能同时看见原节点
     /// ——构图对不对，要跟这一镜的设定对着看。塞进卡片底部会把卡片撑高、把邻居挤开，挑图还得来回滚。
     ///
-    /// 它们**不是画布节点**：不进 JSON、不能被连线、也不参与框选；程序重开就没了（见 NodeImageBatch）。
+    /// 它们**不是画布节点**：不进 JSON、不能被连线；程序重开就没了（见 NodeImageBatch）。
     /// 但它们**必须可点**——这跟「将修改 / 将删除」那种纯提示的虚影不同：挑图、看图、删图都在它们身上做。
     /// </summary>
     private void AddBatchGhosts(IReadOnlyList<WorkflowNode> visibleNodes)

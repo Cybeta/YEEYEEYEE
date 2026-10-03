@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { errorMessage, request } from './api'
 import { mapAssets, recordReferences, resolveReference, type Asset } from './assets'
 import { ALL_CHAPTERS_ID } from './ChapterView'
 import { CANVAS_VERSION } from './Protocol/VersionedMessages'
@@ -7,8 +8,11 @@ import { canEdit, gateOf, parseAuthState, roleLabel, type AuthState } from './Se
 import { AgentPanel, type WebJob, type WebSkill } from './shell/AgentPanel'
 import { ChapterTree } from './shell/ChapterTree'
 import { InspectorPanel } from './shell/InspectorPanel'
+import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layoutPlan'
+import { describeLease, leaseCovering } from './shell/locks'
 import { RightDock } from './shell/RightDock'
 import { canvasBounds, chapterGroups, isEditableRecord, parseScene, recordContent, recordTitle, type ShellScene } from './shell/records'
+import { useLeases } from './shell/useLeases'
 import { Workspace } from './shell/Workspace'
 import {
   WorkbenchShell, type DockMode, type RailSection, type StatusFacts, type WorkbenchChrome, type WorkbenchView
@@ -34,29 +38,6 @@ export { mapAssets, recordReferences, resolveReference } from './assets'
 
 type Notice = { kind: 'success' | 'error' | 'info'; message: string }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '未知错误'
-}
-
-/**
- * 会话 cookie 由浏览器自动带上，所以这里**不再手动塞 Authorization 头**。
- * 凭据放在 HttpOnly cookie 里：脚本读不到它，也就不存在「前端把令牌存哪儿」这个问题。
- */
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...options,
-    credentials: 'same-origin',
-    headers: { ...(options?.body ? { 'Content-Type': 'application/json' } : {}) },
-    cache: 'no-store'
-  })
-  const data: unknown = await response.json().catch(() => null)
-  if (!response.ok) {
-    const failure = data && typeof data === 'object' ? data as { code?: unknown; message?: unknown } : {}
-    throw new Error(`${typeof failure.code === 'string' ? `[${failure.code}] ` : ''}${typeof failure.message === 'string' ? failure.message : `HTTP ${response.status}`}`)
-  }
-  return data as T
-}
-
 export function WebCanvasApp() {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [authFailure, setAuthFailure] = useState('')
@@ -81,7 +62,12 @@ export function WebCanvasApp() {
   const [dockMode, setDockMode] = useState<DockMode>('inspector')
   const [activeChapter, setActiveChapter] = useState<string>(ALL_CHAPTERS_ID)
   const [lastSaved, setLastSaved] = useState('')
+  const [layoutPlan, setLayoutPlan] = useState<LayoutPlan | null>(null)
+  const [layoutScope, setLayoutScope] = useState<LayoutScope>('all')
+  const [layoutBusy, setLayoutBusy] = useState(false)
   const generation = useRef(0)
+  // 编辑锁只能轮询：服务端还没有变更推送。锁坏了不影响画布，错误单独显示。
+  const { leases, error: leaseError, invalidCount: leaseInvalidCount, refresh: refreshLeases } = useLeases(!!auth?.user)
 
   const records = useMemo(() => scene?.records ?? [], [scene])
   const groups = useMemo(() => chapterGroups(records), [records])
@@ -90,6 +76,10 @@ export function WebCanvasApp() {
   const readOnly = scene?.readOnly === true
   const role = auth?.user?.role ?? 'Viewer'
   const editable = canEdit(role) && !readOnly
+  const myUserId = auth?.user?.id ?? ''
+  // 选中节点上的锁：别人持有的（含整棵树锁）会让写入与检查器都变成只读。
+  const selectedLease = selected ? leaseCovering(leases, selected.recordId) : null
+  const blockedBy = selectedLease && selectedLease.userId !== myUserId ? selectedLease : null
 
   /**
    * 选中 / 取消选中。传 null 是「在画布上点了空白处」——桌面端也是按空白先取消选中再进入平移。
@@ -117,6 +107,8 @@ export function WebCanvasApp() {
     setTaskNotice('正在加载技能与任务…')
     setSelectedId('')
     setActiveChapter(ALL_CHAPTERS_ID)
+    // 重新加载之后旧预览的基准修订已经不对了，留着它只会让人以为还能应用。
+    setLayoutPlan(null)
     const [sceneResult, assetResult] = await Promise.allSettled([
       request<unknown>('/api/web/scene'),
       request<unknown>('/api/web/assets')
@@ -213,6 +205,11 @@ export function WebCanvasApp() {
 
   async function save() {
     if (!selected || !scene || saving) return
+    // 别人正拿着这个节点的锁：服务端也会拒，但界面不该先给一个点了必然失败的按钮。
+    if (blockedBy) {
+      setNotice({ kind: 'error', message: `${describeLease(blockedBy)} 正在编辑这个节点，等他保存或让管理员接管。` })
+      return
+    }
     if (readOnly) {
       setNotice({ kind: 'error', message: '服务端把这张画布标成了只读，拒绝保存。' })
       return
@@ -239,11 +236,74 @@ export function WebCanvasApp() {
       setTitle(recordTitle(result.record))
       setContent(recordContent(result.record))
       setLastSaved(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+      // 保存会推进修订，旧预览的基准随之失效——同上，不能留着。
+      setLayoutPlan(null)
       setNotice({ kind: 'success', message: `已保存 ${id.slice(0, 8)}，画布修订 ${result.revision}。` })
     } catch (error) {
       setNotice({ kind: 'error', message: `保存失败：${errorMessage(error)}。修改仍在编辑框里；修订冲突时请重新加载画布。` })
     } finally {
       setSaving(false)
+    }
+  }
+
+  /**
+   * 整理布局的预览。**只算不写**：服务端按桌面端那份泳道引擎算，回泳道划分与逐节点改动，
+   * 网页端把「会搬到哪里」画成虚影。写入是另一次请求，因为写到一半的坐标比没写更糟。
+   */
+  async function planLayout(scope: LayoutScope) {
+    if (layoutBusy) return
+    setLayoutBusy(true)
+    setLayoutScope(scope)
+    try {
+      const plan = parseLayoutPlan(await request<unknown>('/api/web/layout/plan', {
+        method: 'POST', body: JSON.stringify({ scope, overrideManual: false })
+      }))
+      setLayoutPlan(plan)
+      // 虚影画在画布上，所以预览一出来就切到画布视图。
+      setView('canvas')
+      setNotice(plan.blocking
+        ? { kind: 'error', message: '布局被阻断，画布不会改动。' }
+        : { kind: 'info', message: plan.changed ? `整理预览：${plan.moves.length} 个节点会移动，确认后才写入。` : '位置已经符合泳道布局，无需改动。' })
+    } catch (error) {
+      setLayoutPlan(null)
+      setNotice({ kind: 'error', message: `整理预览失败：${errorMessage(error)}` })
+    } finally {
+      setLayoutBusy(false)
+    }
+  }
+
+  /** 应用整理。计划由服务端**重算**，这里只报「哪个范围」与「要不要连手动摆放的一起动」。 */
+  async function applyLayout(overrideManual: boolean) {
+    if (!layoutPlan || !scene || layoutBusy) return
+    setLayoutBusy(true)
+    try {
+      const result = await request<{ revision: number; moved: number; records: ShellScene['records'] }>('/api/web/layout/apply', {
+        method: 'POST',
+        body: JSON.stringify({ baseRevision: scene.revision, scope: layoutScope, overrideManual, client: 'web' })
+      })
+      if (!Number.isFinite(result?.revision) || !Array.isArray(result.records)) throw new Error('整理响应格式不正确')
+      setScene((current) => current
+        ? { ...current, revision: result.revision, records: current.records.map((item) => result.records.find((updated) => updated.recordId === item.recordId) ?? item) }
+        : current)
+      setLayoutPlan(null)
+      setLastSaved(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+      setNotice({
+        kind: 'success',
+        message: result.moved > 0
+          ? `已整理：移动了 ${result.moved} 个节点，画布修订 ${result.revision}。`
+          : '位置已经排好了，画布没有改动。'
+      })
+      // 写入会让服务端拿到整棵树锁（自己持有就是续期），所以顺手刷新一次锁列表。
+      void refreshLeases()
+    } catch (error) {
+      const message = errorMessage(error)
+      setNotice({ kind: 'error', message: `整理失败：${message}` })
+      // 修订冲突说明画布在这中间被改过：这份预览的基准已经失效，收掉它让用户重新加载。
+      if (message.includes('SCENE_REVISION_CONFLICT')) setLayoutPlan(null)
+      // 别人正拿着整棵树锁：刷新锁列表，把「谁在编辑」显示出来。
+      if (message.includes('EDIT_CONFLICT')) void refreshLeases()
+    } finally {
+      setLayoutBusy(false)
     }
   }
 
@@ -322,14 +382,21 @@ export function WebCanvasApp() {
     onOpenAgent: () => { setDockOpen(true); setDockMode('agent') },
     onSave: () => void save(),
     saveLabel: saving ? '保存中…' : '保存修订',
-    saveDisabled: !editable || !dirty || saving
+    saveDisabled: !editable || !dirty || saving || !!blockedBy
   }
 
   const inspectorHint = !selected
     ? '在画布上点一个节点后可以改它的名称与内容'
-    : readOnly ? '这张画布被服务端标成只读，改不了'
-      : !canEdit(role) ? '你的账号是只读，改不了画布'
-        : dirty ? '改完点「应用修改」或按 Ctrl+Enter 写回画布' : '没有未保存的修改'
+    : blockedBy ? `${describeLease(blockedBy)} 正在编辑这个节点，等他保存或让管理员接管`
+      : readOnly ? '这张画布被服务端标成只读，改不了'
+        : !canEdit(role) ? '你的账号是只读，改不了画布'
+          : dirty ? '改完点「应用修改」或按 Ctrl+Enter 写回画布' : '没有未保存的修改'
+
+  // 锁这一路自己的问题。它不该把画布变成不可用，但也不能悄悄吞掉——
+  // 否则界面上的「没有人编辑」会被读成「现在没人编辑」。
+  const leaseNotice = leaseError
+    ? `编辑锁暂时读不到：${leaseError}`
+    : leaseInvalidCount > 0 ? `有 ${leaseInvalidCount} 条锁记录格式不对，已跳过` : ''
 
   return (
     <WorkbenchShell
@@ -356,8 +423,18 @@ export function WebCanvasApp() {
           activeChapter={activeChapter}
           onChapter={setActiveChapter}
           readOnly={readOnly}
+          canEdit={canEdit(role)}
           assets={assets}
           assetsReady={assetsReady}
+          leases={leases}
+          myUserId={myUserId}
+          leaseNotice={leaseNotice}
+          layoutBusy={layoutBusy}
+          layoutPlan={layoutPlan}
+          layoutScope={layoutScope}
+          onLayoutPlan={(scope) => void planLayout(scope)}
+          onLayoutApply={(overrideManual) => void applyLayout(overrideManual)}
+          onLayoutCancel={() => setLayoutPlan(null)}
         />
       )}
       dock={dockOpen ? (
@@ -374,6 +451,7 @@ export function WebCanvasApp() {
                 readOnly={readOnly}
                 canEdit={canEdit(role)}
                 hint={inspectorHint}
+                blockedBy={blockedBy}
                 assets={assets}
                 assetsReady={assetsReady}
                 onTitle={setTitle}

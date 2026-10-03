@@ -1,5 +1,6 @@
 import { recordReferences, resolveReference, type Asset } from '../assets'
 import { chapterIdOf } from '../ChapterView'
+import { describeLease, type Lease } from './locks'
 import { chapterGroups, kindOf, NODE_KINDS, recordStatus, type ViewRecord } from './records'
 
 /**
@@ -22,6 +23,8 @@ export type InspectorProps = {
   readOnly: boolean
   canEdit: boolean
   hint: string
+  /** 别人正锁着这个节点（含整棵树锁）：能看不能改。 */
+  blockedBy?: Lease | null
   assets: Asset[]
   assetsReady: boolean
   onTitle: (value: string) => void
@@ -31,14 +34,17 @@ export type InspectorProps = {
 
 export function InspectorPanel(props: InspectorProps) {
   const { selected, records, title, content, dirty, saving, readOnly, canEdit, hint, assets, assetsReady, onTitle, onContent, onApply } = props
-  const editable = !!selected && canEdit && !readOnly
+  const blockedBy = props.blockedBy ?? null
+  const editable = !!selected && canEdit && !readOnly && !blockedBy
   const chapterLabel = selected ? chapterGroups(records).find((group) => group.id === chapterIdOf(selected) && group.id.length > 0)?.label : undefined
   const kindLabel = selected ? NODE_KINDS[kindOf(selected.recordType)].label : ''
-  const status = readOnly
-    ? { text: '只读', color: 'var(--df-warning)', title: '服务端判定这张画布只能读（高版本格式、校验有错或迁移有歧义）' }
-    : canEdit
-      ? { text: '可编辑', color: 'var(--df-success)', title: '可以改节点标题与内容' }
-      : { text: '无编辑权限', color: 'var(--df-error)', title: '当前角色没有 canvas.edit 权限' }
+  const status = blockedBy
+    ? { text: `${describeLease(blockedBy)} 正在编辑`, color: 'var(--df-warning)', title: '别人正拿着这个节点的锁，等他保存或让管理员接管' }
+    : readOnly
+      ? { text: '只读', color: 'var(--df-warning)', title: '服务端判定这张画布只能读（高版本格式、校验有错或迁移有歧义）' }
+      : canEdit
+        ? { text: '可编辑', color: 'var(--df-success)', title: '可以改节点标题与内容' }
+        : { text: '无编辑权限', color: 'var(--df-error)', title: '当前角色没有 canvas.edit 权限' }
 
   return (
     <div className="df-section" style={{ gap: 16 }}>
