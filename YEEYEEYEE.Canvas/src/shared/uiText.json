@@ -22,6 +22,8 @@
   "inspector.idleHint": "选中节点后可改；改完点「应用修改」或按 Ctrl+Enter 写回画布",
   "nodeMenu.edit": "编辑节点…",
   "nodeMenu.delete": "删除节点",
+  "dock.inspector": "节点详情",
+  "dock.agent": "Agent 协作",
   "lease.client.desktop": "桌面端",
   "lease.client.web": "网页端",
   "lease.who": "{name}（{client}）"

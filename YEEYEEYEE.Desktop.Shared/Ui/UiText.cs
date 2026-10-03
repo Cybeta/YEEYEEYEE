@@ -96,6 +96,14 @@ public static class UiText
     public static string NodeMenuDelete => Text("nodeMenu.delete");
 
     /// <summary>
+    /// 右侧栏那两个页签（第 179 轮网页端也做了同一组页签，两个词从那时起两端都有）。
+    /// 桌面端在 <c>MainWindow.axaml</c> 与 <c>AgentPanel.axaml</c> 里各有一处。
+    /// </summary>
+    public static string DockInspector => Text("dock.inspector");
+
+    public static string DockAgent => Text("dock.agent");
+
+    /// <summary>
     /// 编辑锁的来源端说法（wire 值只有 <c>web</c> / <c>desktop</c>）。**认不出的按「网页端」**——
     /// 这条规则过去在服务端 <c>EditClient.Label</c>、桌面端 <c>CollaborationSession.ClientLabel</c>
     /// 与网页端 <c>locks.ts</c> 各写了一遍，每处的注释都指着另一处。现在只有这一份。

@@ -12,6 +12,7 @@ import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layo
 import { describeLease, leaseCovering, shouldHoldNodeLease } from './shell/locks'
 import { buildNodeMenu, parseNodeAssist, type NodeAssistPlan, type NodeMenuItem } from './shell/nodeMenu'
 import { RightDock } from './shell/RightDock'
+import { SettingsPanel } from './shell/SettingsPanel'
 import {
   canvasBounds, chapterGroups, isEditableRecord, kindOf, NODE_KINDS, nodeX, nodeY, parseScene, recordContent,
   recordTitle, type ShellScene, type ViewRecord
@@ -918,8 +919,10 @@ export function WebCanvasApp() {
                 onAddReference={editable ? (entityId, variantId) => void addReference(entityId, variantId) : undefined}
               />
             )
-            : (
-              <AgentPanel
+            : dockMode === 'settings'
+              ? (<SettingsPanel />)
+              : (
+                <AgentPanel
                 skills={skills}
                 jobs={jobs}
                 prompt={prompt}

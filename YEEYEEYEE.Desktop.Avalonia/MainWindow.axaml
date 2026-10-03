@@ -143,7 +143,7 @@
                         Content="{x:Static shared:UiText.PanelProjectTree}" Click="ProjectTree_OnClick" />
                 <Button x:Name="StoryCanvasNavButton" Classes="navButton active" HorizontalContentAlignment="Left"
                         Content="{x:Static shared:UiText.PanelStoryCanvas}" Click="StoryCanvas_OnClick" />
-                <Button Classes="navButton" HorizontalContentAlignment="Left" Content="Agent 协作"
+                <Button Classes="navButton" HorizontalContentAlignment="Left" Content="{x:Static shared:UiText.DockAgent}"
                         Click="AgentCollab_OnClick" />
               </StackPanel>
 
@@ -306,7 +306,7 @@
                 </Grid>
 
                 <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="18" Margin="16,0" Height="38">
-                  <Button Classes="toolButton" Content="节点详情" Foreground="{StaticResource DfInk}"
+                  <Button Classes="toolButton" Content="{x:Static shared:UiText.DockInspector}" Foreground="{StaticResource DfInk}"
                           FontWeight="SemiBold" BorderBrush="{StaticResource DfPrimary}" BorderThickness="0,0,0,2"
                           CornerRadius="0" />
                   <Button Classes="toolButton" Content="Agent 协作 ›" ToolTip.Tip="切到 Agent 协作面板"

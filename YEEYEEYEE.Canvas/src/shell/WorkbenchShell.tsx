@@ -21,7 +21,7 @@ import { uiText } from './uiText'
  */
 
 export type WorkbenchView = 'canvas' | 'timeline' | 'script'
-export type DockMode = 'inspector' | 'agent'
+export type DockMode = 'inspector' | 'agent' | 'settings'
 export type RailSection = 'project' | 'story'
 export type SyncTone = 'ok' | 'busy' | 'error' | 'idle' | 'stale'
 

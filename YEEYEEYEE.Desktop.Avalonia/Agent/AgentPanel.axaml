@@ -1,5 +1,6 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:shared="clr-namespace:YEEYEEYEE.Desktop;assembly=YEEYEEYEE.Desktop.Shared"
              x:Class="YEEYEEYEE.Desktop.Avalonia.AgentPanel">
 
   <!-- Agent 协作面板：与节点检查器共用右侧栏，切换到 Agent 时显示。
@@ -13,7 +14,7 @@
         <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Height="50" Margin="16,1,10,0">
           <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
             <TextBlock Text="✦" Foreground="{StaticResource DfPrimary}" FontSize="13" VerticalAlignment="Center" />
-            <TextBlock Text="Agent 协作" Classes="heading" FontSize="13" VerticalAlignment="Center" />
+            <TextBlock Text="{x:Static shared:UiText.DockAgent}" Classes="heading" FontSize="13" VerticalAlignment="Center" />
           </StackPanel>
           <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
             <Button x:Name="UndoLastButton" Classes="toolButton" Content="↺" IsVisible="False"

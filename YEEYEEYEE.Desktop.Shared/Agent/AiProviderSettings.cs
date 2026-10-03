@@ -319,6 +319,12 @@ public static class AiProviderSettings
         }
     }
 
+    /// <summary>
+    /// 配置文件**路径**（不是内容）。给网页端那条只读的设置接口用：
+    /// 它必须**绕开 <see cref="Load"/>**——那个会去解密钥，而解密钥要 DPAPI，只在 Windows 上有。
+    /// </summary>
+    public static string FilePath => ConfigPath;
+
     /// <summary>旧配置里的明文密钥只尝试加密保存一次，避免配置目录不可写时每次读取都重复尝试落盘。</summary>
     private static bool migrationAttempted;
 

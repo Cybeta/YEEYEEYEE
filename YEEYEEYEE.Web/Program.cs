@@ -85,6 +85,7 @@ WebEventApi.Map(app);
 // 整画布写入（PUT /api/web/canvas）：桌面端把保存交给服务端，锁与修订都由服务端仲裁。
 WebCanvasApi.Map(app);
 WebSkillJobApi.Map(app);
+WebSettingsApi.Map(app);
 app.UseWebSockets();
 if (Directory.Exists(canvasDistPath))
     app.UseStaticFiles(new StaticFileOptions { FileProvider = new PhysicalFileProvider(canvasDistPath) });
