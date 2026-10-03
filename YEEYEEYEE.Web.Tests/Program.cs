@@ -1150,6 +1150,31 @@ try
             "删掉的节点不该还在场景里");
         Assert(stAfterDelete.GetProperty("records").EnumerateArray()
             .Count(row => row.GetProperty("recordType").GetString() != "chapter") == stNodes, "节点数要回到原样");
+
+        // 连线也要投影出来（桌面端画布上一直画着它们，网页端此前完全看不到）。
+        // 这段画布里本来一条连线都没有，所以直接往文件里写：**一条有效的 + 一条悬空的**，
+        // 再看服务端投影了什么——「悬空的不投影」只有这样才能验到。
+        var efJson = JsonNode.Parse(File.ReadAllText(layoutCanvas))!;
+        var efCanvas = efJson["Canvas"]!.AsObject();
+        var efNodes = efCanvas["Nodes"]!.AsArray();
+        var efFirst = efNodes[0]!["Id"]!.GetValue<string>();
+        var efSecond = efNodes[1]!["Id"]!.GetValue<string>();
+        var efArray = efCanvas["Edges"] as JsonArray;
+        if (efArray is null)
+        {
+            efArray = new JsonArray();
+            efCanvas["Edges"] = efArray;
+        }
+        efArray.Add(new JsonObject { ["SourceNodeId"] = efFirst, ["TargetNodeId"] = efSecond });
+        efArray.Add(new JsonObject { ["SourceNodeId"] = efFirst, ["TargetNodeId"] = Guid.NewGuid().ToString() });
+        File.WriteAllBytes(layoutCanvas, Encoding.UTF8.GetBytes(efJson.ToJsonString()));
+
+        var efScene = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+        var efEdges = efScene.GetProperty("edges").EnumerateArray().ToList();
+        Assert(efEdges.Count == 1, "有效的连线要投影、悬空的那条要跳过：" + efScene.GetProperty("edges").GetRawText());
+        Assert(efEdges[0].GetProperty("sourceId").GetString() == efFirst &&
+            efEdges[0].GetProperty("targetId").GetString() == efSecond, "两端要照原样投影");
+        Assert(Guid.TryParse(efEdges[0].GetProperty("edgeId").GetString(), out _), "连线要有稳定的 ID（将来断开它要用）");
     }
 
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。

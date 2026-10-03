@@ -129,6 +129,9 @@ internal sealed class ProjectCanvasSceneStore
         {
             revision,
             records = NodeProjection.ProjectRecords(state.Canvas.Nodes, state.Canvas),
+            // 连线也要投影：桌面端的画布上一直画着它们，网页端却完全看不到——那是白丢一层信息。
+            // 只投影两头都还在的那些：悬空连线画不出来，也不该被画出来。
+            edges = ProjectEdges(state.Canvas),
             readOnly = opened.UnsupportedFormat || opened.Validation.HasErrors || opened.Migration.Ambiguities.Count > 0,
             formatVersion = state.FormatVersion,
             projectName = ProjectContext.Open(root)?.Descriptor.Name ?? Path.GetFileName(root),
@@ -136,6 +139,24 @@ internal sealed class ProjectCanvasSceneStore
             migration = opened.Migration,
             validation = opened.Validation
         };
+    }
+
+    /// <summary>
+    /// 连线投影：<c>edgeId / sourceId / targetId</c>，与记录的 <c>recordId</c> 用同一套标识（都是节点 GUID）。
+    /// 两端任一不在画布上的连线直接跳过——画不出来，也不该让前端去猜它连到哪。
+    /// </summary>
+    private static List<object> ProjectEdges(WorkflowCanvasState canvas)
+    {
+        var known = canvas.Nodes.Select(node => node.Id).ToHashSet();
+        return canvas.Edges
+            .Where(edge => known.Contains(edge.SourceNodeId) && known.Contains(edge.TargetNodeId))
+            .Select(edge => (object)new
+            {
+                edgeId = edge.Id.ToString(),
+                sourceId = edge.SourceNodeId.ToString(),
+                targetId = edge.TargetNodeId.ToString()
+            })
+            .ToList();
     }
 
     public IResult Read()

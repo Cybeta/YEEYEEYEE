@@ -77,6 +77,7 @@ export function WebCanvasApp() {
   const { leases, error: leaseError, invalidCount: leaseInvalidCount, refresh: refreshLeases } = useLeases(!!auth?.user)
 
   const records = useMemo(() => scene?.records ?? [], [scene])
+  const edges = useMemo(() => scene?.edges ?? [], [scene])
   const groups = useMemo(() => chapterGroups(records), [records])
   const selected = useMemo(() => records.find((item) => item.recordId === selectedId) ?? null, [records, selectedId])
   const dirty = !!selected && (title !== recordTitle(selected) || content !== recordContent(selected))
@@ -415,9 +416,8 @@ export function WebCanvasApp() {
     syncTone: sync.tone,
     syncAction: remoteChange ? { label: '重新加载', onClick: () => void loadScene() } : undefined,
     nodes: `${nodeCount} 节点`,
-    // 连线没有被投影到网页端（NodeProjection 只投影节点），所以这里如实写出来，
-    // 而不是显示一个永远是 0 的漂亮数字。
-    edges: '连线未投影',
+    // 连线是服务端投影过来的真数（只投影两端都还在的那些），所以这里可以照实报数。
+    edges: `${edges.length} 连线`,
     canvasSize: `画布 ${bounds.width}×${bounds.height}`,
     version: scene?.formatVersion != null ? `格式 v${scene.formatVersion}` : '格式 —',
     saved: `最后保存 ${lastSaved || '—'}`
@@ -564,6 +564,7 @@ export function WebCanvasApp() {
           onLayoutPlan={(scope) => void planLayout(scope)}
           onLayoutApply={(overrideManual) => void applyLayout(overrideManual)}
           onLayoutCancel={() => setLayoutPlan(null)}
+          edges={edges}
         />
       )}
       dock={dockOpen ? (

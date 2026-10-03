@@ -824,6 +824,31 @@ textarea.df-input {
   box-shadow: var(--df-glow-shadow);
 }
 
+/* ==================== 画布上的连线 ==================== */
+
+/* 连线层与虚影层同一种做法：铺在世界画布上、只给眼睛看（不可点，也不参与平移判定）。
+   它画在卡片下面：线压过卡片会把标题压花。 */
+.df-edge-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.df-edge-layer line {
+  stroke: var(--df-primary);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  opacity: 0.5;
+}
+
+/* 箭头是与线一起画的，所以线的 opacity 也罩着它，这里只要给个填充色
+   （标记不继承所依附元素的描边色）。 */
+.df-edge-layer marker path {
+  fill: var(--df-primary);
+}
+
 /* ==================== 整理布局的虚影 ==================== */
 
 /* 虚影层只给眼睛看：点不中、不参与平移判定（桌面端的预览层同样是 IsHitTestVisible=false） */
