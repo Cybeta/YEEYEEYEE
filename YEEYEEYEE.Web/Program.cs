@@ -95,7 +95,27 @@ app.MapGet("/ws/canvas", async (HttpContext context) =>
     await transport.HandleWebSocketAsync(await context.WebSockets.AcceptWebSocketAsync(), context.RequestAborted);
     return Results.Empty;
 });
-// Legacy desktop bridge: retained for desktop compatibility but requires Bearer and loopback.
+// ==================== 旧的 HostBridge 兼容面（/api/canvas/* 与 /ws/canvas） ====================
+// 这一家子把 HostBridge 架在 HTTP 上：`/ws/canvas` 是那条 socket，下面这几个 POST 是往它上面推消息，
+// 身份由 WebAccessGuard 管（要 Bearer 且只能来自本机）。
+//
+// **本仓库里已经没有调用方**（第 178 轮查过：全仓搜 `api/canvas` 与 `ws/canvas`，命中的只有这一处定义、
+// 访问守卫、Web.Tests 里那几条 401 断言，以及文档里提到它的句子）：桌面端走的是 WebView2 的 postMessage
+// 直接驱动它自己那份画布前端（见 YEEYEEYEE.Canvas/src/main.tsx 里那条 chrome.webview 分支），
+// 网页端走 /api/web/*。
+//
+// 而且它**与现在的协议对不上**：这里的 revision 是 int，而画布修订早已是**内容哈希**（SHA-256 前 48 位）。
+// 就算还有谁在推，推过来的修订号也没法与画布对上。
+//
+// 那为什么不直接删：`retained for desktop compatibility` 是**外部兼容性**的判断——万一还有旧版本的
+// 桌面端或别的机器上的集成朝它推，删掉就是一次静默断链。所以这里把它**说清楚**，删不删留给拍板。
+// 真要清掉，删这几处（互不牵连，删完 dotnet build 会指出还漏了什么）：
+//   ① 这一段里 /api/canvas/scene、/api/canvas/nodes、/api/canvas/resource-replace(+ /next、/result) 五个映射；
+//   ② 本文件末尾的 ScenePushRequest / NodeUpdateRequest / CanvasResourceReplacePayload / CanvasResourceReplaceResult；
+//   ③ resourceReplaceRequests 队列，以及 transport / bridge 两个字段（先确认没有别的使用者）；
+//   ④ app.MapGet("/ws/canvas", …) 与它上面那句 app.UseWebSockets()；
+//   ⑤ WebAccessGuard 里的 /api/canvas 与 /ws/canvas 两条前缀；
+//   ⑥ YEEYEEYEE.Web.Tests 里那 5 条 401 断言，以及 README 里提到它的那两句。
 app.MapPost("/api/canvas/scene", async (HttpRequest request) =>
 {
     var body = await JsonSerializer.DeserializeAsync<ScenePushRequest>(request.Body);

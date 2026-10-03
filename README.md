@@ -89,7 +89,9 @@ npm.cmd --prefix YEEYEEYEE.Canvas run build
 dotnet run --project YEEYEEYEE.Web
 ```
 
-浏览器访问 `http://localhost:5000`。Web 端会读项目里的画布文件（`ProjectCanvasSceneStore`）并把场景广播给前端，也接受 `POST /api/canvas/scene` 推来的场景；但**桌面端目前没有向它推送的代码**，所以「桌面改一下、网页实时跟着变」这条路还不通（见[路线图](TODO.md)）。
+浏览器访问 `http://localhost:5000`。Web 端读项目里的画布文件（`ProjectCanvasSceneStore`）并把场景广播给前端；桌面端把「保存修订」交给 `PUT /api/web/canvas`，两端都订阅 `GET /api/web/events`（SSE），所以「桌面改一下、网页跟着变」这条路是通的——触发时机是**保存 / 改动停下**，不是逐帧（见[路线图](TODO.md)）。
+
+另有一组旧的 HostBridge 兼容面（`POST /api/canvas/scene` 等 5 个端点与 `/ws/canvas`）：**本仓库里已无调用方**，而且它用的还是 `int` 修订号，与现在的**内容哈希**修订对不上。留着是出于外部兼容性的考虑——为什么留、要清掉该删哪几处，都写在 `YEEYEEYEE.Web/Program.cs` 里那段注释里。
 
 ### 账号与权限
 
