@@ -115,6 +115,7 @@ var tests = new (string Name, Action Run)[]
     ("候选图批次：只留选中的那张、其余进回收站，没出好的不算在内", NodeImageBatchKeepsOnlyPicked),
     ("智能导入认得出 ComfyUI（且不把普通画图接口误认成它）", ProviderImportRecognizesComfyUi),
     ("只贴一个 ComfyUI 地址：分类器认不出，靠问一句地址 + 人来定兜底", ComfyUiBareAddressFallback),
+    ("解不开的密钥不许被任何一次保存清掉（改个别的东西也不行）", UnreadableKeySurvivesAnySave),
     ("生成链自检：四层缺口报数与花费预估、预勾只管挡路的那几件、缺失文件不算已出图", GenerationAuditReportsDependencyChain),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
@@ -9246,6 +9247,79 @@ static void ProviderChoiceFlagRoundTrips()
 	{
 		configEnvironment.Restore();
 	}
+}
+
+/// <summary>
+/// 解不开的密钥**不许被任何一次保存清掉**。
+///
+/// 这条是真出过的事故（用户报「agent 用不了了：401 Authentication Fails」）：
+/// 密钥解不开时 <c>Load</c> 会把内存里的值置空、只标一个「解不开」，而
+/// **任何一次「Load → 改点别的 → Save」**（设置页保存、记住上次用的池子 / 工作流、
+/// 切换 ComfyUI 当前那一台…）都会把这个空值当成「用户把密钥清掉了」写进文件，
+/// 密文就此**永久消失**——可它本来只是「这个账户解不开」，换回原账户还解得开。
+///
+/// 断言分两头：解不开时（①）不拿密文去当密钥发请求、（②）盘上那份密文必须原样留着。
+/// </summary>
+static void UnreadableKeySurvivesAnySave()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "df-unreadable-key-" + Guid.NewGuid().ToString("N")[..8]);
+    var previous = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG");
+    try
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "ai-config.json");
+        Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG", path);
+
+        // 一份「密文格式对、但本机解不开」的配置：合法 base64，内容却不是 DPAPI 的产物。
+        const string sealedKey = "dpapi:AQIDBAUGBwgJCgsMDQ4PEA==";
+        File.WriteAllText(path, $$"""
+        {
+          "Endpoint": "https://api.deepseek.com/v1",
+          "Model": "deepseek-flash",
+          "ApiKey": "{{sealedKey}}",
+          "Profiles": [
+            { "Id": "p1", "Endpoint": "https://api.deepseek.com/v1", "Model": "deepseek-flash",
+              "ApiKey": "{{sealedKey}}", "Enabled": true }
+          ],
+          "SelectedProfileId": "p1"
+        }
+        """, new UTF8Encoding(false));
+
+        var config = AiProviderSettings.Load();
+        Expect(config.ApiKeyUnreadable, "解不开的密钥要被标成「解不开」，不能静默当成「没配」");
+        Expect(config.ApiKey.Length == 0, "解不开时内存里必须是空的——绝不拿密文去当密钥发请求");
+
+        // 一次典型的「只改了个别的东西然后保存」：正是用户那次导入 ComfyUI 干的事。
+        config.ComfyUiBaseUrl = "https://comfy.example.com";
+        Expect(AiProviderSettings.Save(config), "保存该成功");
+
+        var onDisk = File.ReadAllText(path, Encoding.UTF8);
+        Expect(onDisk.Contains("comfy.example.com", StringComparison.Ordinal),
+            "该改的那一项要照常改（否则说明这次保存压根没发生，测试就没测到东西）");
+        Expect(onDisk.Contains(sealedKey, StringComparison.Ordinal),
+            "解不开的密文必须原样留着——清掉就永远没救了：" + onDisk[..Math.Min(400, onDisk.Length)]);
+        Expect(onDisk.Split(sealedKey).Length - 1 == 2,
+            "顶层与那一份 profile 的密文都要留着（两边各一次）");
+
+        // 用户**真的**重填一把：这时要正常写进去（保护只针对「解不开」，不挡住重填）。
+        var retyped = AiProviderSettings.Load();
+        retyped.ApiKey = "sk-重新填的密钥-1234";
+        Expect(AiProviderSettings.Save(retyped), "重填之后该能保存");
+        var afterRetype = File.ReadAllText(path, Encoding.UTF8);
+        Expect(!afterRetype.Contains(sealedKey, StringComparison.Ordinal),
+            "重填之后盘上不该还留着那把解不开的旧密文");
+        Expect(AiProviderSettings.Load().ApiKey == "sk-重新填的密钥-1234",
+            "重填的密钥要能读回来：" + AiProviderSettings.Load().ApiKey);
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG", previous);
+        try
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+        catch (IOException) { }
+    }
 }
 
 /// <summary>

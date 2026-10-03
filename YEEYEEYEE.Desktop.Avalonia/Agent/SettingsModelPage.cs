@@ -413,7 +413,12 @@ internal static class SettingsModelPage
             config.UseFullUrl = useFullUrl.IsChecked == true;
             config.ApiFormat = manual ? SelectedFormat() : values.Format;
             config.Model = typedModel;
-            config.ApiKey = apiKey.Text ?? string.Empty;
+            // 这一栏空着，**只在密钥解不开时**表示「不改」而不是「清掉」：
+            // 解不开时 ReloadForm 故意不回显那一刻的空值，照空写回去等于把盘上那份密文清掉，
+            // 而它只是**这个账户**解不开而已。密钥可读时留空仍然表示「清掉」，语义不变。
+            config.ApiKey = apiKey.Text is { Length: > 0 } typedKey
+                ? typedKey
+                : keyUnreadable ? config.ApiKey : string.Empty;
             // 「本地模拟」不是一家真的服务商：它不定义任何能力值，所以这两项保持原样——
             // 否则用户拿本地模拟比一下再切回自己的接口，会发现上下文窗口被悄悄清零了。
             if (!preset.IsLocal)

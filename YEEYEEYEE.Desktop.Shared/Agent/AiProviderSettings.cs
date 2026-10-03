@@ -625,10 +625,35 @@ public static class AiProviderSettings
             if (owner is not null) UpdateProfileFromConfig(config, owner);
             if (ResolveSelected(config) is { } effective) ApplyProfile(config, effective);
 
-            config.ApiKey = SecretProtector.Protect(plaintext);
+            // 解不开的密钥**不许被清掉**——这是这条链上唯一会造成永久损失的一步。
+            //
+            // 为什么非挡不可：Load() 解不开密文时会把内存里的密钥置空、只标一个 ApiKeyUnreadable，
+            // 而**任何一次「Load → 改点别的 → Save」**（设置页保存、记住上次用的池子 / 工作流、
+            // 切换 ComfyUI 当前那一台……）都会把这个空值当成「用户把密钥清掉了」写进文件。
+            // 于是密文永久消失——可它本来只是「**这个账户**解不开」（换回原账户、或换回原机器，
+            // 本来还解得开）。"读不出来"绝不该变成"没有了"。
+            //
+            // 判据要**两个条件同时成立**才算「该保留盘上那份」：解不开、**而且这次也没给新值**。
+            // 只看前者的话，用户重填一把新密钥会被这条守卫挡在门外——那等于把人锁死。
+            var keepTopLevelCipher = config.ApiKeyUnreadable && string.IsNullOrEmpty(plaintext);
+            var profilesToKeep = (config.Profiles ?? new List<AiProviderProfile>())
+                .Where(profile => profile.ApiKeyUnreadable && string.IsNullOrEmpty(profile.ApiKey))
+                .Select(profile => profile.Id)
+                .ToHashSet(StringComparer.Ordinal);
+            var onDisk = keepTopLevelCipher || profilesToKeep.Count > 0 ? ReadOnDiskSecrets() : null;
+
+            config.ApiKey = keepTopLevelCipher && onDisk?.ApiKey is { Length: > 0 } keptKey
+                ? keptKey
+                : SecretProtector.Protect(plaintext);
             config.ImageApiKey = ProtectOptional(imagePlaintext);
             config.VideoApiKey = ProtectOptional(videoPlaintext);
-            foreach (var profile in config.Profiles) profile.ApiKey = ProtectOptional(profile.ApiKey);
+            foreach (var profile in config.Profiles)
+            {
+                var kept = profilesToKeep.Contains(profile.Id)
+                    ? onDisk?.Profiles?.FirstOrDefault(item => item.Id == profile.Id)?.ApiKey
+                    : null;
+                profile.ApiKey = kept is { Length: > 0 } ? kept : ProtectOptional(profile.ApiKey);
+            }
 
             var directory = Path.GetDirectoryName(ConfigPath);
             if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
@@ -652,6 +677,24 @@ public static class AiProviderSettings
     /// <summary>空密钥不加密——空值加密后反而会变成一段"看起来配了密钥"的密文，界面会误报已配置。</summary>
     private static string ProtectOptional(string value) =>
         string.IsNullOrWhiteSpace(value) ? string.Empty : SecretProtector.Protect(value);
+
+    /// <summary>
+    /// 读盘上那份配置的密钥字段（**不解密**，只取原文）。
+    /// 专门给「解不开的密钥不许被清掉」用：把盘上那份原样留回去，而不是写一个空。
+    /// 读不到（文件不在、坏了、读不了）返回 null——那时也没什么可保护的。
+    /// </summary>
+    private static AiProviderConfig? ReadOnDiskSecrets()
+    {
+        try
+        {
+            if (!File.Exists(ConfigPath)) return null;
+            return JsonSerializer.Deserialize<AiProviderConfig>(File.ReadAllText(ConfigPath));
+        }
+        catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
 
     public static string ConfigFilePath => ConfigPath;
 
