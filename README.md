@@ -195,7 +195,7 @@ dotnet run --project YEEYEEYEE.Web
 
 ## 构建与验证
 
-2026-10-03 基线：解决方案构建 0 错误；Agent 203 项、Core 29 项、Migration `8/8`、G6V1、Canvas TS 66 项、Web HTTP 回归 + Web 认证回归 + Web 编辑锁回归 + Web 整理布局回归全部通过；容器镜像在 GitHub 的干净机器上构建通过。
+2026-10-03 基线：解决方案构建 0 错误；Agent 203 项、Core 29 项、Migration `8/8`、G6V1 `checks=40`、前端 TS 114 项（13 个文件）、Web 回归**九段**（HTTP / 认证 / 编辑锁 / 整理布局 / 变更推送 / 桌面客户端 / 桌面画布写入 / 桌面订阅 / 结构）全部通过；容器镜像在 GitHub 的干净机器上构建通过。
 
 提交与 PR 会触发 [CI](.github/workflows/build.yml)，三个互相独立的 job——哪个红了就能直接看出是哪一层出的问题：
 
