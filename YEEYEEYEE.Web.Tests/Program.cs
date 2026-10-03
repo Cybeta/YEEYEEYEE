@@ -891,6 +891,42 @@ try
     // 订阅是一条长连接，收工就断开，别把它拖进下一次重启。
     eventResponse.Dispose();
 
+    // ---------- 桌面端接入：用桌面那份会话客户端登录同一台服务器 ----------
+    // 这一段验的是「桌面端到底能不能接进来」：账号登录、看谁在编辑、会话失效要说清楚。
+    // 对象就是 Desktop.Shared 里那份 CollaborationSession——桌面端界面将来用的就是它，
+    // 所以这里通了，桌面端那一路就通了，剩下的只是把结果显示到界面上。
+    //
+    // 为什么不走桌面桥的 Bearer 令牌：编辑锁的意义是「显示谁在编辑」，那个令牌不带用户身份，
+    // 服务端在锁接口上按设计拒绝它（EDIT_LEASE_REQUIRES_SESSION）。所以桌面端必须有账号。
+    using (var desktop = new YEEYEEYEE.Desktop.CollaborationSession($"http://127.0.0.1:{port}"))
+    {
+        Assert(!desktop.IsSignedIn, "一开始不该是已登录状态");
+
+        // 密码错：登不进去，而且**不能留下半个身份**。
+        var denied = await desktop.SignInAsync("chenmo", "wrong-password");
+        Assert(!denied.Ok && !string.IsNullOrWhiteSpace(denied.Message), "登录失败要带一句能给人看的话");
+        Assert(!desktop.IsSignedIn && desktop.User is null, "登录失败了就不该有身份");
+
+        var signedIn = await desktop.SignInAsync("chenmo", "longenough");
+        Assert(signedIn.Ok && desktop.User?.DisplayName == "陈默", "登录要回身份：" + signedIn.Message);
+        Assert(desktop.User?.RoleLabel == "编辑", "角色标签也要从服务端来");
+
+        // 网页端的林晚占一个节点锁：桌面端应当看见它——这就是「谁在编辑」的来源。
+        var webLease = (await Check(arranger, HttpMethod.Post, "/api/web/edits", 200,
+            "{\"scope\":\"node\",\"targetId\":\"" + editableId + "\",\"client\":\"web\"}"))
+            .GetProperty("lease").GetProperty("leaseId").GetGuid();
+        var listed = await desktop.RefreshLeasesAsync();
+        Assert(listed.Ok && desktop.Leases.Count == 1, "桌面端应当看见那一条编辑锁：" + listed.Message);
+        Assert(desktop.Leases[0].DisplayName == "林晚" && desktop.Leases[0].Client == "web",
+            "锁要带清持有者与来源端");
+        Assert(desktop.Leases[0].TargetId == Guid.Parse(editableId), "节点锁要带目标节点");
+        await Check(arranger, HttpMethod.Delete, $"/api/web/edits/{webLease}", 200);
+
+        // 退出之后本地身份与 cookie 都要清掉：不能拿着旧身份接着用。
+        Assert((await desktop.SignOutAsync()).Ok && !desktop.IsSignedIn, "退出要清掉身份");
+        Assert(!(await desktop.RefreshLeasesAsync()).Ok, "没登录就不该能看谁在编辑");
+    }
+
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
     Stop();
     await Start(standalone: true, userDatabase: layoutDatabase);
@@ -905,5 +941,6 @@ try
     Console.WriteLine("Edit-lease regression passed: node/tree granularity, idempotent acquire, holder identity, heartbeat renew, expiry vs missing, admin force takeover, corrupt-file self-healing, restart persistence, canvas bytes untouched");
     Console.WriteLine("Layout regression passed: shared swimlane engine on the server, chapter scope, stale revision, tree-lease arbitration, preview equals what lands on disk, idempotent no-op, standalone refusal");
     Console.WriteLine("Change-push regression passed: SSE subscribe gating, canvas.changed carrying recordId/actor/the same revision the API reports, silence on failure and on no-op layout, edits.changed on acquire/release but not on renew, tree lease returned after apply");
+    Console.WriteLine("Desktop-client regression passed: account sign-in refuses a wrong password without leaving an identity behind, reads the shared lease list with holder and source client, sign-out clears the session");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }
