@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -81,6 +83,88 @@ public sealed class SitePool
 }
 
 /// <summary>
+/// ComfyUI 站点下的一个**工作流**：服务器 <c>userdata/workflows/</c> 里的一份文件，已转成 API 格式。
+///
+/// 为什么它不是 <see cref="SitePool"/>：池子是「一个模型乘一个档位」，参数是宽度、时长、单价，
+/// 拼出来是一次 HTTP 调用；工作流是一整张**节点图**，参数藏在各个节点里，没有「档位」这回事。
+/// 硬塞进池子会让 Price / 宽高 / 时长这些字段恒为空，checkpoint 也没地方放。
+///
+/// 为什么这里**只存元信息、不存 API JSON 正文**：这台服务器的 <c>object_info</c> 是 21.8 MB，
+/// 而工作流有 315 份、正文合计好几 MB（实测 4 份样本 4.4K～30.7K）。把这些塞进站点文件，
+/// 会让每次打开选择器都要读一个十几 MB 的 JSON。正文因此按份落在
+/// <c>skills/sites/&lt;站点id&gt;/</c> 下（见 <see cref="SiteCatalog.PayloadDirectory"/>），
+/// 只有真正要提交时才读那**一份**。
+/// </summary>
+public sealed class SiteWorkflow
+{
+    /// <summary>站点内唯一：服务器上 <c>workflows/</c> 下的相对路径（含子目录），如 <c>T-图像-Krea/T01-….json</c>。</summary>
+    public string Key { get; set; } = string.Empty;
+
+    /// <summary>给人看的名字：去掉扩展名的文件名。</summary>
+    public string Title { get; set; } = string.Empty;
+
+    /// <summary>顶层文件夹名（服务器自己按模态分的那一层，如 <c>G视频-Wan图生</c>）；根目录下为空。</summary>
+    public string Folder { get; set; } = string.Empty;
+
+    /// <summary>image / video / audio / other。判据见 <see cref="KindReason"/>，不猜。</summary>
+    public string Kind { get; set; } = "other";
+
+    /// <summary>凭什么是这个种类（取自文件夹名还是节点类型），如实写出来给用户核对。</summary>
+    public string KindReason { get; set; } = string.Empty;
+
+    /// <summary>转成 API 格式后还剩几个节点。</summary>
+    public int NodeCount { get; set; }
+
+    /// <summary>转换时被跳过的节点说明（静音 / 绕过 / 非后端节点 / 匿名控件）；没有跳过时为空。</summary>
+    public string Note { get; set; } = string.Empty;
+
+    /// <summary>这份没转成的原因；空表示转成了。</summary>
+    public string Error { get; set; } = string.Empty;
+
+    /// <summary>这一份是不是该种类下的推荐项（推荐规则见 <see cref="ComfyUiLibrary.PickRecommended"/>）。</summary>
+    public bool Recommended { get; set; }
+
+    /// <summary>清单里被标成不用的工作流：留着看得见，但不进选择器的候选。</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>API 正文落在哪个文件（相对 <see cref="SiteCatalog.PayloadDirectory"/> 的文件名）。</summary>
+    public string PayloadFile { get; set; } = string.Empty;
+
+    public DateTimeOffset ConvertedAt { get; set; } = DateTimeOffset.Now;
+
+    [JsonIgnore]
+    public bool IsVideo => string.Equals(Kind, "video", StringComparison.OrdinalIgnoreCase);
+
+    [JsonIgnore]
+    public bool IsImage => string.Equals(Kind, "image", StringComparison.OrdinalIgnoreCase);
+
+    [JsonIgnore]
+    public bool Converted => Error.Length == 0;
+
+    /// <summary>选择器里那一行。</summary>
+    [JsonIgnore]
+    public string Label => Folder.Length == 0 ? Title : $"{Folder} / {Title}";
+
+    /// <summary>一行补充说明：节点数、种类判据、跳过与失败。</summary>
+    public string Describe()
+    {
+        var parts = new List<string> { $"节点 {NodeCount} 个" };
+        if (Error.Length > 0) parts.Add("**没转成**：" + Error);
+        if (Note.Length > 0) parts.Add(Note);
+        if (KindReason.Length > 0) parts.Add($"判为{KindName}：{KindReason}");
+        return string.Join(" · ", parts);
+    }
+
+    private string KindName => Kind switch
+    {
+        "video" => "视频",
+        "image" => "图像",
+        "audio" => "声音",
+        _ => "未知"
+    };
+}
+
+/// <summary>
 /// 一个已登记的站点：基础地址、各类接口路径、以及它下面全部可用池子。
 ///
 /// 一个站点一个文件（<c>skills/sites/&lt;id&gt;.json</c>），而不是每个池子一个文件——
@@ -151,10 +235,49 @@ public sealed class SiteProfile
 
     public List<SitePool> Pools { get; set; } = new();
 
+    /// <summary>
+    /// 这个站点是**哪一种来源**：<c>api</c>（一家有接口的聚合站）还是 <c>comfyui</c>（一台 ComfyUI 服务器）。
+    ///
+    /// 为什么要分：两者的「子项」是两种完全不同的东西——接口站下面是一个个「模型 × 档位」的池子，
+    /// ComfyUI 下面是一份份**工作流**。合成一种会让选择器里混进语义不同的条目，
+    /// 也会让「这一家有哪些能用的」这个问题有两种答案。
+    ///
+    /// 默认 <c>api</c>：这个字段是后加的，老站点文件里没有它，读出来应当仍按接口站解释。
+    /// </summary>
+    public string Backend { get; set; } = "api";
+
+    /// <summary>
+    /// ComfyUI 的 checkpoint 文件名（只有 <see cref="Backend"/> 为 comfyui 时有意义）。
+    /// 存在站点上而不是只存在设置里：**一家站一个 checkpoint**，多台 ComfyUI 各自加载的底模通常不同，
+    /// 只有一个全局值时，切换站点会把另一台的 checkpoint 覆盖掉。
+    /// </summary>
+    public string Checkpoint { get; set; } = string.Empty;
+
+    /// <summary>ComfyUI 站点下的工作流清单（只有 <see cref="Backend"/> 为 comfyui 时有意义）。</summary>
+    public List<SiteWorkflow> Workflows { get; set; } = new();
+
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.Now;
 
     /// <summary>这个站点用哪把密钥：出图 / 出视频各自的字段（留空则沿用当前选中模型的密钥）。</summary>
     public string Kind => HasVideoPools && ImagePools.Count == 0 ? "video" : "image";
+
+    [JsonIgnore]
+    public bool IsComfyUi => string.Equals(Backend, "comfyui", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>选择器里的工作流候选：转成了、且没被标成不用的那些。</summary>
+    [JsonIgnore]
+    public IReadOnlyList<SiteWorkflow> UsableWorkflows =>
+        Workflows.Where(workflow => workflow.Enabled && workflow.Converted).ToList();
+
+    [JsonIgnore]
+    public IReadOnlyList<SiteWorkflow> ImageWorkflows => UsableWorkflows.Where(workflow => workflow.IsImage).ToList();
+
+    [JsonIgnore]
+    public IReadOnlyList<SiteWorkflow> VideoWorkflows => UsableWorkflows.Where(workflow => workflow.IsVideo).ToList();
+
+    /// <summary>该种类下被推荐的那一份；没有推荐项时返回 null（不退回第一项——那会假装有推荐）。</summary>
+    public SiteWorkflow? Recommended(bool video) =>
+        (video ? VideoWorkflows : ImageWorkflows).FirstOrDefault(workflow => workflow.Recommended);
 
     [JsonIgnore]
     public IReadOnlyList<SitePool> ImagePools => Pools.Where(pool => !pool.IsVideo).ToList();
@@ -175,20 +298,34 @@ public sealed class SiteProfile
     /// <summary>第一段说明：这家有多少池子、清单从哪来。</summary>
     public string Describe()
     {
+        // ComfyUI 站点没有池子，它的子项是工作流——报「生图 0 个、视频 0 个」会让人以为这家是空的。
+        if (IsComfyUi)
+        {
+            var text = $"工作流：图像 {ImageWorkflows.Count} 份、视频 {VideoWorkflows.Count} 份";
+            if (Workflows.Count > UsableWorkflows.Count)
+                text += $"（另有 {Workflows.Count - UsableWorkflows.Count} 份没转成或已停用）";
+            if (BaseUrl.Length > 0) text += $"｜{BaseUrl}";
+            if (Checkpoint.Length > 0) text += $"｜checkpoint {Checkpoint}";
+            return text;
+        }
+
         var parts = new List<string>
         {
             $"生图 {ImagePools.Count} 个",
             $"视频 {VideoPools.Count} 个"
         };
-        var text = $"池子：{string.Join("、", parts)}";
-        if (BaseUrl.Length > 0) text += $"｜{BaseUrl}";
-        text += ListSource.Length > 0 ? $"｜清单来自 {ListSource}" : "｜清单来自文档的可用模型表";
-        return text;
+        var pools = $"池子：{string.Join("、", parts)}";
+        if (BaseUrl.Length > 0) pools += $"｜{BaseUrl}";
+        pools += ListSource.Length > 0 ? $"｜清单来自 {ListSource}" : "｜清单来自文档的可用模型表";
+        return pools;
     }
 }
 
 /// <summary>用户选定的一个池子：哪一家站、哪一个池子。跑一次出图要的「用谁、用哪档、用哪把密钥」都在这两个里。</summary>
 public sealed record SitePoolChoice(SiteProfile Site, SitePool Pool);
+
+/// <summary>用户选定的一个工作流：哪一台 ComfyUI、哪一份工作流。</summary>
+public sealed record SiteWorkflowChoice(SiteProfile Site, SiteWorkflow Workflow);
 
 /// <summary>
 /// 站点文件（<c>skills/sites/&lt;id&gt;.json</c>）的读写。
@@ -265,6 +402,98 @@ public static class SiteCatalog
         return slug.Length == 0 ? "site" : slug;
     }
 
+    /// <summary>
+    /// 工作流 API 正文的存放目录：<c>sites/&lt;站点id&gt;/</c>。
+    ///
+    /// 与站点文件（<c>sites/&lt;id&gt;.json</c>）分开：正文合计好几 MB，塞进站点文件会让
+    /// 每次打开选择器都要解析一个巨大的 JSON；分成一份一个文件之后，只有真正要提交时才读那一份。
+    /// 目录名用站点 id，与站点文件同名不同「型」，一眼能看出谁属于谁。
+    /// </summary>
+    public static string PayloadDirectory(string siteId) => Path.Combine(Directory, siteId);
+
+    /// <summary>
+    /// 正文文件名：可读的标题片段 + 键的短哈希。
+    /// 中文名与斜杠都不能直接当文件名（工作流的相对路径里带子目录，如 <c>T-图像-Krea/T01-….json</c>），
+    /// 短哈希则保证「不同键绝不同名」——只用清洗过的标题会让两份中文名相同的工作流互相覆盖。
+    /// </summary>
+    public static string PayloadFileName(string key)
+    {
+        var title = Path.GetFileNameWithoutExtension(key);
+        var ascii = new string(title.Where(ch => char.IsLetterOrDigit(ch)).ToArray());
+        if (ascii.Length > 40) ascii = ascii[..40];
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..8].ToLowerInvariant();
+        return ascii.Length == 0 ? $"{hash}.json" : $"{ascii}.{hash}.json";
+    }
+
+    /// <summary>写一份工作流正文。原文照写，不再包一层——它就是 <c>/prompt</c> 要的东西。</summary>
+    public static bool SavePayload(string siteId, string fileName, string apiJson, out string error)
+    {
+        error = string.Empty;
+        if (string.IsNullOrWhiteSpace(siteId) || string.IsNullOrWhiteSpace(fileName))
+        {
+            error = "工作流正文缺少站点或文件名。";
+            return false;
+        }
+
+        try
+        {
+            var directory = PayloadDirectory(siteId);
+            System.IO.Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, fileName), apiJson);
+            return true;
+        }
+        catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            error = failure.Message;
+            return false;
+        }
+    }
+
+    /// <summary>读一份工作流正文；读不到返回 null（由调用方如实报出，不拿默认值顶替一张节点图）。</summary>
+    public static string? LoadPayload(string siteId, string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(siteId) || string.IsNullOrWhiteSpace(fileName)) return null;
+        try
+        {
+            var path = Path.Combine(PayloadDirectory(siteId), fileName);
+            return File.Exists(path) ? File.ReadAllText(path) : null;
+        }
+        catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 清掉站点目录下**已不被任何工作流引用**的正文文件。
+    ///
+    /// 什么时候会有多余文件：重新导入时工作流被删掉或被改了名（服务器上删了一份工作流），
+    /// 那些正文就成了孤儿。不清的话，目录会随着每次导入越滚越大，而且里面留着的是**旧图**——
+    /// 名字还在、内容已经不是那一份了，比干脆没有更危险。
+    /// </summary>
+    public static int PrunePayloads(SiteProfile site)
+    {
+        ArgumentNullException.ThrowIfNull(site);
+        var directory = PayloadDirectory(site.Id);
+        if (!System.IO.Directory.Exists(directory)) return 0;
+
+        var keep = new HashSet<string>(
+            site.Workflows.Select(workflow => workflow.PayloadFile).Where(name => name.Length > 0),
+            StringComparer.OrdinalIgnoreCase);
+        var removed = 0;
+        foreach (var path in System.IO.Directory.EnumerateFiles(directory, "*.json"))
+        {
+            if (keep.Contains(Path.GetFileName(path))) continue;
+            try
+            {
+                File.Delete(path);
+                removed++;
+            }
+            catch (Exception failure) when (failure is IOException or UnauthorizedAccessException) { }
+        }
+        return removed;
+    }
+
     /// <summary>读取全部站点；单个文件出错只记录它，不影响其它站点。</summary>
     public static (List<SiteProfile> Sites, List<string> Errors) Load()
     {
@@ -283,6 +512,11 @@ public static class SiteCatalog
                     continue;
                 }
                 site.Pools ??= new List<SitePool>();
+                site.Workflows ??= new List<SiteWorkflow>();
+                // 后加字段的归一化：老文件里没有 backend，反序列化后可能留成空串（有人手工把字段写成
+                // null 也会），这里一律按「接口站」解释——早先只有这一种站点。
+                if (string.IsNullOrWhiteSpace(site.Backend)) site.Backend = "api";
+                site.Checkpoint ??= string.Empty;
                 UnprotectKey(site);
                 sites.Add(site);
             }
@@ -336,7 +570,7 @@ public static class SiteCatalog
         site.ApiKey = decrypted;
     }
 
-    /// <summary>删掉一个站点文件。</summary>
+    /// <summary>删掉一个站点文件（连同它的工作流正文目录）。</summary>
     public static bool TryDelete(SiteProfile site, out string error)
     {
         error = string.Empty;
@@ -346,6 +580,10 @@ public static class SiteCatalog
             var path = Path.Combine(Directory, $"{site.Id}.json");
             if (!File.Exists(path)) { error = "找不到这个站点的文件（可能已被移动或删除）。"; return false; }
             File.Delete(path);
+
+            // 正文目录跟着站点一起走：留下它的话，同名站点下次导入会捡到上一次的旧工作流正文。
+            var payloads = PayloadDirectory(site.Id);
+            if (System.IO.Directory.Exists(payloads)) System.IO.Directory.Delete(payloads, recursive: true);
             return true;
         }
         catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or ArgumentException)

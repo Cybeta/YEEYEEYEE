@@ -234,6 +234,11 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 转换：四份真机样本逐字对拍（网页格式 → API 格式）", ComfyUiConversionMatchesRealExports),
     ("ComfyUI 转换：被绕过/静音与纯界面节点如实跳过并报出来", ComfyUiConversionReportsSkippedNodes),
     ("ComfyUI 转换：控件按位置对齐（含「生成后固定」占位）且指向被跳过节点的连线整条删掉", ComfyUiConversionAlignsWidgetsAndPrunesDangling),
+    ("ComfyUI 拉取：清单→正文→转换整条打通，按文件夹分种类、每类每家族各推一份", ComfyUiLibraryFetchesAndClassifies),
+    ("ComfyUI 拉取：正文地址整条转义（含 / 变 %2F），老版服务器没有 /api 前缀也要能读", ComfyUiLibraryEndpointShapes),
+    ("ComfyUI 拉取：单份读不到或转不了只让那一份失败，其余照常，原因逐份记着", ComfyUiLibraryIsolatesFailures),
+    ("ComfyUI 落盘：正文按份落文件、站点文件里不带正文，重新导入保住用户停用与推荐", ComfyUiLibraryInstallKeepsUserChoices),
+    ("ComfyUI 落盘：孤儿正文被清掉，删站点连正文目录一起删", ComfyUiLibraryPrunesAndDeletesPayloads),
 };
 
 var failures = new List<string>();
@@ -1355,6 +1360,320 @@ static void ComfyUiConversionAlignsWidgetsAndPrunesDangling()
     Expect(fourth["seed"]!.GetValue<long>() == 1, "删线不该影响同一节点上的控件值");
     Expect(result.SkippedSummary.Contains("绕过") && result.SkippedSummary.Contains("不是后端节点"),
         "两种跳过原因都要如实报出来：" + result.SkippedSummary);
+}
+
+// ── ComfyUI 拉取与落盘：清单 → 正文 → 转换 → 站点文件 ────────────────────────
+//
+// 这一段取代的是「人在浏览器里一份一份右键导出」：清单与正文都是普通 GET，转换用官方那套规则
+// （已按真机样本逐字对拍，见上面那组）。这里钉的是**接线**本身——地址怎么拼、种类怎么判、
+// 某一份坏了会不会连坐、正文落在哪、重新导入会不会把用户的取舍冲掉。
+
+/// <summary>把样本里的节点定义子集拿出来当假服务器的 <c>object_info</c>（真机那份 21.8 MB）。</summary>
+static string ComfyUiObjectInfoFixture()
+{
+    var path = Path.Combine(ComfyUiFixtureDir(), "objectInfo.subset.json");
+    var subset = JsonNode.Parse(File.ReadAllText(path, Encoding.UTF8));
+    return subset!["defs"]!.ToJsonString();
+}
+
+static string ComfyUiUiFixture(string tag) =>
+    File.ReadAllText(Path.Combine(ComfyUiFixtureDir(), tag + ".ui.json"), Encoding.UTF8);
+
+/// <summary>本机技能目录换成临时目录（站点文件与工作流正文都写在它下面）。</summary>
+static void WithSiteDirectory(string directory, Action body)
+{
+    var previous = Environment.GetEnvironmentVariable("YEEYEEYEE_SKILL_DIR");
+    try
+    {
+        Environment.SetEnvironmentVariable("YEEYEEYEE_SKILL_DIR", directory);
+        Directory.CreateDirectory(directory);
+        body();
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("YEEYEEYEE_SKILL_DIR", previous);
+        try
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+        catch (IOException) { }
+    }
+}
+
+static string NewTempDirectory(string tag)
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"df-{tag}-{Guid.NewGuid().ToString("N")[..8]}");
+    Directory.CreateDirectory(directory);
+    return directory;
+}
+
+static void ComfyUiLibraryFetchesAndClassifies()
+{
+    var server = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
+    // 同一家族放两份（11 节点 vs 16 节点），用来验「推荐挑节点最少的那一份」。
+    server.Add("A图像-Qwen生成/简单文生图.json", ComfyUiUiFixture("T01"));
+    server.Add("A图像-Qwen生成/复杂三视图.json", ComfyUiUiFixture("T04"));
+    // 文件夹名带「视频」——服务器自己已经标好了模态，优先用它的判据。
+    server.Add("G视频-Wan图生/图生视频.json", ComfyUiUiFixture("G01"));
+    // 文件夹名看不出用途 → 退回节点类型（T01 只有保存图像的节点）。
+    server.Add("Y通用制作/没写用途的工作流.json", ComfyUiUiFixture("T01"));
+    // 工具目录也要能收下，只是不归到图像 / 视频。
+    server.Add("Z工具设置/一些设置.json", ComfyUiUiFixture("T03"));
+
+    var progress = new SyncProgress<ComfyUiLibraryProgress>();
+    using var http = new HttpClient(server.Handler());
+    var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, progress, CancellationToken.None)
+        .GetAwaiter().GetResult();
+
+    Expect(result.Workflows.Count == 5, "应拉回 5 份工作流，实际 " + result.Workflows.Count);
+    Expect(result.Converted == 5, "5 份都该转成，实际 " + result.Converted + " 份；"
+        + string.Join("；", result.Workflows.Where(w => !w.Converted).Select(w => w.Key + "=" + w.Error)));
+
+    SiteWorkflow Of(string key) => result.Workflows.Single(workflow => workflow.Key == key);
+
+    var simple = Of("A图像-Qwen生成/简单文生图.json");
+    Expect(simple.Kind == "image", "「A图像-…」应判为图像，实际 " + simple.Kind);
+    Expect(simple.KindReason.Contains("文件夹名含「图像」"), "判据要写明取自文件夹名：" + simple.KindReason);
+    Expect(simple.Folder == "A图像-Qwen生成" && simple.Title == "简单文生图", "标题与文件夹要拆开：" + simple.Label);
+    Expect(simple.NodeCount == 11, "T01 转出来应是 11 个节点，实际 " + simple.NodeCount);
+
+    var video = Of("G视频-Wan图生/图生视频.json");
+    Expect(video.Kind == "video", "「G视频-…」应判为视频，实际 " + video.Kind);
+    Expect(video.KindReason.Contains("文件夹名含「视频」"), "判据要写明取自文件夹名：" + video.KindReason);
+
+    var generic = Of("Y通用制作/没写用途的工作流.json");
+    Expect(generic.Kind == "image", "文件夹看不出用途时应退回节点类型判为图像，实际 " + generic.Kind);
+    Expect(generic.KindReason.Contains("保存图像"), "退回节点类型时要说清是看了节点：" + generic.KindReason);
+
+    var tools = Of("Z工具设置/一些设置.json");
+    Expect(tools.Kind == "other", "工具目录不该被算成出图或出视频，实际 " + tools.Kind);
+
+    // 推荐：每个「种类 + 家族」各一份，组内挑节点最少的。
+    Expect(simple.Recommended, "同家族里 11 节点的应胜过 16 节点的");
+    Expect(!Of("A图像-Qwen生成/复杂三视图.json").Recommended, "同家族只能有一个推荐");
+    Expect(video.Recommended && generic.Recommended && tools.Recommended, "每个家族各推一份");
+    var groups = result.Workflows.Where(w => w.Recommended).Select(w => (w.Kind, w.Folder)).ToList();
+    Expect(groups.Count == groups.Distinct().Count(), "同一组里不得出现两个推荐：" + string.Join("；", groups));
+
+    // 正文都在内存里备好了（几 MB 的东西不该塞进后面的站点文件）。
+    Expect(result.Payloads.Count == 5, "5 份都该有正文，实际 " + result.Payloads.Count);
+    Expect(result.Payloads[simple.Key].Contains("\"class_type\""), "正文应当是 API 格式");
+    Expect(!result.Payloads[simple.Key].Contains("\"widgets_values\""),
+        "正文里不该留网页格式的 widgets_values（那是没转干净的迹象）");
+
+    // 进度：先报一次「正在拉节点定义」（那一步是二十多 MB，最慢也最该让用户看见），再逐份报。
+    var seen = progress.Seen;
+    Expect(seen.Count == 6, "应先报一次节点定义、再逐份报，共 6 次，实际 " + seen.Count);
+    Expect(seen[0].Done == 0 && seen[0].Current.Contains("object_info"),
+        "第一次应报「正在拉节点定义」，实际 " + seen[0].Done + "/" + seen[0].Total + " " + seen[0].Current);
+    Expect(seen[^1].Done == 5 && seen[^1].Total == 5, "最后一次进度应是 5/5，实际 "
+        + seen[^1].Done + "/" + seen[^1].Total);
+    Expect(seen.Skip(1).Select(item => item.Done).SequenceEqual(new[] { 1, 2, 3, 4, 5 }),
+        "逐份进度应从 1 数到 5：" + string.Join("、", seen.Skip(1).Select(item => item.Done)));
+    Expect(result.Notes.Any(note => note.Contains("节点定义")), "报告里要说清节点定义有多大：" + string.Join("；", result.Notes));
+}
+
+static void ComfyUiLibraryEndpointShapes()
+{
+    var server = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
+    server.Add("T-图像-Krea/T01-写实.json", ComfyUiUiFixture("T01"));
+    using var http = new HttpClient(server.Handler());
+    var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None)
+        .GetAwaiter().GetResult();
+    Expect(result.Workflows.Count == 1 && result.Workflows[0].Converted,
+        "一份工作流都没拉到：" + (result.Workflows.Count == 0 ? "空清单" : result.Workflows[0].Error));
+
+    // 这个接口最反直觉的一条：**整条相对路径当一个路径段**转义（/ 变成 %2F）才通，
+    // 按段转义（保留 /）会 404——当时试了 11 种写法只有这一种能通，所以钉死。
+    var content = server.Requests.Single(address => address.Contains("userdata/", StringComparison.Ordinal));
+    Expect(content.Contains("workflows%2F", StringComparison.Ordinal),
+        "正文地址必须把整条相对路径一起转义：" + content);
+    Expect(!content.Contains("workflows/", StringComparison.Ordinal),
+        "正文地址里不得留下未转义的斜杠：" + content);
+    Expect(content.Contains("T-%E5%9B%BE%E5%83%8F-Krea", StringComparison.Ordinal),
+        "中文文件夹名也要转义：" + content);
+
+    // 清单那一份要带 recurse 与 full_info（前者才列子目录，后者拿得到体积）。
+    var list = server.Requests.Single(address => address.Contains("userdata?", StringComparison.Ordinal));
+    Expect(list.Contains("recurse=true") && list.Contains("full_info=true"), "清单地址参数不齐：" + list);
+
+    // 老版服务器没有 /api 这一层：前缀写法先试（404）再退到裸路径。
+    var legacy = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture(), WithoutApiPrefix = true };
+    legacy.Add("T-图像-Krea/T01-写实.json", ComfyUiUiFixture("T01"));
+    using var legacyHttp = new HttpClient(legacy.Handler());
+    var legacyResult = ComfyUiLibrary.FetchAsync("https://comfy.example.com/", legacyHttp, null, CancellationToken.None)
+        .GetAwaiter().GetResult();
+    Expect(legacyResult.Workflows.Count == 1 && legacyResult.Workflows[0].Converted,
+        "老版（没有 /api 前缀）也要能读："
+        + (legacyResult.Workflows.Count == 0 ? "空清单" : legacyResult.Workflows[0].Error));
+}
+
+static void ComfyUiLibraryIsolatesFailures()
+{
+    var fake = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
+    fake.Add("A图像-Qwen生成/好的.json", ComfyUiUiFixture("T01"));
+    fake.Add("A图像-Qwen生成/服务器出错.json", ComfyUiUiFixture("T01"));
+    fake.Add("A图像-Qwen生成/不是JSON.json", ComfyUiUiFixture("T01"));
+    fake.Fault = relative => relative switch
+    {
+        "A图像-Qwen生成/服务器出错.json" => new HttpResponseMessage(HttpStatusCode.InternalServerError),
+        "A图像-Qwen生成/不是JSON.json" => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("<html>这不是 JSON</html>", Encoding.UTF8, "text/html")
+        },
+        _ => null
+    };
+
+    using var http = new HttpClient(fake.Handler());
+    // 一份坏掉不该把整次导入掀翻：315 份里坏一两份是常态。
+    var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None)
+        .GetAwaiter().GetResult();
+
+    Expect(result.Workflows.Count == 3, "三份都要有条目（坏的也要留下，不能默默消失）");
+    Expect(result.Converted == 1, "只有好的那份该转成，实际 " + result.Converted);
+    Expect(result.Failed == 2, "两份该记为失败，实际 " + result.Failed);
+
+    var broken = result.Workflows.Single(workflow => workflow.Key == "A图像-Qwen生成/服务器出错.json");
+    Expect(broken.Error.Contains("读取失败"), "读不到要说「读取失败」：" + broken.Error);
+    var html = result.Workflows.Single(workflow => workflow.Key == "A图像-Qwen生成/不是JSON.json");
+    Expect(html.Error.Contains("转换失败"), "内容不是 JSON 要说「转换失败」：" + html.Error);
+    // 异常**类型名**要带上：不写的话「我们自己的空引用」和「这份工作流引用了没装的节点」会变成同一句话。
+    // （JSON 解析失败的运行时类型是 JsonReaderException —— JsonException 的子类。）
+    Expect(html.Error.Contains("Exception"), "转换失败要带上异常类型名，便于分清是我们的缺陷还是文件的问题：" + html.Error);
+    Expect(!html.Error.Contains("（Exception）"), "类型名不能是个空的占位（要拿到真实类型）：" + html.Error);
+
+    // 坏的那两份不该留下正文：留着的话选择器会列出一份「点下去必然失败」的工作流。
+    Expect(broken.PayloadFile.Length == 0 && html.PayloadFile.Length == 0, "没转成的不得指向正文文件");
+    Expect(result.Payloads.Count == 1 && result.Payloads.ContainsKey("A图像-Qwen生成/好的.json"),
+        "只有转成的那份该有正文，实际 " + result.Payloads.Count + " 份");
+    Expect(result.Notes.Any(note => note.Contains("2 份没能转换")), "报告要如实报出失败份数：" + string.Join("；", result.Notes));
+
+    // 失败的那两份不该被推荐（推荐只从转成了的里面挑）。
+    Expect(result.Workflows.Single(workflow => workflow.Key == "A图像-Qwen生成/好的.json").Recommended,
+        "唯一转成的那份该被推荐");
+    Expect(!broken.Recommended && !html.Recommended, "没转成的不得被推荐");
+}
+
+static void ComfyUiLibraryInstallKeepsUserChoices()
+{
+    var directory = NewTempDirectory("comfyui-install");
+    WithSiteDirectory(directory, () =>
+    {
+        var server = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
+        server.Add("A图像-Qwen生成/简单文生图.json", ComfyUiUiFixture("T01"));
+        server.Add("A图像-Qwen生成/复杂三视图.json", ComfyUiUiFixture("T04"));
+        server.Add("A图像-Qwen生成/三采流.json", ComfyUiUiFixture("T03"));
+        server.Add("G视频-Wan图生/图生视频.json", ComfyUiUiFixture("G01"));
+
+        using var http = new HttpClient(server.Handler());
+        var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None)
+            .GetAwaiter().GetResult();
+
+        var (site, error) = ComfyUiLibrary.Install(result, "我的 ComfyUI", "sd_xl_base_1.0.safetensors", null);
+        Expect(site is not null && error.Length == 0, "落盘失败：" + error);
+        Expect(site!.Id == "comfy", "站点标识该由主机名派生（comfy.example.com → comfy），实际 " + site.Id);
+        Expect(site.IsComfyUi && site.Backend == "comfyui", "站点要写明自己是 ComfyUI 来源");
+        Expect(site.Checkpoint == "sd_xl_base_1.0.safetensors", "checkpoint 要存在站点上（一家站一个底模）");
+        Expect(site.Workflows.Count == 4 && site.ImageWorkflows.Count == 3 && site.VideoWorkflows.Count == 1,
+            $"种类分派不对：共 {site.Workflows.Count}、图像 {site.ImageWorkflows.Count}、视频 {site.VideoWorkflows.Count}");
+        Expect(site.Describe().Contains("工作流"), "站点说明该讲工作流而不是池子：" + site.Describe());
+
+        // 正文按份落文件，**站点文件里一个字都不带**：标错了两者之一，选择器每次打开都要读一个几 MB 的 JSON。
+        var siteFile = Path.Combine(SiteCatalog.Directory, site.Id + ".json");
+        Expect(File.Exists(siteFile), "站点文件该写在 sites/ 下：" + siteFile);
+        var siteText = File.ReadAllText(siteFile, Encoding.UTF8);
+        Expect(!siteText.Contains("class_type"), "站点文件不该带工作流正文");
+        Expect(siteText.Contains("\"backend\"", StringComparison.OrdinalIgnoreCase), "站点文件要写清 backend：" + siteText[..Math.Min(400, siteText.Length)]);
+        Expect(siteText.Contains("comfyui", StringComparison.Ordinal), "站点文件里 backend 应是 comfyui");
+
+        var payloadDirectory = SiteCatalog.PayloadDirectory(site.Id);
+        var payloadFiles = Directory.GetFiles(payloadDirectory, "*.json");
+        Expect(payloadFiles.Length == 4, "正文该按份落文件，实际 " + payloadFiles.Length + " 个");
+        foreach (var workflow in site.Workflows)
+        {
+            Expect(workflow.PayloadFile.Length > 0, "每份都要指向自己的正文文件：" + workflow.Key);
+            var payload = SiteCatalog.LoadPayload(site.Id, workflow.PayloadFile);
+            Expect(payload is not null && payload.Contains("\"class_type\""), "正文要读得回来：" + workflow.Key);
+        }
+
+        // 用户自己的取舍：关掉一份、并且把这个家族的推荐改到另一份上。
+        var pool = site.Workflows.Where(workflow => workflow.Folder == "A图像-Qwen生成")
+            .OrderBy(workflow => workflow.Key, StringComparer.Ordinal).ToList();
+        var autoRecommended = pool.Single(workflow => workflow.Recommended);
+        var userPicked = pool.First(workflow => workflow.Key != autoRecommended.Key);
+        var disabled = pool.First(workflow => workflow.Key != autoRecommended.Key && workflow.Key != userPicked.Key);
+        disabled.Enabled = false;
+        foreach (var workflow in site.Workflows) workflow.Recommended = false;
+        userPicked.Recommended = true;
+        Expect(SiteCatalog.Save(site, out var saveError), "改完站点该能存回去：" + saveError);
+
+        // 「重新导入」的那一份要从**磁盘重新读**，不能拿内存里那个对象：
+        // 拿同一个对象的话，那次「保住取舍」的赋值会退化成自己给自己赋值，测了个寂寞。
+        var (reloaded, reloadErrors) = SiteCatalog.Load();
+        Expect(reloadErrors.Count == 0, "重新读站点失败：" + string.Join("；", reloadErrors));
+        var previous = reloaded.Single(item => item.Id == site.Id);
+
+        var (again, againError) = ComfyUiLibrary.Install(result, "我的 ComfyUI", "sd_xl_base_1.0.safetensors", previous);
+        Expect(again is not null && againError.Length == 0, "重新导入失败：" + againError);
+        Expect(!again!.Workflows.Single(workflow => workflow.Key == disabled.Key).Enabled,
+            "重新导入把用户关掉的那一份又打开了");
+        var recommended = again.Workflows.Where(workflow => workflow.Recommended).ToList();
+        Expect(recommended.Count == 2, "每个家族各一份推荐，实际 " + recommended.Count
+            + "：" + string.Join("；", recommended.Select(workflow => workflow.Key)));
+        Expect(recommended.Any(workflow => workflow.Key == userPicked.Key), "重新导入把用户改选的推荐冲掉了");
+        Expect(recommended.Any(workflow => workflow.Folder == "G视频-Wan图生"), "没被用户选过的家族该补上默认推荐");
+
+        // 老站点文件（这个字段是后加的，里面没有 backend）必须仍按「接口站」解释，
+        // 否则升级之后所有老站点会突然变成「ComfyUI 站点」，池子一个都看不见。
+        var legacyId = "legacy";
+        File.WriteAllText(Path.Combine(SiteCatalog.Directory, legacyId + ".json"),
+            "{\"id\":\"legacy\",\"displayName\":\"老站点\",\"baseUrl\":\"https://old.example.com/v1\",\"pools\":[]}",
+            Encoding.UTF8);
+        var (sites, loadErrors) = SiteCatalog.Load();
+        var legacy = sites.Single(item => item.Id == legacyId);
+        Expect(loadErrors.Count == 0, "老站点文件该能读：" + string.Join("；", loadErrors));
+        Expect(!legacy.IsComfyUi && legacy.Backend == "api", "没有 backend 的老站点要按接口站解释");
+        Expect(legacy.Workflows.Count == 0, "老站点的工作流清单该是空的，不是 null");
+    });
+}
+
+static void ComfyUiLibraryPrunesAndDeletesPayloads()
+{
+    var directory = NewTempDirectory("comfyui-prune");
+    WithSiteDirectory(directory, () =>
+    {
+        var server = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
+        server.Add("A图像-Qwen生成/简单文生图.json", ComfyUiUiFixture("T01"));
+        server.Add("A图像-Qwen生成/复杂三视图.json", ComfyUiUiFixture("T04"));
+
+        using var http = new HttpClient(server.Handler());
+        var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None)
+            .GetAwaiter().GetResult();
+        var (site, error) = ComfyUiLibrary.Install(result, "我的 ComfyUI", "sd_xl.safetensors", null);
+        Expect(site is not null && error.Length == 0, "落盘失败：" + error);
+
+        var payloadDirectory = SiteCatalog.PayloadDirectory(site!.Id);
+        Expect(Directory.GetFiles(payloadDirectory, "*.json").Length == 2, "先要有两份正文");
+
+        // ① 服务器上删了一份工作流 → 它留下的正文是孤儿。清掉，否则目录越滚越大，
+        //    而且留着的是**旧图**：名字还在、内容已经不是那一份了。
+        site.Workflows.RemoveAt(0);
+        var removed = SiteCatalog.PrunePayloads(site);
+        Expect(removed == 1, "该清掉 1 个孤儿正文，实际 " + removed);
+        var remaining = Directory.GetFiles(payloadDirectory, "*.json");
+        Expect(remaining.Length == 1, "被引用的那份要活着，实际 " + remaining.Length);
+
+        // ② 手工丢进去的文件也算孤儿。
+        var stray = Path.Combine(payloadDirectory, "stray.json");
+        File.WriteAllText(stray, "{}");
+        Expect(SiteCatalog.PrunePayloads(site) == 1, "没被引用过的文件也该清掉");
+        Expect(!File.Exists(stray), "孤儿文件没清掉：" + stray);
+
+        // ③ 删站点：正文目录必须跟着走。留下的话，同名站点下次导入会捡到上一次的旧正文。
+        Expect(SiteCatalog.TryDelete(site, out var deleteError), "删站点失败：" + deleteError);
+        Expect(!File.Exists(Path.Combine(SiteCatalog.Directory, site.Id + ".json")), "站点文件该没了");
+        Expect(!Directory.Exists(payloadDirectory), "正文目录该跟着站点一起删：" + payloadDirectory);
+    });
 }
 
 /// <summary>对拍用：返回第一处差异（路径 + 两边取值），完全一致返回 null。JSON 对象的键顺序不参与比较。
@@ -10070,6 +10389,86 @@ sealed class StubHttpHandler : HttpMessageHandler
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
         Task.FromResult(respond(request));
+}
+
+/// <summary>
+/// 假的 ComfyUI 服务器：按路径发「工作流清单 / 工作流正文 / 节点定义」，并把每次请求的
+/// 「路径+查询」原样记下来（原样很重要——测试要钉住正文地址是整条转义还是按段转义）。
+/// </summary>
+sealed class ComfyUiStubServer
+{
+    private readonly Dictionary<string, string> contents = new(StringComparer.Ordinal);
+    private readonly List<string> requests = new();
+
+    /// <summary>节点定义（<c>object_info</c>）的返回体。</summary>
+    public string ObjectInfo { get; set; } = "{\"SaveImage\":{\"display_name\":\"Save Image\",\"input\":{\"required\":{\"filename_prefix\":[\"STRING\",{}]}}}}";
+
+    /// <summary>模拟老版服务器：<c>/api</c> 前缀一律 404，只能读裸路径。</summary>
+    public bool WithoutApiPrefix { get; set; }
+
+    /// <summary>按相对路径注入故障（返回非 null 就用它顶掉正常响应），用来验「单份失败不连坐」。</summary>
+    public Func<string, HttpResponseMessage?>? Fault { get; set; }
+
+    /// <summary>被请求过的地址（路径+查询，**保持转义原样**）。并行抓取时会被多线程写，所以带锁。</summary>
+    public IReadOnlyList<string> Requests { get { lock (requests) return requests.ToList(); } }
+
+    public void Add(string relativePath, string uiJson) => contents[relativePath] = uiJson;
+
+    /// <summary>清单返回体：与真机同形（<c>path/size/modified/created</c>）。</summary>
+    private string ListJson()
+    {
+        var rows = contents.Keys.OrderBy(path => path, StringComparer.Ordinal).Select(path =>
+            $"{{\"path\":{JsonSerializer.Serialize(path)},\"size\":{Encoding.UTF8.GetByteCount(contents[path])},\"modified\":0,\"created\":0}}");
+        return "[" + string.Join(",", rows) + "]";
+    }
+
+    public HttpMessageHandler Handler() => new StubHttpHandler(request =>
+    {
+        var pathAndQuery = request.RequestUri!.PathAndQuery;
+        lock (requests) requests.Add(pathAndQuery);
+
+        if (WithoutApiPrefix && pathAndQuery.StartsWith("/api/", StringComparison.Ordinal))
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+
+        // 路径里的 %2F 要解回来才能当键查表；这也顺带证明「整条转义」是对的写法
+        // （按段转义的话这里解出来还是分段的样子，查不到表 → 404）。
+        var decoded = Uri.UnescapeDataString(request.RequestUri.AbsolutePath);
+        if (decoded.StartsWith("/api/", StringComparison.Ordinal)) decoded = decoded[4..];
+
+        if (decoded == "/userdata" && request.RequestUri.Query.Contains("dir=workflows", StringComparison.Ordinal))
+            return Json(ListJson());
+
+        const string marker = "/userdata/";
+        if (decoded.StartsWith(marker, StringComparison.Ordinal))
+        {
+            var relative = decoded[marker.Length..];
+            if (relative.StartsWith("workflows/", StringComparison.Ordinal)) relative = relative["workflows/".Length..];
+            var injected = Fault?.Invoke(relative);
+            if (injected is not null) return injected;
+            return contents.TryGetValue(relative, out var ui)
+                ? Json(ui)
+                : new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
+
+        if (decoded == "/object_info") return Json(ObjectInfo);
+        return new HttpResponseMessage(HttpStatusCode.NotFound);
+    });
+
+    private static HttpResponseMessage Json(string body) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent(body, Encoding.UTF8, "application/json")
+    };
+}
+
+/// <summary>同步收集进度回调的 IProgress：<see cref="Progress{T}"/> 是往线程池投递的，
+/// 断言时会读到半路的状态；测试要的是「回调确实都发生过」。</summary>
+sealed class SyncProgress<T> : IProgress<T>
+{
+    private readonly List<T> seen = new();
+
+    public IReadOnlyList<T> Seen { get { lock (seen) return seen.ToList(); } }
+
+    public void Report(T value) { lock (seen) seen.Add(value); }
 }
 
 /// <summary>桩 HttpClient：不发真实请求，只把请求体留给我们检查；响应内容可指定（含 SSE）。</summary>

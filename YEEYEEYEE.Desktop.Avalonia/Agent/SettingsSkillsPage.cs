@@ -51,7 +51,8 @@ internal static class SettingsSkillsPage
             {
                 sitesHost.Children.Add(Note(
                     "还没有登记任何站点。到「生图与生视频」页顶端用「智能导入」给一个接口说明网页，"
-                    + "导入一次就会登记成站点，并把这家能用的池子（模型 × 档位）一并记下来。"));
+                    + "导入一次就会登记成站点，并把这家能用的池子（模型 × 档位）一并记下来；"
+                    + "贴 ComfyUI 地址的话，登记出来的站点下面挂的是那台服务器的工作流。"));
                 return;
             }
 
@@ -60,13 +61,15 @@ internal static class SettingsSkillsPage
                 var captured = site;
                 var detail = new StackPanel { Spacing = 4, IsVisible = false };
 
-                var toggle = Secondary("展开池子");
+                var toggle = Secondary(captured.IsComfyUi ? "展开工作流" : "展开池子");
                 toggle.FontSize = 10;
                 toggle.VerticalAlignment = VerticalAlignment.Top;
                 toggle.Click += (_, _) =>
                 {
                     detail.IsVisible = !detail.IsVisible;
-                    toggle.Content = detail.IsVisible ? "收起池子" : "展开池子";
+                    toggle.Content = detail.IsVisible
+                        ? (captured.IsComfyUi ? "收起工作流" : "收起池子")
+                        : (captured.IsComfyUi ? "展开工作流" : "展开池子");
                 };
 
                 var rename = Secondary("改名");
@@ -92,7 +95,10 @@ internal static class SettingsSkillsPage
                 remove.Click += async (_, _) =>
                 {
                     if (!await ConfirmAsync(context.Owner, "删除站点",
-                            $"要删掉站点「{captured.Label}」吗？它下面 {captured.Pools.Count} 个池子的登记会一起删掉。\n"
+                            $"要删掉站点「{captured.Label}」吗？"
+                            + (captured.IsComfyUi
+                                ? $"它下面 {captured.Workflows.Count} 份工作流的正文会一起删掉。\n"
+                                : $"它下面 {captured.Pools.Count} 个池子的登记会一起删掉。\n")
                             + "已经出过的图和画布上的附件不受影响；要再建回来重新导入一次即可。",
                             "删除"))
                         return;
@@ -123,7 +129,9 @@ internal static class SettingsSkillsPage
                     Children =
                     {
                         Row(captured.Label, Chip(captured.Id, "DfPrimary"),
-                            captured.HasVideoPools ? Chip("含视频池", "DfInk3") : null),
+                            captured.IsComfyUi
+                                ? captured.VideoWorkflows.Count > 0 ? Chip("含视频工作流", "DfInk3") : null
+                                : captured.HasVideoPools ? Chip("含视频池", "DfInk3") : null),
                         new TextBlock { Text = captured.Describe(), FontSize = 10, TextWrapping = TextWrapping.Wrap, Foreground = Brush("DfInk3") },
                         keyStatus
                     }
@@ -205,7 +213,52 @@ internal static class SettingsSkillsPage
                         Foreground = Brush(sample.Enabled ? "DfInk2" : "DfInk3")
                     });
                 }
-                detail.Children.Add(Note($"接口：{captured.BaseUrl}｜文件：{Path.Combine(SiteCatalog.Directory, captured.Id + ".json")}"));
+
+                // ComfyUI 站点的子项是工作流，不是池子——只列池子的话这一台下面三百多份在这儿一份都看不见。
+                // 按服务器上的顶层文件夹（= 模型家族）分组，一份一行：推荐的那份标出来，
+                // 没转成的写明原因，被停用的压暗（它们还在，只是不进选择器的候选）。
+                foreach (var group in captured.Workflows
+                             .GroupBy(workflow => workflow.Folder.Length == 0 ? "（根目录）" : workflow.Folder)
+                             .OrderBy(group => group.Key, StringComparer.Ordinal))
+                {
+                    var kinds = group.Select(workflow => workflow.Kind).Distinct(StringComparer.Ordinal).ToList();
+                    var kindLabel = kinds.Count == 1
+                        ? kinds[0] switch { "video" => "视频", "image" => "图像", "audio" => "声音", _ => "用途未知" }
+                        : "混合";
+                    detail.Children.Add(new TextBlock
+                    {
+                        Text = $"· {group.Key}（{group.Count()} 份 · {kindLabel}）",
+                        FontSize = 10,
+                        FontWeight = FontWeight.SemiBold,
+                        TextWrapping = TextWrapping.Wrap,
+                        Foreground = Brush("DfInk2")
+                    });
+
+                    foreach (var workflow in group.OrderBy(item => item.Title, StringComparer.Ordinal))
+                    {
+                        var marks = new List<string>();
+                        if (workflow.Recommended) marks.Add("推荐");
+                        if (!workflow.Enabled) marks.Add("已停用");
+                        detail.Children.Add(new TextBlock
+                        {
+                            Text = $"    {workflow.Title}"
+                                + (marks.Count > 0 ? $"｜{string.Join("、", marks)}" : string.Empty)
+                                + (workflow.Error.Length > 0
+                                    ? $"｜{workflow.Error}"
+                                    : workflow.Note.Length > 0 ? $"｜{workflow.Note}" : string.Empty),
+                            FontSize = 10,
+                            TextWrapping = TextWrapping.Wrap,
+                            // 转不成的用告警色：这是一件要人去处理的事（多半是这份工作流引用了服务器上没装的节点）。
+                            // 色板里只有三档墨色，所以「已停用」靠行里的字样标出来，不靠再压暗一级。
+                            Foreground = Brush(workflow.Converted ? "DfInk3" : "DfError")
+                        });
+                    }
+                }
+
+                detail.Children.Add(Note(captured.IsComfyUi
+                    ? $"地址：{captured.BaseUrl}｜工作流正文目录：{SiteCatalog.PayloadDirectory(captured.Id)}"
+                      + $"｜清单：{Path.Combine(SiteCatalog.Directory, captured.Id + ".json")}"
+                    : $"接口：{captured.BaseUrl}｜文件：{Path.Combine(SiteCatalog.Directory, captured.Id + ".json")}"));
 
                 var actions = new StackPanel
                 {

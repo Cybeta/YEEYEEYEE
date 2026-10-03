@@ -55,8 +55,14 @@ internal sealed class SettingsApiImportDialog
     /// <summary>待登记的站点（跟着解析与探测一起长出来）；产物是它，不是一串技能文件。</summary>
     private SiteProfile? site;
 
-    /// <summary>识别成 ComfyUI 时的结论（非空表示走的是 ComfyUI 那条分支，不登记站点）。</summary>
+    /// <summary>识别成 ComfyUI 时的结论（非空表示走的是 ComfyUI 那条分支）。</summary>
     private ProviderImportDraft? comfyDraft;
+
+    /// <summary>刚刚登记下来的 ComfyUI 站点（结论里要报它拉到了多少份工作流）。</summary>
+    private SiteProfile? installedComfySite;
+
+    /// <summary>正在跑一件不能重入的慢事（拉清单 / 落站点）：期间把按钮按住，免得点两遍拉两次。</summary>
+    private bool busy;
     private bool probing;
     private ApiAccountSnapshot? lastAccount;
     private long? lastTestCost;
@@ -143,8 +149,8 @@ internal sealed class SettingsApiImportDialog
         repairButton.Click += async (_, _) => await RepairWithModelAsync();
         createButton.Click += async (_, _) =>
         {
-            // 同一个按钮两种意思：ComfyUI 那条分支写设置，接口站那条分支登记站点。
-            if (comfyDraft is not null) { WriteComfyUi(); return; }
+            // 同一个按钮两种意思：ComfyUI 那条分支拉工作流 + 登记站点，接口站那条分支登记站点。
+            if (comfyDraft is not null) { await InstallComfyUiAsync(); return; }
             await CreateSite();
         };
         saveKeyButton.Click += async (_, _) =>
@@ -314,7 +320,18 @@ internal sealed class SettingsApiImportDialog
         if (!wroteSite && !savedConfig) return null;
 
         var parts = new List<string>();
-        if (wroteSite) parts.Add($"站点已登记（{SiteCatalog.Directory}）");
+        if (installedComfySite is { } comfy)
+        {
+            // ComfyUI 这条：站点本身就是产物，把份数说出来——用户看不到的话，
+            // 「导入成功了什么」只能靠他自己去技能管理页翻。
+            parts.Add($"ComfyUI 站点「{comfy.Label}」已登记："
+                + $"图像 {comfy.ImageWorkflows.Count} 份、视频 {comfy.VideoWorkflows.Count} 份工作流");
+        }
+        else if (wroteSite)
+        {
+            parts.Add($"站点已登记（{SiteCatalog.Directory}）");
+        }
+
         if (savedConfig) parts.Add("接口地址 / 模型 / 密钥已保存");
         if (returnedMediaPath.Length > 0) parts.Add($"最小测试产出 {Path.GetFileName(returnedMediaPath)}");
         if (lastTestCost is { } cost && cost != 0) parts.Add($"本次测试消耗 {cost} 积分");
@@ -382,13 +399,15 @@ internal sealed class SettingsApiImportDialog
     }
 
     /// <summary>
-    /// ComfyUI 分支的结论页。**不建站点、不探测清单**，只把地址与 checkpoint 写进设置。
+    /// ComfyUI 分支的结论页。**不探测模型池**（ComfyUI 没有「模型 × 档位」），
+    /// 改成把服务器上 <c>workflows/</c> 里的工作流整份拉下来。
     /// </summary>
     private void ShowComfyUi(ProviderImportDraft draft)
     {
         comfyDraft = draft;
         lastReport = null;
         site = null;
+        installedComfySite = null;
 
         var lines = new List<string>
         {
@@ -398,42 +417,125 @@ internal sealed class SettingsApiImportDialog
         };
         if (draft.Signals.Count > 0) lines.Add($"· 判据：{string.Join("、", draft.Signals.Take(6))}");
         lines.Add(string.Empty);
-        lines.Add("ComfyUI 不是「一家有接口站」：它跑的是本机 / 远程的工作流模板，");
-        lines.Add("用哪个模型、走几步、吃几张参考图，全由模板决定，没有「模型 × 档位」能在这里挑。");
-        lines.Add("所以这条**不登记站点、也不探测模型清单**，只把地址与 checkpoint 写进设置；工作流模板在那一页选。");
+        lines.Add("ComfyUI 不是「一家有接口站」：它跑的是工作流模板，用哪个模型、走几步、吃几张参考图全由模板决定，");
+        lines.Add("所以这里没有「模型 × 档位」可挑，也不会探测模型清单——**它的子项就是工作流**。");
+        lines.Add(string.Empty);
+        lines.Add("点下面的按钮会做两件事：");
+        lines.Add("· 把地址与 checkpoint 写进设置（并登记成一个 ComfyUI 站点，地址以站点文件为准）；");
+        lines.Add("· 把服务器 workflows 目录里的工作流**整份**拉下来，逐份转成 API 格式存好——");
+        lines.Add("  这等价于在浏览器里一份一份右键「导出（API）」，只是不用你点。");
+        lines.Add("  拉取过程只读：只问清单、正文与节点定义，不发任何生成请求。");
         reportText.Text = string.Join(Environment.NewLine, lines);
 
-        createButton.Content = "写入 ComfyUI 设置";
+        createButton.Content = "拉取工作流并登记站点";
         createButton.IsEnabled = draft.BaseUrl.Length > 0;
         createButton.IsVisible = true;
         rebuildButton.IsVisible = false;
         SetStatus(draft.BaseUrl.Length > 0
-            ? "识别为 ComfyUI：点「写入 ComfyUI 设置」把地址与 checkpoint 写进设置（不登记站点）。"
+            ? "识别为 ComfyUI：点「拉取工作流并登记站点」把工作流拉下来存好（只读，不跑任何生成）。"
             : "识别为 ComfyUI，但这段文字里没有能用的地址：把控制台首页地址、或含 http://…:8188 的那一行一起贴进来。");
         EnterStep(ApiWizardStep.Document);
     }
 
-    private void WriteComfyUi()
+    /// <summary>
+    /// ComfyUI 分支的落地动作：写设置 → 拉整份工作流目录 → 转成 API 格式 → 登记成一个站点。
+    ///
+    /// 为什么在这一步就把工作流拉下来，而不是等出图时再说：转换要用服务器的
+    /// <c>object_info</c>，而实测那有 **21.8 MB**；每次提交前去拉一次既慢又不稳。
+    /// 拉一次存起来，之后不管选哪一份都只是读一个几十 KB 的本地文件。
+    ///
+    /// 站点文件与设置**同源**：地址与 checkpoint 先写配置、再写进站点，最后按站点回写配置，
+    /// 保证「设置里显示的」和「站点里记着的」是同一台机器，不会出现改了这头忘那头。
+    /// </summary>
+    private async Task InstallComfyUiAsync()
     {
-        if (comfyDraft is null || lastReport is not null) return;
-        var applied = ProviderImporter.Apply(config, comfyDraft);
-        if (applied.Count == 0)
+        if (comfyDraft is null || lastReport is not null || busy) return;
+        if (comfyDraft.BaseUrl.Length == 0)
         {
-            SetStatus("ComfyUI 地址与 checkpoint 和现有配置一致，没有需要写入的改动。");
+            SetStatus("这段文字里没有能用的 ComfyUI 地址：把控制台首页地址、或含 http://…:8188 的那一行一起贴进来。");
+            return;
+        }
+
+        busy = true;
+        createButton.IsEnabled = false;
+        try
+        {
+            var applied = ProviderImporter.Apply(config, comfyDraft);
+            if (applied.Count > 0 && !AiProviderSettings.Save(config))
+            {
+                SetStatus("配置写入失败（配置文件可能不可写或磁盘只读），本次没有生效："
+                    + Environment.NewLine + string.Join(Environment.NewLine, applied.Select(item => "· " + item)));
+                return;
+            }
+            if (applied.Count > 0) savedConfig = true;
+
+            SetStatus("正在读取工作流清单…");
+            // Progress<T> 在界面线程上构造，回调就回到界面线程——直接改 TextBlock 是安全的。
+            var progress = new Progress<ComfyUiLibraryProgress>(item => SetStatus(item.Describe()));
+            // 二十多 MB 的节点定义 + 三百多份正文，给足时间；超时也要如实说出来。
+            using var budget = new CancellationTokenSource(TimeSpan.FromMinutes(20));
+
+            ComfyUiLibraryResult fetched;
+            try
+            {
+                fetched = await ComfyUiLibrary.FetchAsync(comfyDraft.BaseUrl, null, progress, budget.Token);
+            }
+            catch (Exception error) when (error is HttpRequestException or TaskCanceledException or InvalidOperationException)
+            {
+                SetStatus("拉取工作流失败：" + error.Message + Environment.NewLine
+                    + "· 确认地址指向 ComfyUI 本身（控制台首页），并且那台机器上的 ComfyUI 正在运行；"
+                    + "地址后面带 /object_info、/prompt 这类路径的，请去掉再试。" + Environment.NewLine
+                    + "· 本次**没有登记站点**，也没有改动出图 / 出视频的设置。");
+                return;
+            }
+
+            // 同一个地址重新导入是**覆盖**：把上一轮用户的取舍（停用了哪几份、推荐改了哪一份）带过去。
+            var previous = SiteCatalog.Load().Sites.FirstOrDefault(item =>
+                string.Equals(item.Id, fetched.SiteId, StringComparison.OrdinalIgnoreCase));
+
+            var (installed, failure) = ComfyUiLibrary.Install(
+                fetched,
+                previous?.DisplayName ?? string.Empty,
+                comfyDraft.Checkpoint,
+                previous);
+            if (installed is null)
+            {
+                SetStatus("工作流拉回来了，但站点没能落盘：" + failure + Environment.NewLine
+                    + $"· 站点目录：{SiteCatalog.Directory}" + Environment.NewLine
+                    + "· 本次没有改动出图 / 出视频的设置。");
+                return;
+            }
+
+            installedComfySite = installed;
+            wroteSite = true;
+            // 站点文件为准：按刚落盘的站点回写配置，两边不会各说一套。
+            config.ComfyUiBaseUrl = installed.BaseUrl;
+            if (installed.Checkpoint.Length > 0) config.ComfyUiCheckpoint = installed.Checkpoint;
+            AiProviderSettings.Save(config);
+
+            var picks = installed.UsableWorkflows.Count(workflow => workflow.Recommended);
+            var lines = new List<string>
+            {
+                $"站点「{installed.Label}」已登记：图像 {installed.ImageWorkflows.Count} 份、视频 {installed.VideoWorkflows.Count} 份工作流。",
+                $"· 地址：{installed.BaseUrl}"
+                    + (installed.Checkpoint.Length > 0 ? $"｜checkpoint {installed.Checkpoint}" : "｜没填 checkpoint"),
+                $"· 清单来自 ComfyUI 的 workflows 目录：共 {installed.Workflows.Count} 份，转成 {fetched.Converted} 份",
+                $"· 每个家族（服务器上的顶层文件夹）各推了一份默认：共 {picks} 份",
+                $"· 正文按份落盘：{SiteCatalog.PayloadDirectory(installed.Id)}（站点文件本身不带正文，选择器不必读大文件）"
+            };
+            if (fetched.Failed > 0)
+                lines.Add($"· **{fetched.Failed} 份没能转换**：原因逐份记在站点文件里，不影响其它工作流");
+            foreach (var note in fetched.Notes) lines.Add("· " + note);
+            lines.Add("· 以后要换工作流 / 看这一台有哪些：**设置 → 技能管理 → 站点与池子**");
+            lines.Add("· 出图 / 出视频时会先让你在这台服务器的工作流里选一份（默认选中的是推荐的那份）");
+            SetStatus(string.Join(Environment.NewLine, lines));
             EnterStep(ApiWizardStep.Done);
-            return;
         }
-        if (!AiProviderSettings.Save(config))
+        finally
         {
-            SetStatus("配置写入失败（配置文件可能不可写或磁盘只读），本次没有生效："
-                + Environment.NewLine + string.Join(Environment.NewLine, applied.Select(item => "· " + item)));
-            return;
+            busy = false;
+            createButton.IsEnabled = true;
         }
-        savedConfig = true;
-        SetStatus("已写入 ComfyUI 设置：" + Environment.NewLine
-            + string.Join(Environment.NewLine, applied.Select(item => "· " + item))
-            + Environment.NewLine + "以后要改：设置 → 生图与生视频 → ComfyUI。工作流模板也在那一页选。");
-        EnterStep(ApiWizardStep.Done);
     }
 
     private void Analyze(ApiDocReport report)
@@ -1100,8 +1202,12 @@ internal sealed class SettingsApiImportDialog
                 "密钥只保存在本机，写入时按当前平台的方案加密；界面与日志都不会回显完整密钥。"),
             ApiWizardStep.Test => ("第 3 步 / 共 4 步：是否做一次最小测试",
                 "选「是」会真的调一次接口，成功就把图返回来；选「否」直接保存完成。"),
-            _ => ("第 4 步 / 共 4 步：完成",
-                "技能已建好、密钥已加密保存。要改地址或模型可以随时在本页改，或回「设置」改。")
+            _ => comfyDraft is not null
+                ? ("第 2 步 / 共 2 步：完成",
+                    "工作流已按份存好，站点也登记了。要换哪一份、或看这一台有哪些，" +
+                    "去「设置 → 技能管理 → 站点与池子」；出图时在选择器里挑。")
+                : ("第 4 步 / 共 4 步：完成",
+                    "技能已建好、密钥已加密保存。要改地址或模型可以随时在本页改，或回「设置」改。")
         };
 
         if (step == ApiWizardStep.Key) keyBox.Focus();
