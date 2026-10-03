@@ -562,10 +562,10 @@ textarea.df-input {
 
 /* ==================== 节点卡（Border.node） ==================== */
 
+/* 尺寸（width / min-height）由 CanvasView 里的 NODE_CARD_WIDTH / NODE_CARD_HEIGHT 给：
+   虚影连线的端点要算卡片中心，尺寸放在一处才不会两边对不上 */
 .df-node {
   position: absolute;
-  width: 232px;
-  min-height: 104px;
   background: var(--df-surface-2);
   border: 1px solid var(--df-line);
   border-radius: var(--df-radius-panel);
@@ -822,6 +822,122 @@ textarea.df-input {
   display: grid;
   place-items: center;
   box-shadow: var(--df-glow-shadow);
+}
+
+/* ==================== 整理布局的虚影 ==================== */
+
+/* 虚影层只给眼睛看：点不中、不参与平移判定（桌面端的预览层同样是 IsHitTestVisible=false） */
+.df-ghost-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.df-ghost-lines line {
+  stroke: var(--df-primary);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 6;
+  stroke-linecap: round;
+  opacity: 0.7;
+}
+
+.df-ghost-card {
+  position: absolute;
+  border: 1px dashed var(--df-primary);
+  border-radius: var(--df-radius-panel);
+  background: rgba(20, 38, 63, 0.35);
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.df-ghost-card .df-node-title {
+  color: var(--df-ink);
+}
+
+.df-ghost-coords {
+  margin-top: auto;
+  font-size: 10px;
+  color: var(--df-primary);
+}
+
+/* 会被移动的节点：换成虚线边（压暗在 JS 里算——inline opacity 会压过这里，
+   而「只看这一章」也在用 opacity，两个状态谁生效必须写在一处） */
+.df-node.is-moving {
+  border-style: dashed;
+}
+
+/* ==================== 编辑锁 ==================== */
+
+.df-lock-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 1px 6px;
+  border-radius: var(--df-radius-pill);
+  background: rgba(223, 180, 90, 0.14);
+  border: 1px solid rgba(223, 180, 90, 0.45);
+  color: var(--df-warning);
+  font-size: 10px;
+}
+
+/* 画布左上角那枚「谁在编辑」（桌面端的 HintChip 用在左下角，这里避开它） */
+.df-who {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: var(--df-radius-box);
+  background: rgba(13, 19, 27, 0.78);
+  border: 1px solid rgba(223, 180, 90, 0.4);
+  color: var(--df-warning);
+  font-size: 11px;
+  pointer-events: none;
+  max-width: 420px;
+}
+
+/* ==================== 整理预览条 ==================== */
+
+.df-layout-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: var(--df-radius-panel);
+  background: rgba(13, 19, 27, 0.86);
+  border: 1px solid var(--df-line-glow);
+  box-shadow: var(--df-glow-shadow);
+  font-size: 11px;
+  max-width: calc(100% - 28px);
+}
+
+.df-layout-bar.is-blocked {
+  border-color: rgba(224, 112, 126, 0.5);
+  color: var(--df-error);
+}
+
+.df-layout-note {
+  color: var(--df-ink-2);
+  line-height: 1.5;
+  min-width: 0;
+}
+
+.df-layout-scope {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--df-ink-3);
 }
 
 /* ==================== 会话与登录（沿用既有会话面板的语义） ==================== */
