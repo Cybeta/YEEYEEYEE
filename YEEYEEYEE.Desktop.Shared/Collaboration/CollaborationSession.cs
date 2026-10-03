@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 
@@ -24,9 +25,14 @@ public sealed record CollaborationLease(
 /// 成功与失败都必须带一句**能直接给人看的话**，失败另外带上服务端的错误码——
 /// 界面据此决定是「提示重试」「引导去登录」还是「如实转述」，不必自己拆响应体。
 /// </summary>
-public sealed record CollaborationResult(bool Ok, string Code, string Message, CollaborationLease? Holder = null)
+public sealed record CollaborationResult(
+    bool Ok, string Code, string Message, CollaborationLease? Holder = null, long Revision = 0)
 {
     public static CollaborationResult Success(string message) => new(true, string.Empty, message);
+
+    /// <summary>成功、并且服务端回了一个新修订号（整画布写入用：调用方拿它核对本地文件是不是同一张）。</summary>
+    public static CollaborationResult Success(string message, long revision) =>
+        new(true, string.Empty, message, null, revision);
 
     public static CollaborationResult Failure(string code, string message, CollaborationLease? holder = null) =>
         new(false, code, message, holder);
@@ -269,6 +275,73 @@ public sealed class CollaborationSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// 服务端上这张画布现在的修订号；读不到就回 null 并说明原因。
+    ///
+    /// 这是**保存前的握手**用的：它必须等于我本地那份文件的修订号（<see cref="CanvasRevision"/>）。
+    /// 相等才说明「我看的这份就是服务端那份、而且我没落后」，这时把保存交给服务端才安全。
+    /// </summary>
+    public async Task<(long? Revision, string Error)> CanvasRevisionAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsConfigured) return (null, "还没有填服务器地址");
+        if (!IsSignedIn) return (null, "还没有登录");
+
+        try
+        {
+            using var response = await http.GetAsync($"{BaseUrl}/api/web/scene", cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await ReadErrorAsync(response, cancellationToken);
+                return (null, error.Message);
+            }
+
+            var payload = await response.Content.ReadFromJsonAsync<SceneResponse>(Options, cancellationToken);
+            return payload is null ? (null, "服务器没有回画布") : (payload.Revision, string.Empty);
+        }
+        catch (Exception error) when (IsTransport(error))
+        {
+            return (null, TransportFailure(error).Message);
+        }
+    }
+
+    /// <summary>
+    /// 把整张画布交给服务端保存（<c>PUT /api/web/canvas</c>，请求体就是画布字节）。
+    ///
+    /// <paramref name="baseRevision"/> 是我手上那份的修订号：服务端拿它做 CAS，
+    /// 别人在这之间改过就会被拒（<c>SCENE_REVISION_CONFLICT</c>），而不是把别人的改动盖掉。
+    /// 整画布写入是结构级操作，服务端那边要整棵树锁——别人占着任何节点都会回 <c>EDIT_CONFLICT</c>，
+    /// 持有者放在 <see cref="CollaborationResult.Holder"/> 上。
+    /// </summary>
+    public async Task<CollaborationResult> SaveCanvasAsync(
+        long baseRevision, byte[] canvas, CancellationToken cancellationToken = default)
+    {
+        if (!IsConfigured) return CollaborationResult.Failure("NOT_CONFIGURED", "还没有填服务器地址");
+        if (!IsSignedIn) return CollaborationResult.Failure("NOT_SIGNED_IN", "先登录才能把保存交给服务端");
+
+        try
+        {
+            // 来源端声明 desktop：别人看到的就是「某某（桌面端）正在编辑」。
+            var content = new ByteArrayContent(canvas);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+            using var response = await http.PutAsync(
+                $"{BaseUrl}/api/web/canvas?baseRevision={baseRevision}&client=desktop", content, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await ReadErrorAsync(response, cancellationToken);
+                return CollaborationResult.Failure(error.Code ?? string.Empty, error.Message, error.Holder);
+            }
+
+            var payload = await response.Content.ReadFromJsonAsync<CanvasWriteResponse>(Options, cancellationToken);
+            return payload is null
+                ? CollaborationResult.Failure("UNEXPECTED_RESPONSE", "服务器没有回修订号")
+                : CollaborationResult.Success($"已保存到服务端（修订 {payload.Revision}，{payload.Nodes} 个节点）", payload.Revision);
+        }
+        catch (Exception error) when (IsTransport(error))
+        {
+            return TransportFailure(error);
+        }
+    }
+
     /// <summary>会话与身份一起清掉（cookie 也要丢：留着过期 cookie 只会让下一次请求白跑）。</summary>
     private void Forget()
     {
@@ -311,6 +384,12 @@ public sealed class CollaborationSession : IDisposable
     public void Dispose() => http.Dispose();
 
     private sealed record UserResponse(CollaborationUser? User);
+
+    /// <summary>场景接口的读侧：这一路只关心修订号（别的字段用不上）。</summary>
+    private sealed record SceneResponse(long Revision);
+
+    /// <summary>整画布写入的响应：新修订号与节点数。</summary>
+    private sealed record CanvasWriteResponse(long Revision, int Nodes);
 
     private sealed record LeaseResponse(CollaborationLease[]? Leases);
 

@@ -145,6 +145,18 @@ public static class CanvasFileWriter
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
 
     /// <summary>
+    /// 只序列化，不落盘。
+    ///
+    /// 存在的理由：桌面端把整张画布交给服务端保存时，送出去的必须是**和本地落盘逐字节一样**的内容
+    /// （服务端会把它当画布文件的内容重新校验并落盘）。序列化只能有一份实现，否则两边会悄悄分叉。
+    /// </summary>
+    public static byte[] Serialize(RecentCanvasState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        return System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(state, Options));
+    }
+
+    /// <summary>
     /// 写入画布文件。目标已存在时必须先由调用方完成备份（见 <see cref="CanvasBackup.TryBackup"/>）；
     /// 这里只负责「临时文件 + 替换」，任何失败都不影响原文件。
     /// </summary>
@@ -160,7 +172,7 @@ public static class CanvasFileWriter
         var temp = Path.Combine(directory ?? string.Empty, $".{Path.GetFileName(full)}.{Guid.NewGuid():N}.tmp");
         try
         {
-            var bytes = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(state, Options));
+            var bytes = Serialize(state);
             File.WriteAllBytes(temp, bytes);
             File.Move(temp, full, overwrite: true);
             return bytes;

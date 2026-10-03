@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 var root = Path.Combine(Path.GetTempPath(), "yeeeyee-web-tests-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
@@ -953,6 +954,73 @@ try
         Assert(!(await desktop.RefreshLeasesAsync()).Ok, "没登录就不该能看谁在编辑");
     }
 
+    // ---------- 桌面端把保存交给服务端：整画布写入 ----------
+    // 桌面端自己写的是本地文件：既不经锁仲裁，别人也收不到通知。这条路把它交给服务端，
+    // 于是锁真正管得住它、改动也顺便推给所有订阅者。跑的还是桌面那份客户端（CollaborationSession），
+    // 所以这里通了，桌面端「保存修订」那一路就通了。
+    using (var writer = new YEEYEEYEE.Desktop.CollaborationSession($"http://127.0.0.1:{port}"))
+    {
+        using var writeEvents = await rival.GetAsync("/api/web/events", HttpCompletionOption.ResponseHeadersRead);
+        var writeReader = new StreamReader(await writeEvents.Content.ReadAsStreamAsync());
+        var writePending = ReadFrame(writeReader);
+        async Task<(string Type, JsonElement Data)?> NextWriteEvent(int milliseconds)
+        {
+            if (await Task.WhenAny(writePending, Task.Delay(milliseconds)) != writePending) return null;
+            var frame = await writePending;
+            writePending = ReadFrame(writeReader);
+            return frame;
+        }
+
+        Assert((await writer.SignInAsync("chenmo", "longenough")).Ok, "桌面端先登录");
+        var localRevision = YEEYEEYEE.Desktop.CanvasRevision.Of(File.ReadAllBytes(layoutCanvas));
+        var handshake = await writer.CanvasRevisionAsync();
+        Assert(handshake.Revision == localRevision,
+            "握手：服务端那张画布的修订必须等于本地文件的哈希——这也正是「两边看的是同一张画布」的判据");
+
+        // 改一个节点的标题，把**整张画布**交给服务端写（请求体就是画布字节）。
+        var cwEdited = JsonNode.Parse(File.ReadAllText(layoutCanvas))!;
+        cwEdited["Canvas"]!.AsObject()["Nodes"]!.AsArray()[0]!["Title"] = "桌面端改的标题";
+        var payload = Encoding.UTF8.GetBytes(cwEdited.ToJsonString());
+        var cwSaved = await writer.SaveCanvasAsync(localRevision, payload);
+        Assert(cwSaved.Ok, "整画布写入应当成功：" + cwSaved.Message);
+        Assert(YEEYEEYEE.Desktop.CanvasRevision.Of(File.ReadAllBytes(layoutCanvas)) == cwSaved.Revision,
+            "服务端回的修订号必须等于它刚写下的那份字节（客户端就是拿它核对「写的是不是同一张」的）");
+        // 落盘的写法会把非 ASCII 转义（画布里存的就是 \uXXXX），所以这里解析回来比对，
+        // 而不是去原文里找那串中文。
+        var landedTitle = JsonNode.Parse(File.ReadAllText(layoutCanvas))!
+            ["Canvas"]!.AsObject()["Nodes"]!.AsArray()[0]!["Title"]!.GetValue<string>();
+        Assert(landedTitle == "桌面端改的标题", "改动要真的落盘，实际是：" + landedTitle);
+
+        // 别人应当收到一条 canvas.changed：这就是「桌面改一下、网页跟着变」的那条链，
+        // 也正是「保存交给服务端」相比「自己写本地文件」多出来的东西。
+        var pushed = await NextWriteEvent(5000);
+        Assert(pushed is not null && pushed.Value.Type == "canvas.changed", "整画布写入也要广播");
+        Assert(pushed!.Value.Data.GetProperty("scope").GetString() == "canvas",
+            "广播要说清这是整画布级的改动：" + pushed.Value.Data.GetRawText());
+        Assert(pushed.Value.Data.GetProperty("revision").GetInt64() == cwSaved.Revision, "广播里的修订号要与写入回报的一致");
+
+        // 陈旧修订：必须被拒，而且字节不变（别人那份改动不能被盖掉）。
+        var bytesBefore = File.ReadAllBytes(layoutCanvas);
+        var stale = await writer.SaveCanvasAsync(localRevision, payload);
+        Assert(!stale.Ok && stale.Code == "SCENE_REVISION_CONFLICT", "用旧修订保存必须被拒：" + stale.Message);
+        Assert(bytesBefore.SequenceEqual(File.ReadAllBytes(layoutCanvas)), "被拒的写入不该动文件");
+
+        // 别人正占着一个节点：整画布写入按**结构级**对待，要被挡住并说清等谁。
+        var cwHold = (await Check(arranger, HttpMethod.Post, "/api/web/edits", 200,
+            "{\"scope\":\"node\",\"targetId\":\"" + editableId + "\",\"client\":\"web\"}"))
+            .GetProperty("lease").GetProperty("leaseId").GetGuid();
+        var cwBlocked = await writer.SaveCanvasAsync(cwSaved.Revision, payload);
+        Assert(!cwBlocked.Ok && cwBlocked.Code == "EDIT_CONFLICT", "有人占着节点时不该硬写整画布：" + cwBlocked.Message);
+        Assert(cwBlocked.Holder?.DisplayName == "林晚", "冲突要说清等谁");
+        Assert(bytesBefore.SequenceEqual(File.ReadAllBytes(layoutCanvas)), "被锁挡住时不该动文件");
+        await Check(arranger, HttpMethod.Delete, $"/api/web/edits/{cwHold}", 200);
+
+        // 送来的根本不是画布：如实拒绝，而不是写坏文件。
+        var garbage = await writer.SaveCanvasAsync(cwSaved.Revision, Encoding.UTF8.GetBytes("这不是画布"));
+        Assert(!garbage.Ok && garbage.Code == "CANVAS_INVALID", "送来的字节解析不了就要拒绝：" + garbage.Message);
+        Assert(bytesBefore.SequenceEqual(File.ReadAllBytes(layoutCanvas)), "解析失败时不该动文件");
+    }
+
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
     Stop();
     await Start(standalone: true, userDatabase: layoutDatabase);
@@ -968,5 +1036,6 @@ try
     Console.WriteLine("Layout regression passed: shared swimlane engine on the server, chapter scope, stale revision, tree-lease arbitration, preview equals what lands on disk, idempotent no-op, standalone refusal");
     Console.WriteLine("Change-push regression passed: SSE subscribe gating, canvas.changed carrying recordId/actor/the same revision the API reports, silence on failure and on no-op layout, edits.changed on acquire/release but not on renew, tree lease returned after apply");
     Console.WriteLine("Desktop-client regression passed: account sign-in refuses a wrong password without leaving an identity behind, reads the shared lease list with holder and source client, sign-out clears the session");
+    Console.WriteLine("Desktop canvas-write regression passed: handshake (server revision equals the local file hash), whole-canvas write lands and broadcasts canvas.changed with the same revision, stale base revision and someone else's node lease both refuse without touching the file, unparsable bytes rejected");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }

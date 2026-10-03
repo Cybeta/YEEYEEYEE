@@ -81,6 +81,9 @@ EditLeaseApi.Map(app);
 WebLayoutApi.Map(app);
 // 变更推送（SSE）：场景、锁、布局三处写成功之后往这里发一条「变了」，客户端据此刷新。
 WebEventApi.Map(app);
+
+// 整画布写入（PUT /api/web/canvas）：桌面端把保存交给服务端，锁与修订都由服务端仲裁。
+WebCanvasApi.Map(app);
 WebSkillJobApi.Map(app);
 app.UseWebSockets();
 if (Directory.Exists(canvasDistPath))
