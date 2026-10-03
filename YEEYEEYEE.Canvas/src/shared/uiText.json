@@ -8,6 +8,11 @@
   "gesture.delete": "Delete 删除",
   "gesture.cancel": "Esc 取消",
   "connect.mode": "连接模式：点另一个节点作为终点",
+  "connect.pickSource": "请选择连接起点",
+  "connect.pickedSource": "已选择起点：{title}，请选择终点",
+  "connect.droppedOnBlank": "松在空白处，没有连线；要连接请拖到目标节点上",
+  "connect.selfLoop": "不能连到自己",
+  "connect.dragEnded": "拖拽已结束",
   "lease.client.desktop": "桌面端",
   "lease.client.web": "网页端",
   "lease.who": "{name}（{client}）"

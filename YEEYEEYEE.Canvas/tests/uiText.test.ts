@@ -4,6 +4,20 @@ import { clientLabel } from '../src/shell/locks'
 import { gestureHint, uiText, uiTextFill, uiTextKeys } from '../src/shell/uiText'
 
 /**
+ * 仓库里所有 C# 源码（跳过 node_modules / bin / obj / .git）。
+ * 用来把「C# 里引用的键」与共享文件对一遍——这个仓库里 C# 与 TS 谁都不知道对方的字面量。
+ */
+function csharpSources(directory: URL, found: URL[] = []): URL[] {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (['node_modules', 'bin', 'obj', '.git'].includes(entry.name)) continue
+    const child = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, directory)
+    if (entry.isDirectory()) csharpSources(child, found)
+    else if (entry.name.endsWith('.cs')) found.push(child)
+  }
+  return found
+}
+
+/**
  * 两端共读的界面文案（画布手势提示这一片）。
  *
  * 重点不在「文案写得对不对」，而在**只有一份**：桌面端 csproj 里嵌的必须是同一个文件
@@ -53,6 +67,29 @@ describe('共享界面文案', () => {
 
   it('占位符填不干净就抛出，不让界面显示半句话', () => {
     expect(() => uiTextFill('lease.who', { name: '陈默' })).toThrow(/占位符/)
+  })
+
+  it('C# 里引用的每个键都真的存在（键名对不上，只有跑到那一行才发现）', () => {
+    const root = new URL('../../', import.meta.url)
+    const referenced = new Set<string>()
+    for (const file of csharpSources(root)) {
+      const source = readFileSync(file, 'utf8')
+      for (const match of source.matchAll(/UiText\.(?:Text|Fill)\(\s*"([^"]+)"/g)) referenced.add(match[1])
+      for (const match of source.matchAll(/UiText\.Gestures\(([^)]*)\)/g))
+        for (const key of match[1].matchAll(/"([^"]+)"/g)) referenced.add(key[1])
+    }
+
+    // 扫到 0 个说明扫描本身失效了（比如 C# 挪了地方），那这条测试就成了摆设。
+    expect(referenced.size).toBeGreaterThan(5)
+    for (const key of [...referenced].sort()) expect(uiTextKeys(), key).toContain(key)
+  })
+
+  it('桌面端连线手势那几句已经改成读共享文案，没留下写死的副本', () => {
+    const surface = readFileSync(
+      new URL('../../YEEYEEYEE.Desktop.Avalonia/CanvasSurface.axaml.cs', import.meta.url), 'utf8')
+    for (const literal of ['请选择连接起点', '已选择起点：', '不能连到自己', '松在空白处', '拖拽已结束'])
+      expect(surface).not.toContain(literal)
+    expect(surface).toContain('UiText.Fill("connect.pickedSource"')
   })
 
   it('C# 那边嵌的是同一个文件，而且**只有一处**嵌它（再嵌一份就又变回两份抄写）', () => {

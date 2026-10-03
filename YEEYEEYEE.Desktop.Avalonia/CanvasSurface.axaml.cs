@@ -284,7 +284,7 @@ public partial class CanvasSurface : UserControl
     {
         connectionMode = enabled;
         connectionSource = null;
-        StatusTextHint = enabled ? "请选择连接起点" : null;
+        StatusTextHint = enabled ? UiText.Text("connect.pickSource") : null;
         UpdateHint();
     }
 
@@ -2589,13 +2589,14 @@ public partial class CanvasSurface : UserControl
         var target = NodeAt(world);
         if (target is null)
         {
-            StatusTextHint = "松在空白处，没有连线；要连接请拖到目标节点上";
+            // 连线手势这几句也走共享文案（措辞只有一份，网页端那条提示读的是同一个文件）。
+            StatusTextHint = UiText.Text("connect.droppedOnBlank");
             UpdateHint();
             return;
         }
         if (target.Id == source.Id)
         {
-            StatusTextHint = "不能连到自己";
+            StatusTextHint = UiText.Text("connect.selfLoop");
             UpdateHint();
             return;
         }
@@ -2603,7 +2604,7 @@ public partial class CanvasSurface : UserControl
         // 从输入端口出发 = 把对方的输出接到我这里，方向与从输出端口出发相反。
         var connection = fromInput ? (target, source) : (source, target);
         ConnectionRequested?.Invoke(this, connection);
-        StatusTextHint = "拖拽已结束";
+        StatusTextHint = UiText.Text("connect.dragEnded");
         Rebuild();
     }
 
@@ -2958,13 +2959,13 @@ public partial class CanvasSurface : UserControl
             if (connectionSource is null)
             {
                 connectionSource = node;
-                StatusTextHint = $"已选择起点：{node.Title}，请选择终点";
+                StatusTextHint = UiText.Fill("connect.pickedSource", ("title", node.Title));
             }
             else if (connectionSource.Id != node.Id)
             {
                 ConnectionRequested?.Invoke(this, (connectionSource, node));
                 connectionSource = null;
-                StatusTextHint = "请选择连接起点";
+                StatusTextHint = UiText.Text("connect.pickSource");
             }
             Rebuild();
             SelectedNodeChanged?.Invoke(this, node);
