@@ -84,8 +84,15 @@
 与现在的**内容哈希**修订对不上——不是「暂时没人用」，是「用不了了」。
 唯一的风险是**外部旧客户端**（别的机器上还有旧版本桌面端在推），这属于兼容性判断；
 `WebAccessGuard` 里 `/api/canvas` 与 `/ws/canvas` 两条前缀也一并删了，所以即便有旧客户端推也只会拿到 404。
-（**还留着一半**：`YEEYEEYEE.Canvas/src/CanvasApp.tsx` 那份 WebView 前端仍是死的——`main.tsx` 只在
-`window.chrome.webview` 存在时才用它，而仓库里没有任何 WebView 宿主。要清理得单独一次。）
+**第 181 轮把那另一半也清了**：`CanvasApp.tsx`（WebView 那份前端）、它的桥客户端 `CanvasBridge.ts`、
+本地状态模型 `CanvasStore.ts`、协议编解码 `Protocol/CanvasMessageCodec.ts` 与 `Protocol/Capabilities.ts`、
+库入口 `src/index.ts`、样式 `workflow.css`，连同三份只服务它们的测试与仓库根目录的 `protocol/fixtures/`
+（**那份「Canvas ⇄ Host v1 消息契约」的夹具就是给这条已经不存在的协议写的**）。
+`main.tsx` 现在只剩一个入口：网页端工作台。**构建产物随之瘦了一圈**：CSS 35.5 → 21.7 kB、
+JS 338.5 → 314.2 kB，参与打包的模块 51 → 44。
+**留着没动的**：`Protocol/VersionedMessages.ts`（`CANVAS_VERSION`、`OperationRecord`、`layerOf` 仍被在用），
+以及 `ChapterView.filterByChapter`——它第 181 轮之后已无生产调用方（网页端选某一章是**压暗**而不是筛掉），
+但它的用例同时钉住了「企划层只认 L1/L2」这条仍在用的判据，要清得连着改测试，记在 `TODO.local.md` 里。
 
 ### 2. 多端协同
 

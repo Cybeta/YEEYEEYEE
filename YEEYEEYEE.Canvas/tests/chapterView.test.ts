@@ -58,7 +58,10 @@ describe('章节视图按稳定 ID 对齐（C-4）', () => {
    * 这一条曾经是错的：判据写成 `layerOf(...) <= 2`，而 `layerOf` 对认不出来的类型返回 0，
    * 于是角色 / 场景 / 道具 / 通用这些真实节点全被判成「企划层」——选第一章时它们赖在画面上不走，
    * 看起来像「第一章里有三个角色」；剧本视图里还会被排到最前。
-   * 桌面端画的正是这一份（WebView 里的 `CanvasApp` 用 `filterByChapter`），所以这是真到用户眼前的。
+   * 判据本身是活的：外壳的 `records.isPlanning` 直接用它，与桌面端泳道引擎的
+   * `CanvasSwimlaneLayout.IsPlanningCategory` 是同一条规则。
+   * （`filterByChapter` 那几个用例只覆盖函数自己：第 181 轮删掉 WebView 那份前端之后它已无生产调用方
+   *   ——网页端选某一章是**压暗**而不是筛掉。要清掉它得单独一次。）
    */
   it('企划层只认 L1 剧情与 L2 企划：认不出的类型（0）不是企划层', () => {
     expect(isPlanningLayer(node('p', 'story-plan', {}))).toBe(true)

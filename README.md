@@ -187,9 +187,8 @@ dotnet run --project YEEYEEYEE.Web
 | `YEEYEEYEE.Desktop.Shared` | 无界面逻辑：Agent、画布计算、AI 提供方、技能与档位判定 |
 | `YEEYEEYEE.Desktop.Avalonia` | 桌面主端（Avalonia）。工作台的布局与配色以它为准，网页端对着它对齐 |
 | `YEEYEEYEE.Web` | Web 服务：镜像、账号、创作与编辑锁接口（`/api/web`） |
-| `YEEYEEYEE.Canvas` | React/Vite 前端：网页端工作台在 `src/shell/`，另有一份给 WebView 用的旧画布前端。产物单独构建，不在解决方案里 |
+| `YEEYEEYEE.Canvas` | React/Vite 前端：网页端工作台在 `src/shell/`。产物单独构建，不在解决方案里 |
 | `YEEYEEYEE.Mcp` | 独立只读 MCP 服务，不在解决方案里 |
-| `protocol/` | Canvas ⇄ Host v1 消息契约与测试夹具 |
 | `provider-art/` | 各厂家的形象图，构建时拷到程序目录旁 |
 | `tools/` | 发布脚本 |
 

@@ -1,33 +1,12 @@
 import { createRoot } from 'react-dom/client'
-import { CanvasApp } from './CanvasApp'
 import { WebCanvasApp } from './WebCanvasApp'
-import type { CanvasBridgeTransport, Envelope } from './Protocol/VersionedMessages'
 
-type WebViewWindow = Window & {
-  chrome?: { webview?: { postMessage: (message: unknown) => void; addEventListener: (type: string, listener: (event: MessageEvent) => void) => void; removeEventListener: (type: string, listener: (event: MessageEvent) => void) => void } }
-}
-
-function createWebViewTransport(): CanvasBridgeTransport {
-  return {
-    send: (message: Envelope) => {
-      const webview = (window as WebViewWindow).chrome?.webview
-      if (webview) webview.postMessage(message)
-      else window.parent.postMessage(message, '*')
-    },
-    subscribe: (handler) => {
-      const listener = (event: MessageEvent) => handler(event.data)
-      const webview = (window as WebViewWindow).chrome?.webview
-      if (webview) {
-        webview.addEventListener('message', listener)
-        return () => webview.removeEventListener('message', listener)
-      }
-      window.addEventListener('message', listener)
-      return () => window.removeEventListener('message', listener)
-    }
-  }
-}
-
-const isInWebView = typeof (window as WebViewWindow).chrome?.webview !== 'undefined'
-createRoot(document.getElementById('root')!).render(isInWebView
-  ? <CanvasApp transport={createWebViewTransport()} />
-  : <WebCanvasApp />)
+/**
+ * 唯一入口：网页端工作台。
+ *
+ * 第 181 轮之前这里还有一条分支：页面跑在 WebView2 里（`window.chrome.webview` 存在）时渲染
+ * 另一份 `CanvasApp`，走 `postMessage` 与宿主对话。那条路随旧的 HostBridge 兼容面一起删了——
+ * 仓库里没有任何 WebView 宿主（整个 `YEEYEEYEE.Desktop.Avalonia` 里搜不到 WebView），
+ * 那条分支**永远进不去**，却让每次构建都多打进一份完整的前端。
+ */
+createRoot(document.getElementById('root')!).render(<WebCanvasApp />)

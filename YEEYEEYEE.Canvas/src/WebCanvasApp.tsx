@@ -27,8 +27,7 @@ import {
   WorkbenchShell, type DockMode, type RailSection, type StatusFacts, type WorkbenchChrome, type WorkbenchView
 } from './shell/WorkbenchShell'
 import './session.css'
-import './workflow.css'
-// 令牌放最后：它定义的 :root 与 body 是整页的底色与字体，得压过前面那两份样式。
+// 令牌放最后：它定义的 :root 与 body 是整页的底色与字体，得压过前面那份样式。
 import './shell/tokens.css'
 
 /**
