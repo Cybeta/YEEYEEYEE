@@ -241,6 +241,7 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 落盘：孤儿正文被清掉，删站点连正文目录一起删", ComfyUiLibraryPrunesAndDeletesPayloads),
     ("ComfyUI 槽位：从四份真机样本里认出参数该放哪，认不出的如实说", ComfyUiBinderDetectsOnRealSamples),
     ("ComfyUI 槽位：按一次调用绑值，不改模板本身，连线槽位不硬写", ComfyUiBinderBindsWithoutDamagingTemplate),
+    ("ComfyUI 当前这一台：切换把地址与底模写成站点那一份，同一台不重复写", ComfyUiActivationProjectsSiteOntoConfig),
 };
 
 var failures = new List<string>();
@@ -1845,6 +1846,76 @@ static void ComfyUiBinderBindsWithoutDamagingTemplate()
     var shapelessSlots = ComfyUiWorkflowBinder.Detect(shapeless);
     Expect(!shapelessSlots.CanTextToImage && shapelessSlots.Notes.Count > 0,
         "形状不对时必须报「认不出」，不能给出一个假槽位");
+}
+
+/// <summary>
+/// 「当前用的是哪一台 ComfyUI」是**站点文件的投影**，不是设置里另存的一份。
+///
+/// 这件事必须钉住：一旦这两处能各说一套，请求就会打到另一台服务器上——而那台机器上
+/// 很可能没有这份工作流需要的节点，报出来的是一句「节点类型找不到」，看不出根因。
+/// </summary>
+static void ComfyUiActivationProjectsSiteOntoConfig()
+{
+    var home = Path.Combine(Path.GetTempPath(), "df-comfy-activate-" + Guid.NewGuid().ToString("N")[..8]);
+    var previous = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME");
+    try
+    {
+        Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME", home);
+        Directory.CreateDirectory(home);
+
+        var first = new SiteProfile
+        {
+            Id = "first",
+            DisplayName = "第一台",
+            Backend = "comfyui",
+            BaseUrl = "https://first.example.com",
+            Checkpoint = "sd_xl_base_1.0.safetensors"
+        };
+        var second = new SiteProfile
+        {
+            Id = "second",
+            DisplayName = "第二台",
+            Backend = "comfyui",
+            BaseUrl = "https://second.example.com",
+            Checkpoint = "wan2.1.safetensors"
+        };
+
+        Expect(ComfyUiSiteActivation.Activate(first, out var firstError), "第一台该能设上：" + firstError);
+        var afterFirst = AiProviderSettings.Load();
+        Expect(afterFirst.ComfyUiBaseUrl == first.BaseUrl, "地址该跟着站点走，实际 " + afterFirst.ComfyUiBaseUrl);
+        Expect(afterFirst.ComfyUiCheckpoint == first.Checkpoint, "底模该跟着站点走，实际 " + afterFirst.ComfyUiCheckpoint);
+
+        // 换台：配置必须**整份**跟着换，不能只换地址把上一台的底模留着——
+        // 那种混合状态会让请求打到第二台、却去加载第一台的底模，服务端报「模型不存在」。
+        Expect(ComfyUiSiteActivation.Activate(second, out var secondError), "第二台该能设上：" + secondError);
+        var afterSecond = AiProviderSettings.Load();
+        Expect(afterSecond.ComfyUiBaseUrl == second.BaseUrl, "换台后地址要变：" + afterSecond.ComfyUiBaseUrl);
+        Expect(afterSecond.ComfyUiCheckpoint == second.Checkpoint, "换台后底模也要变（不能留着上一台的）：" + afterSecond.ComfyUiCheckpoint);
+
+        // 同一台再设一次：不该改动文件（省掉一次无谓的写盘）。
+        var before = File.ReadAllText(AiProviderSettings.ConfigFilePath, Encoding.UTF8);
+        Expect(ComfyUiSiteActivation.Activate(second, out _), "重复设同一台该成功");
+        Expect(File.ReadAllText(AiProviderSettings.ConfigFilePath, Encoding.UTF8) == before,
+            "设的已经是当前这一台时不该再写一次盘");
+
+        // 不是 ComfyUI 站点、或没有地址：如实拒绝，不能把配置写成空。
+        var notComfy = new SiteProfile { Id = "api", Backend = "api", BaseUrl = "https://api.example.com/v1" };
+        Expect(!ComfyUiSiteActivation.Activate(notComfy, out var refused) && refused.Length > 0,
+            "接口站不该被当成 ComfyUI 设上");
+        var addressless = new SiteProfile { Id = "empty", Backend = "comfyui" };
+        Expect(!ComfyUiSiteActivation.Activate(addressless, out var refusedToo) && refusedToo.Length > 0,
+            "没有地址的 ComfyUI 站点不该被设上");
+        Expect(AiProviderSettings.Load().ComfyUiBaseUrl == second.BaseUrl, "被拒绝的两次不该动配置");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME", previous);
+        try
+        {
+            if (Directory.Exists(home)) Directory.Delete(home, true);
+        }
+        catch (IOException) { }
+    }
 }
 
 /// <summary>对拍用：返回第一处差异（路径 + 两边取值），完全一致返回 null。JSON 对象的键顺序不参与比较。
@@ -8723,7 +8794,7 @@ static void NodeImageBatchKeepsOnlyPicked()
 		NodeId = Guid.NewGuid(),
 		NodeTitle = "雨夜追车",
 		IsRunning = true,
-		Pool = new SitePoolChoice(new SiteProfile
+		Source = ImageSourceChoice.OfPool(new SitePoolChoice(new SiteProfile
 		{
 			Id = "example",
 			DisplayName = "示例站"
@@ -8732,7 +8803,7 @@ static void NodeImageBatchKeepsOnlyPicked()
 			Model = "gpt-image-2(池6)",
 			Tier = "2K",
 			Kind = "image"
-		})
+		}))
 	};
 	Expect(nodeImageBatch.PoolLabel == "示例站 · gpt-image-2(池6) · 2K", "卡片上那行由池子算出来：" + nodeImageBatch.PoolLabel);
 	nodeImageBatch.Slots.Add(new BatchSlot
@@ -10372,23 +10443,35 @@ static void CrackedRedrawPicksOnlyCrackedWithinCap()
 /// </summary>
 static void OneClickDurationFollowsPoolTier()
 {
+	var site = new SiteProfile { Id = "v", BaseUrl = "https://video.example.com/v1" };
 	var five = new SitePool { Model = "veo-3", Kind = "video", Tier = "5s", Seconds = 5, UnitPrice = 2 };
 	var any = new SitePool { Model = "wan-2", Kind = "video", Seconds = 0 };
+	var fiveSource = ImageSourceChoice.OfPool(new SitePoolChoice(site, five));
+	var anySource = ImageSourceChoice.OfPool(new SitePoolChoice(site, any));
 
 	// 清单写着 5s、用户要 15s：提醒一句，并说清清单里是多少。
-	var mismatch = VideoDurationPolicy.Check(five, 15);
+	var mismatch = VideoDurationPolicy.Check(fiveSource, 15);
 	Expect(mismatch.Mismatch, "清单写 5s 而用户要 15s 时要提醒");
 	Expect(mismatch.Note.Contains("5s") && mismatch.Note.Contains("15s"), "提醒要把两个数都写出来：" + mismatch.Note);
 
 	// 对得上：不提醒。
-	Expect(!VideoDurationPolicy.Check(five, 5).Mismatch, "秒数与清单一致时不该提醒");
+	Expect(!VideoDurationPolicy.Check(fiveSource, 5).Mismatch, "秒数与清单一致时不该提醒");
 
 	// 清单没写时长（0）：不知道，交给服务端——不猜也不拦。
-	var unknown = VideoDurationPolicy.Check(any, 15);
+	var unknown = VideoDurationPolicy.Check(anySource, 15);
 	Expect(!unknown.Mismatch && unknown.Note.Contains("没写时长"), "清单没写时长时交给服务端判断：" + unknown.Note);
 
 	// 不走池子（设置里的视频接口）：同样交给服务端。
 	Expect(!VideoDurationPolicy.Check(null, 15).Mismatch, "不走池子时不该提醒");
+
+	// 走 ComfyUI 工作流：那个秒数根本不会发出去（时长由工作流自己的帧数决定），
+	// 所以既不该说「对得上」也不该提醒去改——要说清的是「改了也没用」。
+	var workflowSource = ImageSourceChoice.OfWorkflow(new SiteWorkflowChoice(
+		new SiteProfile { Id = "c", Backend = "comfyui", BaseUrl = "https://comfy.example.com" },
+		new SiteWorkflow { Key = "G/wf.json", Title = "图生视频", Kind = "video" }));
+	var workflowCheck = VideoDurationPolicy.Check(workflowSource, 15);
+	Expect(!workflowCheck.Mismatch, "走工作流时不该报「档位对不上」：" + workflowCheck.Note);
+	Expect(workflowCheck.Note.Contains("自己"), "要走工作流时要说清时长由谁决定：" + workflowCheck.Note);
 
 	// 候选筛选：能接受这个秒数的池子才算（没写时长的也算「可以试」）。
 	var accepting = VideoDurationPolicy.Accepting(new[] { five, any }, 15);
@@ -10403,8 +10486,8 @@ static void OneClickCostAddsBothLines()
 {
 	var imageSite = new SiteProfile { Id = "s1", BaseUrl = "https://img.example.com/v1" };
 	var videoSite = new SiteProfile { Id = "s2", BaseUrl = "https://video.example.com/v1" };
-	var imagePool = new SitePoolChoice(imageSite, new SitePool { Model = "flux", UnitPrice = 0.5 });
-	var videoPool = new SitePoolChoice(videoSite, new SitePool { Model = "veo-3", Kind = "video", Seconds = 5, UnitPrice = 2 });
+	var imagePool = ImageSourceChoice.OfPool(new SitePoolChoice(imageSite, new SitePool { Model = "flux", UnitPrice = 0.5 }));
+	var videoPool = ImageSourceChoice.OfPool(new SitePoolChoice(videoSite, new SitePool { Model = "veo-3", Kind = "video", Seconds = 5, UnitPrice = 2 }));
 
 	// 补 4 张图 + 出 3 段视频：两笔各自成行，最后一行是合计。
 	var fourImages = Enumerable.Range(1, 4)
@@ -10429,7 +10512,7 @@ static void OneClickCostAddsBothLines()
 	// 池子没登记数字单价：如实说算不出来，不许报 0。
 	var unknownPrice = OneClickCost.Describe(new OneClickRunRequest(
 		GenerationIntent.Video, FillMissingImages: true, fourImages.Take(1).ToList(), threeVideos.Take(1).ToList(),
-		new SitePoolChoice(imageSite, new SitePool { Model = "flux" }), videoPool, Seconds: 5));
+		ImageSourceChoice.OfPool(new SitePoolChoice(imageSite, new SitePool { Model = "flux" })), videoPool, Seconds: 5));
 	Expect(unknownPrice.Any(line => line.Contains("算不出")), "没有数字单价时要说算不出来：" + string.Join(" / ", unknownPrice));
 	Expect(unknownPrice.Any(line => line.Contains("更多")), "只知道一半时要说明实际会比这更多：" + string.Join(" / ", unknownPrice));
 
@@ -10438,6 +10521,25 @@ static void OneClickCostAddsBothLines()
 		GenerationIntent.Images, FillMissingImages: true, Array.Empty<GenerationAuditItem>(), Array.Empty<GenerationAuditItem>(),
 		imagePool, null, Seconds: 0));
 	Expect(nothing.Count == 1 && nothing[0].Contains("齐的"), "没缺东西时说清楚：" + nothing[0]);
+
+	// 走本机 ComfyUI 工作流：那是**已知的 0**（烧的是自己的显卡），既不能说「算不出来」，
+	// 也不能让合计被当成「有一笔不清楚」。这两种说法都会让人把钱算错。
+	var comfySite = new SiteProfile { Id = "c1", Backend = "comfyui", BaseUrl = "https://comfy.example.com" };
+	var comfySource = ImageSourceChoice.OfWorkflow(new SiteWorkflowChoice(
+		comfySite, new SiteWorkflow { Key = "A/wf.json", Title = "文生图", Kind = "image", NodeCount = 11 }));
+	Expect(comfySource.UnitPrice is null, "工作流没有按次计费的单价");
+	var comfyCost = OneClickCost.Describe(new OneClickRunRequest(
+		GenerationIntent.Images, FillMissingImages: true, fourImages.Take(2).ToList(), Array.Empty<GenerationAuditItem>(),
+		comfySource, null, Seconds: 0));
+	Expect(comfyCost.Count == 1, "只补图时只有一行，实际 " + comfyCost.Count);
+	Expect(comfyCost[0].Contains("不花积分"), "走本机要说清不花积分：" + comfyCost[0]);
+	Expect(!comfyCost[0].Contains("算不出"), "走本机不该说成「算不出来」：" + comfyCost[0]);
+
+	// 一笔本机（已知 0）+ 一笔没单价（不知道）：合计必须说「已知的那部分」，不能拿 0 冒充总数。
+	var mixed = OneClickCost.Describe(new OneClickRunRequest(
+		GenerationIntent.Video, FillMissingImages: true, fourImages.Take(2).ToList(), threeVideos.Take(1).ToList(),
+		comfySource, ImageSourceChoice.OfPool(new SitePoolChoice(videoSite, new SitePool { Model = "veo-3", Kind = "video" })), Seconds: 5));
+	Expect(mixed.Any(line => line.Contains("已知的那部分")), "有一笔不知道时要说明合计只是已知部分：" + string.Join(" / ", mixed));
 }
 
 /// <summary>一个 JSON 桩响应。</summary>

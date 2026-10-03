@@ -33,8 +33,8 @@ internal static class GenerationAuditDialog
         Window owner,
         GenerationAuditReport report,
         bool videoAvailable,
-        SitePoolChoice? initialImagePool,
-        SitePoolChoice? initialVideoPool,
+        ImageSourceChoice? initialImageSource,
+        ImageSourceChoice? initialVideoSource,
         int initialSeconds)
     {
         Guid? locate = null;
@@ -96,8 +96,8 @@ internal static class GenerationAuditDialog
         };
         body.Children.Add(fillImages);
 
-        var imagePool = initialImagePool;
-        var videoPool = initialVideoPool;
+        var imagePool = initialImageSource;
+        var videoPool = initialVideoSource;
         var seconds = Math.Max(0, initialSeconds);
 
         var poolNote = Note(string.Empty);
@@ -160,8 +160,9 @@ internal static class GenerationAuditDialog
         void SyncTiers()
         {
             // 档位下拉只列视频池子清单里写明的那些秒数（没写就是空表，用户自己填）。
-            var tiers = (videoPool?.Pool.Seconds ?? 0) > 0
-                ? new List<string> { $"{videoPool!.Pool.Seconds}s（清单登记）" }
+            // 走 ComfyUI 工作流时没有「档位」这回事（时长由工作流自己的帧数决定），也不该装作有。
+            var tiers = (videoPool?.PoolItem?.Seconds ?? 0) > 0
+                ? new List<string> { $"{videoPool!.PoolItem!.Seconds}s（清单登记）" }
                 : new List<string>();
             var anyPool = SiteCatalog.Load().Sites.SelectMany(site => site.VideoPools)
                 .Where(pool => pool.Seconds > 0).Select(pool => $"{pool.Seconds}s").Distinct().OrderBy(text => text.Length).ToList();
@@ -171,16 +172,23 @@ internal static class GenerationAuditDialog
             tierBox.IsVisible = tiers.Count > 0;
         }
 
+        /// <summary>一行说明：走池子时报池子的细节，走 ComfyUI 工作流时报那份工作流的名字。</summary>
+        string SourceNote(ImageSourceChoice? source, string none)
+        {
+            if (source is null) return none;
+            return source.IsWorkflow
+                ? $"{source.Label}（ComfyUI 工作流：底模与步数由它自己决定，烧本机显卡）"
+                : $"{source.Label}（{source.PoolItem?.Describe()}）";
+        }
+
         void SyncCost()
         {
-            poolNote.Text = imagePool is null
-                ? "没选：补图会用设置里的默认图像模型（价格看设置，这里算不出来）。"
-                : $"{imagePool.Site.Label} · {imagePool.Pool.Label}（{imagePool.Pool.Describe()}）";
-            videoPoolNote.Text = videoPool is null
-                ? (videoAvailable ? "没选：会用设置里的视频接口。" : "还没配视频链路：出视频这一档现在跑不了。")
-                : $"{videoPool.Site.Label} · {videoPool.Pool.Label}（{videoPool.Pool.Describe()}）";
+            poolNote.Text = SourceNote(imagePool,
+                "没选：补图会用设置里的默认图像模型（价格看设置，这里算不出来）。");
+            videoPoolNote.Text = SourceNote(videoPool,
+                videoAvailable ? "没选：会用设置里的视频接口。" : "还没配视频链路：出视频这一档现在跑不了。");
 
-            var check = VideoDurationPolicy.Check(videoPool?.Pool, seconds);
+            var check = VideoDurationPolicy.Check(videoPool, seconds);
             durationNote.Text = check.Note;
             durationNote.Foreground = Brush(check.Mismatch ? "DfWarning" : "DfInk3");
 
@@ -237,7 +245,9 @@ internal static class GenerationAuditDialog
             videoPool = picked;
             // 换了池子就把时长对齐到它登记的档位：用户多半是「照这家的档位来」，
             // 而不是「我非要 15 秒」——真非要的话他自己改回去，那时会看到一句提醒。
-            if (videoPool.Pool.Seconds > 0) durationBox.Text = videoPool.Pool.Seconds.ToString();
+            // 走 ComfyUI 工作流时没有可对齐的档位（时长由工作流自己的帧数决定），所以不动它。
+            if (videoPool.PoolItem?.Seconds is > 0 and var tierSeconds)
+                durationBox.Text = tierSeconds.ToString();
             SyncTiers();
             SyncCost();
         };
@@ -249,7 +259,7 @@ internal static class GenerationAuditDialog
         {
             var clipboard = TopLevel.GetTopLevel(owner)?.Clipboard;
             if (clipboard is not null)
-                await clipboard.SetTextAsync(current.ToText(imagePool?.Pool.UnitPrice) + "\n\n" + string.Join("\n", OneClickCost.Describe(CurrentRun())));
+                await clipboard.SetTextAsync(current.ToText(imagePool?.UnitPrice) + "\n\n" + string.Join("\n", OneClickCost.Describe(CurrentRun())));
         };
         start.Click += (_, _) =>
         {

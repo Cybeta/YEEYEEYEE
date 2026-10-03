@@ -81,6 +81,17 @@ public sealed class AiProviderConfig
 
     public string LastImagePoolTier { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 上一次出图用的那份 **ComfyUI 工作流**（站点 Id + 服务器上的相对路径）。
+    ///
+    /// 与池子那份印记分开存：两种来源是并列的两条路，共用一组字段的话，
+    /// 「上次用池子」会把它上一次用工作流的记录冲掉，反之也一样——于是预选永远是错的。
+    /// 同样只存印记，工作流的真实内容始终以站点里那份正文为准。
+    /// </summary>
+    public string LastImageWorkflowSiteId { get; set; } = string.Empty;
+
+    public string LastImageWorkflowKey { get; set; } = string.Empty;
+
     /// <summary>视频接口一次最多能同时使用几张参考帧（0 表示不限制）。</summary>
     public int VideoMaxReferenceImages { get; set; } = 1;
 

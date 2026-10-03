@@ -2241,11 +2241,20 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (BlockedByOtherEditor(node.Id)) return;
 
         // 预选上一次用过的那一个：这条路每次都要挑一次池子，记住能省掉一连串点击。
-        var choice = await SitePoolPicker.ShowAsync(this, sites, node.Title, RememberedPool());
+        var choice = await SitePoolPicker.ShowAsync(this, sites, node.Title, RememberedPool(), RememberedWorkflow());
         if (choice is null) return;
-        RememberPool(choice);
+        RememberPool(choice.Pool);
+        RememberWorkflow(choice.Workflow);
 
-        if (choice.Pool.IsVideo)
+        // 选中某台 ComfyUI 的工作流时，先把**那台**设为当前用的那一台：
+        // 设置里的地址是站点文件的投影，不跟着走的话请求会打到另一台服务器上去。
+        if (choice.Workflow is { } comfy && !ComfyUiSiteActivation.Activate(comfy.Site, out var activationError))
+        {
+            StatusText.Text = activationError;
+            return;
+        }
+
+        if (choice.IsVideo)
         {
             // 视频池子只能走视频那条路：**绝不能**落进下面的出图逻辑——
             // 那会拿一张静图冒充视频（与「图生图被偷偷改成文生图」同一类的事）。
@@ -2269,7 +2278,9 @@ public partial class MainWindow : Window, IAgentSessionHost
             return;
         }
 
-        StatusText.Text = $"准备用「{choice.Site.Label} · {choice.Pool.Label}」（{choice.Pool.Describe()}）出图";
+        StatusText.Text = choice.IsWorkflow
+            ? $"准备用「{choice.Label}」出图（ComfyUI 工作流）"
+            : $"准备用「{choice.Label}」（{choice.PoolItem?.Describe()}）出图";
         await ShowPromptDialogAsync(node, suggestion, allowGenerate: true, choice);
     }
 
@@ -2293,8 +2304,8 @@ public partial class MainWindow : Window, IAgentSessionHost
             this,
             report,
             videoAvailable: VideoReady,
-            initialImagePool: RememberedPool(),
-            initialVideoPool: SuggestedVideoPool(),
+            initialImageSource: RememberedPool() is { } rememberedPool ? ImageSourceChoice.OfPool(rememberedPool) : null,
+            initialVideoSource: SuggestedVideoSource(),
             initialSeconds: Math.Max(0, AiProviderSettings.Load().VideoDefaultSeconds));
 
         if (outcome.Run is { } request)
@@ -2366,7 +2377,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                 }
 
                 await GenerateNodeImageAsync(target, suggestion, suggestion.Prompt, suggestion.NegativePrompt,
-                    forcedApproach: null, poolChoice: request.ImagePool, count: 1);
+                    forcedApproach: null, source: request.ImageSource, count: 1);
                 if (currentCanvas != canvas) return;
 
                 if (AdoptSingleResult(target)) imagesDone++;
@@ -2417,7 +2428,7 @@ public partial class MainWindow : Window, IAgentSessionHost
 
                 StatusText.Text = $"一键出视频 {step}/{total}：正在给「{target.Title}」出视频（异步任务，可能要等几分钟）…";
                 await RunVideoAsync(target, suggestion.Prompt, LatestImageAttachmentPath(target),
-                    request.Seconds, request.VideoPool, provider);
+                    request.Seconds, request.VideoSource, provider);
                 if (currentCanvas != canvas) return;
 
                 if (target.Attachments.Any(attachment =>
@@ -2467,17 +2478,21 @@ public partial class MainWindow : Window, IAgentSessionHost
     }
 
     /// <summary>
-    /// 一键出视频时预选的视频池子：站点清单里的第一个（遍历顺序稳定，所以每次预选的都一样）。
-    /// **只是预选**——池子名字与单价都摆在窗口上，随时能换；一个视频池子都没有时返回 null，
+    /// 一键出视频时预选的视频来源：站点清单里的第一个视频池子（遍历顺序稳定，所以每次预选的都一样）。
+    /// **只是预选**——来源的名字与单价都摆在窗口上，随时能换；一个视频池子都没有时返回 null，
     /// 那时走设置里的视频接口，窗口上会如实写「没选」。
+    ///
+    /// 这里**不去猜哪份 ComfyUI 工作流适合出视频**：一台服务器上往往有几十份出视频的工作流
+    /// （图生、动作迁移、对口型…），它们出的东西完全不同，按文件夹名挑一个等于替用户押注。
+    /// 池子那一侧可以预选，是因为清单排序本身就只有一个「第一个」；工作流这一侧则由用户自己挑。
     /// </summary>
-    private static SitePoolChoice? SuggestedVideoPool()
+    private static ImageSourceChoice? SuggestedVideoSource()
     {
         try
         {
             foreach (var site in SiteCatalog.Load().Sites)
                 foreach (var pool in site.UsablePools.Where(pool => pool.IsVideo))
-                    return new SitePoolChoice(site, pool);
+                    return ImageSourceChoice.OfPool(new SitePoolChoice(site, pool));
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
         {
@@ -2512,7 +2527,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             case NodeAssistKind.Video:
                 // **仍然显式分流**，不能让它落进 default：default 那条路是「出图」，
                 // 用户点「出视频」会拿到一张静图——那正是之前「图生图被偷偷改成文生图」同一类的事。
-                await ShowVideoPromptDialogAsync(node, suggestion, poolChoice: null);
+                await ShowVideoPromptDialogAsync(node, suggestion, source: null);
                 return;
 
             default:
@@ -2527,18 +2542,27 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// 首帧默认用节点上最新那张图（= 这一镜的画面），没有就是文生视频——并**如实说明是哪种**，
     /// 因为「有没有首帧」直接决定出来的是不是这一镜。视频是异步任务、动辄几分钟，这一点也先说清。
     /// </summary>
-    private async Task ShowVideoPromptDialogAsync(WorkflowNode node, NodeAssistSuggestion suggestion, SitePoolChoice? poolChoice)
+    private async Task ShowVideoPromptDialogAsync(WorkflowNode node, NodeAssistSuggestion suggestion, ImageSourceChoice? source)
     {
         if (currentCanvas is null) return;
+
+        // 出视频这条路只认接口站的视频池子（提交 → 轮询 → 下载）。选择器已经不会给出工作流那一项，
+        // 但这里再挡一道：万一以后接上了别的入口，也不该**静默**按池子的逻辑去跑一份工作流。
+        if (source?.IsWorkflow == true)
+        {
+            StatusText.Text = $"「{source.Label}」是一份 ComfyUI 工作流：出视频那条链现在只认接口站的视频池子，"
+                + "还提交不了 ComfyUI 的工作流。这一镜没有发出去。";
+            return;
+        }
 
         var config = AiProviderSettings.Load();
         // 走站点池子时，地址 / 模型 / 密钥由**池子**说了算（它自带这三样）：
         // 在配置的一份临时副本上覆盖，出视频那条链就按这一家去打——设置里那份只是兜底。
-        if (poolChoice is not null)
+        if (source?.Pool is { } pool)
         {
-            config.VideoEndpoint = poolChoice.Site.BaseUrl;
-            config.VideoModel = poolChoice.Pool.Model;
-            config.VideoApiKey = poolChoice.Site.ApiKey;
+            config.VideoEndpoint = pool.Site.BaseUrl;
+            config.VideoModel = pool.Pool.Model;
+            config.VideoApiKey = pool.Site.ApiKey;
         }
 
         IVideoProvider provider;
@@ -2550,15 +2574,15 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
         if (!provider.IsConfigured)
         {
-            StatusText.Text = poolChoice is null
+            StatusText.Text = source is null
                 ? "出视频链路没配好：请在「设置 → 生图与生视频 → 视频接口」里填上地址与模型。"
-                : $"「{poolChoice.Pool.Label}」这个池子缺地址或模型名，出不了视频。";
+                : $"「{source.Label}」这个池子缺地址或模型名，出不了视频。";
             return;
         }
 
         var frame = LatestImageAttachmentPath(node);
         var seconds = config.VideoDefaultSeconds;
-        var model = poolChoice?.Pool.Model ?? string.Empty;
+        var model = source?.PoolItem?.Model ?? string.Empty;
 
         var prompt = new TextBox
         {
@@ -2586,7 +2610,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             frame.Length > 0 ? AgentNoteLevel.Info : AgentNoteLevel.Warning));
         body.Children.Add(AgentDialogUi.Note(
             $"模型：{(model.Length > 0 ? model : config.VideoModel.Length > 0 ? config.VideoModel : "（设置里没填）")}"
-            + (poolChoice is null ? string.Empty : $" · {poolChoice.Site.Label} · {poolChoice.Pool.Label}")
+            + (source?.Pool is null ? string.Empty : $" · {source.Label}")
             + $" · 时长：{(seconds > 0 ? seconds + " 秒" : "由服务端决定")}"
             + "\n说明：视频是**异步任务**（提交 → 轮询 → 下载），可能等几分钟；"
             + "这一条链一次只出一版、不会自动重试——按次计费，多出就是多花钱。"));
@@ -2611,7 +2635,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                 return;
             }
             dialog.Close();
-            _ = RunVideoAsync(node, text, frame, seconds, poolChoice, provider);
+            _ = RunVideoAsync(node, text, frame, seconds, source, provider);
         };
         await dialog.ShowDialog(this);
     }
@@ -2623,7 +2647,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// 所以成功就挂上去；失败就如实说失败，不留下半个文件冒充产物。
     /// </summary>
     private async Task RunVideoAsync(
-        WorkflowNode node, string prompt, string frame, int seconds, SitePoolChoice? poolChoice, IVideoProvider provider)
+        WorkflowNode node, string prompt, string frame, int seconds, ImageSourceChoice? source, IVideoProvider provider)
     {
         if (currentCanvas is null) return;
 
@@ -2633,13 +2657,14 @@ public partial class MainWindow : Window, IAgentSessionHost
         StatusText.Text = $"正在出视频（{provider.Name}）：已提交，视频是异步任务，出好之前请别关窗口…";
 
         // 走站点池子时，模型 / 地址 / 路径 / **密钥**都由选定的那个池子说了算——与出图同一条规矩。
+        var pool = source?.Pool;
         var request = new VideoGenerationRequest
         {
             Prompt = prompt,
-            Model = poolChoice?.Pool.Model ?? string.Empty,
-            BaseUrl = poolChoice?.Site.BaseUrl ?? string.Empty,
-            EndpointPath = poolChoice?.Site.VideoPath ?? string.Empty,
-            ApiKey = poolChoice?.Site.ApiKey ?? string.Empty,
+            Model = pool?.Pool.Model ?? string.Empty,
+            BaseUrl = pool?.Site.BaseUrl ?? string.Empty,
+            EndpointPath = pool?.Site.VideoPath ?? string.Empty,
+            ApiKey = pool?.Site.ApiKey ?? string.Empty,
             Seconds = seconds,
             ReferenceImages = frame.Length > 0 ? new[] { frame } : Array.Empty<string>()
         };
@@ -2711,7 +2736,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// 提示词窗口：**提示词可改**，再决定复制、交给 Agent，或直接出图。
     /// 出图前必须让用户看到会发出去的提示词——不然出了不想要的图，只能靠猜是哪句话的问题。
     /// </summary>
-    private async Task ShowPromptDialogAsync(WorkflowNode node, NodeAssistSuggestion suggestion, bool allowGenerate, SitePoolChoice? poolChoice = null)
+    private async Task ShowPromptDialogAsync(WorkflowNode node, NodeAssistSuggestion suggestion, bool allowGenerate, ImageSourceChoice? source = null)
     {
         var prompt = new TextBox
         {
@@ -2761,8 +2786,8 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 从右键「运行技能」进来时池子已经选好了，这里只是让它可见、可改。
         // 否则用**上一次用过的那个**：多数人的出图是同一家、同一个模型反复用，
         // 每次重挑一遍纯属浪费。它只是「预选」——价格与档位都摆在上面，改动也随时可以。
-        var chosenPool = poolChoice ?? RememberedPool();
-        var poolButton = AgentDialogUi.Secondary("选池子…");
+        var chosenSource = source ?? (RememberedPool() is { } remembered ? ImageSourceChoice.OfPool(remembered) : null);
+        var poolButton = AgentDialogUi.Secondary("选接口…");
         var poolNote = AgentDialogUi.Note(string.Empty);
         poolNote.TextWrapping = TextWrapping.Wrap;
         // 「出图技能」是与「出图方式」**平行**的一项，不是它的一个取值。
@@ -2814,7 +2839,16 @@ public partial class MainWindow : Window, IAgentSessionHost
                 costNote.Text = "出 1 张：出好直接收进节点。";
                 return;
             }
-            var pool = chosenPool?.Pool;
+            // 走 ComfyUI 工作流时**没有按次计费的单价**：它烧的是本机显卡。
+            // 所以这里既不能说「算不出来」（那会让人以为是缺数据），也不能报 0 积分（那像在说白嫖）。
+            if (chosenSource?.IsWorkflow == true)
+            {
+                costNote.Text = $"同时出 {many} 张：走本机 ComfyUI 工作流，不花积分（烧的是这张显卡）。"
+                    + "工作流的步数与底模由它自己决定，改不了。";
+                return;
+            }
+
+            var pool = chosenSource?.PoolItem;
             if (pool is null)
             {
                 costNote.Text = $"同时出 {many} 张：出完在节点卡上点一张保存，其余的作废；都不满意可以「全部不要，重做」。";
@@ -2829,11 +2863,15 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         void DescribePool()
         {
-            clearPoolButton.IsVisible = chosenPool is not null;
-            poolNote.Text = chosenPool is null
+            clearPoolButton.IsVisible = chosenSource is not null;
+            poolNote.Text = chosenSource is null
                 ? "不用技能：按设置里的默认图像模型出图。"
-                : $"{chosenPool.Site.Label} · {chosenPool.Pool.Label}"
-                  + (chosenPool.Pool.Price.Length > 0 ? $"（{chosenPool.Pool.Price}）" : "（清单没写单价）");
+                : chosenSource.IsWorkflow
+                    ? $"{chosenSource.Label}（ComfyUI 工作流：底模与步数由它自己决定）"
+                    : $"{chosenSource.Label}"
+                      + (chosenSource.PoolItem?.Price.Length > 0
+                          ? $"（{chosenSource.PoolItem.Price}）"
+                          : "（清单没写单价）");
             SyncCost();
         }
 
@@ -2859,20 +2897,32 @@ public partial class MainWindow : Window, IAgentSessionHost
         modeBox.SelectionChanged += (_, _) => SyncModeNote();
         poolButton.Click += async (_, _) =>
         {
-            var picked = await SitePoolPicker.ShowAsync(this, SiteCatalog.Load().Sites, node.Title);
+            // 这一步只出图，所以两路候选都限定在出图：出视频池子 / 出视频工作流都不列出来
+            // （选完才发现「这个不能拿来出图」比一开始就看不到更浪费）。
+            var picked = await SitePoolPicker.ShowAsync(
+                this, SiteCatalog.Load().Sites, node.Title, video: false);
             if (picked is null) return;
-            if (picked.Pool.IsVideo)
+
+            // 走某台 ComfyUI 的工作流时要先把**那台**设为当前用的那一台（设置里的地址是站点文件的投影）。
+            // 失败就如实说，并且**不改**当前选择——免得界面显示新工作流、请求却打到旧那台上。
+            if (picked.Workflow is { } comfy)
             {
-                poolNote.Text = $"「{picked.Pool.Label}」是出视频池子，不能拿来出图；"
-                    + "出视频请到分镜节点右键选「出这一镜的视频」，或工具栏「运行技能」里挑它。";
+                if (!ComfyUiSiteActivation.Activate(comfy.Site, out var activationError))
+                {
+                    poolNote.Text = activationError;
+                    return;
+                }
+                chosenSource = picked;
+                DescribePool();
                 return;
             }
-            chosenPool = picked;
+
+            chosenSource = picked;
             DescribePool();
         };
         clearPoolButton.Click += (_, _) =>
         {
-            chosenPool = null;
+            chosenSource = null;
             DescribePool();
         };
         DescribePool();
@@ -2942,15 +2992,16 @@ public partial class MainWindow : Window, IAgentSessionHost
             // 出图技能是可选的：没选就用设置里的默认图像模型，不需要拦。
             generateRequested = true;
             forcedApproach = modeApproaches[modeBox.SelectedIndex];
-            // 真正要出图了才记：只是点开窗口看一眼不该改掉记忆。
-            RememberPool(chosenPool);
+            // 真正要出图了才记：只是点开窗口看一眼不该改掉记忆。两条记忆分开记（池子 / 工作流）。
+            RememberPool(chosenSource?.Pool);
+            RememberWorkflow(chosenSource?.Workflow);
             dialog.Close();
         };
 
         await dialog.ShowDialog(this);
         if (generateRequested)
             await GenerateNodeImageAsync(node, suggestion, prompt.Text?.Trim() ?? string.Empty,
-                negative.Text?.Trim() ?? string.Empty, forcedApproach, chosenPool,
+                negative.Text?.Trim() ?? string.Empty, forcedApproach, chosenSource,
                 (int)(countBox.Value ?? 1));
     }
 
@@ -3067,14 +3118,41 @@ public partial class MainWindow : Window, IAgentSessionHost
     }
 
     /// <summary>
+    /// 上一次出图用的那份 ComfyUI 工作流。找不到（站点被删、工作流被删或被改名）就返回 null——
+    /// 理由与 <see cref="RememberedPool"/> 一样：退到别的哪一份上去，用户会以为上次那份还在。
+    /// </summary>
+    private static SiteWorkflowChoice? RememberedWorkflow()
+    {
+        var config = AiProviderSettings.Load();
+        if (config.LastImageWorkflowSiteId.Length == 0) return null;
+        return SiteCatalog.FindWorkflow(SiteCatalog.Load().Sites,
+            config.LastImageWorkflowSiteId, config.LastImageWorkflowKey);
+    }
+
+    /// <summary>记下这一次用的工作流（空 = 这次没走工作流，这件事也要记住）。</summary>
+    private void RememberWorkflow(SiteWorkflowChoice? choice)
+    {
+        var config = AiProviderSettings.Load();
+        var siteId = choice?.Site.Id ?? string.Empty;
+        var key = choice?.Workflow.Key ?? string.Empty;
+        if (config.LastImageWorkflowSiteId == siteId && config.LastImageWorkflowKey == key) return;
+
+        config.LastImageWorkflowSiteId = siteId;
+        config.LastImageWorkflowKey = key;
+        if (!AiProviderSettings.Save(config))
+            StatusText.Text = "这一次用的工作流没能记住（配置文件写不进去）：下次要重新选一遍。";
+    }
+
+    /// <summary>
     /// 组装一次出图请求。**单张与多张共用这一处**——池子覆盖了哪几个字段、图生图走哪个接口路径，
     /// 复制成两份的话，改了一处另一处就会悄悄按设置里的默认值跑。
     /// </summary>
     private ImageGenerationRequest BuildImageRequest(
-        string prompt, string negative, SitePoolChoice? poolChoice,
+        string prompt, string negative, ImageSourceChoice? source,
         NodeImageDecision decision, IReadOnlyList<string> references, double? denoise)
     {
         var canvas = currentCanvas!;
+        var pool = source?.Pool;
         return new ImageGenerationRequest
         {
             Prompt = prompt,
@@ -3082,18 +3160,24 @@ public partial class MainWindow : Window, IAgentSessionHost
             // 走站点池子时，模型 / 接口 / 画幅 / **密钥**都由选定的那个池子说了算——
             // 「调用前询问用哪个接口」问的就是这几项，问完又按设置里的默认值跑就白问了。
             // 密钥尤其不能漏：一家站一把账号，拿别家的密钥去打它的地址只会拿到 401。
-            ApiKey = poolChoice?.Site.ApiKey ?? string.Empty,
-            Model = poolChoice?.Pool.Model ?? string.Empty,
-            BaseUrl = poolChoice?.Site.BaseUrl ?? string.Empty,
-            EndpointPath = poolChoice is null
+            ApiKey = pool?.Site.ApiKey ?? string.Empty,
+            Model = pool?.Pool.Model ?? string.Empty,
+            BaseUrl = pool?.Site.BaseUrl ?? string.Empty,
+            EndpointPath = pool is null
                 ? string.Empty
-                : decision.UsesBaseImage && poolChoice.Site.ImageEditPath.Length > 0
-                    ? poolChoice.Site.ImageEditPath
-                    : poolChoice.Site.ImagePath,
-            Method = poolChoice?.Site.Method ?? string.Empty,
-            AuthStyle = poolChoice?.Site.AuthStyle ?? string.Empty,
-            Width = poolChoice is { Pool.Width: > 0 } sized ? sized.Pool.Width : canvas.Width,
-            Height = poolChoice is { Pool.Height: > 0 } measured ? measured.Pool.Height : canvas.Height,
+                : decision.UsesBaseImage && pool.Site.ImageEditPath.Length > 0
+                    ? pool.Site.ImageEditPath
+                    : pool.Site.ImagePath,
+            Method = pool?.Site.Method ?? string.Empty,
+            AuthStyle = pool?.Site.AuthStyle ?? string.Empty,
+            // 走 ComfyUI 工作流时，地址与底模由「当前那一台」的配置决定（站点文件是它的投影），
+            // 这里只带「哪一台的哪一份」；正文由出图链路按这三个印记去读。
+            // 画幅也交给工作流自己：它认得出 width / height 才写，认不出就沿用模板里的。
+            WorkflowSiteId = source?.Workflow?.Site.Id ?? string.Empty,
+            WorkflowPayloadFile = source?.Workflow?.Workflow.PayloadFile ?? string.Empty,
+            WorkflowKey = source?.Workflow?.Workflow.Key ?? string.Empty,
+            Width = pool is { Pool.Width: > 0 } sized ? sized.Pool.Width : canvas.Width,
+            Height = pool is { Pool.Height: > 0 } measured ? measured.Pool.Height : canvas.Height,
             Steps = canvas.Steps,
             Cfg = canvas.Cfg,
             ReferenceImages = references,
@@ -3136,7 +3220,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// </summary>
     private async Task RunImageBatchAsync(
         WorkflowNode node, string prompt, string negative, string modeNote,
-        IImageProvider provider, SitePoolChoice? poolChoice, NodeImageDecision decision,
+        IImageProvider provider, ImageSourceChoice? source, NodeImageDecision decision,
         IReadOnlyList<string> references, double? denoise, int count,
         string sourceLabel = "")
     {
@@ -3158,8 +3242,8 @@ public partial class MainWindow : Window, IAgentSessionHost
             NodeContext = DescribeNodeContext(node),
             ModeNote = modeNote,
             SourceLabel = sourceLabel,
-            Pool = poolChoice,
-            Request = BuildImageRequest(prompt, negative, poolChoice, decision, references, denoise)
+            Source = source,
+            Request = BuildImageRequest(prompt, negative, source, decision, references, denoise)
         };
         for (var index = 0; index < count; index++) batch.Slots.Add(new BatchSlot());
         imageBatches[node.Id] = batch;
@@ -3169,7 +3253,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         node.ExecutionStatus = NodeExecutionStatus.Generating;
         CanvasSurfaceControl.Refresh();
         StatusText.Text = $"正在同时出 {count} 张（{provider.Name} · {decision.ApproachLabel}"
-            + (poolChoice is null ? string.Empty : $" · {poolChoice.Pool.Label}")
+            + (source is null ? string.Empty : $" · {source.ItemLabel}")
             + "）；节点上方那排窗口会亮着显示进度，出完在节点卡上点一张再点「保存这张」。";
 
         await Task.WhenAll(batch.Slots.Select(slot => GenerateIntoSlotAsync(node, batch, slot, provider)));
@@ -3604,8 +3688,8 @@ public partial class MainWindow : Window, IAgentSessionHost
             or System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
         {
             // 报不出「是哪一家」不该拦住开奖：退回中性徽标，池子信息仍然照报。
-            var fallback = batch.Pool is { } poolChoice
-                ? $"{poolChoice.Site.DisplayName} · {poolChoice.Pool.Label}"
+            var fallback = batch.Source is { } pickedSource
+                ? $"{pickedSource.SiteLabel} · {pickedSource.ItemLabel}"
                 : batch.SourceLabel;
             return (ProviderBadges.NeutralAbbreviation, ProviderBadges.NeutralColorHex, fallback, "custom");
         }
@@ -3614,8 +3698,8 @@ public partial class MainWindow : Window, IAgentSessionHost
         var preset = ProviderPreset.Match(endpoint);
         var badge = ProviderBadges.Of(preset.Id);
 
-        var line = batch.Pool is { } pool
-            ? $"{pool.Site.DisplayName} · {pool.Pool.Label}"
+        var line = batch.Source is { } source
+            ? $"{source.SiteLabel} · {source.ItemLabel}"
             : config.ImageModel.Length > 0 ? $"{preset.Name} · {config.ImageModel}" : preset.Name;
 
         return (badge.Abbreviation, badge.ColorHex, line, preset.Id);
@@ -3689,8 +3773,8 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
         var decision = NodeImageModePlanner.Decide(currentCanvas.Canvas, node);
         var approach = previous.Request.ReferenceImages.Count > 0 ? NodeImageApproach.ImageToImage : NodeImageApproach.TextToImage;
-        // 池子直接从上一批取（含站点与密钥）：不靠显示文案反推，改一次文案就不会悄悄失效。
-        await RunImageBatchAsync(node, previous.Prompt, previous.Negative, previous.ModeNote, provider, previous.Pool,
+        // 来源直接从上一批取（含站点与密钥）：不靠显示文案反推，改一次文案就不会悄悄失效。
+        await RunImageBatchAsync(node, previous.Prompt, previous.Negative, previous.ModeNote, provider, previous.Source,
             decision with { Approach = approach }, previous.Request.ReferenceImages, previous.Request.Denoise, previous.Count,
             sourceLabel: previous.SourceLabel);
     }
@@ -3821,7 +3905,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// </summary>
     private async Task GenerateNodeImageAsync(
         WorkflowNode node, NodeAssistSuggestion suggestion, string prompt, string negative,
-        NodeImageApproach? forcedApproach = null, SitePoolChoice? poolChoice = null, int count = 1)
+        NodeImageApproach? forcedApproach = null, ImageSourceChoice? source = null, int count = 1)
     {
         if (currentCanvas is null || string.IsNullOrWhiteSpace(prompt)) return;
         if (!canEdit)
@@ -3886,9 +3970,9 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 这时候如实拒绝并说明，**不偷偷改成文生图**：用户明确要的是图生图，给他一张文生图，
         // 钱花了、要的东西也还没拿到。其余组合都成立——文生图 / 图生图决定发不发参考图，
         // 池子决定用哪个模型、哪档、打哪个接口，两者是正交的。
-        if (poolChoice is { Pool.SupportsReference: false } && decision.UsesBaseImage)
+        if (source?.PoolItem is { SupportsReference: false } noReference && decision.UsesBaseImage)
         {
-            StatusText.Text = $"没发出去（没有产生费用）：「{poolChoice.Pool.Label}」的清单里明确写着不支持参考图，"
+            StatusText.Text = $"没发出去（没有产生费用）：「{noReference.Label}」的清单里明确写着不支持参考图，"
                 + "做不了图生图。把「出图方式」改成「文生图」，或者换一个支持参考图的池子。";
             return;
         }
@@ -3900,10 +3984,10 @@ public partial class MainWindow : Window, IAgentSessionHost
         var modeNote = decision.UsesBaseImage
             ? $"图生图 · 底图={decision.BaseImageLabel} · denoise {decision.Denoise:0.00}"
             : "文生图";
-        // 走站点池子时把池子的身份也记上：同一句话用 1K 还是 4K，出的钱差好几倍，
-        // 事后只看附件根本看不出这张是哪个池子跑的。
-        if (poolChoice is { } chosen)
-            modeNote = $"{chosen.Site.Label} · {chosen.Pool.Label} · {modeNote}";
+        // 走站点池子 / 站点工作流时把身份也记上：同一句话用 1K 还是 4K、用哪份工作流，出来的东西差很多，
+        // 事后只看附件根本看不出这张是哪个池子（哪份工作流）跑的。
+        if (source is { } chosen)
+            modeNote = $"{chosen.Label} · {modeNote}";
 
         IImageProvider provider;
         try
@@ -3929,7 +4013,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 状态栏写着「正在出图」，等图出来才跳出一个大图窗口。于是「出图的时候那个自动弹出的节点预览
         // 窗口没有了」这个报告就是这么来的。现在预览窗口在跑的时候就浮在节点上方闪着、报着秒数，
         // 1 张和 6 张是同一套观感（判定、参考图、池子覆盖本来就已经完全共用了）。
-        await RunImageBatchAsync(node, prompt, negative, modeNote, provider, poolChoice, decision,
+        await RunImageBatchAsync(node, prompt, negative, modeNote, provider, source, decision,
             references, denoise, count,
             sourceLabel: $"Agent 协助 · {suggestion.Title}");
     }

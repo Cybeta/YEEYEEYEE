@@ -107,15 +107,16 @@ public sealed class NodeImageBatch
     public DateTimeOffset? StartedAt { get; set; }
 
     /// <summary>
-    /// 这一批用的池子（含站点）。重做要按**同一家、同一把密钥、同一个模型**再来一次，
-    /// 所以留的是完整的池子而不是一个显示用的字符串——靠字符串反推站点，改一次显示文案就会失效。
+    /// 这一批用的来源（接口站池子或 ComfyUI 工作流，含站点）。重做要按**同一台 / 同一家、
+    /// 同一把密钥、同一个模型或同一份工作流**再来一次，所以留的是完整的来源而不是一个显示用的字符串——
+    /// 靠字符串反推，改一次显示文案就会失效。
     /// </summary>
     [JsonIgnore]
-    public SitePoolChoice? Pool { get; set; }
+    public ImageSourceChoice? Source { get; set; }
 
     /// <summary>显示在卡片上的一行（「示例站 · gpt-image-2(池6) · 2K」）。</summary>
     [JsonIgnore]
-    public string PoolLabel => Pool is { } pool ? $"{pool.Site.Label} · {pool.Pool.Label}" : string.Empty;
+    public string PoolLabel => Source?.Label ?? string.Empty;
 
     /// <summary>重做时按同一套参数再出一批，所以把请求本身留在这里。</summary>
     [JsonIgnore]

@@ -56,6 +56,19 @@ public sealed class ImageGenerationRequest
     /// <summary>图生图的重绘强度，越大变化越多；未设置时用服务默认。</summary>
     public double? Denoise { get; init; }
 
+    /// <summary>
+    /// 本次要走的那份 **ComfyUI 站点工作流**（哪一台、哪一份正文、服务器上的哪条路径）。
+    ///
+    /// 三项都为空 = 走代码里内置的那个模板（<c>ComfyUiWorkflowFactory</c> 的既有分支）。
+    /// 给了就说明用户在**这台服务器的这份工作流**里选过，参数按它自己那张图去放。
+    ///
+    /// 为什么带的是「正文文件名」而不是「工作流名」：正文是导出那一刻的快照，
+    /// 「哪份正文配哪份模板」由站点文件说了算；靠名字回查会在重名或改名时指错文件。
+    /// </summary>
+    public string WorkflowSiteId { get; init; } = string.Empty;
+    public string WorkflowPayloadFile { get; init; } = string.Empty;
+    public string WorkflowKey { get; init; } = string.Empty;
+
     public bool HasReferenceImages => ReferenceImages.Count > 0;
 
     public string SizeText => $"{Width}x{Height}";
@@ -528,6 +541,37 @@ public sealed class ComfyUiImageProvider : IImageProvider
     public async Task<ImageGenerationResult> GenerateAsync(ImageGenerationRequest request, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(request.Prompt)) return Failed("图像提示词为空，无法生成。");
+
+        // 用户在某个 ComfyUI 站点里选过一份工作流：把它连正文一起交给执行方。
+        //
+        // 正文是**导出那一刻的快照**，所以参数靠槽位识别写进去（见 ComfyUiWorkflowBinder）：
+        // 认不出收提示词的位置就**如实失败**，而不是把提示词丢掉、跑出导出时那张图——
+        // 那种失败最坏：界面说成功了，出的却是别人的提示词。
+        string template = string.Empty;
+        string slots = string.Empty;
+        ComfyUiWorkflowSlots? detected = null;
+        if (request.WorkflowPayloadFile.Length > 0)
+        {
+            template = SiteCatalog.LoadPayload(request.WorkflowSiteId, request.WorkflowPayloadFile) ?? string.Empty;
+            if (template.Length == 0)
+                return Failed($"这份工作流的正文读不到（站点 {request.WorkflowSiteId} 的 {request.WorkflowPayloadFile}）："
+                    + "可能站点被删了或正文被清掉了，到「设置 → 技能管理 → 站点与池子」重新导入一次即可。");
+
+            try
+            {
+                detected = ComfyUiWorkflowBinder.Detect(template);
+            }
+            catch (Exception error)
+            {
+                return Failed($"这份工作流的形状读不懂（{error.GetType().Name}）：{error.Message}");
+            }
+
+            if (!detected.CanTextToImage)
+                return Failed("这份工作流收不到提示词，所以没提交：" + string.Join("；", detected.Notes));
+
+            slots = JsonSerializer.Serialize(detected);
+        }
+
         var inputs = new Dictionary<string, JsonElement>
         {
             ["prompt"] = JsonSerializer.SerializeToElement(request.Prompt),
@@ -536,6 +580,12 @@ public sealed class ComfyUiImageProvider : IImageProvider
             ["height"] = JsonSerializer.SerializeToElement(Math.Clamp(request.Height, 64, 2048)),
             ["checkpoint"] = JsonSerializer.SerializeToElement(config.ComfyUiCheckpoint)
         };
+        if (template.Length > 0)
+        {
+            // 走用户选的那份工作流：底模由它自己的 CheckpointLoader 决定，配置里那个值不参与。
+            inputs["workflowTemplate"] = JsonSerializer.SerializeToElement(template);
+            inputs["workflowSlots"] = JsonSerializer.SerializeToElement(slots);
+        }
         if (request.Steps is { } steps) inputs["steps"] = JsonSerializer.SerializeToElement(steps);
         if (request.Cfg is { } cfg) inputs["cfg"] = JsonSerializer.SerializeToElement(cfg);
         if (request.Seed is { } seed) inputs["seed"] = JsonSerializer.SerializeToElement(seed);
@@ -584,7 +634,7 @@ public sealed class ComfyUiImageProvider : IImageProvider
             }).ConfigureAwait(false);
 
             var result = await completion.Task.ConfigureAwait(false);
-            return MapResult(result, references.Count);
+            return MapResult(result, ModelLabel(request, template.Length > 0), ReferenceNote(references.Count, detected));
         }
         catch (OperationCanceledException) { return Failed("ComfyUI 任务已取消。"); }
         catch (TimeoutException error) { return Failed(error.Message); }
@@ -593,7 +643,35 @@ public sealed class ComfyUiImageProvider : IImageProvider
         finally { execution.Updated -= OnUpdated; }
     }
 
-    private ImageGenerationResult MapResult(ExecutionResult result, int referenceCount)
+    /// <summary>
+    /// 报出去的「模型」是什么。走站点工作流时报**那份工作流的名字**——报 checkpoint 会让人以为
+    /// 跑的是配置里那个底模，而那份工作流的底模由它自己的 CheckpointLoader 决定。
+    /// </summary>
+    private string ModelLabel(ImageGenerationRequest request, bool usingStoredWorkflow) =>
+        usingStoredWorkflow
+            ? (request.WorkflowKey.Length > 0 ? request.WorkflowKey : "站点工作流")
+            : config.ComfyUiCheckpoint;
+
+    /// <summary>
+    /// 参考图的实际用法说明。**用不了就要说出来**：静默丢掉参考图，用户会以为是模型没画好，
+    /// 而真实原因是这份工作流根本没有底图入口。
+    /// </summary>
+    private static string ReferenceNote(int referenceCount, ComfyUiWorkflowSlots? slots)
+    {
+        if (referenceCount == 0) return string.Empty;
+        if (slots is { CanTakeImage: false })
+            return $"这份工作流没有底图入口，这 {referenceCount} 张参考图没有被使用（它只能文生图）。"
+                + "要按参考图出图得换一份带 LoadImage 的工作流。";
+        if (referenceCount > 1)
+            return slots is null
+                ? $"当前 img2img 工作流只支持单张底图，已使用第 1 张，忽略其余 {referenceCount - 1} 张。" +
+                  "要真正合成多角色，需要换成支持多参考的工作流模板（例如 IPAdapter）。"
+                : $"这份工作流只用了第 1 张底图，忽略其余 {referenceCount - 1} 张；"
+                  + "要合成多张参考图得换一份支持多参考的工作流（例如 IPAdapter）。";
+        return string.Empty;
+    }
+
+    private ImageGenerationResult MapResult(ExecutionResult result, string modelLabel, string referenceNote)
     {
         if (result.State != JobState.Succeeded)
             return Failed(result.ErrorMessage ?? $"ComfyUI 任务状态为 {result.State}。");
@@ -609,11 +687,8 @@ public sealed class ComfyUiImageProvider : IImageProvider
                     Status = ImageGenerationStatus.Succeeded,
                     FilePath = path,
                     Provider = Name,
-                    Model = config.ComfyUiCheckpoint,
-                    ReferenceNote = referenceCount > 1
-                        ? $"当前 img2img 工作流只支持单张底图，已使用第 1 张，忽略其余 {referenceCount - 1} 张。" +
-                          "要真正合成多角色，需要换成支持多参考的工作流模板（例如 IPAdapter）。"
-                        : string.Empty
+                    Model = modelLabel,
+                    ReferenceNote = referenceNote
                 };
         }
         return Failed("ComfyUI 任务完成但没有返回可用图片。");

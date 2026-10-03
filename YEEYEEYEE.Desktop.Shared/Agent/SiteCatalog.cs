@@ -328,6 +328,47 @@ public sealed record SitePoolChoice(SiteProfile Site, SitePool Pool);
 public sealed record SiteWorkflowChoice(SiteProfile Site, SiteWorkflow Workflow);
 
 /// <summary>
+/// 用户选定的一次出图 / 出视频来源。**两种来源只在这一个地方合流**：
+/// 接口站的池子（一家站 × 一个模型 × 一个档位）与 ComfyUI 的工作流（一台服务器 × 一份节点图）。
+///
+/// 为什么不让工作流伪装成池子：池子的参数是「宽高 / 时长 / 单价」，拼出来是一次 HTTP 调用；
+/// 工作流是一整张节点图，参数藏在各节点里。合成一种之后，选择器、自检、成本估算里
+/// 每一处都得再判一次「这到底是哪一种」，而判断漏了一处就是安静地算错价、或按错的尺寸出图。
+/// </summary>
+public sealed record ImageSourceChoice(SitePoolChoice? Pool, SiteWorkflowChoice? Workflow)
+{
+    public static ImageSourceChoice OfPool(SitePoolChoice pool) => new(pool, null);
+
+    public static ImageSourceChoice OfWorkflow(SiteWorkflowChoice workflow) => new(null, workflow);
+
+    public string SiteLabel => Workflow?.Site.Label ?? Pool?.Site.Label ?? string.Empty;
+
+    public string ItemLabel => Workflow is { } workflow
+        ? workflow.Workflow.Label
+        : Pool is { } pool ? pool.Pool.Label : string.Empty;
+
+    /// <summary>一行说明（「站点 · 子项」）。</summary>
+    public string Label => SiteLabel.Length == 0 ? ItemLabel : $"{SiteLabel} · {ItemLabel}";
+
+    public bool IsVideo => Workflow is { } workflow ? workflow.Workflow.IsVideo : Pool?.Pool.IsVideo ?? false;
+
+    /// <summary>走接口站池子时的那个池子；走 ComfyUI 工作流时为 null。</summary>
+    public SitePool? PoolItem => Pool?.Pool;
+
+    /// <summary>走 ComfyUI 工作流时的那份工作流；走接口站池子时为 null。</summary>
+    public SiteWorkflow? WorkflowItem => Workflow?.Workflow;
+
+    /// <summary>走的是不是 ComfyUI 工作流（而不是接口站池子）。</summary>
+    public bool IsWorkflow => Workflow is not null;
+
+    /// <summary>
+    /// 这一次的单价；**算不出来时是 null**（ComfyUI 工作流没有单价——它烧的是自己的显卡，
+    /// 不是按次计费的接口）。返回 0 会让成本行显示「0 积分」，那是在说谎。
+    /// </summary>
+    public double? UnitPrice => Pool?.Pool.UnitPrice is > 0 ? Pool.Pool.UnitPrice : null;
+}
+
+/// <summary>
 /// 站点文件（<c>skills/sites/&lt;id&gt;.json</c>）的读写。
 ///
 /// 放在技能目录下的子目录里，而不是和技能混在一起：技能是「一步一步的流程」，站点是「一家有哪些能用的」，
@@ -384,6 +425,19 @@ public static class SiteCatalog
             string.Equals(item.Model, model.Trim(), StringComparison.OrdinalIgnoreCase)
             && string.Equals(item.Tier, key, StringComparison.OrdinalIgnoreCase));
         return pool is null ? null : new SitePoolChoice(site, pool);
+    }
+
+    /// <summary>
+    /// 按「上次用的那一份」的印记在现有站点里把工作流找回来；找不到返回 null（理由同 <see cref="Find"/>）。
+    /// </summary>
+    public static SiteWorkflowChoice? FindWorkflow(IReadOnlyList<SiteProfile> sites, string? siteId, string? key)
+    {
+        if (sites is null || string.IsNullOrWhiteSpace(siteId) || string.IsNullOrWhiteSpace(key)) return null;
+        var site = sites.FirstOrDefault(item => string.Equals(item.Id, siteId.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (site is null) return null;
+        var workflow = site.Workflows.FirstOrDefault(item =>
+            string.Equals(item.Key, key.Trim(), StringComparison.OrdinalIgnoreCase));
+        return workflow is null ? null : new SiteWorkflowChoice(site, workflow);
     }
 
     /// <summary>默认显示名：主机名本身（例如 video.example.com）；用户可以改成更好认的名字。</summary>

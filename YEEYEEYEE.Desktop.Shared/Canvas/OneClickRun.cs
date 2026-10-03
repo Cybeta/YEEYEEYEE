@@ -12,8 +12,8 @@ public sealed record OneClickRunRequest(
     bool FillMissingImages,
     IReadOnlyList<GenerationAuditItem> ImageItems,
     IReadOnlyList<GenerationAuditItem> VideoItems,
-    SitePoolChoice? ImagePool,
-    SitePoolChoice? VideoPool,
+    ImageSourceChoice? ImageSource,
+    ImageSourceChoice? VideoSource,
     int Seconds)
 {
     /// <summary>这一次要补几张图。**清单本身就是要做的事**，所以数量从它算出来，不另存一个数（免得两边对不上）。</summary>
@@ -44,10 +44,18 @@ public sealed record OneClickRunRequest(
 public static class VideoDurationPolicy
 {
     /// <summary>返回「要不要提醒」以及那句话。</summary>
-    public static (bool Mismatch, string Note) Check(SitePool? pool, int seconds)
+    public static (bool Mismatch, string Note) Check(ImageSourceChoice? source, int seconds)
     {
+        // 走 ComfyUI 工作流时，时长由**那份工作流自己的帧数设置**决定（实测是 a*24+1 这种表达式），
+        // 我们按秒数改不动它。所以这里既不该说「对得上」，也不该提醒用户去改秒数——
+        // 那个秒数根本不会发出去。
+        if (source?.IsWorkflow == true)
+            return (false, $"{seconds}s 不会发出去：这份 ComfyUI 工作流的时长由它自己的帧数设置决定，我们改不了它。");
+
+        var pool = source?.Pool?.Pool;
         if (seconds <= 0) return (false, "时长留空：由服务端按模型的默认值决定。");
-        if (pool is null) return (false, $"这次不走池子（用设置里的视频接口）：清单里没有它的时长档位，{seconds}s 交给服务端判断。");
+        if (source is null) return (false, $"这次不走池子（用设置里的视频接口）：清单里没有它的时长档位，{seconds}s 交给服务端判断。");
+        if (pool is null) return (false, $"{seconds}s 交给服务端判断。");
         if (pool.Seconds <= 0) return (false, $"「{pool.Label}」的清单没写时长，{seconds}s 交给服务端判断。");
         if (pool.Seconds == seconds) return (false, $"「{pool.Label}」登记的时长就是 {seconds}s。");
 
@@ -72,43 +80,55 @@ public static class VideoDurationPolicy
 /// </summary>
 public static class OneClickCost
 {
+    /// <summary>
+    /// 这一次的单价：**算不出来时是 null**。走 ComfyUI 工作流时是 0——
+    /// 那烧的是自己的显卡，不是按次计费的接口，所以「0 积分」是个**已知的**事实，不是缺数据。
+    /// 这两件事必须分开：把「不知道」说成 0，用户会以为这一下白嫖。
+    /// </summary>
+    private static double? Price(ImageSourceChoice? source) =>
+        source?.IsWorkflow == true ? 0 : source?.UnitPrice;
+
+    /// <summary>这一笔的花费是不是**已知的**（含 ComfyUI 工作流的「就是 0」）。</summary>
+    private static bool Known(ImageSourceChoice? source) => source is null || Price(source) is not null;
+
     public static IReadOnlyList<string> Describe(OneClickRunRequest request)
     {
         var lines = new List<string>();
 
         if (request.WantsImages)
-        {
-            var price = request.ImagePool?.Pool.UnitPrice ?? 0;
-            lines.Add(price > 0
-                ? $"补图 {request.ImageCount} 张：单价 {price:0.####}，预计 {price * request.ImageCount:0.####} 积分。"
-                : $"补图 {request.ImageCount} 张；这个池子没登记数字单价，算不出图的花费。");
-        }
+            lines.Add(Line("补图", request.ImageCount, "张", request.ImageSource));
 
         if (request.WantsVideos)
-        {
-            var price = request.VideoPool?.Pool.UnitPrice ?? 0;
-            lines.Add(price > 0
-                ? $"出视频 {request.VideoCount} 段：单价 {price:0.####}，预计 {price * request.VideoCount:0.####} 积分。"
-                : $"出视频 {request.VideoCount} 段；这个池子没登记数字单价，算不出视频的花费。");
-        }
+            lines.Add(Line("出视频", request.VideoCount, "段", request.VideoSource));
 
         if (lines.Count == 0) return new[] { "没有要生成的东西：这一层的产物都是齐的。" };
 
         // 只有一笔时不另起一行「合计」——那只是把刚说过的数再说一遍。
         if (lines.Count == 1) return lines;
 
-        var imagePrice = request.WantsImages ? request.ImagePool?.Pool.UnitPrice ?? 0 : 0;
-        var videoPrice = request.WantsVideos ? request.VideoPool?.Pool.UnitPrice ?? 0 : 0;
-        var imageTotal = imagePrice * request.ImageCount;
-        var videoTotal = videoPrice * request.VideoCount;
-        if (imagePrice > 0 || videoPrice > 0)
-        {
-            var bothKnown = (!request.WantsImages || imagePrice > 0) && (!request.WantsVideos || videoPrice > 0);
-            lines.Add(bothKnown
-                ? $"合计约 {imageTotal + videoTotal:0.####} 积分（这两笔是分开计费的，加起来才是这一下的总账）。"
-                : $"已知的那部分合计约 {imageTotal + videoTotal:0.####} 积分；还有一笔没单价，实际会比这更多。");
-        }
+        var imagePrice = request.WantsImages ? Price(request.ImageSource) ?? 0 : 0;
+        var videoPrice = request.WantsVideos ? Price(request.VideoSource) ?? 0 : 0;
+        var bothKnown = (!request.WantsImages || Known(request.ImageSource))
+            && (!request.WantsVideos || Known(request.VideoSource));
+        var total = imagePrice * request.ImageCount + videoPrice * request.VideoCount;
+
+        lines.Add(bothKnown
+            ? $"合计约 {total:0.####} 积分（这两笔是分开计费的，加起来才是这一下的总账）。"
+            : $"已知的那部分合计约 {total:0.####} 积分；还有一笔没单价，实际会比这更多。");
 
         return lines;
+    }
+
+    /// <summary>一笔的说明。三种情形说三种话：知道单价、走本机（就是 0）、不知道。</summary>
+    private static string Line(string what, int count, string unit, ImageSourceChoice? source)
+    {
+        var price = Price(source);
+        if (price is > 0)
+            return $"{what} {count} {unit}：单价 {price:0.####}，预计 {price * count:0.####} 积分。";
+        if (source?.IsWorkflow == true)
+            return $"{what} {count} {unit}：走本机 ComfyUI 工作流，烧的是这张显卡，不花积分。";
+        if (source is null && price is null)
+            return $"{what} {count} {unit}：这次不走池子（用设置里的接口），没有可查的单价，算不出花费。";
+        return $"{what} {count} {unit}；这个池子没登记数字单价，算不出{what}的花费。";
     }
 }

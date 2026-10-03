@@ -29,6 +29,69 @@ public sealed record ComfyUiLibraryResult(
 }
 
 /// <summary>
+/// 读一份已存好的工作流正文并认出槽位——用于在选择器里**事先**说清这份工作流能收到什么。
+///
+/// 为什么要在选之前就说：认不出收提示词的位置时，选它出图会以失败告终（那是正确的，
+/// 见 <c>ComfyUiImageProvider</c>）；与其让人跑一次才知道，不如在挑选那一刻就把话说清楚。
+/// </summary>
+public static class ComfyUiWorkflowInspector
+{
+    public static (ComfyUiWorkflowSlots? Slots, string Error) Inspect(SiteProfile site, SiteWorkflow workflow)
+    {
+        ArgumentNullException.ThrowIfNull(site);
+        ArgumentNullException.ThrowIfNull(workflow);
+
+        if (workflow.PayloadFile.Length == 0) return (null, "这份没有正文（导入时没转成，见它自己的说明）");
+
+        var payload = SiteCatalog.LoadPayload(site.Id, workflow.PayloadFile);
+        if (payload is null) return (null, "正文文件读不到（可能被清掉了），重新导入一次即可");
+
+        try
+        {
+            return (ComfyUiWorkflowBinder.Detect(payload), string.Empty);
+        }
+        catch (Exception error)
+        {
+            return (null, $"形状读不懂（{error.GetType().Name}）：{error.Message}");
+        }
+    }
+}
+
+/// <summary>
+/// 把某台 ComfyUI 站点设为「当前那一台」。
+///
+/// 设置里的 ComfyUI 地址与 checkpoint 是**站点文件的投影**，不是另一份真相：
+/// 一台服务器上的工作流只有它自己能跑（装了哪些节点、底模叫什么，别人不知道），
+/// 所以选中某份工作流之后，配置里那两项必须跟着指向它，否则请求会打到另一台上去。
+/// 这也是「多台 ComfyUI」唯一需要的机制——不需要再单独存一个「当前是哪台」。
+/// </summary>
+public static class ComfyUiSiteActivation
+{
+    public static bool Activate(SiteProfile site, out string error)
+    {
+        ArgumentNullException.ThrowIfNull(site);
+        error = string.Empty;
+        if (!site.IsComfyUi || site.BaseUrl.Length == 0)
+        {
+            error = $"「{site.Label}」不是一台可用的 ComfyUI 站点（缺少地址）。";
+            return false;
+        }
+
+        var config = AiProviderSettings.Load();
+        if (string.Equals(config.ComfyUiBaseUrl, site.BaseUrl, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(config.ComfyUiCheckpoint, site.Checkpoint, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        config.ComfyUiBaseUrl = site.BaseUrl;
+        config.ComfyUiCheckpoint = site.Checkpoint;
+        if (AiProviderSettings.Save(config)) return true;
+
+        error = "配置写不进去（配置文件可能不可写或磁盘只读），所以没法把这一台设为当前用的那一台。";
+        return false;
+    }
+}
+
+/// <summary>
 /// 把一台 ComfyUI 服务器上 <c>userdata/workflows/</c> 里的工作流**整份**拉下来，并逐份转成 API 格式。
 ///
 /// 这件事以前只能靠人做：在浏览器里打开 ComfyUI，一份一份右键「导出（API）」，再手工导入。

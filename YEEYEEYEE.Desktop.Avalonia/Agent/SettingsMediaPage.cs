@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
+using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using YEEYEEYEE.Desktop;
 using static YEEYEEYEE.Desktop.Avalonia.AgentDialogUi;
@@ -212,16 +213,102 @@ internal static class SettingsMediaPage
         // ---------- ComfyUI ----------
         Divider();
         root.Children.Add(Header("ComfyUI"));
-        var comfyUrl = AddField(
-            "ComfyUI 地址",
-            config.ComfyUiBaseUrl,
-            "填了它并配好 checkpoint，才具备走本地 ComfyUI 出图的前提；只填地址不算配置完成。",
-            "http://127.0.0.1:8188");
-        var comfyCheckpoint = AddField(
-            "Checkpoint 文件名",
-            config.ComfyUiCheckpoint,
-            "工作流里加载的模型文件名；必须与 ComfyUI 机器上实际存在的文件名一致，写错会让任务在跑的时候才失败。",
-            "例如 sd_xl_base_1.0.safetensors");
+
+        // 地址与 checkpoint **不再在这里各存一份**，而是**站点文件的投影**。
+        //
+        // 为什么：一台服务器上装了哪些自定义节点、底模叫什么，只有它自己的站点文件知道；
+        // 在这里再存一份，就成了两个真相源——改了这头忘那头，请求就会打到另一台服务器上去
+        // （那头的节点可能根本不存在，报错还是「节点类型 not found」这种看不出所以然的话）。
+        // 于是这一块变成「看出当前用的是哪一台」，换台 / 改地址都到站点那边去。
+        var comfySites = new List<SiteProfile>();
+        var comfyLoading = false;
+
+        var comfyChoice = new ComboBox { FontSize = 11, HorizontalAlignment = HorizontalAlignment.Left, MinWidth = 260 };
+        var comfyCurrent = new TextBlock
+        {
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brush("DfInk2")
+        };
+        var comfyNote = Note(string.Empty);
+        comfyNote.TextWrapping = TextWrapping.Wrap;
+
+        void ShowComfyProjection()
+        {
+            var index = comfyChoice.SelectedIndex;
+            if (comfySites.Count == 0)
+            {
+                comfyCurrent.Text = config.ComfyUiBaseUrl.Length > 0
+                    ? $"当前用的是手工填的地址：{config.ComfyUiBaseUrl}"
+                      + (config.ComfyUiCheckpoint.Length > 0 ? $"｜checkpoint {config.ComfyUiCheckpoint}" : "｜没填 checkpoint")
+                    : "还没有登记过 ComfyUI 站点。";
+                comfyNote.Text = config.ComfyUiBaseUrl.Length > 0
+                    ? "这个地址是早先手工填的，**没有对应的站点**：它下面没有工作流清单，出图只能走代码里内置的那个最小模板。"
+                      + "想要用那台服务器自己的工作流，就用上面的「智能导入」把地址贴一次——"
+                      + "它会把整份工作流拉下来并登记成站点。"
+                    : "要用 ComfyUI 出图：用上面的「智能导入」把地址贴一次（例如 http://127.0.0.1:8188），"
+                      + "它会把那台服务器的工作流整份拉下来并登记成站点。";
+                return;
+            }
+
+            var site = comfySites[Math.Clamp(index, 0, comfySites.Count - 1)];
+            var recommended = site.Recommended(video: false);
+            comfyCurrent.Text = $"当前这一台：{site.Label}\n地址：{site.BaseUrl}"
+                + (site.Checkpoint.Length > 0 ? $"\ncheckpoint：{site.Checkpoint}" : "\ncheckpoint：没填（用工作流自己声明的那个）")
+                + $"\n工作流：图像 {site.ImageWorkflows.Count} 份、视频 {site.VideoWorkflows.Count} 份"
+                + (recommended is null ? string.Empty : $"\n图像那一侧默认推荐：{recommended.Title}（节点 {recommended.NodeCount} 个）");
+            comfyNote.Text = "要换台 / 改地址 / 看这一台有哪些工作流：**设置 → 技能管理 → 站点与池子**"
+                + "（在那里还能停用某几份、改推荐项）\n"
+                + "重新拉一次清单（服务器上加过工作流）：用上面的「智能导入」把地址再贴一次，是覆盖更新，不会多出第二台。";
+        }
+
+        /// <summary>从磁盘重读站点清单并回显。**智能导入之后必须走这一遍**：
+        /// 它刚登记的那一台在构建这个页面时还不存在，不重读就永远显示「还没有登记过」。</summary>
+        void ReloadComfyProjection()
+        {
+            comfyLoading = true;
+            try
+            {
+                comfySites.Clear();
+                comfySites.AddRange(SiteCatalog.Load().Sites.Where(item => item.IsComfyUi && item.BaseUrl.Length > 0));
+
+                comfyChoice.Items.Clear();
+                foreach (var item in comfySites)
+                    comfyChoice.Items.Add($"{item.Label}（图像 {item.ImageWorkflows.Count} / 视频 {item.VideoWorkflows.Count} 份工作流）");
+                comfyChoice.IsVisible = comfySites.Count > 1;
+
+                // 选中「配置里当前指向的那一台」；找不到就留空（那一台可能被删了）。
+                var current = comfySites.FindIndex(item =>
+                    string.Equals(item.BaseUrl, config.ComfyUiBaseUrl, StringComparison.OrdinalIgnoreCase));
+                comfyChoice.SelectedIndex = current >= 0 ? current : comfySites.Count > 0 ? 0 : -1;
+            }
+            finally { comfyLoading = false; }
+            ShowComfyProjection();
+        }
+
+        // 换台就把配置改成指向它：配置是投影，站点文件才是真相。
+        comfyChoice.SelectionChanged += (_, _) =>
+        {
+            if (comfyLoading) return;
+            var index = comfyChoice.SelectedIndex;
+            if (index < 0 || index >= comfySites.Count) return;
+            var site = comfySites[index];
+            if (!ComfyUiSiteActivation.Activate(site, out var activationError))
+            {
+                report($"换不成那一台：{activationError}", YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Error);
+                return;
+            }
+            // 内存里那份也要跟着改：否则随后一次「保存」会用旧的地址把它覆盖回去。
+            config.ComfyUiBaseUrl = site.BaseUrl;
+            config.ComfyUiCheckpoint = site.Checkpoint;
+            ShowComfyProjection();
+            report($"已切到「{site.Label}」：出图会打到 {site.BaseUrl}。", YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Info);
+        };
+
+        root.Children.Add(comfyChoice);
+        root.Children.Add(comfyCurrent);
+        root.Children.Add(comfyNote);
+
         var comfyClientId = AddField(
             "客户端 ID",
             config.ComfyUiClientId,
@@ -289,8 +376,8 @@ internal static class SettingsMediaPage
             }
 
             report(
-                $"还没配好 ComfyUI：填上「ComfyUI 地址」与「Checkpoint 文件名」后才会优先走本地链路。"
-                + $"当前解析到「{provider.Name}」。",
+                $"还没配好 ComfyUI：先用上面的「智能导入」贴一个 ComfyUI 地址（例如 http://127.0.0.1:8188），"
+                + $"它会登记成站点并把工作流拉下来。当前解析到「{provider.Name}」。",
                 YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Warning);
         };
         root.Children.Add(testComfy);
@@ -474,8 +561,9 @@ internal static class SettingsMediaPage
             if (int.TryParse(TextOf(imageMaxRefs), out var imageMaxRefValue))
                 config.ImageMaxReferenceImages = imageMaxRefValue;
 
-            config.ComfyUiBaseUrl = TextOf(comfyUrl);
-            config.ComfyUiCheckpoint = TextOf(comfyCheckpoint);
+            // ComfyUI 的地址与 checkpoint 不在这里写回：它们是站点文件的投影（见上面那段说明）。
+            // 换台的动作在 comfyChoice 的 SelectionChanged 里**当场**落盘，不留到「保存」——
+            // 留着的话，用户点「测试连接」测的是磁盘上还没改的那一台。
             config.ComfyUiClientId = TextOf(comfyClientId);
             config.AssetDirectory = TextOf(assetDir);
 
@@ -507,8 +595,6 @@ internal static class SettingsMediaPage
             imageSteps.Text = config.DefaultImageSteps;
             imageCfg.Text = config.DefaultImageCfg;
             imageNegative.Text = config.DefaultNegativePrompt;
-            comfyUrl.Text = config.ComfyUiBaseUrl;
-            comfyCheckpoint.Text = config.ComfyUiCheckpoint;
             comfyClientId.Text = config.ComfyUiClientId;
             assetDir.Text = config.AssetDirectory;
             videoEndpoint.Text = config.VideoEndpoint;
@@ -519,6 +605,8 @@ internal static class SettingsMediaPage
             gachaReveal.IsChecked = config.GachaReveal;
             judgeQuality.IsChecked = config.JudgeImageQuality;
             autoRedraw.IsChecked = config.AutoRedrawCrackedCards;
+            // ComfyUI 那两块来自站点文件，不在 config 里 —— 单独重读一遍。
+            ReloadComfyProjection();
         }
 
         /// <summary>
@@ -535,6 +623,9 @@ internal static class SettingsMediaPage
             context.RefreshAll();
             report(summary, YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Success);
         }
+
+        // 页面建好之后立刻按磁盘回显一次：ComfyUI 那块在构建时还是空的（站点清单要从磁盘读）。
+        ReloadComfyProjection();
 
         return (root, CommitEdits, ReloadFromConfig);
     }

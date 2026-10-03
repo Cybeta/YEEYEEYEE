@@ -2,7 +2,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace YEEYEEYEE.Desktop;
+namespace YEEYEEYEE.Host;
 
 /// <summary>
 /// 一份 ComfyUI 工作流里「参数该往哪儿放」的答案。
