@@ -24,11 +24,12 @@ public sealed record CollaborationLease(
 /// 成功与失败都必须带一句**能直接给人看的话**，失败另外带上服务端的错误码——
 /// 界面据此决定是「提示重试」「引导去登录」还是「如实转述」，不必自己拆响应体。
 /// </summary>
-public sealed record CollaborationResult(bool Ok, string Code, string Message)
+public sealed record CollaborationResult(bool Ok, string Code, string Message, CollaborationLease? Holder = null)
 {
     public static CollaborationResult Success(string message) => new(true, string.Empty, message);
 
-    public static CollaborationResult Failure(string code, string message) => new(false, code, message);
+    public static CollaborationResult Failure(string code, string message, CollaborationLease? holder = null) =>
+        new(false, code, message, holder);
 }
 
 /// <summary>
@@ -49,11 +50,12 @@ public sealed class CollaborationSession : IDisposable
 {
     private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web);
 
-    private readonly HttpClient http;
     private readonly CookieContainer cookies = new();
 
+    private HttpClient http;
+
     /// <summary>服务器基地址（已去掉结尾斜杠）。空串表示这台机器还没配服务器。</summary>
-    public string BaseUrl { get; }
+    public string BaseUrl { get; private set; }
 
     /// <summary>当前登录者。未登录时为 null。</summary>
     public CollaborationUser? User { get; private set; }
@@ -78,6 +80,30 @@ public sealed class CollaborationSession : IDisposable
     public static string Display(CollaborationUser user) =>
         string.IsNullOrWhiteSpace(user.DisplayName) ? user.Username : user.DisplayName;
 
+    /// <summary>
+    /// 来源端的说法（wire 值只有 <c>web</c> / <c>desktop</c>，认不出的算网页端）。
+    /// 与服务端 <c>EditClient.Label</c> 是同一套词，桌面端这边只有这一份。
+    /// </summary>
+    public static string ClientLabel(string client) => client == "desktop" ? "桌面端" : "网页端";
+
+    /// <summary>
+    /// 换一台服务器。**会清掉当前身份与 cookie**：换了地址之后旧会话对新服务器毫无意义，
+    /// 留着它比留空更危险。设置页里改完地址要登录时先调它，应用这边持有的就是同一个会话。
+    /// </summary>
+    public void UseServer(string baseUrl)
+    {
+        var normalized = (baseUrl ?? string.Empty).Trim().TrimEnd('/');
+        if (string.Equals(normalized, BaseUrl, StringComparison.Ordinal)) return;
+
+        http.Dispose();
+        http = new HttpClient(new HttpClientHandler { CookieContainer = cookies, UseCookies = true })
+        {
+            Timeout = TimeSpan.FromSeconds(10)
+        };
+        BaseUrl = normalized;
+        Forget();
+    }
+
     public async Task<CollaborationResult> SignInAsync(string username, string password, CancellationToken cancellationToken = default)
     {
         if (!IsConfigured) return CollaborationResult.Failure("NOT_CONFIGURED", "还没有填服务器地址");
@@ -92,8 +118,8 @@ public sealed class CollaborationSession : IDisposable
             {
                 // 换一次账号失败时，上一次的身份必须当场作废：留着一个旧身份比留空更危险。
                 Forget();
-                var (code, message) = await ReadErrorAsync(response, cancellationToken);
-                return CollaborationResult.Failure(code, message);
+                var error = await ReadErrorAsync(response, cancellationToken);
+                return CollaborationResult.Failure(error.Code ?? string.Empty, error.Message, error.Holder);
             }
 
             var payload = await response.Content.ReadFromJsonAsync<UserResponse>(Options, cancellationToken);
@@ -144,8 +170,8 @@ public sealed class CollaborationSession : IDisposable
 
             if (!response.IsSuccessStatusCode)
             {
-                var (code, message) = await ReadErrorAsync(response, cancellationToken);
-                return CollaborationResult.Failure(code, message);
+                var error = await ReadErrorAsync(response, cancellationToken);
+                return CollaborationResult.Failure(error.Code ?? string.Empty, error.Message);
             }
 
             var payload = await response.Content.ReadFromJsonAsync<LeaseResponse>(Options, cancellationToken);
@@ -158,11 +184,98 @@ public sealed class CollaborationSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// 自己现在占着的那条节点锁（没占就是 null）。
+    ///
+    /// 桌面端只在**真的开始编辑**时才去占：点着看一圈就撒一地锁，等于把别人挡在外面而自己什么也没改。
+    /// </summary>
+    public CollaborationLease? HeldNodeLease { get; private set; }
+
+    /// <summary>
+    /// 占住某个节点的编辑锁。已经拿着同一个节点的锁时是幂等的（服务端把它当续期）。
+    /// 别人拿着就返回失败，并把持有者放在 <see cref="CollaborationResult.Holder"/> 上——
+    /// 界面照原话说「某某正在编辑」，不自己编一句。
+    /// </summary>
+    public async Task<CollaborationResult> AcquireNodeLeaseAsync(Guid nodeId, CancellationToken cancellationToken = default)
+    {
+        if (!IsConfigured) return CollaborationResult.Failure("NOT_CONFIGURED", "还没有填服务器地址");
+        if (!IsSignedIn) return CollaborationResult.Failure("NOT_SIGNED_IN", "先登录才能占住编辑锁");
+
+        try
+        {
+            // 来源端声明 desktop：别人看到的就是「某某（桌面端）正在编辑」。
+            using var response = await http.PostAsJsonAsync(
+                $"{BaseUrl}/api/web/edits",
+                new { scope = "node", targetId = nodeId, client = "desktop" },
+                Options, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await ReadErrorAsync(response, cancellationToken);
+                return CollaborationResult.Failure(error.Code ?? string.Empty, error.Message, error.Holder);
+            }
+
+            var payload = await response.Content.ReadFromJsonAsync<LeaseEnvelope>(Options, cancellationToken);
+            if (payload?.Lease is null) return CollaborationResult.Failure("UNEXPECTED_RESPONSE", "服务器没有回锁");
+            HeldNodeLease = payload.Lease;
+            return CollaborationResult.Success("占住了这个节点");
+        }
+        catch (Exception error) when (IsTransport(error))
+        {
+            return TransportFailure(error);
+        }
+    }
+
+    /// <summary>
+    /// 续期。锁不在了（被别人接管、或已经过期）就把它忘掉——调用方据此**停下编辑**，
+    /// 而不是接着写一个自己已经没有资格的节点。
+    /// </summary>
+    public async Task<CollaborationResult> RenewHeldLeaseAsync(CancellationToken cancellationToken = default)
+    {
+        if (HeldNodeLease is not { } held) return CollaborationResult.Success("没有需要续期的锁");
+
+        try
+        {
+            using var response = await http.PutAsync($"{BaseUrl}/api/web/edits/{held.LeaseId}", content: null, cancellationToken);
+            if (response.IsSuccessStatusCode) return CollaborationResult.Success("锁还在");
+
+            var error = await ReadErrorAsync(response, cancellationToken);
+            HeldNodeLease = null;
+            return CollaborationResult.Failure(error.Code ?? string.Empty, error.Message);
+        }
+        catch (Exception error) when (IsTransport(error))
+        {
+            // 服务器暂时叫不到**不等于**锁没了：TTL 内还归我们，界面不必为此惊动用户。
+            return CollaborationResult.Failure("NETWORK", "续期没送到（服务器暂时叫不到），锁在有效期内仍然有效");
+        }
+    }
+
+    /// <summary>还回去。**失败也要忘掉本地记录**：留着它只会让界面继续显示「你在编辑」。</summary>
+    public async Task<CollaborationResult> ReleaseHeldLeaseAsync(CancellationToken cancellationToken = default)
+    {
+        if (HeldNodeLease is not { } held) return CollaborationResult.Success("没有需要释放的锁");
+        HeldNodeLease = null;
+        if (!IsConfigured) return CollaborationResult.Success("已放开");
+
+        try
+        {
+            using var response = await http.DeleteAsync($"{BaseUrl}/api/web/edits/{held.LeaseId}", cancellationToken);
+            return response.IsSuccessStatusCode
+                ? CollaborationResult.Success("已放开这个节点")
+                : CollaborationResult.Failure("RELEASE_FAILED", "放开时服务器没认（锁可能已经过期）");
+        }
+        catch (Exception error) when (IsTransport(error))
+        {
+            return CollaborationResult.Failure("NETWORK", "放开没送到（服务器暂时叫不到），锁会自己过期");
+        }
+    }
+
     /// <summary>会话与身份一起清掉（cookie 也要丢：留着过期 cookie 只会让下一次请求白跑）。</summary>
     private void Forget()
     {
         User = null;
         Leases = Array.Empty<CollaborationLease>();
+        // 身份没了，手上那条锁也就不再代表任何人了：本地记录必须跟着清。
+        HeldNodeLease = null;
         // 逐个置为过期，而不是换一个容器：容器是 HttpClientHandler 建的时候拿走的，
         // 换字段只是换了我们手上的引用，请求照样会带着旧 cookie 出去。
         foreach (Cookie cookie in cookies.GetAllCookies()) cookie.Expired = true;
@@ -176,21 +289,23 @@ public sealed class CollaborationSession : IDisposable
             ? CollaborationResult.Failure("TIMEOUT", "服务器没有在 10 秒内回应（地址对吗？服务起着吗？）")
             : CollaborationResult.Failure("NETWORK", "连不上服务器：" + error.Message);
 
-    /// <summary>服务端的错误契约是 <c>{ code, message }</c>；解不开就如实说解不开，不编一句。</summary>
-    private static async Task<(string Code, string Message)> ReadErrorAsync(
-        HttpResponseMessage response, CancellationToken cancellationToken)
+    /// <summary>
+    /// 服务端的错误契约是 <c>{ code, message }</c>，锁冲突时另外带 <c>holder</c>。
+    /// 这里**只读一次响应体**：读完就取不到了，所以把需要的字段一起带回来，
+    /// 调用方再按需取（冲突时才有 holder，其余是 null）。
+    /// </summary>
+    private static async Task<ErrorResponse> ReadErrorAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         try
         {
             var payload = await response.Content.ReadFromJsonAsync<ErrorResponse>(Options, cancellationToken);
-            if (payload is not null && !string.IsNullOrWhiteSpace(payload.Message))
-                return (payload.Code ?? string.Empty, payload.Message);
+            if (payload is not null && !string.IsNullOrWhiteSpace(payload.Message)) return payload;
         }
         catch (Exception error) when (error is JsonException or NotSupportedException or HttpRequestException)
         {
         }
 
-        return ($"HTTP_{(int)response.StatusCode}", $"服务器回了 {(int)response.StatusCode}，没给原因");
+        return new ErrorResponse($"HTTP_{(int)response.StatusCode}", $"服务器回了 {(int)response.StatusCode}，没给原因", null);
     }
 
     public void Dispose() => http.Dispose();
@@ -199,5 +314,8 @@ public sealed class CollaborationSession : IDisposable
 
     private sealed record LeaseResponse(CollaborationLease[]? Leases);
 
-    private sealed record ErrorResponse(string? Code, string? Message);
+    /// <summary>占锁的响应：<c>{ lease, displaced }</c>。</summary>
+    private sealed record LeaseEnvelope(CollaborationLease? Lease);
+
+    private sealed record ErrorResponse(string? Code, string Message, CollaborationLease? Holder);
 }

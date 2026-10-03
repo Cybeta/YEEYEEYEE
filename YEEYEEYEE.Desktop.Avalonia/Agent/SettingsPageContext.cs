@@ -29,4 +29,10 @@ internal sealed class SettingsPageContext
 
     /// <summary>把一行结论回报到窗口底部的状态区。</summary>
     public required Action<string, AgentNoteLevel> Report { get; init; }
+
+    /// <summary>
+    /// 应用持有的协作会话（同一个实例也用在画布那边占编辑锁，所以不能由某一页自己新建、自己释放）。
+    /// 「协作」页只是它的一个界面。
+    /// </summary>
+    public required CollaborationSession Collaboration { get; init; }
 }

@@ -30,7 +30,7 @@ internal static class SettingsWindow
     /// <summary>
     /// 打开设置。返回是否**成功写盘**：调用方据此决定要不要刷新界面上的「当前模型」之类的展示。
     /// </summary>
-    public static async Task<bool> ShowAsync(Window owner, int initialPage = 0)
+    public static async Task<bool> ShowAsync(Window owner, CollaborationSession collaboration, int initialPage = 0)
     {
         var config = AiProviderSettings.Load();
         var saved = false;
@@ -82,7 +82,8 @@ internal static class SettingsWindow
             CommitAll = CommitAll,
             SaveAll = SaveAll,
             RefreshAll = RefreshAll,
-            Report = Report
+            Report = Report,
+            Collaboration = collaboration
         };
 
         // ---------- 四页 ----------
