@@ -239,6 +239,8 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 拉取：单份读不到或转不了只让那一份失败，其余照常，原因逐份记着", ComfyUiLibraryIsolatesFailures),
     ("ComfyUI 落盘：正文按份落文件、站点文件里不带正文，重新导入保住用户停用与推荐", ComfyUiLibraryInstallKeepsUserChoices),
     ("ComfyUI 落盘：孤儿正文被清掉，删站点连正文目录一起删", ComfyUiLibraryPrunesAndDeletesPayloads),
+    ("ComfyUI 槽位：从四份真机样本里认出参数该放哪，认不出的如实说", ComfyUiBinderDetectsOnRealSamples),
+    ("ComfyUI 槽位：按一次调用绑值，不改模板本身，连线槽位不硬写", ComfyUiBinderBindsWithoutDamagingTemplate),
 };
 
 var failures = new List<string>();
@@ -1674,6 +1676,175 @@ static void ComfyUiLibraryPrunesAndDeletesPayloads()
         Expect(!File.Exists(Path.Combine(SiteCatalog.Directory, site.Id + ".json")), "站点文件该没了");
         Expect(!Directory.Exists(payloadDirectory), "正文目录该跟着站点一起删：" + payloadDirectory);
     });
+}
+
+// ── ComfyUI 槽位：从一份工作流里认出「参数该放哪」 ──────────────────────────
+//
+// 导出的 API 工作流是那一刻的快照（提示词、尺寸、种子都烤死在节点里），
+// 所以「选一份工作流」要真能用，得先知道哪个节点的哪个输入收什么。
+// 四份真机样本覆盖四种形态，它们的识别结论就是这里的验收标准。
+
+static ComfyUiWorkflowSlots DetectFixture(string tag)
+{
+    var api = File.ReadAllText(Path.Combine(ComfyUiFixtureDir(), tag + ".api.json"), Encoding.UTF8);
+    return ComfyUiWorkflowBinder.Detect(api);
+}
+
+static string Explain(ComfyUiWorkflowSlots slots) =>
+    slots.Describe() + "｜" + string.Join("；", slots.Notes);
+
+static void ComfyUiBinderDetectsOnRealSamples()
+{
+    // T01：最正路的文生图。提示词、负面词、画幅、种子四样都该认出来。
+    var t01 = DetectFixture("T01");
+    Expect(t01.CanTextToImage, "T01 该认出收提示词的节点：" + Explain(t01));
+    Expect(t01.PositiveInput == "text", "提示词该写在 text 上：" + t01.PositiveInput);
+    // T01 的负面词这一路指向 ConditioningZeroOut——那是「这份工作流不要负面词」的正规写法。
+    // 它必须被认成「有意置空」，而不是被当成「没找到」：后者会在界面上留一个用户既改不了、
+    // 也不需要改的假问题。
+    Expect(t01.NegativeDeliberatelyEmpty, "T01 的负面词是显式置空的写法，该如实标出来：" + Explain(t01));
+    Expect(t01.NegativeNodeId.Length == 0, "显式置空的那一路不该被当成可写的负面词槽位");
+    Expect(t01.SeedNodeIds.Count > 0, "T01 该认出种子：" + Explain(t01));
+    // T01 的画幅是 ResolutionSelector 按「长宽比 + 百万像素」算出来的，改不了。
+    // 必须报成「改不了」并**说出它会算出多大**，而不是假装我们控制得了。
+    Expect(!t01.CanResize, "T01 的尺寸来自上游计算节点，不该被认成能改画幅");
+    Expect(t01.Notes.Any(note => note.Contains("ResolutionSelector") && note.Contains("aspect_ratio")),
+        "改不了画幅时要说清是谁算的、按什么参数算：" + Explain(t01));
+    // 认出来的节点确实在图上，而且真的收字面量——不然绑值会把它改坏。
+    var t01Graph = JsonNode.Parse(File.ReadAllText(
+        Path.Combine(ComfyUiFixtureDir(), "T01.api.json"), Encoding.UTF8))!.AsObject();
+    Expect(t01Graph[t01.PositiveNodeId]?["inputs"]?["text"] is JsonValue,
+        "T01 认出来的提示词槽位该是字面量：" + t01.PositiveNodeId);
+
+    // G01：Wan 图生视频，形状与常规出图完全不同——提示词不在 CLIPTextEncode 上，
+    // 而在 WanVideoTextEncode 的 positive_prompt / negative_prompt 上。
+    // 这条正是「不猜、只看真样本」换来的：按节点类型找会在这里全军覆没。
+    var g01 = DetectFixture("G01");
+    Expect(g01.CanTextToImage, "G01 该认出收提示词的节点：" + Explain(g01));
+    // 正向前提示词是连线（→ 一个 Text Multiline 节点），必须**跳一跳**才拿到能写的位置。
+    Expect(g01.PositiveNodeId == "119",
+        $"G01 的提示词该落在被引用的那个文本节点上，实际 {g01.PositiveNodeId}");
+    Expect(g01.PositiveInput == "text", "G01 的提示词该写在 text 上：" + g01.PositiveInput);
+    // 负面词在这一份里本身就是字面量，直接写就行。
+    Expect(g01.NegativeNodeId == "130", $"G01 的负面词该写在 WanVideoTextEncode 上，实际 {g01.NegativeNodeId}");
+    Expect(g01.NegativeInput == "negative_prompt", "G01 的负面词输入名认错了：" + g01.NegativeInput);
+    // 两段采样（132 起步、142 接着跑）都要换种子，否则同一张图会出一模一样的结果。
+    Expect(g01.SeedNodeIds.Count == 2, "G01 该认出两段采样的种子：" + string.Join("、", g01.SeedNodeIds));
+    Expect(g01.CanTakeImage, "G01 有 LoadImage，该认得出底图入口");
+    // 帧数由表达式算出来：这一项我们**不动**，但必须如实说出它由谁决定。
+    Expect(g01.Notes.Any(note => note.Contains("num_frames") || note.Contains("视频长度")),
+        "视频长度由工作流自己决定，要如实说明：" + Explain(g01));
+
+    // T03 / T04：这两份内置了提示词改写（文字由图里别的节点产出，不是字面量）。
+    // 那种情况下**必须认不出来**——往里塞字符串会被上游覆盖，属于安静地出错。
+    foreach (var tag in new[] { "T03", "T04" })
+    {
+        var slots = DetectFixture(tag);
+        var graph = JsonNode.Parse(File.ReadAllText(
+            Path.Combine(ComfyUiFixtureDir(), tag + ".api.json"), Encoding.UTF8))!.AsObject();
+
+        if (slots.PositiveNodeId.Length > 0)
+        {
+            // 若仍认出来了，那它就必须真的是字面量（否则就是误判）。查的是**它认出来的那个输入名**，
+            // 不是写死 "text"——不同节点包叫法不同（Wan 那边是 positive_prompt，跳到 Text Multiline 才是 text）。
+            Expect(graph[slots.PositiveNodeId]?["inputs"]?[slots.PositiveInput] is JsonValue,
+                $"{tag} 认出的提示词槽位（节点 {slots.PositiveNodeId}.{slots.PositiveInput}）必须是字面量，"
+                + "否则绑值会把它改坏");
+        }
+        else
+        {
+            Expect(slots.Notes.Count > 0, $"{tag} 认不出提示词时必须给出原因：" + Explain(slots));
+        }
+    }
+}
+
+static void ComfyUiBinderBindsWithoutDamagingTemplate()
+{
+    // 用一张**合成图**来测绑值，因为真机样本里 T01 的尺寸是上游算出来的（改不了），
+    // 这里要的是「五样都能写」的那种最全形状。
+    var source = """
+    {"1":{"class_type":"KSampler","inputs":{"seed":1,"steps":8,"positive":["2",0],"negative":["3",0],"latent_image":["4",0]}},
+     "2":{"class_type":"CLIPTextEncode","inputs":{"text":"原来的提示词","clip":["6",1]}},
+     "3":{"class_type":"CLIPTextEncode","inputs":{"text":"原来的负面词","clip":["6",1]}},
+     "4":{"class_type":"EmptyLatentImage","inputs":{"width":512,"height":512,"batch_size":1}},
+     "5":{"class_type":"LoadImage","inputs":{"image":"example.png"}},
+     "6":{"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"sd_xl.safetensors"}}}
+    """;
+    var graph = JsonNode.Parse(source)!.AsObject();
+    var slots = ComfyUiWorkflowBinder.Detect(graph);
+    Expect(slots.CanTextToImage && slots.CanResize,
+        "合成图该五样都认得出（除底图外）：" + Explain(slots));
+    Expect(slots.PositiveNodeId == "2" && slots.NegativeNodeId == "3",
+        $"提示词/负面词认错了：{slots.PositiveNodeId} / {slots.NegativeNodeId}");
+    Expect(slots.LatentNodeId == "4", "画幅节点认错了：" + slots.LatentNodeId);
+    Expect(slots.SeedNodeIds.SequenceEqual(new[] { "1" }), "种子节点认错了：" + string.Join("、", slots.SeedNodeIds));
+    Expect(slots.ImageNodeId == "5" && slots.ImageInput == "image", "底图节点认错了：" + slots.ImageNodeId);
+
+    var snapshot = graph.ToJsonString();
+    var bound = ComfyUiWorkflowBinder.Bind(graph, slots, new ComfyUiBindValues
+    {
+        Prompt = "一个新提示词",
+        Negative = "一个新负面词",
+        Width = 896,
+        Height = 1152,
+        Seed = 42,
+        ImageName = "uploaded-ref.png"
+    });
+
+    // ① 模板本身一个字都不能变：站点里存的是模板，改坏了下一张图跟着错。
+    Expect(graph.ToJsonString() == snapshot, "绑值不得改动传进来的那份模板");
+
+    // ② 五样都要写对。
+    Expect(bound["2"]!["inputs"]!["text"]!.GetValue<string>() == "一个新提示词", "提示词没写进去");
+    Expect(bound["3"]!["inputs"]!["text"]!.GetValue<string>() == "一个新负面词", "负面词没写进去");
+    Expect(bound["1"]!["inputs"]!["seed"]!.GetValue<long>() == 42, "种子没写进去");
+    Expect(bound["4"]!["inputs"]!["width"]!.GetValue<int>() == 896, "宽度没写进去");
+    Expect(bound["4"]!["inputs"]!["height"]!.GetValue<int>() == 1152, "高度没写进去");
+    Expect(bound["5"]!["inputs"]!["image"]!.GetValue<string>() == "uploaded-ref.png", "底图没写进去");
+
+    // ③ 只动该动的那几个输入：其余键一个都不许少。少一个键，工作流就在服务端报错。
+    int CountInputs(JsonNode? node) => node?["inputs"] is JsonObject inputs ? inputs.Count : 0;
+    foreach (var pair in graph)
+        Expect(CountInputs(bound[pair.Key]) == CountInputs(pair.Value),
+            $"节点 {pair.Key} 的输入个数被改动了（只该改值，不该增删键）");
+
+    // ④ 底图没给时保留原样：工作流里自带的那张示例图被清掉的话，它连示例都跑不了。
+    var withoutImage = ComfyUiWorkflowBinder.Bind(graph, slots, new ComfyUiBindValues { Prompt = "只改提示词" });
+    Expect(withoutImage["5"]!["inputs"]!["image"]!.GetValue<string>() == "example.png",
+        "没传底图时不得清掉工作流里自带的那张");
+    Expect(withoutImage["4"]!["inputs"]!["width"]!.GetValue<int>() == 512,
+        "没传画幅时不得改动工作流自己的尺寸");
+    Expect(withoutImage["1"]!["inputs"]!["seed"]!.GetValue<int>() == 1,
+        "没传种子时不得改动工作流自己的种子");
+
+    // ⑤ 真机样本上要留下「模板没被动过」这条底线（这四份是逐字对拍的样本，改了就没法对拍了）。
+    var fixturePath = Path.Combine(ComfyUiFixtureDir(), "T01.api.json");
+    var fixtureText = File.ReadAllText(fixturePath, Encoding.UTF8);
+    var fixtureGraph = JsonNode.Parse(fixtureText)!.AsObject();
+    var fixtureSnapshot = fixtureGraph.ToJsonString();
+    ComfyUiWorkflowBinder.Bind(fixtureGraph, ComfyUiWorkflowBinder.Detect(fixtureGraph),
+        new ComfyUiBindValues { Prompt = "不该落进模板", Seed = 7 });
+    Expect(fixtureGraph.ToJsonString() == fixtureSnapshot, "绑值不得改动 T01 那份对拍样本");
+    Expect(File.ReadAllText(fixturePath, Encoding.UTF8) == fixtureText, "绑值不得动磁盘上的对拍样本");
+
+    // ⑥ 连线槽位不硬写：是连线（[节点, 槽]）的时候写字符串等于把连线拆了。
+    var linked = JsonNode.Parse("""
+    {"1":{"class_type":"KSampler","inputs":{"positive":["2",0],"negative":["3",0],"seed":1,"latent_image":["4",0]}},
+     "2":{"class_type":"CLIPTextEncode","inputs":{"text":["9",0]}},
+     "3":{"class_type":"CLIPTextEncode","inputs":{"text":""}},
+     "4":{"class_type":"EmptyLatentImage","inputs":{"width":512,"height":512}}}
+    """)!.AsObject();
+    var linkedSlots = ComfyUiWorkflowBinder.Detect(linked);
+    Expect(linkedSlots.PositiveNodeId.Length == 0, "text 是连线时不得认成可写的提示词槽位");
+    Expect(linkedSlots.Notes.Any(note => note.Contains("提示词")), "要说明提示词为什么改不了：" + Explain(linkedSlots));
+    var linkedBound = ComfyUiWorkflowBinder.Bind(linked, linkedSlots, new ComfyUiBindValues { Prompt = "不该写进去" });
+    Expect(linkedBound["2"]!["inputs"]!["text"] is JsonArray, "连线槽位必须原样留着，不能被改成一个字符串");
+
+    // ⑦ 认不出采样器时如实说，而不是瞎猜一个位置。
+    var shapeless = JsonNode.Parse("""{"1":{"class_type":"SaveImage","inputs":{"filename_prefix":"x"}}}""")!.AsObject();
+    var shapelessSlots = ComfyUiWorkflowBinder.Detect(shapeless);
+    Expect(!shapelessSlots.CanTextToImage && shapelessSlots.Notes.Count > 0,
+        "形状不对时必须报「认不出」，不能给出一个假槽位");
 }
 
 /// <summary>对拍用：返回第一处差异（路径 + 两边取值），完全一致返回 null。JSON 对象的键顺序不参与比较。
