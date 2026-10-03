@@ -1,6 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:YEEYEEYEE.Desktop.Avalonia"
+             xmlns:shared="clr-namespace:YEEYEEYEE.Desktop;assembly=YEEYEEYEE.Desktop.Shared"
              x:Class="YEEYEEYEE.Desktop.Avalonia.CanvasSurface"
              Focusable="True">
   <Panel x:Name="FxRoot" ClipToBounds="True" Background="#070A0F">
@@ -36,8 +37,8 @@
     <Border x:Name="HintChip" HorizontalAlignment="Left" VerticalAlignment="Bottom"
             Margin="14" Background="#A60D131B" BorderBrush="{StaticResource DfLine}"
             BorderThickness="1" CornerRadius="10" Padding="10,6" IsHitTestVisible="False">
-      <!-- 初值也走共享文案（x:Static 直接绑 UiText），不在 XAML 里再抄一份字符串。 -->
-      <TextBlock x:Name="HintText" Text="{x:Static local:UiText.CanvasIdleHint}"
+      <!-- 初值也走共享文案（x:Static 直接绑 UiText，它在共享层 Desktop.Shared），不在 XAML 里再抄一份字符串。 -->
+      <TextBlock x:Name="HintText" Text="{x:Static shared:UiText.CanvasIdleHint}"
                  Foreground="{StaticResource DfInk3}" FontSize="11" />
     </Border>
 

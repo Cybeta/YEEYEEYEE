@@ -33,6 +33,18 @@ export function gestureHint(...keys: string[]): string {
   return keys.map(uiText).join(uiText('separator'))
 }
 
+/**
+ * 填一句带占位符的文案：占位符写成 `{名字}`，两端都只做**字面替换**（不做格式化、不转义）。
+ * 填完还剩 `{` 就抛——那说明模板或调用方有一个写错了，而「少半句话」正是最不容易被发现的那种错。
+ * 与 C# 侧的 `UiText.Fill` 是同一套约定。
+ */
+export function uiTextFill(key: string, values: Record<string, string>): string {
+  let text = uiText(key)
+  for (const [name, value] of Object.entries(values)) text = text.split(`{${name}}`).join(value)
+  if (text.includes('{')) throw new Error(`共享文案 ${key} 里还有没填上的占位符：${text}`)
+  return text
+}
+
 /** 共享文件里的所有键，供测试与排查使用。 */
 export function uiTextKeys(): string[] {
   return Object.keys(table)

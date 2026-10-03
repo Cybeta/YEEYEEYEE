@@ -36,6 +36,10 @@ COPY YEEYEEYEE.Host/ YEEYEEYEE.Host/
 COPY YEEYEEYEE.Desktop.Core/ YEEYEEYEE.Desktop.Core/
 COPY YEEYEEYEE.Desktop.Shared/ YEEYEEYEE.Desktop.Shared/
 COPY YEEYEEYEE.Web/ YEEYEEYEE.Web/
+# 两端共读的界面文案：它住在**网页端项目**里（那边的 TS 只能 import 项目内的文件），
+# 而 Desktop.Shared 用 EmbeddedResource 嵌同一个文件（见它 csproj 里的说明）。
+# 所以这条链上也得拷它——少这一行就是「本机照过、镜像构建才炸」那种错。
+COPY YEEYEEYEE.Canvas/src/shared/uiText.json YEEYEEYEE.Canvas/src/shared/uiText.json
 RUN dotnet publish YEEYEEYEE.Web/YEEYEEYEE.Web.csproj -c Release -o /app --no-restore
 
 # ---------- ③ 运行时 ----------

@@ -1,0 +1,87 @@
+using System.Text.Json;
+
+namespace YEEYEEYEE.Desktop;
+
+/// <summary>
+/// 两端共读的界面文案。
+///
+/// **唯一的一份**是 <c>YEEYEEYEE.Canvas/src/shared/uiText.json</c>：网页端直接 import 它，
+/// 这一侧用 EmbeddedResource 把**同一个文件**嵌进来（见 <c>YEEYEEYEE.Desktop.Shared.csproj</c>）。
+/// 所以这里没有第二份可抄，也就没有「改一边别忘改另一边」这类注释债——配色那两份就是这么欠下来的。
+///
+/// **为什么住在 Desktop.Shared**：它要同时给桌面端、协作服务端（<c>YEEYEEYEE.Web</c>）与
+/// Agent 侧的代码用。只有一条是说给未来的自己听的：一旦有别的 C# 项目也要嵌这份文案，
+/// Docker 那条链上必须把 <c>YEEYEEYEE.Canvas/src/shared/uiText.json</c> 拷进构建上下文
+/// （现在 Dockerfile 的②段为此专门有一行 COPY），否则本机照过、镜像构建才炸。
+///
+/// 读不到键就抛：界面文案缺一句会静默地少一截，而少掉的那截没人会发现。
+/// 键写错是开发期错误，该当场炸（第一次跑到那一行就炸，比上线后少半句话好）。
+/// </summary>
+public static class UiText
+{
+    private static readonly JsonElement Table = Load();
+
+    /// <summary>两端的拼接分隔符——也在共享文件里：两端各写一个「 · 」，看着一样，改起来就不一样了。</summary>
+    public static string Separator => Text("separator");
+
+    public static string Text(string key)
+    {
+        if (Table.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String &&
+            value.GetString() is { Length: > 0 } text)
+            return text;
+
+        throw new InvalidOperationException(
+            $"共享文案里没有这个键：{key}（YEEYEEYEE.Canvas/src/shared/uiText.json）");
+    }
+
+    /// <summary>
+    /// 填一句带占位符的文案：占位符写成 <c>{名字}</c>，两端都只做**字面替换**
+    /// （不做格式化、不转义）。填完还剩 <c>{</c> 就抛——那说明模板或调用方有一个写错了，
+    /// 而「少半句话」正是最不容易被发现的那种错。
+    /// </summary>
+    public static string Fill(string key, params (string Name, string Value)[] values)
+    {
+        var text = Text(key);
+        foreach (var (name, value) in values) text = text.Replace("{" + name + "}", value);
+        if (text.Contains('{'))
+            throw new InvalidOperationException($"共享文案 {key} 里还有没填上的占位符：{text}");
+        return text;
+    }
+
+    /// <summary>
+    /// 把若干个手势拼成一行提示——与网页端的 <c>gestureHint</c> 是同一个拼法（同一份措辞、同一个分隔符）。
+    /// **列哪几个手势两端各定**：网页端没有 Delete 键这一条，所以它不列。
+    /// </summary>
+    public static string Gestures(params string[] keys) => string.Join(Separator, keys.Select(Text));
+
+    /// <summary>
+    /// 画布空闲时那一行。XAML 里用 <c>{x:Static}</c> 直接绑它——不在 XAML 里再抄一份字符串，
+    /// 那份抄写正是「改一边忘一边」的老路。
+    /// </summary>
+    public static string CanvasIdleHint => Gestures(
+        "gesture.pan", "gesture.zoom", "gesture.dragNode", "gesture.connect", "gesture.select",
+        "gesture.delete", "gesture.cancel");
+
+    /// <summary>
+    /// 编辑锁的来源端说法（wire 值只有 <c>web</c> / <c>desktop</c>）。**认不出的按「网页端」**——
+    /// 这条规则过去在服务端 <c>EditClient.Label</c>、桌面端 <c>CollaborationSession.ClientLabel</c>
+    /// 与网页端 <c>locks.ts</c> 各写了一遍，每处的注释都指着另一处。现在只有这一份。
+    /// </summary>
+    public static string ClientLabel(string? client) =>
+        Text(client == "desktop" ? "lease.client.desktop" : "lease.client.web");
+
+    /// <summary>「林晚（桌面端）」这种可读的持有者描述——三处过去各拼一遍，现在只有这一份。</summary>
+    public static string Who(string displayName, string? client) =>
+        Fill("lease.who", ("name", displayName), ("client", ClientLabel(client)));
+
+    private static JsonElement Load()
+    {
+        using var stream = typeof(UiText).Assembly.GetManifestResourceStream("UiText.json")
+            ?? throw new InvalidOperationException(
+                "嵌入式共享文案 UiText.json 不见了：检查 YEEYEEYEE.Desktop.Shared.csproj 里那条 "
+                + "EmbeddedResource（它指向 YEEYEEYEE.Canvas/src/shared/uiText.json），"
+                + "以及 Dockerfile 的②段有没有把那个 json 拷进构建上下文。");
+        using var document = JsonDocument.Parse(stream);
+        return document.RootElement.Clone();
+    }
+}

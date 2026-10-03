@@ -1,6 +1,7 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { gestureHint, uiText, uiTextKeys } from '../src/shell/uiText'
+import { clientLabel } from '../src/shell/locks'
+import { gestureHint, uiText, uiTextFill, uiTextKeys } from '../src/shell/uiText'
 
 /**
  * 两端共读的界面文案（画布手势提示这一片）。
@@ -38,9 +39,30 @@ describe('共享界面文案', () => {
       expect(view).not.toContain(literal)
   })
 
-  it('桌面端嵌的是同一个文件（C# 那边找不到第二份可抄）', () => {
-    const csproj = readFileSync(
-      new URL('../../YEEYEEYEE.Desktop.Avalonia/YEEYEEYEE.Desktop.Avalonia.csproj', import.meta.url), 'utf8')
-    expect(csproj).toContain('..\\YEEYEEYEE.Canvas\\src\\shared\\uiText.json')
+  it('「谁在编辑」那一句的措辞与来源端说法也走同一份（三处过去各写一遍，注释互相指着）', () => {
+    expect(clientLabel('desktop')).toBe(uiText('lease.client.desktop'))
+    expect(clientLabel('web')).toBe(uiText('lease.client.web'))
+    expect(clientLabel('unknown')).toBe('网页端')
+    expect(uiTextFill('lease.who', { name: '陈默', client: clientLabel('desktop') })).toBe('陈默（桌面端）')
+
+    // locks.ts 里不该再出现写死的标签——注释里提到「桌面端」没关系，被引号包起来才算抄了一份。
+    const locks = readFileSync(new URL('../src/shell/locks.ts', import.meta.url), 'utf8')
+    expect(locks).not.toContain("'桌面端'")
+    expect(locks).not.toContain("'网页端'")
+  })
+
+  it('占位符填不干净就抛出，不让界面显示半句话', () => {
+    expect(() => uiTextFill('lease.who', { name: '陈默' })).toThrow(/占位符/)
+  })
+
+  it('C# 那边嵌的是同一个文件，而且**只有一处**嵌它（再嵌一份就又变回两份抄写）', () => {
+    const root = new URL('../../', import.meta.url)
+    const embed = 'EmbeddedResource Include="..\\YEEYEEYEE.Canvas\\src\\shared\\uiText.json"'
+    const embedding = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => `${entry.name}/${entry.name}.csproj`)
+      .filter((relative) => existsSync(new URL(relative, root)))
+      .filter((relative) => readFileSync(new URL(relative, root), 'utf8').includes(embed))
+    expect(embedding).toEqual(['YEEYEEYEE.Desktop.Shared/YEEYEEYEE.Desktop.Shared.csproj'])
   })
 })

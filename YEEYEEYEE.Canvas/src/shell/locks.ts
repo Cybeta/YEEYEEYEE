@@ -4,7 +4,10 @@
  * 锁是**会话状态**不是文档内容：它记在画布旁边的 `<画布>.edits.json`，服务端进程是仲裁者。
  * 网页端这边只做两件事：把它解出来、判断「这条记录归哪把锁管」。判断规则写在这里而不是组件里，
  * 是因为它错了的表现是「明明有人在编辑，界面却让人以为可以改」——那必须能单独测。
+ *
+ * 「谁在编辑」那几句的**措辞**不在这里：它们在两端共读的 uiText.json 里（见 uiText.ts）。
  */
+import { uiText, uiTextFill } from './uiText'
 
 export type LeaseScope = 'node' | 'tree'
 export type LeaseClient = 'web' | 'desktop' | 'unknown'
@@ -33,14 +36,18 @@ function asClient(value: unknown): LeaseClient {
   return value === 'desktop' ? 'desktop' : value === 'web' ? 'web' : 'unknown'
 }
 
-/** 来源端的显示名。服务端 `EditClient.Label` 的口径一致：认不出的都说「网页端」。 */
+/**
+ * 来源端的显示名。**与另外两端读的是同一份文案**（`uiText.json`）：过去服务端 `EditClient.Label`、
+ * 桌面端 `CollaborationSession.ClientLabel` 与这里各写了一遍，每处的注释都指着另一处。
+ * 「认不出的都说网页端」也是同一条规则，不是各自定的。
+ */
 export function clientLabel(client: LeaseClient): string {
-  return client === 'desktop' ? '桌面端' : '网页端'
+  return uiText(client === 'desktop' ? 'lease.client.desktop' : 'lease.client.web')
 }
 
-/** 「陈默（桌面端）」——冲突提示里直接用这一句。 */
+/** 「陈默（桌面端）」——冲突提示里直接用这一句。拼法（括号、顺序）也在共享文案里。 */
 export function describeLease(lease: Lease): string {
-  return `${lease.displayName}（${clientLabel(lease.client)}）`
+  return uiTextFill('lease.who', { name: lease.displayName, client: clientLabel(lease.client) })
 }
 
 export type LeaseList = { leases: Lease[]; lifetimeSeconds: number; invalidCount: number }

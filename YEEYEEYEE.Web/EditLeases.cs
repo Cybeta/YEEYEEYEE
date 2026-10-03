@@ -24,7 +24,12 @@ internal static class EditClient
 
     public static bool IsValid(string? value) => value is Web or Desktop;
 
-    public static string Label(string? value) => value == Desktop ? "桌面端" : "网页端";
+    /// <summary>
+    /// 显示名。实现**只有一份**（共享层的 UiText，读两端共读的 uiText.json）——
+    /// 这条与桌面端、网页端过去各写一份，三处的注释互相指着；
+    /// 认不出的按「网页端」也是同一条规则，不是各自定的。
+    /// </summary>
+    public static string Label(string? value) => YEEYEEYEE.Desktop.UiText.ClientLabel(value);
 }
 
 /// <summary>
@@ -76,7 +81,7 @@ internal sealed record EditLeaseResult(
     public static EditLeaseResult Fail(EditLeaseStatus status, string error, EditLease? holder = null) =>
         new(status, null, error, holder);
 
-    /// <summary>「林晚（桌面端）」这种可读的持有者描述。</summary>
+    /// <summary>「林晚（桌面端）」这种可读的持有者描述。拼法也走共享文案（与网页端同一份）。</summary>
     public static string Describe(EditLease lease) =>
-        $"{lease.DisplayName}（{EditClient.Label(lease.Client)}）";
+        YEEYEEYEE.Desktop.UiText.Who(lease.DisplayName, lease.Client);
 }

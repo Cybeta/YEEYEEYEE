@@ -142,6 +142,7 @@ var tests = new (string Name, Action Run)[]
     ("真实入口冒烟：打开→保存重开→复制→重复导入", RealEntrySmokeOpenSaveCopyImport),
     ("返工 R5：空 ID 旧来源的导入身份稳定", ReworkEmptyIdSourceImportIdentityIsStable),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
+    ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
     ("返工 R7：备份失败中止保存且不覆盖", ReworkBackupFailureAbortsSave),
     ("返工 R8：保存失败不改动调用方对象", ReworkFailedSaveLeavesInputUntouched),
@@ -1808,6 +1809,26 @@ static void ProjectCanvasBackupsAreListedAndPruned()
         try { System.IO.Directory.Delete(root, recursive: true); }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
     }
+}
+
+/// <summary>
+/// 两端共读的界面文案在 C# 这一侧的读法。
+///
+/// 它嵌在**共享层**（Desktop.Shared），所以协作服务端、桌面端与这里读的是同一个文件。
+/// 「谁在编辑」那句过去在服务端 <c>EditClient.Label</c>、<c>CollaborationSession.ClientLabel</c>
+/// 与网页端 <c>locks.ts</c> 各写了一遍，三处注释互相指着——这条钉的就是「只剩一份」：
+/// 无论从哪个入口进来，拿到的都是同一份文案里的字面值，改共享文件就一起变。
+/// </summary>
+static void SharedUiTextHasOneCopyForBothEnds()
+{
+    Expect(UiText.ClientLabel("desktop") == "桌面端" && UiText.ClientLabel("web") == "网页端",
+        $"来源端说法：{UiText.ClientLabel("desktop")} / {UiText.ClientLabel("web")}");
+    Expect(UiText.ClientLabel("unrecognized") == "网页端", "认不出的来源端按网页端（两端同一条规则）");
+    Expect(UiText.Who("林晚", "desktop") == "林晚（桌面端）", $"「谁在编辑」那一句：{UiText.Who("林晚", "desktop")}");
+    Expect(UiText.Text("lease.client.desktop") == CollaborationSession.ClientLabel("desktop"),
+        "共享层那个入口应当读同一份文案，而不是自己再写一遍");
+    Expect(UiText.CanvasIdleHint.Contains(" · ") && !UiText.CanvasIdleHint.Contains(" / "),
+        $"手势提示的分隔符来自共享文案：{UiText.CanvasIdleHint}");
 }
 
 /// <summary>1.2：复制画布时全部换新 ID，集合内关系按映射改写，版本语义保持。</summary>

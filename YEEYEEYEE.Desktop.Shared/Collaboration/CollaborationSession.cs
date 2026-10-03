@@ -92,9 +92,13 @@ public sealed class CollaborationSession : IDisposable
 
     /// <summary>
     /// 来源端的说法（wire 值只有 <c>web</c> / <c>desktop</c>，认不出的算网页端）。
-    /// 与服务端 <c>EditClient.Label</c> 是同一套词，桌面端这边只有这一份。
+    ///
+    /// 实现**只有一份**：共享层的 <see cref="UiText.ClientLabel"/>，读的是两端共读的 uiText.json。
+    /// 这里留着这个方法只是不打断调用方。过去服务端 <c>EditClient.Label</c>、这一处、
+    /// 网页端的 <c>locks.ts</c> 各写了一遍同样的规则，每处的注释都指着另一处——
+    /// 那种「互相指着」的约定迟早会走散，而走散的表现是两端对同一把锁的称呼不一样。
     /// </summary>
-    public static string ClientLabel(string client) => client == "desktop" ? "桌面端" : "网页端";
+    public static string ClientLabel(string client) => UiText.ClientLabel(client);
 
     /// <summary>
     /// 换一台服务器。**会清掉当前身份与 cookie**：换了地址之后旧会话对新服务器毫无意义，

@@ -25,6 +25,16 @@
     <ProjectReference Include="..\YEEYEEYEE.Desktop.Core\YEEYEEYEE.Desktop.Core.csproj" />
   </ItemGroup>
 
+  <!-- 两端共读的界面文案（见 Ui/UiText.cs）：**唯一的一份**住在网页端项目里——TS 只能 import
+       项目内的文件，而 MSBuild 嵌哪个路径都行，所以让文件迁就 TS，这边多写一行。
+       嵌在这一层（而不是 Avalonia）是为了让服务端与 Agent 侧也能读到同一份。
+       LogicalName 写死：不写的话资源名是跟着路径算出来的，挪一下目录就变成运行期才炸。
+       ⚠ 这条链会在 Docker 镜像里构建（Web → Desktop.Shared），所以 Dockerfile 的②段专门拷了
+       这个 json（本机不缺文件、镜像里缺，那种错只在镜像构建时出现）。 -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\YEEYEEYEE.Canvas\src\shared\uiText.json" LogicalName="UiText.json" Visible="false" />
+  </ItemGroup>
+
   <!-- DPAPI 只在 Windows 上可用，这里用 NuGet 形式的 ProtectedData（不是桌面框架里的同名类型）：
        后者会把「必须安装 Windows 桌面运行时」变成整个应用的前置依赖，而我们只用它加解密一个字符串。 -->
   <ItemGroup>

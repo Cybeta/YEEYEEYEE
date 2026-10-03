@@ -7,5 +7,8 @@
   "gesture.select": "点节点或连线选中",
   "gesture.delete": "Delete 删除",
   "gesture.cancel": "Esc 取消",
-  "connect.mode": "连接模式：点另一个节点作为终点"
+  "connect.mode": "连接模式：点另一个节点作为终点",
+  "lease.client.desktop": "桌面端",
+  "lease.client.web": "网页端",
+  "lease.who": "{name}（{client}）"
 }
