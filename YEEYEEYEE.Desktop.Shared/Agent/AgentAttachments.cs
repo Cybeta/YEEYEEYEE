@@ -76,6 +76,10 @@ public static class AgentAttachmentLoader
         ".ini", ".toml", ".sh", ".ps1", ".bat"
     };
 
+    /// <summary>按扩展名给出图片的 media type；不是已知图片扩展名时返回 null。</summary>
+    public static string? ImageMediaType(string path) =>
+        ImageMimeTypes.TryGetValue(Path.GetExtension(path), out var type) ? type : null;
+
     /// <summary>对话框用的过滤器：图片与文本分两组，另有全部文件（选到不支持的会给出原因）。</summary>
     public const string ImageFilter = "图片 (*.png;*.jpg;*.jpeg;*.webp;*.gif)|*.png;*.jpg;*.jpeg;*.webp;*.gif";
     public const string TextFilter = "文本文件 (*.md;*.txt;*.json;*.csv;*.log;*.yml;*.xml;*.cs;*.ts;*.js;*.py)|*.md;*.txt;*.json;*.csv;*.log;*.yml;*.xml;*.cs;*.ts;*.js;*.py";

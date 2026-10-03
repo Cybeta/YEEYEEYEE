@@ -725,12 +725,26 @@ textarea.df-input {
 }
 
 .df-ref-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 10px;
   padding: 1px 6px;
   border-radius: var(--df-radius-pill);
   background: var(--df-surface-4);
   color: var(--df-ink-2);
   border: 1px solid var(--df-line);
+}
+
+/* 引用那一版设定的缩略图（按 ID 从服务端取，见 shell/assetImages.ts）：只用来一眼认出「这是谁」。
+   取不到图时组件会把 img 收起来，所以这里不必为「加载失败」留位置。 */
+.df-ref-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  object-fit: cover;
+  flex: none;
+  background: var(--df-surface-1);
 }
 
 .df-ref-pill.is-missing {

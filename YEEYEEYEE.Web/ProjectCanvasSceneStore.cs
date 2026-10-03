@@ -219,6 +219,86 @@ internal sealed class ProjectCanvasSceneStore
     }
 
     /// <summary>
+    /// 只读：一条设定的**预览图字节**（网页端画布上那些引用徽标要显示它）。
+    ///
+    /// 取哪一张图不由这里定：问 <see cref="EntityAssets.PreviewImage"/>——与节点投影里的 <c>thumbnailRef</c>
+    /// 是同一个方法，所以「网页端显示的缩略图」与「服务端说是哪张图」不会各说各话。
+    ///
+    /// 引用的形式有两种，都要认：项目内的**文件**（走 <see cref="AssetStore.Resolve"/>）与内嵌的 **data URL**
+    /// （出图链路有时把图直接写进画布）。两种都从这条接口出去，客户端不必分情况。
+    /// </summary>
+    public IResult EntityThumbnail(Guid entityId, string? variantId, string? versionId)
+    {
+        try
+        {
+            var current = Load();
+            CheckProjectAuthority(current.State);
+            var canvas = current.State.Canvas;
+
+            var entity = canvas.FindEntity(entityId);
+            if (entity is null) return Error(404, "CANVAS_ENTITY_NOT_FOUND", "这条设定不在这张画布里");
+            var variant = (Guid.TryParse(variantId, out var parsedVariant)
+                    ? entity.Variants.FirstOrDefault(item => item.Id == parsedVariant)
+                    : null)
+                ?? entity.Variants.FirstOrDefault();
+            if (variant is null) return Error(404, "CANVAS_VARIANT_NOT_FOUND", "这个变体不在这条设定里");
+
+            // 「拿哪一版」的规矩交给共享的解析器（没给版本号就是当前版），不在这里再判一遍。
+            var content = canvas.ResolveReferenceContent(new NodeReference
+            {
+                EntityId = entityId,
+                VariantId = variant.Id,
+                VariantVersionId = Guid.TryParse(versionId, out var parsedVersion) ? parsedVersion : null
+            });
+            if (content is null)
+                return Error(404, "CANVAS_REFERENCE_UNRESOLVED", "这条引用解不开：设定 / 变体 / 版本对不上");
+
+            var attachment = EntityAssets.PreviewImage(content);
+            if (attachment is null) return Error(404, "ASSET_NO_IMAGE", "这条设定还没有图片");
+
+            if (AgentAttachmentLoader.SplitDataUrl(attachment.Reference) is { } inline)
+            {
+                try { return Results.Bytes(Convert.FromBase64String(inline.Data), inline.MediaType); }
+                catch (FormatException) { return Error(500, "ASSET_INLINE_INVALID", "内嵌图片的 base64 解不开"); }
+            }
+
+            var file = AssetStore.Resolve(attachment.Reference);
+            if (file is null)
+                return Error(404, "ASSET_FILE_MISSING",
+                    "图片文件不在这个部署里：容器要把共享素材目录（ASSET_DIR）或项目目录挂进来");
+            if (!InsideAllowedRoots(file))
+                return Error(403, "ASSET_OUTSIDE_PROJECT",
+                    "这张图不在允许的目录里（共享素材目录或项目目录），拒绝服务");
+            return Results.File(file, AgentAttachmentLoader.ImageMediaType(file) ?? "application/octet-stream");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
+        {
+            return Error(503, "PROJECT_CANVAS_READ_FAILED", "项目画布或项目资源无法安全读取：" + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 只服务**项目内**的文件。设定里的附件引用可以是绝对路径（老数据就是这么写的），
+    /// 不加这道闸，一个被诱导出来的引用就能把机器上任何一张图片读出去。
+    /// 允许两个根：共享素材目录（<see cref="AssetStore.Directory"/>，容器里由 ASSET_DIR 指到挂载点）
+    /// 与**画布所在的项目目录**。
+    /// </summary>
+    private bool InsideAllowedRoots(string file)
+    {
+        var canvasDirectory = Path.GetDirectoryName(Path.GetFullPath(path)) ?? string.Empty;
+        var roots = new[]
+        {
+            AssetStore.Directory,
+            Directory.GetParent(canvasDirectory)?.FullName ?? canvasDirectory
+        };
+        var full = Path.GetFullPath(file);
+        return roots.Any(root => !string.IsNullOrEmpty(root) && full.StartsWith(
+            Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
     /// 所有写入的唯一通道：修订校验 → 只读与校验闸门 → 项目库权威校验 → 变更 → 再校验 →
     /// 原子落盘（带备份与跨进程租约）。「改标题内容」与「整理布局」共用它——
     /// 两套写入规则各自演化出差异，是这类接口最典型的坏法。

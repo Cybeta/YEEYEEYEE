@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { recordReferences, resolveReference, type Asset } from '../assets'
 import { ALL_CHAPTERS_ID } from '../ChapterView'
+import { entityThumbUrl } from './assetImages'
 import type { LayoutMove } from './layoutPlan'
 import { describeLease, isMine, nodeLease, treeLease, type Lease } from './locks'
 import {
@@ -739,6 +740,17 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
             const resolved = resolveReference(reference, assets, assetsReady)
             return (
               <span key={`${reference.entityId}-${index}`} className={`df-ref-pill${resolved.error ? ' is-missing' : ''}`} title={resolved.error ?? resolved.mode}>
+                {/* 引用的那一版设定长什么样，卡片上直接看得见。取不到图就把 img 收起来——
+                    缩略图是**加成**，缺了它这条引用仍然是可读的一枚徽标，不该变成一个破图图标。 */}
+                {reference.entityId && (
+                  <img
+                    className="df-ref-thumb"
+                    src={entityThumbUrl(reference.entityId, reference.variantId, reference.variantVersionId)}
+                    alt=""
+                    loading="lazy"
+                    onError={(event) => { event.currentTarget.style.display = 'none' }}
+                  />
+                )}
                 {resolved.asset?.name || reference.name || reference.entityId}
               </span>
             )

@@ -95,6 +95,15 @@ public sealed class WorkflowEntity
 
 public static class EntityAssets
 {
+    /// <summary>
+    /// 这张设定卡拿哪一张图当预览：**第一张图片附件**（视频、音频不参与）。
+    ///
+    /// 只此一份：节点投影的 <c>thumbnailRef</c> 与网页端取缩略图那条接口都问它——
+    /// 两处各写一条「第一张图片附件」，迟早会给出两张不同的图，而这种偏差没人会去查。
+    /// </summary>
+    public static WorkflowAttachment? PreviewImage(ReferenceContent content) =>
+        content.Attachments.FirstOrDefault(attachment => attachment.Kind == AttachmentKind.Image);
+
     public static IEnumerable<WorkflowAttachment> AllAttachments(WorkflowCanvasState state) => state.Entities
         .SelectMany(entity => entity.Variants)
         .SelectMany(variant => variant.Attachments.Concat(variant.Versions.SelectMany(version => version.Attachments)));

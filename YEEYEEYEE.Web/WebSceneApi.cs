@@ -302,6 +302,13 @@ internal static class WebSceneApi
                 ? projectStore.Assist(recordId)
                 : Error(409, "CANVAS_REQUIRES_PROJECT", "节点协助计划要的是项目画布；当前配置的是独立 Web 场景"));
 
+        // 只读：一条设定的预览图**字节**。网页端画布上那些引用徽标显示的就是它。
+        // 与上一条同理：不取锁、不查 canvas.edit。取哪一张图由共享的 EntityAssets.PreviewImage 定。
+        app.MapGet("/api/web/entities/{entityId:guid}/thumb", (Guid entityId, string? variantId, string? versionId) =>
+            projectStore is not null
+                ? projectStore.EntityThumbnail(entityId, variantId, versionId)
+                : Error(409, "CANVAS_REQUIRES_PROJECT", "素材预览要的是项目画布；当前配置的是独立 Web 场景"));
+
         app.MapGet("/api/web/assets", () =>
         {
             var entitiesPath = LegacyConfig.Text(app.Configuration, "ProjectEntitiesPath");

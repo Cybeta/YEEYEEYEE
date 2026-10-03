@@ -116,8 +116,8 @@ public static class NodeProjection
                 });
                 continue;
             }
-            var thumbRef = content.Attachments
-                .FirstOrDefault(a => a.Kind == AttachmentKind.Image)?.Reference;
+            // 哪一张图当预览由 EntityAssets.PreviewImage 说了算：网页端取缩略图那条接口问的是同一个方法。
+            var thumbRef = EntityAssets.PreviewImage(content)?.Reference;
             result.Add(new
             {
                 entityId = content.Entity.Id.ToString(),
