@@ -9,7 +9,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "tokens": "node scripts/design-tokens.mjs --write",
+    "tokens:check": "node scripts/design-tokens.mjs --check"
   },
   "dependencies": {
     "react": "^19.3.0",

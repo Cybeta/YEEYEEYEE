@@ -1,0 +1,58 @@
+{
+  "note": [
+    "两端共读的调色板（唯一的一份）。",
+    "网页端读 tokens.css 里的 CSS 变量，桌面端读 App.axaml 里的 SolidColorBrush——",
+    "两边的颜色块都是**从这个文件生成的**（scripts/design-tokens.mjs，跑 npm run tokens 重生成）。",
+    "别去手改那两个块：markers 之间的内容会被生成器覆盖，改这里才对。",
+    "alpha 用 0-1 的小数：1 写 6 位十六进制，其余写成 rgba(r, g, b, alpha) / #AARRGGBB。",
+    "只收**纯色**。渐变与投影（aurora / scan / glow-line / glow-shadow，以及桌面端那四个 DfGlow* 画刷）",
+    "两端的表达方式本就不同，仍在各自那一侧手写，不在这份里。"
+  ],
+  "groups": [
+    {
+      "name": "Surfaces",
+      "tokens": [
+        { "css": "--df-bg", "hex": "#070a0f", "alpha": 1 },
+        { "css": "--df-surface-1", "hex": "#0d131b", "alpha": 1 },
+        { "css": "--df-surface-2", "hex": "#131b25", "alpha": 1 },
+        { "css": "--df-surface-3", "hex": "#1a2431", "alpha": 1 },
+        { "css": "--df-surface-4", "hex": "#202d3d", "alpha": 1 },
+        { "css": "--df-glass", "hex": "#0d131b", "alpha": 0.65 },
+        { "css": "--df-glass-clear", "hex": "#090e15", "alpha": 0.5 }
+      ]
+    },
+    {
+      "name": "Ink",
+      "tokens": [
+        { "css": "--df-ink", "hex": "#e9eff7", "alpha": 1 },
+        { "css": "--df-ink-2", "hex": "#93a1b3", "alpha": 1 },
+        { "css": "--df-ink-3", "hex": "#5c6a7c", "alpha": 1 }
+      ]
+    },
+    {
+      "name": "Lines",
+      "tokens": [
+        { "css": "--df-line", "hex": "#1f2c3d", "alpha": 1 },
+        { "css": "--df-line-strong", "hex": "#2c3d52", "alpha": 1 },
+        { "css": "--df-line-glow", "hex": "#4d9bff", "alpha": 0.35 },
+        { "css": "--df-grid-line", "hex": "#4d9bff", "alpha": 0.055 }
+      ]
+    },
+    {
+      "name": "Brand",
+      "tokens": [
+        { "css": "--df-primary", "hex": "#4d9bff", "alpha": 1 },
+        { "css": "--df-primary-strong", "hex": "#2f80ed", "alpha": 1 },
+        { "css": "--df-primary-soft", "hex": "#14263f", "alpha": 1 }
+      ]
+    },
+    {
+      "name": "States",
+      "tokens": [
+        { "css": "--df-success", "hex": "#5cc99a", "alpha": 1 },
+        { "css": "--df-warning", "hex": "#dfb45a", "alpha": 1 },
+        { "css": "--df-error", "hex": "#e0707e", "alpha": 1 }
+      ]
+    }
+  ]
+}

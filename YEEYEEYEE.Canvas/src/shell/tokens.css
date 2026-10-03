@@ -1,9 +1,10 @@
 /*
   桌面端设计令牌的网页端镜像。
 
-  来源是 YEEYEEYEE.Desktop.Avalonia/App.axaml 里那一整套 Df* 画刷与控件样式。
-  这里不重新设计配色，只做「同一个名字、同一个值」的搬运：桌面端改一个颜色，
-  这一份要跟着改，否则两端会长成两个产品。
+  **颜色那一块不在这个文件里手写**：它由 src/shared/designTokens.json 生成
+  （scripts/design-tokens.mjs，跑 `npm run tokens` 重生成），桌面端 App.axaml 里那块也是
+  同一个来源——两份色板从此不会各走各的。这里留着几何、圆角、字体，以及那几个渐变与投影
+  （两端的表达方式本就不同，仍在各自那一侧手写）。
 
   一条刻意的取舍：桌面端 RequestedThemeVariant 钉死为 Dark（那套 Df* 本来就是写死的暗色），
   所以工作台也是暗色，不做浅色主题。做半套浅色只会得到半套看不清的界面。
@@ -12,7 +13,8 @@
 :root {
   color-scheme: dark;
 
-  /* Surfaces（App.axaml: DfBg / DfSurface1-4 / DfGlass / DfGlassClear） */
+  /* palette:begin（生成自 src/shared/designTokens.json，别手改；跑 npm run tokens 重生成） */
+  /* Surfaces */
   --df-bg: #070a0f;
   --df-surface-1: #0d131b;
   --df-surface-2: #131b25;
@@ -41,6 +43,7 @@
   --df-success: #5cc99a;
   --df-warning: #dfb45a;
   --df-error: #e0707e;
+  /* palette:end */
 
   /* 光效：桌面端是 0x8C/0x59 这类 alpha，这里换算成同一个值 */
   --df-glow-shadow: 0 0 28px -12px rgba(77, 155, 255, 0.55);

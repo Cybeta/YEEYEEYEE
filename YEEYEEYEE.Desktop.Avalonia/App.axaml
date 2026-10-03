@@ -8,6 +8,10 @@
          （TextBox 的聚焦 / 悬停底色、CheckBox 的字、下拉框、ToolTip…）会按浅色画，
          跟写死的浅色字叠在一起就成了「底色和字色太接近，看不清」。
          钉死之后 Fluent 只出暗色，两套颜色才是一套。 -->
+    <!-- 颜色那一块由 src/shared/designTokens.json 生成
+         （scripts/design-tokens.mjs，跑 `npm run tokens` 重生成）；网页端 tokens.css 里那块同源。
+         别手改 markers 之间：改了会被生成器盖掉，且测试会红。 -->
+    <!-- palette:begin（生成自 YEEYEEYEE.Canvas/src/shared/designTokens.json，别手改） -->
     <!-- Surfaces -->
     <SolidColorBrush x:Key="DfBg" Color="#070A0F" />
     <SolidColorBrush x:Key="DfSurface1" Color="#0D131B" />
@@ -26,24 +30,25 @@
     <SolidColorBrush x:Key="DfLine" Color="#1F2C3D" />
     <SolidColorBrush x:Key="DfLineStrong" Color="#2C3D52" />
     <SolidColorBrush x:Key="DfLineGlow" Color="#594D9BFF" />
+    <SolidColorBrush x:Key="DfGridLine" Color="#0E4D9BFF" />
 
     <!-- Brand -->
     <SolidColorBrush x:Key="DfPrimary" Color="#4D9BFF" />
     <SolidColorBrush x:Key="DfPrimaryStrong" Color="#2F80ED" />
     <SolidColorBrush x:Key="DfPrimarySoft" Color="#14263F" />
 
-    <!-- Glow -->
-    <SolidColorBrush x:Key="DfGlowFaint" Color="#124D9BFF" />
-    <SolidColorBrush x:Key="DfGlowWeak" Color="#294D9BFF" />
-    <SolidColorBrush x:Key="DfGlow" Color="#524D9BFF" />
-    <SolidColorBrush x:Key="DfGlowStrong" Color="#9E8CC5FF" />
-
     <!-- States -->
     <SolidColorBrush x:Key="DfSuccess" Color="#5CC99A" />
     <SolidColorBrush x:Key="DfWarning" Color="#DFB45A" />
     <SolidColorBrush x:Key="DfError" Color="#E0707E" />
+    <!-- palette:end -->
 
-    <SolidColorBrush x:Key="DfGridLine" Color="#0E4D9BFF" />
+    <!-- 光效：网页端用渐变/投影表达（CSS linear-gradient / box-shadow），这一侧是画刷，
+         表达方式不同，因此**不在**共享色板里，各自手写、各自维护。 -->
+    <SolidColorBrush x:Key="DfGlowFaint" Color="#124D9BFF" />
+    <SolidColorBrush x:Key="DfGlowWeak" Color="#294D9BFF" />
+    <SolidColorBrush x:Key="DfGlow" Color="#524D9BFF" />
+    <SolidColorBrush x:Key="DfGlowStrong" Color="#9E8CC5FF" />
 
     <RadialGradientBrush x:Key="DfAurora" Center="50%,-10%" GradientOrigin="50%,-10%"
                          RadiusX="72%" RadiusY="62%">
