@@ -1088,6 +1088,16 @@ try
         YEEYEEYEE.Desktop.CollaborationEvents.ParseCanvasChanged("canvas.changed", "{\"revision\":5}") is null &&
         YEEYEEYEE.Desktop.CollaborationEvents.ParseCanvasChanged("canvas.unknown", "{\"type\":\"canvas.unknown\"}") is null,
         "坏 JSON、类型不符、缺 type、认不出的类型都要安静地丢掉（服务端以后加新事件时，旧客户端不该整条流都断掉）");
-    Console.WriteLine("Desktop subscribe regression passed: frames parsed and unknown ones dropped, real canvas.changed and edits.changed reach the desktop, sign-out stops the stream");
+    // 「别人改了画布之后要不要自动重载」是个纯判断，值得单独钉住：
+    // 它的全部意义在于**别把用户手上的东西吞掉**，而这四行判断就是那条线。
+    Assert(YEEYEEYEE.Desktop.RemoteCanvasChange.Decide(true, true, false, false) == YEEYEEYEE.Desktop.RemoteChangeAction.Ignore,
+        "自己那次保存的回声要忽略");
+    Assert(YEEYEEYEE.Desktop.RemoteCanvasChange.Decide(false, true, false, false) == YEEYEEYEE.Desktop.RemoteChangeAction.Reload,
+        "本地干净就该自动跟上");
+    Assert(YEEYEEYEE.Desktop.RemoteCanvasChange.Decide(false, true, true, false) == YEEYEEYEE.Desktop.RemoteChangeAction.NotifyOnly &&
+        YEEYEEYEE.Desktop.RemoteCanvasChange.Decide(false, true, false, true) == YEEYEEYEE.Desktop.RemoteChangeAction.NotifyOnly &&
+        YEEYEEYEE.Desktop.RemoteCanvasChange.Decide(false, false, false, false) == YEEYEEYEE.Desktop.RemoteChangeAction.NotifyOnly,
+        "有未保存改动、正在编辑/保存、或者根本没开画布：都只说不动");
+    Console.WriteLine("Desktop subscribe regression passed: frames parsed and unknown ones dropped, real canvas.changed and edits.changed reach the desktop, sign-out stops the stream, auto-reload only when the local copy is clean and idle");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }

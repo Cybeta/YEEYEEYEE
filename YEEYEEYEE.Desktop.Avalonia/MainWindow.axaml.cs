@@ -1046,13 +1046,22 @@ public partial class MainWindow : Window, IAgentSessionHost
 
     private async void SaveCanvas_OnClick(object? sender, RoutedEventArgs e)
     {
-        // 配了服务器并登录着，就把这次保存交给服务端：锁与修订都由它仲裁，改动顺便推给别人。
-        // 返回 null 表示这条不适用（没配服务器、没登录、这张画布还没落盘…），照旧走本地保存。
-        if (await TrySaveCanvasThroughServerAsync() is { } serverMessage) StatusText.Text = serverMessage;
-        else
+        // 保存期间来的推送不当成「可以重载」：那会儿内存里的画布正要落盘，替换掉它是最坏的事。
+        savingCanvas = true;
+        try
         {
-            TrySaveCanvas(out var message);
-            StatusText.Text = message;
+            // 配了服务器并登录着，就把这次保存交给服务端：锁与修订都由它仲裁，改动顺便推给别人。
+            // 返回 null 表示这条不适用（没配服务器、没登录、这张画布还没落盘…），照旧走本地保存。
+            if (await TrySaveCanvasThroughServerAsync() is { } serverMessage) StatusText.Text = serverMessage;
+            else
+            {
+                TrySaveCanvas(out var message);
+                StatusText.Text = message;
+            }
+        }
+        finally
+        {
+            savingCanvas = false;
         }
 
         AgentWorkbenchPanel.SyncHostState();
@@ -4213,6 +4222,9 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// </summary>
     private CollaborationSession? collaboration;
 
+    /// <summary>正在保存。保存期间来的推送不该触发自动重载：那会儿内存里的画布正要落盘。</summary>
+    private bool savingCanvas;
+
     private CollaborationSession Collaboration()
     {
         collaboration ??= new CollaborationSession(AiProviderSettings.Load().CollaborationServerUrl);
@@ -4231,15 +4243,22 @@ public partial class MainWindow : Window, IAgentSessionHost
     }
 
     /// <summary>
-    /// 别人改了画布：说给用户听，并点明「你手上这份已经不是最新的」。
+    /// 别人改了画布：能跟上就跟上，跟不上就只说。
     ///
     /// **自己那次保存的回声要认出来丢掉**（actor 就是我）：不认的话，每保存一次就对着自己喊一句
     /// 「画布有变动」。代价是「我的另一台机器、同一个账号」的改动也会被当成回声——这一点写在
     /// 代码注释里，而不是假装没有。
+    ///
+    /// 该不该自动重载由 <see cref="RemoteCanvasChange.Decide"/> 判断（纯函数、有回归）：
+    /// 本地干净就直接重载，手上还有东西（未保存改动、正在编辑、正在保存）就只提示。
     /// </summary>
     private void OnRemoteCanvasChanged(CanvasChangedNotice notice)
     {
-        if (collaboration?.User is { } me && notice.Actor == CollaborationSession.Display(me)) return;
+        var mine = collaboration?.User is { } me && notice.Actor == CollaborationSession.Display(me);
+        var busy = savingCanvas || collaboration?.HeldNodeLease is not null
+            || InspectorNameText.IsFocused || InspectorSummaryText.IsFocused;
+        var action = RemoteCanvasChange.Decide(mine, currentCanvas is not null, activeCanvasTab?.Dirty == true, busy);
+        if (action == RemoteChangeAction.Ignore) return;
 
         var node = notice.RecordId is { } id && Guid.TryParse(id, out var parsed)
             ? currentCanvas?.Canvas.Nodes.FirstOrDefault(item => item.Id == parsed)
@@ -4249,7 +4268,33 @@ public partial class MainWindow : Window, IAgentSessionHost
             : node is not null ? $"改了「{node.Title}」"
             : "改了一个节点";
 
-        StatusText.Text = $"画布有变动：{notice.Actor}{what}——你手上这份已经不是最新的，保存前先重新打开这张画布。";
+        if (action == RemoteChangeAction.NotifyOnly)
+        {
+            StatusText.Text = $"画布有变动：{notice.Actor}{what}——你手上这份已经不是最新的，保存前先重新打开这张画布。";
+            return;
+        }
+
+        StatusText.Text = ReloadActiveCanvas()
+            ? $"画布有变动：{notice.Actor}{what}——已重新载入最新版本。"
+            : $"画布有变动：{notice.Actor}{what}——自动重新载入失败，请自己重新打开这张画布。";
+    }
+
+    /// <summary>
+    /// 把当前画布从磁盘重读一遍。
+    ///
+    /// 走「换一个标签」这条路而不是让标签自己重读：装载只有一条实现（<see cref="OpenCanvasFromLibrary"/>），
+    /// 重读要另写一份就迟早会和它分叉。代价是这个标签的撤销历史会丢——跨一次远端改动，
+    /// 那份历史本来也已经是错的。
+    /// </summary>
+    private bool ReloadActiveCanvas()
+    {
+        if (activeCanvasTab?.Path is not { } path) return false;
+        // 先确认读得动，再动标签：读不动还把标签丢了，就是从「旧内容」掉进「什么都没有」。
+        if (!CanvasLibrary.TryLoad(path, out _)) return false;
+
+        canvasTabs.Remove(activeCanvasTab);
+        OpenCanvasFromLibrary(path);
+        return activeCanvasTab?.Path is not null && string.Equals(activeCanvasTab.Path, path, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>检查器下面那句提示 = 原有的一句 + 协作要说的一句。</summary>
