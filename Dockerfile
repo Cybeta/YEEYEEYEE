@@ -4,7 +4,9 @@
 # 也没有源码，只有一个能直接跑的服务。
 #
 # 为什么后端阶段能编得过：`YEEYEEYEE.Web` 的目标框架是 **net10.0**（不是 net10.0-windows），
-# 它引用的 Host 与 Desktop.Core 也一样。见 YEEYEEYEE.Web.csproj 里的注释。
+# 它引用的 Host、Desktop.Core 与 Desktop.Shared 也一样。见 YEEYEEYEE.Web.csproj 里的注释。
+# 其中 Desktop.Shared 是泳道布局引擎所在的库：Web 直接引用**同一份**，不在前端另写一份。
+# 注意 Shared 里带着 DPAPI 那套（SecretProtector）：Linux 上编译得过、调用会抛，所以别在这条链上碰它。
 #
 # 一条命令：docker compose up -d --build
 # 数据（账号库、任务库、资产、场景）都在 /data 这个卷里，容器换了数据还在。
@@ -26,11 +28,13 @@ COPY YEEYEEYEE.slnx ./
 COPY YEEYEEYEE.Core/YEEYEEYEE.Core.csproj YEEYEEYEE.Core/
 COPY YEEYEEYEE.Host/YEEYEEYEE.Host.csproj YEEYEEYEE.Host/
 COPY YEEYEEYEE.Desktop.Core/YEEYEEYEE.Desktop.Core.csproj YEEYEEYEE.Desktop.Core/
+COPY YEEYEEYEE.Desktop.Shared/YEEYEEYEE.Desktop.Shared.csproj YEEYEEYEE.Desktop.Shared/
 COPY YEEYEEYEE.Web/YEEYEEYEE.Web.csproj YEEYEEYEE.Web/
 RUN dotnet restore YEEYEEYEE.Web/YEEYEEYEE.Web.csproj
 COPY YEEYEEYEE.Core/ YEEYEEYEE.Core/
 COPY YEEYEEYEE.Host/ YEEYEEYEE.Host/
 COPY YEEYEEYEE.Desktop.Core/ YEEYEEYEE.Desktop.Core/
+COPY YEEYEEYEE.Desktop.Shared/ YEEYEEYEE.Desktop.Shared/
 COPY YEEYEEYEE.Web/ YEEYEEYEE.Web/
 RUN dotnet publish YEEYEEYEE.Web/YEEYEEYEE.Web.csproj -c Release -o /app --no-restore
 

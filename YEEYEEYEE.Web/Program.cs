@@ -75,6 +75,8 @@ AuthApi.Map(app, users);
 WebSceneApi.Map(app);
 // 编辑锁紧挨着场景接口注册：它按 WebCanvasMode 解出同一张画布，把锁文件放到画布旁边。
 EditLeaseApi.Map(app);
+// 整理布局用的是桌面端那份泳道引擎（Desktop.Shared），所以两端对同一张画布排出来的结果一致。
+WebLayoutApi.Map(app);
 WebSkillJobApi.Map(app);
 app.UseWebSockets();
 if (Directory.Exists(canvasDistPath))

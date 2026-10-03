@@ -40,6 +40,15 @@ internal static class EditLeaseApi
             lease = Wire(result.Lease!),
             displaced = result.Displaced?.Select(Wire).ToArray()
         }),
+        _ => Failure(result)
+    };
+
+    /// <summary>
+    /// 冲突 / 失效这类结果的统一回法。整理布局那个接口也要按同一套码与同一句文案回，
+    /// 所以它是 internal 的——两处各写一份，同一个条件迟早会出现两种错误码。
+    /// </summary>
+    internal static IResult Failure(EditLeaseResult result) => result.Status switch
+    {
         // 冲突要把对方是谁一并回给界面，否则用户只看到「被占用」而不知道该等谁。
         EditLeaseStatus.Conflict => Results.Json(
             new { code = "EDIT_CONFLICT", message = result.Error, holder = result.Holder is null ? null : Wire(result.Holder) },
@@ -50,7 +59,7 @@ internal static class EditLeaseApi
         _ => Error(503, "EDIT_LEASE_STORAGE_FAILED", result.Error!)
     };
 
-    private static TimeSpan LifetimeOf(IConfiguration configuration)
+    internal static TimeSpan LifetimeOf(IConfiguration configuration)
     {
         var raw = LegacyConfig.Text(configuration, "EditLeaseLifetimeSeconds");
         // 越界的值直接落回默认：不让人用一个笔误把所有人的锁变成一秒或一天。
