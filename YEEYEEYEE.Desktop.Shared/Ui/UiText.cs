@@ -63,6 +63,21 @@ public static class UiText
         "gesture.delete", "gesture.cancel");
 
     /// <summary>
+    /// 面板与视图切换的标签（中央区三个视图 + 左栏两个工作区视角）。
+    /// 网页端是 <c>WorkbenchShell.tsx</c> 里那两条数组，这一侧是 <c>MainWindow.axaml</c> 里那几个 Content——
+    /// 两处过去各写一份，一端改了名字另一端会悄悄留着旧名字。XAML 用 <c>{x:Static}</c> 直接绑它们。
+    /// </summary>
+    public static string PanelCanvas => Text("panel.canvas");
+
+    public static string PanelTimeline => Text("panel.timeline");
+
+    public static string PanelScript => Text("panel.script");
+
+    public static string PanelProjectTree => Text("panel.projectTree");
+
+    public static string PanelStoryCanvas => Text("panel.storyCanvas");
+
+    /// <summary>
     /// 编辑锁的来源端说法（wire 值只有 <c>web</c> / <c>desktop</c>）。**认不出的按「网页端」**——
     /// 这条规则过去在服务端 <c>EditClient.Label</c>、桌面端 <c>CollaborationSession.ClientLabel</c>
     /// 与网页端 <c>locks.ts</c> 各写了一遍，每处的注释都指着另一处。现在只有这一份。

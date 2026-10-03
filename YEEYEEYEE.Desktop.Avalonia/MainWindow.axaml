@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="using:YEEYEEYEE.Desktop.Avalonia"
+        xmlns:shared="clr-namespace:YEEYEEYEE.Desktop;assembly=YEEYEEYEE.Desktop.Shared"
         x:Class="YEEYEEYEE.Desktop.Avalonia.MainWindow"
         Title="YEEYEEYEE · Avalonia 工作台"
         SystemDecorations="None"
@@ -49,12 +50,14 @@
                            FontSize="12" FontWeight="SemiBold" />
               </StackPanel>
 
-              <!-- 视图分段：画布 / 时间轴 / 剧本 三种视图，切换的是中央区显示什么 -->
+              <!-- 视图分段：画布 / 时间轴 / 剧本 三种视图，切换的是中央区显示什么。
+                   三个标签与左栏两个工作区视角的措辞走共享文案（{x:Static}），
+                   因为网页端的 WorkbenchShell.tsx 里各有一份同名标签。 -->
               <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="2" Margin="18,0,0,0"
                           VerticalAlignment="Center">
-                <Button x:Name="CanvasSegButton" Classes="seg active" Content="画布" Click="CanvasView_OnClick" />
-                <Button x:Name="TimelineSegButton" Classes="seg" Content="时间轴" Click="TimelineView_OnClick" />
-                <Button x:Name="ScriptSegButton" Classes="seg" Content="剧本" Click="ScriptView_OnClick" />
+                <Button x:Name="CanvasSegButton" Classes="seg active" Content="{x:Static shared:UiText.PanelCanvas}" Click="CanvasView_OnClick" />
+                <Button x:Name="TimelineSegButton" Classes="seg" Content="{x:Static shared:UiText.PanelTimeline}" Click="TimelineView_OnClick" />
+                <Button x:Name="ScriptSegButton" Classes="seg" Content="{x:Static shared:UiText.PanelScript}" Click="ScriptView_OnClick" />
               </StackPanel>
 
               <!-- 右侧操作 -->
@@ -137,9 +140,9 @@
                          Margin="10,16,0,8" />
               <StackPanel DockPanel.Dock="Top" Spacing="4">
                 <Button x:Name="ProjectTreeNavButton" Classes="navButton" HorizontalContentAlignment="Left"
-                        Content="项目树" Click="ProjectTree_OnClick" />
+                        Content="{x:Static shared:UiText.PanelProjectTree}" Click="ProjectTree_OnClick" />
                 <Button x:Name="StoryCanvasNavButton" Classes="navButton active" HorizontalContentAlignment="Left"
-                        Content="故事画布" Click="StoryCanvas_OnClick" />
+                        Content="{x:Static shared:UiText.PanelStoryCanvas}" Click="StoryCanvas_OnClick" />
                 <Button Classes="navButton" HorizontalContentAlignment="Left" Content="Agent 协作"
                         Click="AgentCollab_OnClick" />
               </StackPanel>

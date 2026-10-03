@@ -65,6 +65,26 @@ describe('共享界面文案', () => {
     expect(locks).not.toContain("'网页端'")
   })
 
+  it('面板标签两端同措辞：一端改了名字，另一端不会再悄悄留着旧名字', () => {
+    for (const key of ['panel.canvas', 'panel.timeline', 'panel.script', 'panel.projectTree', 'panel.storyCanvas'])
+      expect(uiText(key).length).toBeGreaterThan(0)
+
+    // 网页端：标签走共享文案，视图里不再写死。
+    const shell = readFileSync(new URL('../src/shell/WorkbenchShell.tsx', import.meta.url), 'utf8')
+    expect(shell).toContain("uiText('panel.canvas')")
+    expect(shell).toContain("uiText('panel.storyCanvas')")
+    for (const literal of ["label: '画布'", "label: '时间轴'", "label: '剧本'", "label: '项目树'", "label: '故事画布'"])
+      expect(shell).not.toContain(literal)
+
+    // 桌面端：那几个 Content 改成 {x:Static} 绑共享文案，不再是手抄的字面量。
+    const axaml = readFileSync(
+      new URL('../../YEEYEEYEE.Desktop.Avalonia/MainWindow.axaml', import.meta.url), 'utf8')
+    expect(axaml).toContain('Content="{x:Static shared:UiText.PanelCanvas}"')
+    expect(axaml).toContain('Content="{x:Static shared:UiText.PanelStoryCanvas}"')
+    for (const literal of ['Content="画布"', 'Content="时间轴"', 'Content="剧本"', 'Content="项目树"', 'Content="故事画布"'])
+      expect(axaml).not.toContain(literal)
+  })
+
   it('占位符填不干净就抛出，不让界面显示半句话', () => {
     expect(() => uiTextFill('lease.who', { name: '陈默' })).toThrow(/占位符/)
   })

@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react'
 
+import { uiText } from './uiText'
+
 /**
  * 工作台外壳：桌面端 MainWindow.axaml 的网页端镜像。
  *
@@ -69,15 +71,17 @@ export type WorkbenchShellProps = {
   badge: { visible: boolean; text: string; onClick: () => void }
 }
 
+// 这几条标签两端各有一份（桌面端是 MainWindow.axaml 里那几个 Content），所以措辞走共享文案：
+// 一端改了名字，另一端不会再悄悄留着旧名字。
 const VIEWS: Array<{ key: WorkbenchView; label: string }> = [
-  { key: 'canvas', label: '画布' },
-  { key: 'timeline', label: '时间轴' },
-  { key: 'script', label: '剧本' }
+  { key: 'canvas', label: uiText('panel.canvas') },
+  { key: 'timeline', label: uiText('panel.timeline') },
+  { key: 'script', label: uiText('panel.script') }
 ]
 
 const SECTIONS: Array<{ key: RailSection; label: string }> = [
-  { key: 'project', label: '项目树' },
-  { key: 'story', label: '故事画布' }
+  { key: 'project', label: uiText('panel.projectTree') },
+  { key: 'story', label: uiText('panel.storyCanvas') }
 ]
 
 /** 同步指示点的颜色：这几档是状态编码，不是装饰。 */
