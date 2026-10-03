@@ -4213,8 +4213,44 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// </summary>
     private CollaborationSession? collaboration;
 
-    private CollaborationSession Collaboration() =>
+    private CollaborationSession Collaboration()
+    {
         collaboration ??= new CollaborationSession(AiProviderSettings.Load().CollaborationServerUrl);
+        // 登录之后（比如刚从设置里登录回来）顺手把订阅起起来；已经起着就不动。
+        if (collaboration.IsSignedIn) StartCollaborationWatch(collaboration);
+        return collaboration;
+    }
+
+    /// <summary>订阅服务端的变更推送。回调跑在后台线程上，所以这里一律切回 UI 线程再动界面。</summary>
+    private void StartCollaborationWatch(CollaborationSession session)
+    {
+        session.StartWatching(
+            notice => Dispatcher.UIThread.Post(() => OnRemoteCanvasChanged(notice)),
+            // 别人抢了/放了锁：顺手把锁列表刷新一遍，设置页里那行「谁在编辑」就不会停在旧状态。
+            () => Dispatcher.UIThread.Post(() => _ = session.RefreshLeasesAsync()));
+    }
+
+    /// <summary>
+    /// 别人改了画布：说给用户听，并点明「你手上这份已经不是最新的」。
+    ///
+    /// **自己那次保存的回声要认出来丢掉**（actor 就是我）：不认的话，每保存一次就对着自己喊一句
+    /// 「画布有变动」。代价是「我的另一台机器、同一个账号」的改动也会被当成回声——这一点写在
+    /// 代码注释里，而不是假装没有。
+    /// </summary>
+    private void OnRemoteCanvasChanged(CanvasChangedNotice notice)
+    {
+        if (collaboration?.User is { } me && notice.Actor == CollaborationSession.Display(me)) return;
+
+        var node = notice.RecordId is { } id && Guid.TryParse(id, out var parsed)
+            ? currentCanvas?.Canvas.Nodes.FirstOrDefault(item => item.Id == parsed)
+            : null;
+        var what = notice.Scope == "layout" ? "重新整理了画布布局"
+            : notice.Scope == "canvas" ? "把整张画布存了一遍"
+            : node is not null ? $"改了「{node.Title}」"
+            : "改了一个节点";
+
+        StatusText.Text = $"画布有变动：{notice.Actor}{what}——你手上这份已经不是最新的，保存前先重新打开这张画布。";
+    }
 
     /// <summary>检查器下面那句提示 = 原有的一句 + 协作要说的一句。</summary>
     private string inspectorHint = string.Empty;
@@ -5438,6 +5474,8 @@ public partial class MainWindow : Window, IAgentSessionHost
     public async Task<bool> OpenModelSettingsAsync()
     {
         if (!await SettingsWindow.ShowAsync(this, Collaboration(), initialPage: 0)) return false;
+        // 设置里可能刚登录：回来之后再走一次，订阅据此起起来（退出时由会话自己停）。
+        Collaboration();
         StatusText.Text = "模型配置已保存，下一轮对话生效";
         // 这一页里也可能改了「出图观感」那个开关（它跟模型配置同在一个窗口），重新取一次并重画。
         RefreshRevealPreferences();
@@ -5455,6 +5493,8 @@ public partial class MainWindow : Window, IAgentSessionHost
     private async void Settings_OnClick(object? sender, RoutedEventArgs e)
     {
         if (!await SettingsWindow.ShowAsync(this, Collaboration())) return;
+        // 设置里可能刚登录：回来之后再走一次，订阅据此起起来（退出时由会话自己停）。
+        Collaboration();
         StatusText.Text = "设置已保存";
         // 「出图观感」那个开关就在这个窗口里：改了它要立刻反映到画布上那排候选卡的画法。
         RefreshRevealPreferences();

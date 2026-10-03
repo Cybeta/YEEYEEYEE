@@ -1021,6 +1021,47 @@ try
         Assert(bytesBefore.SequenceEqual(File.ReadAllBytes(layoutCanvas)), "解析失败时不该动文件");
     }
 
+    // ---------- 桌面端订阅变更推送 ----------
+    // 桌面端把保存交给服务端之后，反过来也得收得到别人的改动，不然还要人自己去刷新。
+    // 这一段验三件事：解析（认不出的安静丢掉）、真实推送能到、**退出登录之后不再推**。
+    using (var watcher = new YEEYEEYEE.Desktop.CollaborationSession($"http://127.0.0.1:{port}"))
+    {
+        var notices = new List<YEEYEEYEE.Desktop.CanvasChangedNotice>();
+        var editsPings = 0;
+        Assert((await watcher.SignInAsync("chenmo", "longenough")).Ok, "订阅方先登录");
+        watcher.StartWatching(notice => { lock (notices) notices.Add(notice); }, () => Interlocked.Increment(ref editsPings));
+
+        // 网页端的林晚改一个节点：桌面端应当收到那条 canvas.changed。
+        var subScene = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+        var subEditing = subScene.GetProperty("records").EnumerateArray()
+            .First(row => row.GetProperty("recordType").GetString() != "Chapter").GetProperty("recordId").GetString()!;
+        await Check(arranger, HttpMethod.Put, $"/api/web/records/{subEditing}", 200,
+            JsonSerializer.Serialize(new { baseRevision = subScene.GetProperty("revision").GetInt64(), title = "林晚改的", content = "内容" }));
+
+        for (var attempt = 0; attempt < 40 && notices.Count == 0; attempt++) await Task.Delay(100);
+        YEEYEEYEE.Desktop.CanvasChangedNotice? got;
+        lock (notices) got = notices.FirstOrDefault();
+        Assert(got is not null, "桌面端应当收到「画布有变动」");
+        Assert(got!.Actor == "林晚" && got.RecordId == subEditing, "推送要说清是谁改了哪个节点：" + got);
+
+        // 别人抢锁也会推一条 edits.changed：桌面端据此刷新锁列表。
+        var subPing = (await Check(arranger, HttpMethod.Post, "/api/web/edits", 200,
+            "{\"scope\":\"node\",\"targetId\":\"" + subEditing + "\",\"client\":\"web\"}"))
+            .GetProperty("lease").GetProperty("leaseId").GetGuid();
+        for (var attempt = 0; attempt < 40 && editsPings == 0; attempt++) await Task.Delay(100);
+        Assert(editsPings > 0, "锁的进出也要推给桌面端");
+        await Check(arranger, HttpMethod.Delete, $"/api/web/edits/{subPing}", 200);
+
+        // 退出登录之后**不能再推**：服务端只在订阅那一刻校验过身份，
+        // 客户端不主动断开的话，退出之后那条流还开着，界面会继续收到别人的改动。
+        Assert((await watcher.SignOutAsync()).Ok, "退出登录");
+        var beforeSignOut = notices.Count;
+        await Check(arranger, HttpMethod.Put, $"/api/web/records/{subEditing}", 200,
+            JsonSerializer.Serialize(new { baseRevision = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64(), title = "退出之后改的", content = "内容" }));
+        await Task.Delay(1200);
+        Assert(notices.Count == beforeSignOut, "退出登录之后不该再收到推送");
+    }
+
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
     Stop();
     await Start(standalone: true, userDatabase: layoutDatabase);
@@ -1037,5 +1078,16 @@ try
     Console.WriteLine("Change-push regression passed: SSE subscribe gating, canvas.changed carrying recordId/actor/the same revision the API reports, silence on failure and on no-op layout, edits.changed on acquire/release but not on renew, tree lease returned after apply");
     Console.WriteLine("Desktop-client regression passed: account sign-in refuses a wrong password without leaving an identity behind, reads the shared lease list with holder and source client, sign-out clears the session");
     Console.WriteLine("Desktop canvas-write regression passed: handshake (server revision equals the local file hash), whole-canvas write lands and broadcasts canvas.changed with the same revision, stale base revision and someone else's node lease both refuse without touching the file, unparsable bytes rejected");
+    // 帧的解析：真实帧里 data 与 type 是两个同名的字段（服务端往载荷里补了 type 与 at），
+    // 两者必须一致才认——不一致说明有一边错了，宁可不认。认不出的类型安静丢掉。
+    var parsedFrame = YEEYEEYEE.Desktop.CollaborationEvents.ParseCanvasChanged(
+        "canvas.changed", "{\"type\":\"canvas.changed\",\"revision\":5,\"actor\":\"林晚\",\"scope\":\"record\"}");
+    Assert(parsedFrame is { Actor: "林晚", Revision: 5, Scope: "record" }, "推送帧要能解析出来");
+    Assert(YEEYEEYEE.Desktop.CollaborationEvents.ParseCanvasChanged("canvas.changed", "不是 json") is null &&
+        YEEYEEYEE.Desktop.CollaborationEvents.ParseCanvasChanged("canvas.changed", "{\"type\":\"edits.changed\"}") is null &&
+        YEEYEEYEE.Desktop.CollaborationEvents.ParseCanvasChanged("canvas.changed", "{\"revision\":5}") is null &&
+        YEEYEEYEE.Desktop.CollaborationEvents.ParseCanvasChanged("canvas.unknown", "{\"type\":\"canvas.unknown\"}") is null,
+        "坏 JSON、类型不符、缺 type、认不出的类型都要安静地丢掉（服务端以后加新事件时，旧客户端不该整条流都断掉）");
+    Console.WriteLine("Desktop subscribe regression passed: frames parsed and unknown ones dropped, real canvas.changed and edits.changed reach the desktop, sign-out stops the stream");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }
