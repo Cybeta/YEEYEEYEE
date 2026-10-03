@@ -14,7 +14,6 @@ var tests = new (string Name, Action Run)[]
     ("TypedReference 缺失引用拒绝", MissingReference),
     ("Job 状态和进度", JobLifecycle),
     ("幂等结果和单人撤销", IdempotencyAndUndo),
-    ("Canvas invoke 到 Job 回传", HostInvokeEndToEnd),
     ("Job 取消和失败终态", JobCancellationAndFailure),
     ("任务重试与尝试链", JobRetryLifecycle),
     ("任务重试的权限与归属", JobRetryAuthorization),
@@ -134,29 +133,6 @@ static void IdempotencyAndUndo()
     var registry = new IdempotencyRegistry(); var user = Guid.NewGuid(); var result = new ExecutionResult { JobId = Guid.NewGuid(), IdempotencyKey = "k", State = JobState.Succeeded };
     registry.Store(user, "k", result); Expect(registry.TryGet(user, "k", out var found) && found.JobId == result.JobId, "幂等结果未复用");
     var undo = new LocalUndoStack(); var op = new OperationRecord(); undo.Push(op); Expect(undo.Pop()?.OperationId == op.OperationId && undo.Pop() is null, "本地撤销栈错误");
-}
-
-static void HostInvokeEndToEnd()
-{
-    var transport = new InMemoryCanvasTransport();
-    var bridge = new HostBridge(transport);
-    var session = new SessionContext { SessionId = Guid.NewGuid(), UserId = Guid.NewGuid(), ClientType = ClientType.Desktop, Role = MemberRole.Member, ServerClaims = new HashSet<string>(["skill.invoke", "canvas.edit"]) };
-    bridge.Initialize(session);
-    var hello = "{\"v\":1,\"id\":\"11111111-1111-4111-8111-111111111111\",\"type\":\"canvas/hello\",\"ts\":1,\"payload\":{\"canvasVersion\":\"0.1.0\",\"protocolVersion\":1,\"minHostProtocol\":1,\"features\":[]}}";
-    using (var helloDocument = JsonDocument.Parse(hello)) transport.Deliver(helloDocument.RootElement.Clone());
-    var invocationId = Guid.NewGuid();
-    var invoke = JsonSerializer.Serialize(new { v = 1, id = Guid.NewGuid(), type = "canvas/invoke.request", ts = 1L, payload = new { invocation = new { invocationId, tool = "local.test", capability = (int)Capability.TextToText, channel = "local", inputs = new { }, assets = Array.Empty<object>() }, idempotencyKey = "e2e-key" } });
-    using (var invokeDocument = JsonDocument.Parse(invoke)) transport.Deliver(invokeDocument.RootElement.Clone());
-    var deadline = DateTime.UtcNow.AddSeconds(2);
-    while (DateTime.UtcNow < deadline && !transport.Sent.Any(x => x.GetProperty("type").GetString() == "host/job.update" && x.GetProperty("payload").GetProperty("state").GetString() == "Succeeded")) Thread.Sleep(10);
-    var updates = transport.Sent.Where(x => x.GetProperty("type").GetString() == "host/job.update").ToArray();
-    var success = updates.Single(x => x.GetProperty("payload").GetProperty("state").GetString() == "Succeeded");
-    var firstJobId = success.GetProperty("payload").GetProperty("jobId").GetGuid();
-    Expect(success.GetProperty("payload").GetProperty("progressPercent").GetInt32() == 100, "Job 未回传 100% 进度");
-    using (var duplicateDocument = JsonDocument.Parse(invoke)) transport.Deliver(duplicateDocument.RootElement.Clone());
-    Thread.Sleep(50);
-    var duplicateSuccess = transport.Sent.Where(x => x.GetProperty("type").GetString() == "host/job.update" && x.GetProperty("payload").GetProperty("state").GetString() == "Succeeded").Last();
-    Expect(duplicateSuccess.GetProperty("payload").GetProperty("jobId").GetGuid() == firstJobId, "重复幂等键创建了新的 Job");
 }
 
 static void JobCancellationAndFailure()

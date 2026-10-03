@@ -176,11 +176,6 @@ try
     await Check(authorized, HttpMethod.Post, $"/api/web/jobs/{jobId}/retry", 409);
     await Check(anonymous, HttpMethod.Put, $"/api/web/records/{id}", 401, "{\"baseRevision\":4,\"title\":\"bad\",\"content\":\"bad\"}");
     await Check(wrong, HttpMethod.Get, "/api/web/scene", 401);
-    await Check(anonymous, HttpMethod.Post, "/api/canvas/scene", 401, "{\"revision\":999,\"records\":[]}");
-    await Check(anonymous, HttpMethod.Post, "/api/canvas/nodes", 401, "{}");
-    await Check(anonymous, HttpMethod.Post, "/api/canvas/resource-replace", 401, "{}");
-    await Check(anonymous, HttpMethod.Post, "/api/canvas/resource-replace/result", 401, "{}");
-    await Check(anonymous, HttpMethod.Get, "/api/canvas/resource-replace/next", 401);
     Assert(before == File.ReadAllText(scenePath), "Denied requests changed scene");
     var initial = await Check(authorized, HttpMethod.Get, "/api/web/scene", 200);
     Assert(initial.GetProperty("revision").GetInt32() == 4, "Initial revision");

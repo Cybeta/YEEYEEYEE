@@ -18,10 +18,9 @@ internal sealed record CanvasEventMessage(string Type, string Json);
 /// 于是「丢一条」的后果只是晚一拍看到，而不是状态错；反过来，为了不丢而让慢客户端把服务端内存拖住，
 /// 才是真会出事的那一头。
 ///
-/// 为什么不复用 <see cref="WebCanvasTransport"/>（<c>/ws/canvas</c>）：那条是 HostBridge 的
-/// 双向广播口，协议是 <c>host/...</c> 那一套，跟「画布/编辑锁变了」不是一回事；
-/// 混进去会让两种协议纠缠在一起。浏览器这边要的是单向、带会话身份、能自动重连，
-/// 那正是 SSE（<c>text/event-stream</c>）的形状。
+/// 为什么当初没复用那条 WebSocket 广播口（第 180 轮已随 HostBridge 一起删掉）：那条是**双向**的、
+/// 协议是 <c>host/...</c> 那一套，跟「画布/编辑锁变了」不是一回事；混进去会让两种协议纠缠在一起。
+/// 浏览器这边要的是单向、带会话身份、能自动重连，那正是 SSE（<c>text/event-stream</c>）的形状。
 /// </summary>
 internal sealed class CanvasEventHub
 {

@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
 using YEEYEEYEE.Core;
@@ -54,21 +53,10 @@ if (!string.IsNullOrWhiteSpace(callbackSecret))
     builder.Services.AddSingleton(_ => new HmacCallbackVerifier(new CallbackSignatureOptions { Secret = Convert.FromBase64String(callbackSecret) }));
 
 var app = builder.Build();
-var execution = app.Services.GetRequiredService<SingleMachineExecutionService>();
 var callbackReceiver = app.Services.GetRequiredService<ExternalTaskCallbackReceiver>();
-var resourceReplaceRequests = new ConcurrentQueue<CanvasResourceReplaceRequest>();
 var canvasDistPath = string.IsNullOrWhiteSpace(configuredCanvasDist)
     ? Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "YEEYEEYEE.Canvas", "dist"))
     : Path.GetFullPath(configuredCanvasDist);
-var transport = new WebCanvasTransport();
-var bridge = new HostBridge(transport, execution: execution);
-bridge.Initialize(new SessionContext
-{
-    SessionId = Guid.NewGuid(), UserId = Guid.NewGuid(), ClientType = ClientType.Web,
-    Role = MemberRole.Member, ServerClaims = new HashSet<string>(StringComparer.Ordinal) // legacy socket must never inherit HTTP execution privileges
-});
-bridge.ResourceReplaceRequested += request => resourceReplaceRequests.Enqueue(new CanvasResourceReplaceRequest(
-    Guid.NewGuid(), request.RecordId, request.EntityId, request.VariantId, request.VariantVersionId));
 
 // 守卫必须在场景/技能接口之前注册：它把身份解析成 <see cref="WebAccessGuard.PermissionsItem"/>，
 // 后面的写入判断靠它。
@@ -86,68 +74,9 @@ WebEventApi.Map(app);
 WebCanvasApi.Map(app);
 WebSkillJobApi.Map(app);
 WebSettingsApi.Map(app);
-app.UseWebSockets();
 if (Directory.Exists(canvasDistPath))
     app.UseStaticFiles(new StaticFileOptions { FileProvider = new PhysicalFileProvider(canvasDistPath) });
 app.MapGet("/", () => Results.File(Path.Combine(canvasDistPath, "index.html"), "text/html"));
-app.MapGet("/ws/canvas", async (HttpContext context) =>
-{
-    if (!context.WebSockets.IsWebSocketRequest) return Results.StatusCode(StatusCodes.Status400BadRequest);
-    await transport.HandleWebSocketAsync(await context.WebSockets.AcceptWebSocketAsync(), context.RequestAborted);
-    return Results.Empty;
-});
-// ==================== 旧的 HostBridge 兼容面（/api/canvas/* 与 /ws/canvas） ====================
-// 这一家子把 HostBridge 架在 HTTP 上：`/ws/canvas` 是那条 socket，下面这几个 POST 是往它上面推消息，
-// 身份由 WebAccessGuard 管（要 Bearer 且只能来自本机）。
-//
-// **本仓库里已经没有调用方**（第 178 轮查过：全仓搜 `api/canvas` 与 `ws/canvas`，命中的只有这一处定义、
-// 访问守卫、Web.Tests 里那几条 401 断言，以及文档里提到它的句子）：桌面端走的是 WebView2 的 postMessage
-// 直接驱动它自己那份画布前端（见 YEEYEEYEE.Canvas/src/main.tsx 里那条 chrome.webview 分支），
-// 网页端走 /api/web/*。
-//
-// 而且它**与现在的协议对不上**：这里的 revision 是 int，而画布修订早已是**内容哈希**（SHA-256 前 48 位）。
-// 就算还有谁在推，推过来的修订号也没法与画布对上。
-//
-// 那为什么不直接删：`retained for desktop compatibility` 是**外部兼容性**的判断——万一还有旧版本的
-// 桌面端或别的机器上的集成朝它推，删掉就是一次静默断链。所以这里把它**说清楚**，删不删留给拍板。
-// 真要清掉，删这几处（互不牵连，删完 dotnet build 会指出还漏了什么）：
-//   ① 这一段里 /api/canvas/scene、/api/canvas/nodes、/api/canvas/resource-replace(+ /next、/result) 五个映射；
-//   ② 本文件末尾的 ScenePushRequest / NodeUpdateRequest / CanvasResourceReplacePayload / CanvasResourceReplaceResult；
-//   ③ resourceReplaceRequests 队列，以及 transport / bridge 两个字段（先确认没有别的使用者）；
-//   ④ app.MapGet("/ws/canvas", …) 与它上面那句 app.UseWebSockets()；
-//   ⑤ WebAccessGuard 里的 /api/canvas 与 /ws/canvas 两条前缀；
-//   ⑥ YEEYEEYEE.Web.Tests 里那 5 条 401 断言，以及 README 里提到它的那两句。
-app.MapPost("/api/canvas/scene", async (HttpRequest request) =>
-{
-    var body = await JsonSerializer.DeserializeAsync<ScenePushRequest>(request.Body);
-    if (body is null) return Results.BadRequest("请求体无效");
-    bridge.SendScene(body.Records ?? [], body.Revision, body.Reason ?? "scene-update");
-    return Results.Ok(new { status = "ok", revision = body.Revision });
-});
-app.MapPost("/api/canvas/nodes", async (HttpRequest request) =>
-{
-    var body = await JsonSerializer.DeserializeAsync<NodeUpdateRequest>(request.Body);
-    if (body is null) return Results.BadRequest("请求体无效");
-    bridge.SendNodeUpdates(body.Records ?? [], body.Revision);
-    return Results.Ok(new { status = "ok", revision = body.Revision });
-});
-app.MapPost("/api/canvas/resource-replace", async (HttpRequest request) =>
-{
-    var body = await JsonSerializer.DeserializeAsync<CanvasResourceReplacePayload>(request.Body);
-    if (body is null) return Results.BadRequest("请求体无效");
-    var queued = new CanvasResourceReplaceRequest(Guid.NewGuid(), body.RecordId, body.EntityId, body.VariantId, body.VariantVersionId);
-    resourceReplaceRequests.Enqueue(queued);
-    return Results.Accepted(value: new { status = "queued", requestId = queued.RequestId });
-});
-app.MapGet("/api/canvas/resource-replace/next", () => resourceReplaceRequests.TryDequeue(out var request)
-    ? Results.Ok(request) : Results.NoContent());
-app.MapPost("/api/canvas/resource-replace/result", async (HttpRequest request) =>
-{
-    var body = await JsonSerializer.DeserializeAsync<CanvasResourceReplaceResult>(request.Body);
-    if (body is null) return Results.BadRequest("请求体无效");
-    bridge.SendResourceReplaceResult(body.RequestId, body.Ok, body.Message, body.Revision);
-    return Results.Ok(new { status = "delivered" });
-});
 app.MapPost("/callbacks/comfyui/{userId:guid}", async (HttpRequest request, Guid userId) =>
 {
     var verifier = request.HttpContext.RequestServices.GetService<HmacCallbackVerifier>();
@@ -170,27 +99,3 @@ app.MapPost("/callbacks/comfyui/{userId:guid}", async (HttpRequest request, Guid
 });
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.Run();
-
-public sealed record CanvasResourceReplacePayload(
-    [property: System.Text.Json.Serialization.JsonPropertyName("recordId")] Guid RecordId,
-    [property: System.Text.Json.Serialization.JsonPropertyName("entityId")] Guid EntityId,
-    [property: System.Text.Json.Serialization.JsonPropertyName("variantId")] Guid VariantId,
-    [property: System.Text.Json.Serialization.JsonPropertyName("variantVersionId")] Guid? VariantVersionId);
-public sealed record CanvasResourceReplaceRequest(
-    [property: System.Text.Json.Serialization.JsonPropertyName("requestId")] Guid RequestId,
-    [property: System.Text.Json.Serialization.JsonPropertyName("recordId")] Guid RecordId,
-    [property: System.Text.Json.Serialization.JsonPropertyName("entityId")] Guid EntityId,
-    [property: System.Text.Json.Serialization.JsonPropertyName("variantId")] Guid VariantId,
-    [property: System.Text.Json.Serialization.JsonPropertyName("variantVersionId")] Guid? VariantVersionId);
-public sealed record CanvasResourceReplaceResult(
-    [property: System.Text.Json.Serialization.JsonPropertyName("requestId")] Guid RequestId,
-    [property: System.Text.Json.Serialization.JsonPropertyName("ok")] bool Ok,
-    [property: System.Text.Json.Serialization.JsonPropertyName("message")] string Message,
-    [property: System.Text.Json.Serialization.JsonPropertyName("revision")] int? Revision);
-public sealed record ScenePushRequest(
-    [property: System.Text.Json.Serialization.JsonPropertyName("records")] List<object>? Records,
-    [property: System.Text.Json.Serialization.JsonPropertyName("revision")] int Revision,
-    [property: System.Text.Json.Serialization.JsonPropertyName("reason")] string? Reason);
-public sealed record NodeUpdateRequest(
-    [property: System.Text.Json.Serialization.JsonPropertyName("records")] List<object>? Records,
-    [property: System.Text.Json.Serialization.JsonPropertyName("revision")] int Revision);

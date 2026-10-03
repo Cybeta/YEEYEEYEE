@@ -6,17 +6,20 @@ using YEEYEEYEE.Web.Auth;
 namespace YEEYEEYEE.Web;
 
 /// <summary>
-/// 访问守卫：**谁能碰 /api/web、/api/canvas、/ws/canvas**。
+/// 访问守卫：**谁能碰 /api/web**。
 ///
 /// 现在有两条身份路径，各自服务一类调用方：
 ///
 /// · **浏览器用会话 cookie**（`yeeeyee_session`）。不要求来源是本机——容器部署时用户就是从别的机器访问的，
 ///   还要求 loopback 等于把 Docker 那条路堵死。权限由**角色**换算，前端传什么都不作数。
-/// · **桌面桥用 Bearer**（配置项 `WebToken`）+ **必须来自本机**。这条是给桌面端推场景用的老路径，
-///   它不该因为加了登录系统而变得能从外网调用，所以 loopback 与静态令牌这两道门原样保留。
+/// · **桌面桥用 Bearer**（配置项 `WebToken`）+ **必须来自本机**。桌面端把「保存修订」交给
+///   `PUT /api/web/canvas` 时走这条，它不该因为加了登录系统而变得能从外网调用，
+///   所以 loopback 与静态令牌这两道门原样保留。
 ///
 /// 两者的关系是「或」：任一条通过即可。没有凭据时回 401；带 Bearer 但令牌没配置时回 503
 /// （这是部署漏配，得让运维一眼看出是哪一项没配，而不是笼统的「未授权」）。
+///
+/// 第 180 轮把旧的 HostBridge 兼容面（`/api/canvas/*` 与 `/ws/canvas`）删掉了，所以这里只剩 `/api/web`。
 /// </summary>
 internal static class WebAccessGuard
 {
@@ -24,8 +27,7 @@ internal static class WebAccessGuard
     public const string UserItem = "yeeeyee.user";
     public const string PermissionsItem = "yeeeyee.permissions";
 
-    private static bool Guarded(PathString path) =>
-        path.StartsWithSegments("/api/web") || path.StartsWithSegments("/api/canvas") || path.StartsWithSegments("/ws/canvas");
+    private static bool Guarded(PathString path) => path.StartsWithSegments("/api/web");
 
     public static void Map(WebApplication app, UserStore users)
     {
