@@ -1,6 +1,6 @@
 import { layerOf, isUuid, type OperationRecord } from '../Protocol/VersionedMessages'
 import {
-  chapterIdOf, chapterOrderOf, sortWithinChapters, type ViewRecord
+  chapterIdOf, chapterOrderOf, isPlanningLayer, sortWithinChapters, type ViewRecord
 } from '../ChapterView'
 
 /**
@@ -136,16 +136,15 @@ export const PLANNING_GROUP_ID = '__planning__'
 export const UNFILED_GROUP_ID = '__unfiled__'
 
 /**
- * 是不是企划层。
+ * 是不是企划层。规则在 `ChapterView.isPlanningLayer` 那一份（确切的两层：L1 剧情、L2 企划）。
  *
- * **不能**直接用 ChapterView 的 `isPlanningLayer`：它写的是 `layerOf(...) <= 2`，
- * 而 layerOf 对「认不出来的类型」返回 0，于是角色 / 场景 / 道具 / 通用这些真实节点
- * 都会被判成企划层——章节筛选下永远留在画面上，剧本视图里还会被排到最前。
- * 这里要的是确切的两层：L1 剧情、L2 企划。
+ * 这里原本另写了一份，因为那时 ChapterView 写的是 `layerOf(...) <= 2`，而 `layerOf` 对
+ * 「认不出来的类型」返回 0，于是角色 / 场景 / 道具 / 通用这些真实节点都会被判成企划层
+ * ——章节筛选下永远留在画面上，剧本视图里还会被排到最前。那份判据后来修好了，
+ * 所以这里改成直接用它：**同一条规则不留第二份**，否则下一次修的时候只会修一处。
  */
 export function isPlanning(record: ViewRecord): boolean {
-  const layer = layerOf(record.recordType)
-  return layer === 1 || layer === 2
+  return isPlanningLayer(record)
 }
 
 export type ChapterGroup = {
