@@ -106,6 +106,27 @@ async Task WaitForEditClaim(HttpClient client, string recordId, bool allowed)
     }
     throw new Exception($"Timed out waiting for canvas.edit {(allowed ? "grant" : "revocation")}");
 }
+/// <summary>从 SSE 流里读下一帧。读到空行才算一帧读完；返回 null 表示流关了。</summary>
+async Task<(string Type, JsonElement Data)?> ReadFrame(StreamReader reader)
+{
+    var type = (string?)null;
+    var data = new StringBuilder();
+    while (true)
+    {
+        var line = await reader.ReadLineAsync();
+        if (line is null) return null;
+        if (line.Length == 0)
+        {
+            // 开头那行 retry（重连间隔）与心跳 `: ping` 都没有 event:，于是到这里什么都不返回，
+            // 继续等下一帧——它们本来就不该被当成事件。
+            if (type is not null) return (type, JsonDocument.Parse(data.ToString()).RootElement.Clone());
+            continue;
+        }
+        if (line[0] == ':') continue;
+        if (line.StartsWith("event:", StringComparison.Ordinal)) type = line[6..].Trim();
+        else if (line.StartsWith("data:", StringComparison.Ordinal)) data.Append(line[5..].Trim());
+    }
+}
 try
 {
     await Start();
@@ -731,6 +752,54 @@ try
     Assert(layoutBytesBefore.SequenceEqual(File.ReadAllBytes(layoutCanvas)), "被锁挡住时不该改动画布");
     await Check(rival, HttpMethod.Delete, $"/api/web/edits/{rivalLease}", 200);
 
+    // ---------- 变更推送（SSE）：谁改了什么，别人得立刻知道，而不是靠轮询撞见 ----------
+    // 这条流会说「谁在编辑、谁改了什么」，所以匿名读不到——不过拦住它的是更外层的访问守卫（401），
+    // 连处理函数都进不去。处理函数里那道 403 挡的是另一种情况：「有身份，但一个权限都没有」。
+    using var anonymousEvents = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+    await Check(anonymousEvents, HttpMethod.Get, "/api/web/events", 401);
+
+    // 桌面桥的令牌能过守卫但 claims 是空的——正好走到处理函数里那道闸门。
+    // 顺带用上了「改配置对运行中的服务立刻生效」这条（别处的实时收回权限用例也靠它）。
+    using (var claimless = new HttpClient { BaseAddress = anonymousEvents.BaseAddress })
+    {
+        claimless.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
+        SetClaims("");
+        try
+        {
+            var refused = false;
+            for (var attempt = 0; attempt < 30 && !refused; attempt++)
+            {
+                using var probe = new HttpRequestMessage(HttpMethod.Get, "/api/web/events");
+                // 只读响应头：配置热更新还没落地时这一下会是 200 的长流，
+                // 走默认的「读完整个响应体」会一直挂着直到 HttpClient 超时。
+                using var response = await claimless.SendAsync(probe, HttpCompletionOption.ResponseHeadersRead);
+                if ((int)response.StatusCode != 403) { await Task.Delay(100); continue; }
+                using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                refused = document.RootElement.GetProperty("code").GetString() == "EVENTS_REQUIRE_SESSION";
+            }
+            Assert(refused, "没有权限的调用方不该能订阅变更推送");
+        }
+        finally { SetClaims("canvas.edit,skill.invoke,job.cancel"); }
+    }
+
+    // 订阅放在整理之前，下面那次真的写入才会被看到。
+    using var eventResponse = await rival.GetAsync("/api/web/events", HttpCompletionOption.ResponseHeadersRead);
+    Assert((int)eventResponse.StatusCode == 200, "登录后订阅变更推送应当 200：" + (int)eventResponse.StatusCode);
+    Assert(eventResponse.Content.Headers.ContentType?.MediaType == "text/event-stream", "推送必须是 text/event-stream");
+    var eventReader = new StreamReader(await eventResponse.Content.ReadAsStreamAsync());
+    var pendingFrame = ReadFrame(eventReader);
+    async Task<(string Type, JsonElement Data)?> NextEvent(int milliseconds)
+    {
+        // 超时**不取消**那条读——它继续挂着，下一帧真来了照样接得住。
+        // 取消会把底层连接弄坏，那之后所有「没有收到」的断言都成了假阴性。
+        if (await Task.WhenAny(pendingFrame, Task.Delay(milliseconds)) != pendingFrame) return null;
+        var frame = await pendingFrame;
+        pendingFrame = ReadFrame(eventReader);
+        return frame;
+    }
+    // 除了开头那行 retry（重连间隔）之外，没动静时不该收到任何东西。
+    Assert(await NextEvent(1500) is null, "订阅之后不该凭空收到事件");
+
     // 真正应用：落盘坐标必须与预览逐项一致——计划是服务端按同一份引擎重算的，所以两者等价。
     var applied = await Check(arranger, HttpMethod.Post, "/api/web/layout/apply", 200, ApplyBody(revisionBefore));
     var moved = applied.GetProperty("moved").GetInt32();
@@ -754,6 +823,23 @@ try
     Assert(landed == planned.Count, $"预览里的每一项都应当真的落盘（{landed}/{planned.Count}）");
     Assert(Directory.GetFiles(Path.Combine(layoutCanvases, "backups"), "*.json").Length > 0, "整理布局也要留备份");
 
+    // 整理写完之后订阅方应当收到一条 canvas.changed：scope=layout、不带单个记录号。
+    // 重点在修订号——它必须是**接口回报给客户端的那个数**（项目模式下是内容哈希），
+    // 客户端就是拿它和自己手上的比「谁更新」的；两边不是同一把尺子的话，这条推送等于没发。
+    var layoutEvent = await NextEvent(5000);
+    Assert(layoutEvent is not null && layoutEvent.Value.Type == "canvas.changed", "整理布局应当推一条 canvas.changed");
+    var layoutPayload = layoutEvent!.Value.Data;
+    Assert(layoutPayload.GetProperty("scope").GetString() == "layout" &&
+        layoutPayload.GetProperty("recordId").ValueKind == JsonValueKind.Null,
+        "整理的推送要说 scope=layout 且不带记录号：" + layoutPayload.GetRawText());
+    Assert(layoutPayload.GetProperty("actor").GetString() == "林晚", "推送要说是谁整理的：" + layoutPayload.GetRawText());
+    Assert(layoutPayload.GetProperty("revision").GetInt64() == applied.GetProperty("revision").GetInt64(),
+        "推送里的修订号必须与接口回报的是同一个数：" + layoutPayload.GetRawText());
+    // 整棵树锁只是为了让这次写入与别人排队，写完就该还回去；
+    // 不还的话，一次整理会把别人的结构改动挡到锁过期，而界面上看不出是谁在挡。
+    Assert((await Check(arranger, HttpMethod.Get, "/api/web/edits", 200)).GetProperty("leases").GetArrayLength() == 0,
+        "整理布局用完的整棵树锁应当已经还回去");
+
     // 再应用一次：位置已经排好，就不该再写盘、也不该推进修订。这条同时证明了引擎与写入口是同一个口径。
     var revisionAfter = applied.GetProperty("revision").GetInt64();
     var bytesAfter = File.ReadAllBytes(layoutCanvas);
@@ -761,6 +847,49 @@ try
     Assert(again.GetProperty("moved").GetInt32() == 0 && again.GetProperty("revision").GetInt64() == revisionAfter,
         "已排好的画布再整理应当是「无需改动」：" + again.GetRawText());
     Assert(bytesAfter.SequenceEqual(File.ReadAllBytes(layoutCanvas)), "「无需改动」不该碰画布字节");
+
+    // 改一个节点：推送要说清改的是哪个节点、谁改的，修订号也要与接口回报的一致。
+    var editableId = applied.GetProperty("records")[0].GetProperty("recordId").GetString()!;
+    var edited = await Check(rival, HttpMethod.Put, $"/api/web/records/{editableId}", 200,
+        JsonSerializer.Serialize(new { baseRevision = revisionAfter, title = "改过的标题", content = "改过的内容" }));
+    var recordEvent = await NextEvent(5000);
+    Assert(recordEvent is not null && recordEvent.Value.Type == "canvas.changed", "改完节点应当收到 canvas.changed");
+    var recordPayload = recordEvent!.Value.Data;
+    Assert(recordPayload.GetProperty("scope").GetString() == "record" &&
+        recordPayload.GetProperty("recordId").GetString() == editableId,
+        "推送要说清改的是哪个节点：" + recordPayload.GetRawText());
+    Assert(recordPayload.GetProperty("actor").GetString() == "陈默", "推送要说是谁改的：" + recordPayload.GetRawText());
+    Assert(recordPayload.GetProperty("revision").GetInt64() == edited.GetProperty("revision").GetInt64(),
+        "推送里的修订号必须与接口回报的是同一个数：" + recordPayload.GetRawText());
+
+    // 被拒的写入（缺字段 → 400）不该广播：广播的判据是「真的落了盘」，不是「有人发过请求」。
+    await Check(rival, HttpMethod.Put, $"/api/web/records/{editableId}", 400, "{}");
+    Assert(await NextEvent(800) is null, "写入失败不该广播");
+
+    // 「位置本来就排好」的整理也是 200，但画布一个字节都没变，同样不该广播。
+    var noopApply = await Check(arranger, HttpMethod.Post, "/api/web/layout/apply", 200,
+        ApplyBody(edited.GetProperty("revision").GetInt64()));
+    Assert(noopApply.GetProperty("moved").GetInt32() == 0, "这一步的前提是整理确实无需改动");
+    Assert(await NextEvent(800) is null, "「无需改动」不该广播");
+
+    // 编辑锁：申请与释放要说，续期不必说（它只把到期时间往后推，界面上没有任何东西会变）。
+    var pushedLease = (await Check(rival, HttpMethod.Post, "/api/web/edits", 200,
+        "{\"scope\":\"node\",\"targetId\":\"" + editableId + "\",\"client\":\"web\"}"))
+        .GetProperty("lease").GetProperty("leaseId").GetGuid();
+    var acquiredEvent = await NextEvent(5000);
+    Assert(acquiredEvent is not null && acquiredEvent.Value.Type == "edits.changed" &&
+        acquiredEvent.Value.Data.GetProperty("reason").GetString() == "acquire" &&
+        acquiredEvent.Value.Data.GetProperty("actor").GetString() == "陈默", "申请编辑锁应当推一条 edits.changed");
+    Assert((await Check(rival, HttpMethod.Put, $"/api/web/edits/{pushedLease}", 200))
+        .GetProperty("lease").GetProperty("leaseId").GetGuid() == pushedLease, "续期应当续的是同一个锁");
+    Assert(await NextEvent(800) is null, "续期不该广播——界面上的东西一个都没变");
+    await Check(rival, HttpMethod.Delete, $"/api/web/edits/{pushedLease}", 200);
+    var releasedEvent = await NextEvent(5000);
+    Assert(releasedEvent is not null && releasedEvent.Value.Type == "edits.changed" &&
+        releasedEvent.Value.Data.GetProperty("reason").GetString() == "release", "释放编辑锁应当推一条 edits.changed");
+
+    // 订阅是一条长连接，收工就断开，别把它拖进下一次重启。
+    eventResponse.Dispose();
 
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
     Stop();
@@ -775,5 +904,6 @@ try
     Console.WriteLine("Auth regression passed: first user becomes admin, role-derived claims, session persistence, disable/password revocation, setup token");
     Console.WriteLine("Edit-lease regression passed: node/tree granularity, idempotent acquire, holder identity, heartbeat renew, expiry vs missing, admin force takeover, corrupt-file self-healing, restart persistence, canvas bytes untouched");
     Console.WriteLine("Layout regression passed: shared swimlane engine on the server, chapter scope, stale revision, tree-lease arbitration, preview equals what lands on disk, idempotent no-op, standalone refusal");
+    Console.WriteLine("Change-push regression passed: SSE subscribe gating, canvas.changed carrying recordId/actor/the same revision the API reports, silence on failure and on no-op layout, edits.changed on acquire/release but not on renew, tree lease returned after apply");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }

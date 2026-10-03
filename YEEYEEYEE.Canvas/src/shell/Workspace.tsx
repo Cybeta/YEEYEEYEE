@@ -38,8 +38,8 @@ export type WorkspaceProps = {
   /** 当前有效的编辑锁：卡片徽标、左上角提示、以及整理按钮的可用性都看它。 */
   leases?: Lease[]
   myUserId?: string
-  /** 锁这一路自己的问题，画在画布左上角那枚提示里。 */
-  leaseNotice?: string
+  /** 通道自己的问题（锁读不到、推送断开），画在画布左上角那枚提示里。 */
+  channelNotice?: string
   layoutBusy: boolean
   layoutPlan: LayoutPlan | null
   layoutScope: LayoutScope
@@ -191,7 +191,7 @@ export function Workspace(props: WorkspaceProps) {
             apiRef={canvasApi}
             leases={leases}
             myUserId={props.myUserId}
-            leaseNotice={props.leaseNotice}
+            channelNotice={props.channelNotice}
             ghosts={ghosts}
           />
         )}

@@ -113,6 +113,16 @@ internal static class WebAccessGuard
     public static WebUser? CurrentUser(HttpContext context) =>
         context.Items.TryGetValue(UserItem, out var value) ? value as WebUser : null;
 
+    /// <summary>
+    /// 「谁做的」这件事的显示名，用在变更推送与锁提示上。
+    /// 桌面桥没有用户身份（Bearer 令牌不带用户），就报它自己的名字——
+    /// 总比留空让界面写一句「有人改了」强。
+    /// </summary>
+    public static string ActorName(HttpContext context) =>
+        CurrentUser(context) is { } user
+            ? (string.IsNullOrWhiteSpace(user.DisplayName) ? user.Username : user.DisplayName)
+            : "桌面桥";
+
     /// <summary>写入 cookie。HttpOnly（脚本读不到）、SameSite=Lax（跨站请求不带它，够挡 CSRF）。</summary>
     public static void SetCookie(HttpContext context, string token, DateTimeOffset expires)
     {
