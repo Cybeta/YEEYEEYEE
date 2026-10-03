@@ -50,11 +50,14 @@ internal sealed class ProjectCanvasSceneStore
     }
 
 
-    private static long Revision(byte[] bytes)
+    /// <summary>修订号的定义在 <see cref="CanvasRevision.Of"/>：桌面端也要算同一个数，所以实现只有一份。</summary>
+    private static long Revision(byte[] bytes) => CanvasRevision.Of(bytes);
+
+    /// <summary>磁盘上这份画布现在的修订号；读不到（文件不在、没权限）就是 null。</summary>
+    public long? CurrentRevision()
     {
-        var digest = SHA256.HashData(bytes);
-        return ((long)digest[0] << 40) | ((long)digest[1] << 32) | ((long)digest[2] << 24) |
-               ((long)digest[3] << 16) | ((long)digest[4] << 8) | digest[5];
+        try { return Revision(File.ReadAllBytes(path)); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
     }
 
     private (RecentCanvasState State, byte[] Bytes, long Revision, CanvasOpenOutcome Open) Load()
@@ -235,6 +238,30 @@ internal sealed class ProjectCanvasSceneStore
                 .First(row => JsonSerializer.SerializeToElement(row).GetProperty("recordId").GetString() == recordId);
             return new { revision = Revision(bytes), record };
         });
+    }
+
+    /// <summary>
+    /// 整张画布的写入：桌面端把画布字节交回来，由服务端校验、推进修订、原子落盘。
+    ///
+    /// 为什么要有这条路：桌面端编辑的是**本地文件**，它自己保存时既不经锁仲裁、别人也收不到通知。
+    /// 把保存交给服务端之后，「谁在编辑」这条锁才真正管得住它，改动也顺便推给所有订阅者。
+    ///
+    /// 送来的字节被当作**画布文件的内容重新解析与校验**（不是拿去覆盖文件），
+    /// 所以只读闸门、迁移歧义、项目库权威校验、备份与原子落盘一个都没绕开——
+    /// 与「改一个节点」和「整理布局」走的是同一条 <see cref="Write"/> 通道，修订也由这里推进。
+    /// </summary>
+    public IResult ReplaceCanvas(long baseRevision, byte[] canvasBytes)
+    {
+        if (!CanvasOpenService.TryOpenBytes(canvasBytes, path, out var opened, out var reason))
+            return Error(400, "CANVAS_INVALID", "送来的画布无法解析：" + reason);
+        if (opened.State.Canvas is not { } incoming)
+            return Error(400, "CANVAS_INVALID", "送来的画布没有节点集合");
+        if (opened.UnsupportedFormat) return Error(409, "CANVAS_READ_ONLY", "高版本画布只读，拒绝覆盖");
+        if (opened.Validation.HasErrors || opened.Migration.Ambiguities.Count > 0)
+            return Error(409, "CANVAS_VALIDATION_FAILED", "画布引用或迁移存在未解决问题，拒绝保存");
+
+        return Write(baseRevision, _ => (incoming, null),
+            (next, bytes) => new { revision = Revision(bytes), nodes = next.Canvas.Nodes.Count });
     }
 
     /// <summary>

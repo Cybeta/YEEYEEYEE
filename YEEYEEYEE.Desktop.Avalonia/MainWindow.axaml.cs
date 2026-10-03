@@ -1044,11 +1044,104 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// <summary>新建画布：左栏按钮与标签条 ＋ 共用同一个入口，行为完全一致。</summary>
     private void NewCanvas_OnClick(object? sender, RoutedEventArgs e) => CreateCanvasTab();
 
-    private void SaveCanvas_OnClick(object? sender, RoutedEventArgs e)
+    private async void SaveCanvas_OnClick(object? sender, RoutedEventArgs e)
     {
-        TrySaveCanvas(out var message);
-        StatusText.Text = message;
+        // 配了服务器并登录着，就把这次保存交给服务端：锁与修订都由它仲裁，改动顺便推给别人。
+        // 返回 null 表示这条不适用（没配服务器、没登录、这张画布还没落盘…），照旧走本地保存。
+        if (await TrySaveCanvasThroughServerAsync() is { } serverMessage) StatusText.Text = serverMessage;
+        else
+        {
+            TrySaveCanvas(out var message);
+            StatusText.Text = message;
+        }
+
         AgentWorkbenchPanel.SyncHostState();
+    }
+
+    /// <summary>
+    /// 把这次保存交给服务端。返回 null = **这条不适用**，调用方照旧本地保存；
+    /// 返回一句话 = 这次的结论（成功或失败都算，本地不再写）。
+    ///
+    /// 几个刻意的决定：
+    /// · **保存前先握手**：服务端那张画布的修订号必须等于我本地这份文件的修订号。不等就说明
+    ///   别人改过、或者这台服务器管的根本不是这张画布——两种都不该硬写。
+    /// · **服务器叫不到时退回本地写**，但把那句话说出口：桌面端本地优先，写盘不该被服务器绑住。
+    /// · 服务端写完**再核对一次本地文件**：修订对得上，才算这次保存真的落在同一张画布上。
+    /// </summary>
+    private async Task<string?> TrySaveCanvasThroughServerAsync()
+    {
+        // 临时引用画布、没有落盘的新画布、只读项目：都不归服务端管，走原来的路。
+        if (referenceCanvas is not null || currentCanvas is null || string.IsNullOrWhiteSpace(currentCanvasPath)) return null;
+        if (!canEdit) return null;
+        var session = collaboration;
+        if (session is null || !session.IsSignedIn) return null;
+
+        long localRevision;
+        try { localRevision = CanvasRevision.OfFile(currentCanvasPath); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return null; }
+
+        var (serverRevision, handshakeError) = await session.CanvasRevisionAsync();
+        if (serverRevision is null)
+        {
+            // 叫不到服务器（或会话失效）：不算错误，退回本地写，但说清楚这次没广播给协作者。
+            TrySaveCanvas(out var fallback);
+            return fallback + "（没联上服务器，这次只写了本地：" + handshakeError + "）";
+        }
+
+        if (serverRevision != localRevision)
+            return "服务端上这张画布的修订和你本地这份对不上：可能别人刚改过，也可能这台服务器管的不是这张画布。"
+                 + "先到「设置 → 协作」核对服务器地址，或重新打开这张画布，再保存。";
+
+        CanvasSurfaceControl.Refresh();
+        // 与本地保存同样的准备：托管实体先发布到项目库（服务端会校验画布的实体引用）。
+        // 发布过的实体留在库里无害（没被引用的实体不影响任何东西），所以失败时不必回滚。
+        try
+        {
+            foreach (var entity in currentCanvas.Canvas.Entities.Where(entity => entity.ManagedByProject))
+                if (!ProjectEntityScope.TryPublish(entity, out var publishError)) return $"项目库写入失败：{publishError}";
+            ProjectEntityScope.RefreshSnapshots(currentCanvas.Canvas);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return "项目库写入失败：" + error.Message;
+        }
+
+        // 修订由服务端推进，所以送出去的是**没自己 +1 的那份**，字节与本地保存时逐字节一致。
+        AssetStore.Normalize(currentCanvas.Canvas);
+        var result = await session.SaveCanvasAsync(localRevision, CanvasFileWriter.Serialize(currentCanvas));
+        if (!result.Ok)
+        {
+            if (result.Holder is { } holder)
+                return $"{DescribeHolder(holder)}正在编辑，这次保存没写进去——等他保存，或让管理员接管。";
+            return "保存到服务端失败：" + result.Message;
+        }
+
+        long written;
+        try { written = CanvasRevision.OfFile(currentCanvasPath); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        { return "服务端说存好了，但读不回本地文件：" + error.Message; }
+        if (written != result.Revision)
+            return "服务端说存好了，可你本地这份文件没变——它管的不是这张画布（到「设置 → 协作」核对地址与部署）。";
+
+        // 服务端写完，本地这份就是新的：把内存修订与标签状态对齐，别让「未保存」的标记骗人。
+        currentCanvas = currentCanvas with { Revision = currentCanvas.Revision + 1 };
+        if (activeCanvasTab is not null)
+        {
+            activeCanvasTab.Dirty = false;
+            activeCanvasTab.Snapshot = CanvasCloner.Clone(currentCanvas);
+        }
+
+        // 服务端那边用的是整棵树锁，它会把我们自己的节点锁吸收掉：还在编辑就把节点锁占回来。
+        if (CanvasSurfaceControl.SelectedNode is { } editing &&
+            (InspectorNameText.IsFocused || InspectorSummaryText.IsFocused))
+        {
+            var again = await session.AcquireNodeLeaseAsync(editing.Id);
+            if (again.Ok) EnsureCollaborationHeartbeat().Start();
+            else if (again.Holder is { } blocker)
+                SetCollaborationHint($"{DescribeHolder(blocker)}正在编辑这个节点，你现在的改动可能会盖掉他的。");
+        }
+
+        return result.Message;
     }
 
     /// <summary>
