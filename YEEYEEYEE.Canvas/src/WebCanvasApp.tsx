@@ -803,6 +803,36 @@ export function WebCanvasApp() {
     }
   }
 
+  /**
+   * 记录级写入：给当前选中的节点挂一条设定（从项目库里挑的那条）。
+   *
+   * 与「改标题内容」「移动位置」「改类别」同一档——引用是节点内容的一部分，不动画布结构。
+   * **不做乐观更新**：挂不挂得上要服务端说了算（重复、变体 / 版本对不上都由它拦），
+   * 所以等结果回来再重取画布。这类动作一次一个，不值得为它做本地推断。
+   */
+  async function addReference(entityId: string, variantId: string | null) {
+    const target = selected
+    if (!scene || !target) return
+    if (!editable) {
+      setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
+      return
+    }
+    setSaving(true)
+    setNotice({ kind: 'info', message: '正在挂上设定…' })
+    try {
+      await request(`/api/web/records/${encodeURIComponent(target.recordId)}/references`, {
+        method: 'POST',
+        body: JSON.stringify({ baseRevision: scene.revision, entityId, variantId })
+      })
+      await loadScene()
+      setNotice({ kind: 'success', message: '已挂上这条设定。' })
+    } catch (error) {
+      setNotice({ kind: 'error', message: `挂上失败：${errorMessage(error)}` })
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <>
     <WorkbenchShell
@@ -884,6 +914,8 @@ export function WebCanvasApp() {
                 onDisconnect={editable ? (edgeId) => void disconnectEdge(edgeId) : undefined}
                 // 改类别也是记录级，与「改标题内容」同一档：能编辑就给。
                 onCategory={editable ? (recordType) => void changeCategory(recordType) : undefined}
+                // 挂设定同样是记录级：能编辑就给。挂完要重新取画布——引用是服务端算出来的那份投影。
+                onAddReference={editable ? (entityId, variantId) => void addReference(entityId, variantId) : undefined}
               />
             )
             : (

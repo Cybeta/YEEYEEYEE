@@ -174,6 +174,55 @@ internal sealed class ProjectCanvasSceneStore
     }
 
     /// <summary>
+    /// 给一个节点**挂上一条引用**（网页端从项目库里挑一条设定挂过去；桌面端对应的是节点编辑器里的「加引用」）。
+    ///
+    /// 与「改标题内容」同一档：**记录级**。引用是节点内容的一部分，不动画布结构——按结构级对待的话，
+    /// 挂一条设定就得先占住整棵树锁，那与「挪一下卡片挡住别人的结构改动」是同一个毛病。
+    ///
+    /// 服务端把关三件：
+    /// ① 实体 / 变体 / 版本**必须真的在这张画布里**——写一条对不上的引用等于塞一个悬空引用
+    ///    （画布校验随后会判错，但那时文件已经写坏了，所以要在写之前拦）；
+    /// ② 同一条设定不许挂两遍——那只会变成两枚一模一样的徽标；
+    /// ③ 节点没被锁定。
+    /// **没给 variantId 就用这个实体的第一个变体；没给 versionId 就是「跟着当前版走」**（null 的含义），
+    /// 这两条与共享的 <see cref="WorkflowCanvasState.ResolveReferenceContent"/> 是同一套规矩，不另立一套。
+    /// </summary>
+    public IResult AddReference(long baseRevision, Guid nodeId, Guid entityId, Guid? variantId, Guid? versionId)
+    {
+        return Write(baseRevision, current =>
+            {
+                var canvas = current.Canvas;
+                var node = canvas.Nodes.SingleOrDefault(item => item.Id == nodeId);
+                if (node is null) return (null, Error(404, "RECORD_NOT_FOUND", "该记录不是可编辑节点"));
+                if (node.IsLocked) return (null, Error(409, "NODE_LOCKED", "节点已锁定"));
+
+                var entity = canvas.FindEntity(entityId);
+                if (entity is null) return (null, Error(404, "CANVAS_ENTITY_NOT_FOUND", "这条设定不在这张画布里"));
+                var variant = variantId is { } wanted
+                    ? entity.Variants.FirstOrDefault(item => item.Id == wanted)
+                    : entity.Variants.FirstOrDefault();
+                if (variant is null)
+                    return (null, Error(404, "CANVAS_VARIANT_NOT_FOUND",
+                        variantId is null ? "这条设定还没有变体" : "这个变体不在这条设定里"));
+                if (versionId is { } version && variant.FindVersion(version) is null)
+                    return (null, Error(404, "CANVAS_VERSION_NOT_FOUND", "这个版本不在这个变体里"));
+                if (node.References.Any(reference => reference.EntityId == entityId &&
+                        reference.VariantId == variant.Id && reference.VariantVersionId == versionId))
+                    return (null, Error(409, "REFERENCE_DUPLICATE", "这个节点已经引用过这一条设定了"));
+
+                // X / Y 留默认的 -1：那是「还没摆过」，位置交给共享的引用布局去算，不在这里猜。
+                node.References.Add(new NodeReference
+                {
+                    EntityId = entityId,
+                    VariantId = variant.Id,
+                    VariantVersionId = versionId
+                });
+                return (canvas, null);
+            },
+            (next, bytes) => new { revision = Revision(bytes), record = ProjectRecord(next.Canvas, nodeId.ToString()) });
+    }
+
+    /// <summary>
     /// 只读：一个节点的「协助计划」——网页端节点右键那份菜单的内容，与桌面端右键菜单**同一份**来源。
     ///
     /// 建议**不是写死的**：由共享的 <see cref="NodeAssistPlanner"/> 沿入边收集上游设定、再按节点类型

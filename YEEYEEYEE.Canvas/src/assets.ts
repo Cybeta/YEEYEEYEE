@@ -44,3 +44,32 @@ export function resolveReference(ref: Reference, assets: Asset[], available = tr
   const version = variant.versions?.find((item) => item.id === ref.variantVersionId)
   return version ? { asset, variant, version, mode } : { asset, variant, mode, error: `锁定版本缺失：${ref.variantVersionId}` }
 }
+
+/** 挑一条设定挂到节点上时，下拉里的一行。`value` 是 `<实体Id>|<变体Id>`。 */
+export type ReferenceOption = { value: string; label: string; entityId: string; variantId: string | null }
+
+/**
+ * 把项目库摊成「可以挂上去的条目」：每个实体 × 它的每个变体一行。
+ *
+ * 实体**没有变体**时也要给出一行（`variantId` 为 null）：那条请求缺 variantId 时服务端会落到
+ * 这个实体的第一个变体，是合法的；而「这个实体在网页端根本挑不到」是投影缺了一块，不该等到挑的时候才发现。
+ * 名称只用来显示（实体名 · 变体名），**身份始终是 ID**——两端一致：名字是标签，不是键。
+ */
+export function referenceOptions(assets: Asset[]): ReferenceOption[] {
+  return assets.flatMap((asset): ReferenceOption[] => {
+    const variants = asset.variants ?? []
+    if (variants.length === 0) return [{ value: asset.id, label: asset.name, entityId: asset.id, variantId: null }]
+    return variants.map((variant) => ({
+      value: `${asset.id}|${variant.id}`,
+      label: variant.name ? `${asset.name} · ${variant.name}` : asset.name,
+      entityId: asset.id,
+      variantId: variant.id
+    }))
+  })
+}
+
+/** 把下拉的 value 拆回两个 ID。拆不出实体 ID 就返回 null——那说明这个 value 不是 referenceOptions 生成的。 */
+export function parseReferenceOption(value: string): { entityId: string; variantId: string | null } | null {
+  const [entityId, variantId = ''] = value.split('|')
+  return entityId ? { entityId, variantId: variantId || null } : null
+}

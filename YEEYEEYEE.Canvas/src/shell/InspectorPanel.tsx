@@ -1,4 +1,4 @@
-import { recordReferences, resolveReference, type Asset } from '../assets'
+import { parseReferenceOption, recordReferences, referenceOptions, resolveReference, type Asset } from '../assets'
 import { chapterIdOf } from '../ChapterView'
 import { describeLease, type Lease } from './locks'
 import {
@@ -52,6 +52,11 @@ export type InspectorProps = {
    * 注意它**不进草稿**——下拉一改就写一次（与旁边的名称/内容不同，那两个要点「应用修改」）。
    */
   onCategory?: (recordType: string) => void
+  /**
+   * 挂一条设定到这个节点上（**记录级**写入，与「改标题内容」同一档）。
+   * 不给就不显示那个选择框——与「断开连线」「改类别」同一条规矩：没权限的入口不摆出来。
+   */
+  onAddReference?: (entityId: string, variantId: string | null) => void
   assets: Asset[]
   assetsReady: boolean
   onTitle: (value: string) => void
@@ -220,6 +225,34 @@ export function InspectorPanel(props: InspectorProps) {
                 </div>
               )
             })}
+            {/* 挂一条设定上来：与上面的「节点类别」同一条规矩——**选一下就写**，不进草稿。
+                所以这里也单独一块并写明，不然会让人以为要跟着「应用修改」一起提交。
+                选择框的值**永远钉在空串**上：选中即动作，不是状态；选完自己弹回占位项。 */}
+            {selected && props.onAddReference && (
+              <div className="df-section" style={{ gap: 6, marginTop: 4 }}>
+                <span className="df-label">挂上设定</span>
+                {!assetsReady
+                  ? <span className="df-notice">资产库还没加载好，暂时挑不了设定。</span>
+                  : (
+                    <div className="df-field is-boxed">
+                      <select
+                        className="df-input"
+                        value=""
+                        disabled={saving}
+                        onChange={(event) => {
+                          const chosen = parseReferenceOption(event.target.value)
+                          if (chosen) props.onAddReference!(chosen.entityId, chosen.variantId)
+                        }}
+                      >
+                        <option value="">＋ 选一条设定挂上去（选一下就写）</option>
+                        {referenceOptions(assets).map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+              </div>
+            )}
           </div>
         </>
       )}

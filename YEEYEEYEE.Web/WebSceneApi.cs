@@ -37,6 +37,16 @@ internal static class WebSceneApi
             value = Guid.Empty;
             return node is JsonValue json && json.TryGetValue<string>(out var text) && Guid.TryParse(text, out value);
         }
+        // **可选** GUID：没给、写 null 都算「没给」（合法）；给了但不是 GUID 就不合法。
+        // 这两种情况必须分开——把写错的 ID 静默当成「没给」，用户会以为「没挑变体」，实际却挂到了另一个变体上。
+        static bool TryOptionalGuid(JsonElement input, string name, out Guid? value)
+        {
+            value = null;
+            if (!input.TryGetProperty(name, out var node) || node.ValueKind == JsonValueKind.Null) return true;
+            if (node.ValueKind != JsonValueKind.String || !Guid.TryParse(node.GetString(), out var parsed)) return false;
+            value = parsed;
+            return true;
+        }
 
         app.MapGet("/api/web/scene", () => projectStore is not null ? projectStore.Read() : store is not null ? store.Read() : unavailable!);
 
@@ -294,6 +304,38 @@ internal static class WebSceneApi
                 hub.CanvasChanged(after.Revision, recordId, WebAccessGuard.ActorName(request.HttpContext), "record");
             return result;
         });
+        // 给一个节点挂一条引用（网页端从项目库里挑一条设定）。与「改标题内容」「移动位置」「改类别」
+        // 同一档：**记录级**——引用是节点内容的一部分，不动画布结构，所以不要树锁。
+        app.MapPost("/api/web/records/{recordId}/references", async (string recordId, HttpRequest request) =>
+        {
+            if (!WebAccessGuard.Permissions(request.HttpContext).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+            if (projectStore is null)
+                return Error(409, "CANVAS_REQUIRES_PROJECT", "挂引用要的是项目画布；当前配置的是独立 Web 场景");
+            if (!Guid.TryParse(recordId, out var nodeId))
+                return Error(400, "INVALID_REQUEST", "这个 recordId 不是一个画布节点");
+
+            JsonElement input;
+            try { input = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body, cancellationToken: request.HttpContext.RequestAborted); }
+            catch (JsonException) { return Error(400, "INVALID_REQUEST", "请求 JSON 无效"); }
+            // entityId 必须是合法 GUID；variantId / versionId **可缺**（缺 = 第一个变体 / 当前版本），
+            // 但给了就必须是合法 GUID——把 `"variantId": "abc"` 悄悄当成「没给」，会挂到用户没挑的那个变体上。
+            if (input.ValueKind != JsonValueKind.Object ||
+                !input.TryGetProperty("baseRevision", out var rev) || !rev.TryGetInt64(out var baseRevision) ||
+                !input.TryGetProperty("entityId", out var entity) || entity.ValueKind != JsonValueKind.String ||
+                !Guid.TryParse(entity.GetString(), out var entityId) ||
+                !TryOptionalGuid(input, "variantId", out var variantId) ||
+                !TryOptionalGuid(input, "versionId", out var versionId))
+                return Error(400, "INVALID_REQUEST", "需要 baseRevision、entityId（GUID），可选的 variantId / versionId（GUID）");
+
+            var before = CommitToken();
+            var result = projectStore.AddReference(baseRevision, nodeId, entityId, variantId, versionId);
+            var after = CommitToken();
+            if (after.Serial > before.Serial)
+                hub.CanvasChanged(after.Revision, recordId, WebAccessGuard.ActorName(request.HttpContext), "record");
+            return result;
+        });
+
         // 只读：节点右键菜单的「协助计划」（建议由共享的 NodeAssistPlanner 算，桌面端右键用的是同一份）。
         // 它是投影不是写入，所以**不取锁、不查 canvas.edit**——「这个节点能做什么」看一眼就知道，
         // 不该因为别人正占着编辑锁而问不出来。
