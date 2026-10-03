@@ -175,7 +175,8 @@ public static class ProviderImporter
         {
             kind = ProviderKind.Unknown;
             warnings.Add(rawUrl.Length > 0
-                ? "只识别到地址，没有能判断用途的关键词：请手动选择类型（ComfyUI / 画图 / 画视频 / 文本），或粘贴更完整的文档片段。"
+                ? "只识别到地址，没有能判断用途的关键词：请把接口段落（路径、模型名）一起贴上来，"
+                  + "或确认这个地址是不是 ComfyUI。"
                 : "没有识别到可用地址：请粘贴接口地址（或在文档里复制一段包含地址的内容）。");
         }
 
@@ -204,6 +205,33 @@ public static class ProviderImporter
         if (apiKey.Length > 0) signals.Add($"密钥：{SecretProtector.Describe(apiKey)}（只显示首尾，不回显完整密钥）");
 
         return new ProviderImportDraft(kind, baseUrl, apiKey, model, checkpoint, signals, warnings);
+    }
+
+    /// <summary>
+    /// 把一个「只认出了地址、类型没判出来」的结论当成 ComfyUI。两个来源：
+    /// 地址自己答话了（<paramref name="fromProbe"/>），或者用户自己说「这是 ComfyUI」。
+    ///
+    /// 两种都要**把理由写进判据**：用户得能看出来我们凭什么这么判——尤其是他自己点的那一下，
+    /// 更要说清「这是按你说的定的」，而不是伪装成我们认出来了。
+    /// 同时把「请手动选择类型」那句提醒去掉：类型已经定下来了，再留着自相矛盾。
+    /// </summary>
+    public static ProviderImportDraft AsComfyUi(ProviderImportDraft draft, bool fromProbe)
+    {
+        ArgumentNullException.ThrowIfNull(draft);
+        if (draft.Kind == ProviderKind.ComfyUi || draft.BaseUrl.Length == 0) return draft;
+
+        var signals = new List<string>(draft.Signals)
+        {
+            fromProbe
+                ? "地址自己答话了：/system_stats 回了 ComfyUI 才有的结构"
+                : "按你的判断：这段文字当成 ComfyUI 处理"
+        };
+        var warnings = draft.Warnings
+            .Where(warning => !warning.Contains("没有能判断用途的关键词", StringComparison.Ordinal))
+            .ToList();
+
+        return new ProviderImportDraft(
+            ProviderKind.ComfyUi, draft.BaseUrl, draft.ApiKey, string.Empty, draft.Checkpoint, signals, warnings);
     }
 
     /// <summary>

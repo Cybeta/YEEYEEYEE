@@ -114,6 +114,7 @@ var tests = new (string Name, Action Run)[]
     ("站点与池子：站点标识与落盘、清单宽容解析（模型 × 档位、价格、参考图能力）", SiteCatalogAndPoolProbe),
     ("候选图批次：只留选中的那张、其余进回收站，没出好的不算在内", NodeImageBatchKeepsOnlyPicked),
     ("智能导入认得出 ComfyUI（且不把普通画图接口误认成它）", ProviderImportRecognizesComfyUi),
+    ("只贴一个 ComfyUI 地址：分类器认不出，靠问一句地址 + 人来定兜底", ComfyUiBareAddressFallback),
     ("生成链自检：四层缺口报数与花费预估、预勾只管挡路的那几件、缺失文件不算已出图", GenerationAuditReportsDependencyChain),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
@@ -4883,7 +4884,11 @@ static void ProviderImportRefusesToGuess()
     var bare = ProviderImporter.Inspect("https://api.example.com/v1");
     Expect(bare.Kind == ProviderKind.Unknown, "只有地址时不应猜类型");
     Expect(bare.BaseUrl == "https://api.example.com/v1", "地址仍应归一化出来供用户确认：" + bare.BaseUrl);
-    Expect(bare.Warnings.Any(warning => warning.Contains("手动选择类型")), "应提示手动选择类型：" + string.Join("；", bare.Warnings));
+    // 提示要给**能真正走通的两条路**：把接口段落贴上来（画图 / 画视频 / 文本要靠文字判断），
+    // 或者确认这地址是不是 ComfyUI（那种情况下界面上有个按钮能定）。
+    // 早先这里写的是「请手动选择类型（ComfyUI / 画图 / 画视频 / 文本）」，而界面上并没有那样的选择器。
+    Expect(bare.Warnings.Any(warning => warning.Contains("ComfyUI")), "应指出 ComfyUI 这条出路：" + string.Join("；", bare.Warnings));
+    Expect(bare.Warnings.Any(warning => warning.Contains("接口段落")), "应告诉用户怎么补足判据：" + string.Join("；", bare.Warnings));
 
     var ambiguous = ProviderImporter.Inspect("同一网关既支持 images/generations 出图，也支持 text2video 画视频");
     Expect(ambiguous.Kind == ProviderKind.Unknown, "画图与画视频判据同时命中时不应替用户选");
@@ -9241,6 +9246,75 @@ static void ProviderChoiceFlagRoundTrips()
 	{
 		configEnvironment.Restore();
 	}
+}
+
+/// <summary>
+/// 只贴一个地址时的兜底。用户手上常常只有一台 ComfyUI 的首页地址，而那种地址里
+/// **一个能判断用途的词都没有**（不是 :8188、域名里也没有 comfy），分类器只能判成「未能判断」——
+/// 于是「明明有 ComfyUI，界面上却什么都出不来」。所以判不出来时去**问一句地址**，
+/// 问不到时再留一个「人来定」的出口。这三条都要钉住，否则这个毛病会静静地回来。
+/// </summary>
+static void ComfyUiBareAddressFallback()
+{
+    // ① 分类器本身：这种地址只看文字是判不出来的（这正是要去问一句的原因）。
+    var bare = ProviderImporter.Inspect("https://host.example.com:8443/");
+    Expect(bare.Kind == ProviderKind.Unknown,
+        "只看文字时这种地址判不出来，实际 " + ProviderImporter.KindName(bare.Kind));
+    Expect(bare.BaseUrl.Length > 0, "地址本身要认出来：" + bare.BaseUrl);
+    Expect(bare.Warnings.Any(warning => warning.Contains("ComfyUI")),
+        "提醒里要给 ComfyUI 这条出路：" + string.Join("；", bare.Warnings));
+
+    // ② 去问一句：答得像 ComfyUI 才认。
+    var real = new StubHttpHandler(request => request.RequestUri!.AbsolutePath.Contains("system_stats", StringComparison.Ordinal)
+        ? JsonResponse("""{"system":{"os":"linux"},"devices":[{"name":"cuda:0"}]}""")
+        : new HttpResponseMessage(HttpStatusCode.NotFound));
+    Expect(ComfyUiLibrary.LooksLikeComfyUiAsync("https://host.example.com:8443/", new HttpClient(real))
+            .GetAwaiter().GetResult(),
+        "带 system 的 /system_stats 应当认成 ComfyUI");
+
+    // 老版没有 /api 前缀：也要能问到（这里故意让带前缀的那种 404）。
+    var legacy = new StubHttpHandler(request => request.RequestUri!.AbsolutePath == "/system_stats"
+        ? JsonResponse("""{"devices":[]}""")
+        : new HttpResponseMessage(HttpStatusCode.NotFound));
+    Expect(ComfyUiLibrary.LooksLikeComfyUiAsync("https://host.example.com:8443/", new HttpClient(legacy))
+            .GetAwaiter().GetResult(),
+        "老版（没有 /api 前缀）也该能问到");
+
+    // 普通文档站回 HTML：解析不出来就该说不像，不能瞎认。
+    var docs = new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new StringContent("<html><body>API 文档</body></html>", Encoding.UTF8, "text/html")
+    });
+    Expect(!ComfyUiLibrary.LooksLikeComfyUiAsync("https://docs.example.com/", new HttpClient(docs))
+            .GetAwaiter().GetResult(),
+        "回 HTML 的文档站不能认成 ComfyUI");
+
+    // 是 JSON、但没有 ComfyUI 那两个键：同样不认（别的服务也会回 JSON）。
+    var otherJson = new StubHttpHandler(_ => JsonResponse("""{"status":"ok"}"""));
+    Expect(!ComfyUiLibrary.LooksLikeComfyUiAsync("https://other.example.com/", new HttpClient(otherJson))
+            .GetAwaiter().GetResult(),
+        "回普通 JSON 的服务不能认成 ComfyUI");
+
+    // ③ 人来定。理由必须写进判据，而且要显式说明「这是按你说的定的」——
+    //    不能伪装成我们认出来了。同时把「请手动选择类型」那句已经自相矛盾的提醒去掉。
+    var forced = ProviderImporter.AsComfyUi(bare, fromProbe: false);
+    Expect(forced.Kind == ProviderKind.ComfyUi, "按用户判断该能定成 ComfyUI");
+    Expect(forced.BaseUrl == bare.BaseUrl, "地址要原样带过去：" + forced.BaseUrl);
+    Expect(forced.Signals.Any(signal => signal.Contains("按你的判断")),
+        "要说清这是按用户说的定的：" + string.Join("；", forced.Signals));
+    Expect(!forced.Warnings.Any(warning => warning.Contains("手动选择类型", StringComparison.Ordinal)),
+        "类型已定，不该再劝人手动选：" + string.Join("；", forced.Warnings));
+
+    var probed = ProviderImporter.AsComfyUi(bare, fromProbe: true);
+    Expect(probed.Signals.Any(signal => signal.Contains("system_stats")),
+        "探出来的要说清是地址答的话：" + string.Join("；", probed.Signals));
+
+    // 幂等：已经是 ComfyUI 的结论不该被再包一层；没有地址时也无从下手。
+    var already = ProviderImporter.Inspect("http://127.0.0.1:8188");
+    Expect(ReferenceEquals(ProviderImporter.AsComfyUi(already, fromProbe: false), already),
+        "已经是 ComfyUI 的结论不该再包一层");
+    Expect(ProviderImporter.AsComfyUi(ProviderImportDraft.Empty, fromProbe: false).Kind == ProviderKind.Unknown,
+        "连地址都没有时不该硬定成 ComfyUI");
 }
 
 static void ProviderImportRecognizesComfyUi()

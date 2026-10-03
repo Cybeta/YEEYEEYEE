@@ -72,7 +72,7 @@ internal static class SettingsMediaPage
         // ---------- 智能导入 ----------
         // 放在最顶端：这一页的字段是「知道地址和模型之后填的」，而多数人是先拿到一份接口文档。
         // 把它摆在字段前面，等于把「先读文档、再自动填」这条顺序摆到了台面上。
-        var smartImport = Primary("智能导入：给一个接口说明网页");
+        var smartImport = Primary("智能导入：接口说明网页 / ComfyUI 地址");
         smartImport.HorizontalAlignment = HorizontalAlignment.Left;
         smartImport.Click += async (_, _) => await RunSmartImportAsync();
         root.Children.Add(new Border

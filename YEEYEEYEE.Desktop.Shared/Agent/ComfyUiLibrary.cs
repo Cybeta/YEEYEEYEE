@@ -117,6 +117,9 @@ public static class ComfyUiLibrary
     private static readonly TimeSpan WorkflowTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ObjectInfoTimeout = TimeSpan.FromMinutes(3);
 
+    /// <summary>「这个地址是不是 ComfyUI」的探测超时：只是问一句，不该让人干等。</summary>
+    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(8);
+
     /// <summary>
     /// 服务器自己按模态分好的顶层文件夹名里的判据。
     /// 这些目录名（<c>A图像-Qwen生成</c> / <c>G视频-Wan图生</c> / <c>N声音生成-…</c>）就是这家服务器
@@ -545,6 +548,46 @@ public static class ComfyUiLibrary
         {
             watch.Stop();
             return (false, $"{error.Message}（耗时 {watch.ElapsedMilliseconds} ms）");
+        }
+        finally
+        {
+            if (owned) client.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// 问一句「这个地址是不是 ComfyUI」。
+    ///
+    /// 为什么需要它：**用户手上常常只有一个地址**（一台服务器的控制台首页），没有一整段文档。
+    /// 而那种地址里往往一个能判断用途的词都没有——不是 <c>:8188</c>、域名里也没有 comfy，
+    /// 于是分类器只能判成「未能判断」。实测一个真实的远程 ComfyUI 地址
+    /// （<c>https://主机:8443/</c>）正是这种情形，结果就是**明明有 ComfyUI、界面上却什么都出不来**。
+    ///
+    /// 判不出来时就去问一句，比继续猜强：<c>/system_stats</c> 是 ComfyUI 特有的，而且**只读**
+    /// （它不跑任何生成，也不改任何东西）。老版本没有 <c>/api</c> 前缀，所以两种写法都试。
+    /// </summary>
+    public static async Task<bool> LooksLikeComfyUiAsync(
+        string baseUrl, HttpClient? http = null, CancellationToken cancellationToken = default)
+    {
+        var normalized = ProviderImporter.NormalizeBaseUrl(baseUrl);
+        if (normalized.Length == 0) return false;
+
+        var owned = http is null;
+        var client = http ?? new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        try
+        {
+            var text = await GetOptionalAsync(
+                client, normalized, "system_stats", ProbeTimeout, cancellationToken).ConfigureAwait(false);
+            if (text is null) return false;
+
+            // 只看「是不是 JSON 且带 system / devices 这两个键」，不看具体数值——
+            // 版本之间字段会增删，但这两个一直在。普通文档站回的是 HTML，解析就抛，也落在这里。
+            return JsonNode.Parse(text) is JsonObject root
+                && (root["system"] is not null || root["devices"] is not null);
+        }
+        catch (Exception error) when (error is JsonException or HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            return false;
         }
         finally
         {

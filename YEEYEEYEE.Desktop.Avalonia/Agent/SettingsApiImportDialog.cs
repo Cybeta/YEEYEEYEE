@@ -81,7 +81,7 @@ internal sealed class SettingsApiImportDialog
         FontSize = 12,
         Background = Brush("DfSurface2"),
         Foreground = Brush("DfInk"),
-        Watermark = "https://服务商文档地址——接口说明所在的那一页"
+        Watermark = "https://服务商文档地址……或者 http://127.0.0.1:8188 这样的 ComfyUI 地址"
     };
     private readonly Button fetchButton = Secondary("读取网页");
     private readonly TextBox pasteBox = new()
@@ -97,6 +97,15 @@ internal sealed class SettingsApiImportDialog
     private readonly Button analyzeButton = Secondary("分析这段文字");
     private readonly Button repairButton = Secondary("让大模型分析");
     private readonly Button createButton = Secondary("登记站点");
+
+    /// <summary>
+    /// 「这是 ComfyUI」：类型没判出来时的**人来定**的出口。
+    ///
+    /// 为什么要留它：识别器只看文字，而用户手上常常只有一个地址；探测也可能失败
+    /// （地址暂时不通、在内网、有鉴权）。这时候识别器的提醒是「请手动选择类型」——
+    /// 那句话得有地方能选，否则就是把人卡在死路上。
+    /// </summary>
+    private readonly Button forceComfyButton = Secondary("这是 ComfyUI");
     private readonly SelectableTextBlock reportText = CodeText();
     private readonly StackPanel keySection = new() { Spacing = 7, IsVisible = false };
     private readonly TextBox keyBox = new()
@@ -134,7 +143,7 @@ internal sealed class SettingsApiImportDialog
     public static async Task<string?> ShowAsync(Window owner, AiProviderConfig config)
     {
         var dialog = new SettingsApiImportDialog(config);
-        var window = DialogShell.Create("智能导入：从一个接口说明网页建出技能与配置", dialog.Build(), 900, 640);
+        var window = DialogShell.Create("智能导入：接口说明网页，或 ComfyUI 地址", dialog.Build(), 900, 640);
         dialog.window = window;
         dialog.Wire(window);
         return await window.ShowDialog<string?>(owner);
@@ -147,6 +156,7 @@ internal sealed class SettingsApiImportDialog
         fetchButton.Click += async (_, _) => await AnalyzeUrlAsync(urlBox.Text);
         analyzeButton.Click += (_, _) => AnalyzeContent(pasteBox.Text, urlBox.Text);
         repairButton.Click += async (_, _) => await RepairWithModelAsync();
+        forceComfyButton.Click += (_, _) => ForceComfyUi();
         createButton.Click += async (_, _) =>
         {
             // 同一个按钮两种意思：ComfyUI 那条分支拉工作流 + 登记站点，接口站那条分支登记站点。
@@ -180,6 +190,9 @@ internal sealed class SettingsApiImportDialog
     {
         createButton.IsEnabled = false;
         createButton.IsVisible = false;
+        // 「这是 ComfyUI」平时不出现：只在类型没判出来、手上又有个地址时才亮出来，
+        // 平时摆着会让人以为「要先点它才算 ComfyUI」。
+        forceComfyButton.IsVisible = false;
         if (jsonCompleter is null)
         {
             repairButton.IsEnabled = false;
@@ -196,11 +209,13 @@ internal sealed class SettingsApiImportDialog
             Spacing = 6,
             Children =
             {
-                new TextBlock { Text = "接口说明网页地址", FontSize = 11, Foreground = Brush("DfInk2") },
+                new TextBlock { Text = "接口说明网页地址，或 ComfyUI 地址", FontSize = 11, Foreground = Brush("DfInk2") },
                 urlRow,
                 new TextBlock
                 {
-                    Text = "抓不到正文时（文档站由前端脚本渲染）不用换地方：在浏览器里打开该文档，把接口段落粘到下面。",
+                    Text = "贴 ComfyUI 地址也可以（例如 https://主机:端口 或 http://127.0.0.1:8188）："
+                        + "那会走另一条路——登记成 ComfyUI 站点，并把那台服务器上的工作流整份拉下来。"
+                        + "\n文档站抓不到正文时（页面由前端脚本渲染），在浏览器里打开该文档，把接口段落粘到下面。",
                     FontSize = 10,
                     TextWrapping = TextWrapping.Wrap,
                     Foreground = Brush("DfInk3")
@@ -210,7 +225,7 @@ internal sealed class SettingsApiImportDialog
                 {
                     Orientation = Orientation.Horizontal,
                     Spacing = 6,
-                    Children = { analyzeButton, repairButton, createButton }
+                    Children = { analyzeButton, repairButton, forceComfyButton, createButton }
                 }
             }
         };
@@ -353,7 +368,13 @@ internal sealed class SettingsApiImportDialog
             var fetched = await fetcher(target, CancellationToken.None);
             if (!fetched.Ok)
             {
+                // 抓不到正文**不代表这个地址没用**：ComfyUI 的首页本来就不是「文档页」，
+                // 抓不到是正常的（早先这里直接 return，于是贴 ComfyUI 地址的人
+                // 只看到一句抓取失败，后面那条分支永远走不到）。
+                // 所以照样往下走一遍类型判断——判不出来时，那边会去问地址一句。
                 SetStatus(fetched.Error);
+                AppendStatus("（这个地址可能不是文档页。先按「手上只有一个地址」继续判断类型。）");
+                AnalyzeContent(string.Empty, target);
                 return false;
             }
             lastContent = fetched.Content;
@@ -376,26 +397,64 @@ internal sealed class SettingsApiImportDialog
 
         // 先问一句「这是不是 ComfyUI」。
         //
-        // ComfyUI **不是「一家有接口站」**：它跑的是本机 / 远程的工作流模板，用哪个模型、走几步、
-        // 要不要参考图全由模板决定，没有「模型 × 档位」可挑。所以它走另一条分支（只写设置、不登记站点）。
+        // ComfyUI **不是「一家有接口站」**：它跑的是工作流模板，用哪个模型、走几步、
+        // 要不要参考图全由模板决定，没有「模型 × 档位」可挑。所以它走另一条分支（登记成站点 + 拉工作流）。
         //
-        // 这个识别器本来就写好了（`ProviderImporter.Inspect`：`/object_info`、`/prompt`、`/queue`、
-        // `/system_stats`、`clientid=`、`:8188`、产品名都能认），只是这个窗口一直没用它——
-        // 只用了它的「写入」那一半（`Apply`），于是贴一段 ComfyUI 的说明进来会被当成画图接口。
+        // 这个识别器本来就写好了（`ProviderImporter.Inspect`：`/object_info`、`/prompt`、`:8188`
+        // 之类的判据都能认），但它**只认文字**：用户手上往往只有一个地址，而那个地址里
+        // 一个能判断用途的词都没有（不是 8188、域名里也没有 comfy），于是只能判成「未能判断」——
+        // 明明有一台 ComfyUI，界面上却什么都出不来。所以判不出来时**去问一句地址**。
         var draft = ProviderImporter.Inspect(lastContent);
+        // 正文可能一个字都没有（地址是一台 ComfyUI 的首页，它不是「文档页」，抓不到是正常的）。
+        // 那时只有地址可用——地址一样能判类型，判不出来还能去问它一句。
+        if (draft.BaseUrl.Length == 0 && urlBox.Text.Trim().Length > 0)
+            draft = ProviderImporter.Inspect(urlBox.Text.Trim());
+        if (draft.Kind != ProviderKind.ComfyUi && draft.BaseUrl.Length > 0)
+        {
+            SetStatus($"这段文字里没有能判断类型的词，正在问一下 {draft.BaseUrl} 是不是 ComfyUI…");
+            var looksLikeComfy = ComfyUiLibrary.LooksLikeComfyUiAsync(draft.BaseUrl).GetAwaiter().GetResult();
+            AppendStatus(looksLikeComfy
+                ? "那个地址答话了：它是 ComfyUI（/system_stats 回了 ComfyUI 才有的结构）。"
+                : "那个地址不像 ComfyUI；如果有别的地址或更完整的文档，换一个再试。");
+            draft = ProviderImporter.AsComfyUi(draft, fromProbe: looksLikeComfy);
+        }
+
         if (draft.Kind == ProviderKind.ComfyUi)
         {
             ShowComfyUi(draft);
             // 这条分支不产出接口报告（没有要解析的接口清单）；返回一份空报告，调用方只看成功与否。
             return ApiDocAnalyzer.Analyze(null, null);
         }
+
         comfyDraft = null;
         createButton.Content = "登记站点";
         rebuildButton.IsVisible = true;
+        // 判不出类型但手上有个地址时，留一个**人来定**的出口：探测失败（地址暂时不通、在内网、
+        // 有鉴权）时不该就此卡死，而「请手动选择类型」那句话也得真有个地方能选。
+        // 只在**确实没判出来**时出现——已经认出是画图接口了还摆着一个「这是 ComfyUI」，
+        // 会让人以为非点它不可。
+        forceComfyButton.IsVisible = draft.Kind == ProviderKind.Unknown && draft.BaseUrl.Length > 0;
 
         var report = ApiDocAnalyzer.Analyze(content, sourceUrl ?? urlBox.Text.Trim());
         Analyze(report);
         return report;
+    }
+
+    /// <summary>用户点「这是 ComfyUI」时：按他说的走，不再猜。</summary>
+    private void ForceComfyUi()
+    {
+        var draft = ProviderImporter.Inspect(lastContent);
+        // 同样地：正文可能是空的（地址不是文档页），那时地址栏里那个才是线索。
+        if (draft.BaseUrl.Length == 0) draft = ProviderImporter.Inspect(urlBox.Text);
+        draft = ProviderImporter.AsComfyUi(draft, fromProbe: false);
+        if (draft.BaseUrl.Length == 0)
+        {
+            SetStatus("按「这是 ComfyUI」走需要先有一个地址：把 ComfyUI 的首页地址（例如 http://127.0.0.1:8188）贴上。");
+            return;
+        }
+        comfyDraft = null;
+        SetStatus("按你的判断当成 ComfyUI：下面是这条分支的结论。");
+        ShowComfyUi(draft);
     }
 
     /// <summary>
@@ -431,6 +490,7 @@ internal sealed class SettingsApiImportDialog
         createButton.IsEnabled = draft.BaseUrl.Length > 0;
         createButton.IsVisible = true;
         rebuildButton.IsVisible = false;
+        forceComfyButton.IsVisible = false;
         SetStatus(draft.BaseUrl.Length > 0
             ? "识别为 ComfyUI：点「拉取工作流并登记站点」把工作流拉下来存好（只读，不跑任何生成）。"
             : "识别为 ComfyUI，但这段文字里没有能用的地址：把控制台首页地址、或含 http://…:8188 的那一行一起贴进来。");
