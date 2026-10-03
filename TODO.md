@@ -68,7 +68,8 @@
 5. **`YEEYEEYEE.Web` 的目标框架是 `net10.0`（不是 `net10.0-windows`）**，这是为了让 Linux 容器能跑。它引用的 `Host` 与 `Desktop.Core` 本来就是这个框架，但**以后往这条链上加代码时要留意别引入 Windows-only 的 API**（DPAPI 那一类只能留在桌面端的 `SecretProtector` 里），否则容器会在运行时报错、而本机构建照样通过——这正是最难查的那种坏法。
 6. **依赖里有一个高危漏洞提示**：`SQLitePCLRaw.lib.e_sqlite3 2.1.10`（由 `Microsoft.Data.Sqlite` 带进来的传递依赖）会报 `NU1903`，Web 项目单独构建时六条警告全部来自它。升级 SQLite 这条链时要连迁移与任务库的测试一起跑。
 7. **配色与控件定义曾有两份**：桌面端 `App.axaml` 里那一套 `Df*` 画刷，与网页端 `YEEYEEYEE.Canvas/src/shell/tokens.css` 里的 CSS 变量，过去是同一样东西的两份抄写。
-> 第 171 轮把这条销掉了：唯一的一份是 `YEEYEEYEE.Canvas/src/shared/designTokens.json`，两端各自的色块都由 `scripts/design-tokens.mjs` **生成**（`npm run tokens`）。两端那种「改一边忘一边」从「靠注释互相指着」变成「测试会红」。只收纯色——渐变与投影两端的表达方式本就不同（CSS 渐变 vs 画刷），仍在各自那一侧手写。
+> 第 171 轮把这条销掉了：唯一的一份是 `YEEYEEYEE.Canvas/src/shared/designTokens.json`，两端各自的色块都由 `scripts/design-tokens.mjs` **生成**（`npm run tokens`）。两端那种「改一边忘一边」从「靠注释互相指着」变成「测试会红」。
+> 第 172 轮把**几何与圆角**也收了进去：网页端那两块照旧生成；桌面端这两项散在 `MainWindow.axaml` 的元素属性与 `App.axaml` 的各个 `Style` 里（不是一个独立块，没法整块生成），所以那一侧是**测试对数**（`tests/designTokens.test.ts` 直接读那两个文件比）。只收纯色与尺寸——渐变与投影两端的表达方式本就不同（CSS 渐变 vs 画刷），仍在各自那一侧手写。
 8. **`Dockerfile` 里逐个列了要拷进去的项目**（还原用的 csproj 一份、源码一份）。这是为了利用层缓存换来的速度，代价是**加项目引用时必须同步改它**，否则本机构建通过、镜像在还原或发布阶段才炸。CI 的 `image` job 会拦住这种坏法，但拦住的时间点偏晚。
 > 第 166 轮把这条销掉了：备份改成按**画布自己的位置**清（`CanvasBackup.PruneFor`，每个画布留最新 10 份），
 > 写一次盘就顺手清一次。连带修掉同一处的另一个毛病——`ListFor` 过去也是按「画布库目录」找的，

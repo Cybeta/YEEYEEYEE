@@ -1,16 +1,20 @@
 {
   "note": [
-    "两端共读的调色板（唯一的一份）。",
+    "两端共读的设计令牌（唯一的一份）。",
     "网页端读 tokens.css 里的 CSS 变量，桌面端读 App.axaml 里的 SolidColorBrush——",
     "两边的颜色块都是**从这个文件生成的**（scripts/design-tokens.mjs，跑 npm run tokens 重生成）。",
     "别去手改那两个块：markers 之间的内容会被生成器覆盖，改这里才对。",
-    "alpha 用 0-1 的小数：1 写 6 位十六进制，其余写成 rgba(r, g, b, alpha) / #AARRGGBB。",
+    "kind=color 的令牌用 hex + alpha（0-1）：1 写 6 位十六进制，其余写成 rgba(r, g, b, alpha) / #AARRGGBB。",
+    "kind=length 的令牌用 px，网页端写成 `Npx`。",
     "只收**纯色**。渐变与投影（aurora / scan / glow-line / glow-shadow，以及桌面端那四个 DfGlow* 画刷）",
-    "两端的表达方式本就不同，仍在各自那一侧手写，不在这份里。"
+    "两端的表达方式本就不同，仍在各自那一侧手写，不在这份里。",
+    "桌面端的几何与圆角散在 MainWindow.axaml / App.axaml 的各个元素与 Style 里（不是一个独立块，没法整块生成），",
+    "所以那两项在这一侧是**对账**而不是生成：tests/designTokens.test.ts 直接读那两个文件对数。"
   ],
   "groups": [
     {
       "name": "Surfaces",
+      "kind": "color",
       "tokens": [
         { "css": "--df-bg", "hex": "#070a0f", "alpha": 1 },
         { "css": "--df-surface-1", "hex": "#0d131b", "alpha": 1 },
@@ -23,6 +27,7 @@
     },
     {
       "name": "Ink",
+      "kind": "color",
       "tokens": [
         { "css": "--df-ink", "hex": "#e9eff7", "alpha": 1 },
         { "css": "--df-ink-2", "hex": "#93a1b3", "alpha": 1 },
@@ -31,6 +36,7 @@
     },
     {
       "name": "Lines",
+      "kind": "color",
       "tokens": [
         { "css": "--df-line", "hex": "#1f2c3d", "alpha": 1 },
         { "css": "--df-line-strong", "hex": "#2c3d52", "alpha": 1 },
@@ -40,6 +46,7 @@
     },
     {
       "name": "Brand",
+      "kind": "color",
       "tokens": [
         { "css": "--df-primary", "hex": "#4d9bff", "alpha": 1 },
         { "css": "--df-primary-strong", "hex": "#2f80ed", "alpha": 1 },
@@ -48,10 +55,39 @@
     },
     {
       "name": "States",
+      "kind": "color",
       "tokens": [
         { "css": "--df-success", "hex": "#5cc99a", "alpha": 1 },
         { "css": "--df-warning", "hex": "#dfb45a", "alpha": 1 },
         { "css": "--df-error", "hex": "#e0707e", "alpha": 1 }
+      ]
+    },
+    {
+      "name": "几何：MainWindow.axaml 的 Grid 常数",
+      "kind": "length",
+      "tokens": [
+        { "css": "--df-rail-width", "px": 244 },
+        { "css": "--df-dock-width", "px": 336 },
+        { "css": "--df-titlebar-height", "px": 58 },
+        { "css": "--df-statusbar-height", "px": 34 },
+        { "css": "--df-gap", "px": 10 },
+        {
+          "css": "--df-center-min",
+          "px": 500,
+          "note": "中栏的最小宽度（原工程债 #9，第 164 轮已修）。不是随手取的数：桌面端 MainWindow 的 Window.MinWidth=1100，减掉两边各 10 的边距再减掉 244 + 336 两条侧栏，正好是 500——**两端同一个数**。窄到装不下时不压缩这一栏，改成整块横向滚动。"
+        }
+      ]
+    },
+    {
+      "name": "圆角",
+      "kind": "length",
+      "tokens": [
+        { "css": "--df-radius-glass", "px": 16 },
+        { "css": "--df-radius-panel", "px": 12 },
+        { "css": "--df-radius-box", "px": 10 },
+        { "css": "--df-radius-control", "px": 8 },
+        { "css": "--df-radius-small", "px": 6 },
+        { "css": "--df-radius-pill", "px": 999 }
       ]
     }
   ]

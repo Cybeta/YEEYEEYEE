@@ -51,23 +51,24 @@
   --df-aurora: radial-gradient(72% 62% at 50% -10%, rgba(92, 77, 255, 0.36) 0%, rgba(31, 77, 255, 0.12) 42%, rgba(77, 155, 255, 0) 100%);
   --df-scan: linear-gradient(180deg, rgba(77, 155, 255, 0) 0%, rgba(33, 77, 255, 0.13) 46%, rgba(140, 197, 255, 0.2) 50%, rgba(33, 77, 255, 0.13) 54%, rgba(77, 155, 255, 0) 100%);
 
+  /* metrics:begin（生成自 src/shared/designTokens.json，别手改；跑 npm run tokens 重生成） */
   /* 几何：MainWindow.axaml 的 Grid 常数 */
   --df-rail-width: 244px;
   --df-dock-width: 336px;
   --df-titlebar-height: 58px;
   --df-statusbar-height: 34px;
   --df-gap: 10px;
-  /* 中栏的最小宽度（原工程债 #9，第 164 轮已修）。不是随手取的数：桌面端 MainWindow 的 Window.MinWidth=1100，
-     减掉两边各 10 的边距再减掉 244 + 336 两条侧栏，正好是 500——**两端同一个数**。
-     窄到装不下时不压缩这一栏，改成整块横向滚动。 */
+  /* 中栏的最小宽度（原工程债 #9，第 164 轮已修）。不是随手取的数：桌面端 MainWindow 的 Window.MinWidth=1100，减掉两边各 10 的边距再减掉 244 + 336 两条侧栏，正好是 500——**两端同一个数**。窄到装不下时不压缩这一栏，改成整块横向滚动。 */
   --df-center-min: 500px;
 
+  /* 圆角 */
   --df-radius-glass: 16px;
   --df-radius-panel: 12px;
   --df-radius-box: 10px;
   --df-radius-control: 8px;
   --df-radius-small: 6px;
   --df-radius-pill: 999px;
+  /* metrics:end */
 
   --df-font: Inter, "Microsoft YaHei UI", "PingFang SC", "Segoe UI", system-ui, sans-serif;
   --df-font-mono: "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
