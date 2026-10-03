@@ -12,7 +12,7 @@ import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layo
 import { describeLease, leaseCovering, shouldHoldNodeLease } from './shell/locks'
 import { RightDock } from './shell/RightDock'
 import { canvasBounds, chapterGroups, isEditableRecord, kindOf, parseScene, recordContent, recordTitle, type ShellScene } from './shell/records'
-import { canvasChangeText, isStaleRevision } from './shell/serverEvents'
+import { canvasChangeText, isOtherRevision } from './shell/serverEvents'
 import { useLeases } from './shell/useLeases'
 import { useNodeLease } from './shell/useNodeLease'
 import { useServerEvents } from './shell/useServerEvents'
@@ -70,10 +70,10 @@ export function WebCanvasApp() {
   const [layoutBusy, setLayoutBusy] = useState(false)
   /** 检查器的编辑框是否拿到焦点——它是「打算改」的信号，用来决定要不要去占锁。 */
   const [editorFocused, setEditorFocused] = useState(false)
-  /** 服务端说画布被改到了这个修订（且比我手上的新）。 */
-  const [staleRevision, setStaleRevision] = useState<{ revision: number; text: string } | null>(null)
+  /** 服务端推来一条「画布变了」，且那个修订和我手上的不是同一个——我这份已经不是最新的了。 */
+  const [remoteChange, setRemoteChange] = useState<{ revision: number; text: string } | null>(null)
   const generation = useRef(0)
-  // 编辑锁读取：正常情况下靠推送立刻刷新，30 秒的轮询是兜底（推送断了、或锁因超时自然消失）。
+  // 编辑锁读取：正常情况下靠推送立刻刷新，15 秒的轮询是兜底（推送断了、或锁因超时自然消失）。
   const { leases, error: leaseError, invalidCount: leaseInvalidCount, refresh: refreshLeases } = useLeases(!!auth?.user)
 
   const records = useMemo(() => scene?.records ?? [], [scene])
@@ -107,9 +107,9 @@ export function WebCanvasApp() {
     enabled: !!auth?.user,
     onEditsChanged: () => void refreshLeases(),
     onCanvasChanged: (event) => {
-      if (!isStaleRevision(scene?.revision, event)) return
+      if (!isOtherRevision(scene?.revision, event)) return
       const changed = event.recordId ? records.find((item) => item.recordId === event.recordId) : null
-      setStaleRevision({
+      setRemoteChange({
         revision: event.revision,
         text: canvasChangeText(event, changed ? recordTitle(changed) : undefined)
       })
@@ -156,8 +156,8 @@ export function WebCanvasApp() {
       if (sceneResult.status === 'rejected') throw sceneResult.reason
       const parsed = parseScene(sceneResult.value)
       setScene(parsed)
-      // 重新加载之后「有新版本」这件事就已经解决了，标记必须跟着清掉。
-      setStaleRevision(null)
+      // 重新加载之后「画布有变动」这件事就已经解决了，标记必须跟着清掉。
+      setRemoteChange(null)
       setNotice({
         kind: 'success',
         // 章节数按**种类**数，不拿「非可编辑记录」当代理：章节可以是工作树行（recordId 是 wt-，
@@ -386,8 +386,9 @@ export function WebCanvasApp() {
       : loading ? { label: '加载中', tone: 'busy' }
         : readOnly ? { label: '只读画布', tone: 'idle' }
           : dirty ? { label: '有未保存修改', tone: 'busy' }
-            // 别人改了画布：说清楚是谁改的、改到第几修订，并给一个动作（下面那个按钮）。
-            : staleRevision ? { label: `有新版：${staleRevision.text}`, tone: 'stale' }
+            // 别人改了画布：说清楚是谁改的、改了什么，并给一个动作（下面那个按钮）。
+            // 文案不写「有新版」：修订是哈希，谁更新排不出来，只能说「有变动」，动作也只能是重新加载。
+            : remoteChange ? { label: `画布有变动：${remoteChange.text}`, tone: 'stale' }
               : { label: '已同步', tone: 'ok' }
 
   const status: StatusFacts = {
@@ -395,7 +396,7 @@ export function WebCanvasApp() {
     revision: `修订 ${scene?.revision ?? '—'}`,
     syncLabel: sync.label,
     syncTone: sync.tone,
-    syncAction: staleRevision ? { label: '重新加载', onClick: () => void loadScene() } : undefined,
+    syncAction: remoteChange ? { label: '重新加载', onClick: () => void loadScene() } : undefined,
     nodes: `${nodeCount} 节点`,
     // 连线没有被投影到网页端（NodeProjection 只投影节点），所以这里如实写出来，
     // 而不是显示一个永远是 0 的漂亮数字。

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canvasChangeText, isStaleRevision, parseServerEvent, type CanvasChangedEvent } from '../src/shell/serverEvents'
+import { canvasChangeText, isOtherRevision, parseServerEvent, type CanvasChangedEvent } from '../src/shell/serverEvents'
 
 /**
  * 服务端变更推送的读取口径（SSE 那条流）。
@@ -75,23 +75,30 @@ describe('解析推来的事件', () => {
   })
 })
 
-describe('「比我手上的新吗」', () => {
+describe('「这条推送说的修订，和我手上的不是一个吗」', () => {
   const event: CanvasChangedEvent = { type: 'canvas.changed', revision: 13, recordId: null, actor: '陈默', scope: 'record', at: '' }
 
-  it('比手上的大才算有新版本', () => {
-    expect(isStaleRevision(12, event)).toBe(true)
+  it('不一样就说明我手上这份不是最新的', () => {
+    expect(isOtherRevision(12, event)).toBe(true)
   })
 
-  it('相等不算——自己保存成功后服务端也会广播一条，那条不该让状态条对着自己闪', () => {
-    expect(isStaleRevision(13, event)).toBe(false)
+  it('相等不算：自己保存成功后服务端也会广播一条，那条不该让状态条对着自己闪', () => {
+    expect(isOtherRevision(13, event)).toBe(false)
   })
 
-  it('比手上的旧不算——晚到的消息不该把界面拉回去', () => {
-    expect(isStaleRevision(14, event)).toBe(false)
+  /**
+   * 这一条曾经写成「比手上的大才算」。项目模式的修订号是画布内容的哈希，
+   * 新内容的哈希不保证比旧的大——用 `>` 判断时，真实的一次协作里就有推送被静默丢掉
+   * （浏览器里亲眼看到的：服务端报 235064242561675，客户端手上是 280703274272840）。
+   * 哈希排不出谁更新，所以判据只能是「不一样」。
+   */
+  it('比手上的小也要算——哈希排不出大小，拿它比大小会丢掉大约一半的推送', () => {
+    expect(isOtherRevision(14, event)).toBe(true)
+    expect(isOtherRevision(235_064_242_561_675, { ...event, revision: 280_703_274_272_840 })).toBe(true)
   })
 
-  it('手上还没有修订号时不判断（画布都没加载，谈不上过期）', () => {
-    expect(isStaleRevision(undefined, event)).toBe(false)
+  it('手上还没有修订号时不判断（画布都没加载，谈不上有没有变动）', () => {
+    expect(isOtherRevision(undefined, event)).toBe(false)
   })
 })
 

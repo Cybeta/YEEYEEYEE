@@ -61,13 +61,17 @@ export function parseServerEvent(type: string, data: string): ServerEvent | null
 }
 
 /**
- * 「这条事件说的修订，比我手上的新吗」。
+ * 「这条推送说的修订，和我手上的不是一个吗」。
  *
- * 相等**不算**新：自己保存成功之后服务端也会广播一条，修订正好等于手上的，
- * 那不是「别人改了」，把它当成过期会让状态条对着自己闪一下。
+ * 相等**不算**：自己保存成功之后服务端也会广播一条，修订正好等于手上的，那不是「别人改了」。
+ *
+ * 但**不能比大小**。项目模式的修订号是画布内容的哈希（服务端拿它做 CAS），
+ * 新内容的哈希不保证比旧的大——用 `>` 判断的话，大约一半的推送会被静默丢掉，
+ * 而它不报错，只是那枚提示永远不出现。所以判据是「不一样」：不一样就说明我手上这份不是最新的。
+ * 至于谁更新，哈希本来就排不出来，界面也不该假装知道——所以按钮给的是「重新加载」，不是「合并」。
  */
-export function isStaleRevision(mine: number | undefined, event: CanvasChangedEvent): boolean {
-  return typeof mine === 'number' && event.revision > mine
+export function isOtherRevision(mine: number | undefined, event: CanvasChangedEvent): boolean {
+  return typeof mine === 'number' && event.revision !== mine
 }
 
 /** 把事件说成一句人话。节点标题由调用方给（它手上有整份记录）。 */
