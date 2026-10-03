@@ -130,52 +130,6 @@ public sealed class NodeReference
     public Guid? VariantVersionId { get; set; }
 }
 
-public sealed record VersionDifference(string Field, string? Before, string? After)
-{
-    public string Describe() => (Before, After) switch
-    {
-        (null, { } after) => $"{Field}：新增「{Trim(after)}」",
-        ({ } before, null) => $"{Field}：移除「{Trim(before)}」",
-        ({ } before, { } after) => $"{Field}：「{Trim(before)}」→「{Trim(after)}」",
-        _ => Field
-    };
-    private static string Trim(string value) => value.Length <= 80 ? value : value[..80] + "…";
-}
-
-public static class VersionDiff
-{
-    public static List<VersionDifference> CompareToCurrent(EntityVariantVersion version, WorkflowEntityVariant current)
-    {
-        var result = new List<VersionDifference>();
-        Add(result, "差异描述", version.Description, current.Description);
-        Add(result, "布局概述", version.Layout?.Overview, current.Layout?.Overview);
-        var before = VisibleItems(version.Layout); var after = VisibleItems(current.Layout);
-        foreach (var item in after.Where(item => !before.Any(candidate => SameKey(candidate, item)))) result.Add(new VersionDifference($"布局元素（{item.DescribeDirection()}）", null, Describe(item)));
-        foreach (var item in before.Where(item => !after.Any(candidate => SameKey(candidate, item)))) result.Add(new VersionDifference($"布局元素（{item.DescribeDirection()}）", Describe(item), null));
-        foreach (var item in after)
-        {
-            var match = before.FirstOrDefault(candidate => SameKey(candidate, item));
-            if (match is not null) Add(result, $"元素说明（{item.DescribeDirection()}）", DescribeNote(match), DescribeNote(item));
-        }
-        var beforeReferences = version.References.Select(ReferenceKey).ToHashSet(StringComparer.Ordinal);
-        var afterReferences = current.References.Select(ReferenceKey).ToHashSet(StringComparer.Ordinal);
-        foreach (var value in afterReferences.Where(value => !beforeReferences.Contains(value))) result.Add(new VersionDifference("子引用", null, value));
-        foreach (var value in beforeReferences.Where(value => !afterReferences.Contains(value))) result.Add(new VersionDifference("子引用", value, null));
-        var beforeImages = ImageNames(version.Attachments); var afterImages = ImageNames(current.Attachments);
-        foreach (var name in afterImages.Where(name => !beforeImages.Contains(name))) result.Add(new VersionDifference("参考图", null, name));
-        foreach (var name in beforeImages.Where(name => !afterImages.Contains(name))) result.Add(new VersionDifference("参考图", name, null));
-        return result;
-    }
-    private static void Add(List<VersionDifference> result, string field, string? before, string? after)
-    { if (!string.Equals(before?.Trim() ?? string.Empty, after?.Trim() ?? string.Empty, StringComparison.Ordinal)) result.Add(new VersionDifference(field, before, after)); }
-    private static List<SceneLayoutItem> VisibleItems(SceneLayout? layout) => layout?.Items.Where(item => !string.IsNullOrWhiteSpace(item.Element)).ToList() ?? new();
-    private static bool SameKey(SceneLayoutItem left, SceneLayoutItem right) => left.Direction == right.Direction && string.Equals(left.Element.Trim(), right.Element.Trim(), StringComparison.OrdinalIgnoreCase);
-    private static string Describe(SceneLayoutItem item) => string.IsNullOrWhiteSpace(item.Note) ? item.Element.Trim() : $"{item.Element.Trim()}（{item.Note.Trim()}）";
-    private static string DescribeNote(SceneLayoutItem item) => string.IsNullOrWhiteSpace(item.Note) ? string.Empty : item.Note.Trim();
-    private static string ReferenceKey(NodeReference reference) => $"{reference.EntityId:N}/{reference.VariantId:N}/{reference.VariantVersionId?.ToString("N") ?? "latest"}";
-    private static HashSet<string> ImageNames(IEnumerable<WorkflowAttachment> attachments) => attachments.Where(item => item.Kind == AttachmentKind.Image).Select(item => string.IsNullOrWhiteSpace(item.Name) ? item.Reference : item.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-}
-
 public sealed class EntityVariantVersion
 {
     public Guid Id { get; set; } = Guid.NewGuid();

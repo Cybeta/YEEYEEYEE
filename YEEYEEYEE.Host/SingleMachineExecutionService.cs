@@ -1,4 +1,3 @@
-using System.Text.Json;
 using YEEYEEYEE.Core;
 
 namespace YEEYEEYEE.Host;
@@ -302,19 +301,5 @@ public sealed class SingleMachineExecutionService
     {
         store?.Save(result);
         Updated?.Invoke(result);
-    }
-}
-
-public static class InvocationRequestParser
-{
-    public static (Invocation Invocation, string IdempotencyKey) Parse(JsonElement payload)
-    {
-        if (!payload.TryGetProperty("invocation", out var invocationElement) || invocationElement.ValueKind != JsonValueKind.Object) throw new ProtocolViolationException("PROTOCOL_MALFORMED", "执行请求缺少 invocation");
-        if (!payload.TryGetProperty("idempotencyKey", out var keyElement) || keyElement.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(keyElement.GetString())) throw new ProtocolViolationException("PROTOCOL_MALFORMED", "执行请求缺少幂等键");
-        Invocation? invocation;
-        try { invocation = JsonSerializer.Deserialize<Invocation>(invocationElement.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }); }
-        catch (JsonException error) { throw new ProtocolViolationException("PROTOCOL_MALFORMED", $"invocation 格式无效：{error.Message}"); }
-        if (invocation is null || invocation.InvocationId == Guid.Empty || string.IsNullOrWhiteSpace(invocation.Tool)) throw new ProtocolViolationException("PROTOCOL_MALFORMED", "invocation 标识或工具不能为空");
-        return (invocation, keyElement.GetString()!);
     }
 }

@@ -21,7 +21,6 @@ public static class AppPaths
     }
 
     public static string Combine(string name) => Path.Combine(Root, name);
-    public static string CombineProgram(string name) => Path.Combine(ProgramRoot, name);
 
     /// <summary>
     /// 用户级配置目录（按平台惯例）：

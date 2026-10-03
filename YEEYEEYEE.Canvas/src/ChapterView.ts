@@ -5,9 +5,6 @@ export type ViewRecord = OperationRecord & { record: Record<string, unknown> }
 /** 章节条目：身份是稳定 ID，标签只用于显示（C-4）。 */
 export type ChapterEntry = { id: string; label: string; order: number }
 
-/** 未归档（节点没有稳定章节 ID）的保留 ID。 */
-export const UNASSIGNED_CHAPTER_ID = ''
-
 /** 「全部章节」的保留 ID。 */
 export const ALL_CHAPTERS_ID = '__all__'
 

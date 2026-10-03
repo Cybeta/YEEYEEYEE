@@ -1733,9 +1733,6 @@ public partial class MainWindow : Window, IAgentSessionHost
     private static string EntityKindLabel(EntityKind kind) => kind switch { EntityKind.Character => "角色", EntityKind.Scene => "场景", _ => "道具" };
     private static IBrush Brush(string color) => new SolidColorBrush(Color.Parse(color));
 
-    /// <summary>设定种类的行首颜色：与画布节点、引用浮层、临时画布同一份口径（<see cref="NodeKindPalette"/>）。</summary>
-    private static IBrush ResourceAccent(EntityKind kind) => NodeKindBrushes.BrushOf(NodeKindPalette.CategoryOf(kind));
-
     /// <summary>节点分类的中文名（与画布卡片上的标签一致）。</summary>
     private static string CategoryNameOf(NodeCategory category) => category switch
     {

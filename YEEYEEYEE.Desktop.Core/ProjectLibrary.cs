@@ -335,10 +335,6 @@ public static class ProjectEntityScope
         return refreshed;
     }
 
-    /// <summary>本画布里尚未进入项目库的实体（迁移的候选）。</summary>
-    public static IReadOnlyList<WorkflowEntity> Unmigrated(WorkflowCanvasState canvas) =>
-        canvas.Entities.Where(entity => !entity.ManagedByProject).ToList();
-
     /// <summary>
     /// 一次发布的真实结果（目标 6 / G6-T2）：只有**真的落进项目库**才叫已持久化。
     /// 本地（未迁移）实体不写库，所以 <see cref="Persisted"/> 为 false——界面不得提示"已保存"。
@@ -601,13 +597,6 @@ public static class ProjectEntityDeletion
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 }
-
-/// <summary>项目库补偿失败后留下的"待恢复"记录（目标 6 / G6-T3）：重试成功之前不再向库写入。</summary>
-public sealed record ProjectCompensation(
-    Guid EntityId,
-    WorkflowEntity Content,
-    string CanvasKey,
-    string Reason);
 
 /// <summary>迁移预览里的一条：哪个资源、会怎么处理、为什么。</summary>
 public sealed record ProjectMigrationItem(

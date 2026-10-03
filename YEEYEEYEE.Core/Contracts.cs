@@ -162,13 +162,6 @@ public sealed record OperationRecord
     public IReadOnlyList<string> AffectedNodeIds { get; init; } = Array.Empty<string>();
 }
 
-public sealed record MigrationCheck
-{
-    public bool Allowed { get; init; }
-    public string Reason { get; init; } = string.Empty;
-    public IReadOnlyList<MissingChannel> Missing { get; init; } = Array.Empty<MissingChannel>();
-}
-
 public sealed record MissingChannel
 {
     public Guid ChannelId { get; init; }

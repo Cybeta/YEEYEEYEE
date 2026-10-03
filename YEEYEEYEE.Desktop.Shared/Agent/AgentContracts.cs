@@ -139,9 +139,3 @@ public sealed record AgentContext(
     规则：只在确实需要改动时才输出这个块；没有改动就不要输出；自然语言的说明写在块之前。
     """;
 }
-
-/// <summary>
-/// 自动模式落地结果（返工 S1）：动作清单 + 失败说明。
-/// <see cref="Failure"/> 为 null 才代表**真的已应用并保存**；有值时必须如实显示，不能报成功。
-/// </summary>
-public sealed record AgentAutoStageResult(IReadOnlyList<AgentAction> Actions, string? Failure);

@@ -139,20 +139,6 @@ public static class ComfyUiSubmissionProfiles
         "提交 /prompt 后轮询任务结果；参考图先上传到 ComfyUI 输入目录再按文件名引用。");
 }
 
-/// <summary>兼容旧名字：参考图模式即提交方式声明。</summary>
-public static class ComfyUiReferenceModes
-{
-    public static readonly SubmissionProfile SingleBaseImage = ComfyUiSubmissionProfiles.SingleBaseImage;
-
-    public static IReadOnlyList<SubmissionProfile> All { get; } = new[] { ComfyUiSubmissionProfiles.SingleBaseImage };
-
-    /// <summary>当前实现并默认使用的提交方式。</summary>
-    public static SubmissionProfile Current => ComfyUiSubmissionProfiles.SingleBaseImage;
-
-    public static SubmissionProfile Find(string? id) =>
-        All.FirstOrDefault(profile => string.Equals(profile.Id, id, StringComparison.OrdinalIgnoreCase)) ?? Current;
-}
-
 public interface IImageProvider
 {
     bool IsConfigured { get; }

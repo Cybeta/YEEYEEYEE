@@ -35,10 +35,10 @@ canvas-tabs.json
 workspace.json
 # 项目级资源库：共享资源与备份属于用户数据
 /project/
-# 交接文档与分享包只在本机维护
+# 交接文档已并入 README（第 183 轮），这两条留着当兜底，防止日后又把它们生成出来
 LOCAL_HANDOFF*.html
 .trae-html-share-packages/
-# 内部工作记录（待拍板的决定、带轮次的现场记录、本机特有事项）只在本机维护
+# 内部工作记录（待拍板的决定、本机特有事项、协作约定）只在本机维护
 TODO.local.md
 # 页面设计工具的中间产物（含本机绝对路径与工具内部清单，不入库）
 *.design/

@@ -202,15 +202,6 @@ public sealed class WorkflowCanvasState
     private static string DescriptionOf(WorkflowEntity entity, WorkflowEntityVariant variant) =>
         string.IsNullOrWhiteSpace(variant.Description) ? entity.Core : variant.Description;
 
-    public string ReferenceLabel(WorkflowNode node)
-    {
-        var references = ResolveReferences(node);
-        if (references.Count == 0) return string.Empty;
-        return references.Count == 1 ? references[0].Label : $"{references[0].Label} 等 {references.Count} 个";
-    }
-
-    public List<string> ReferenceLabels(WorkflowNode node) => ResolveReferences(node).Select(reference => reference.Label).ToList();
-
     public string DescribeReferenceForPrompt(WorkflowNode node)
     {
         var references = ResolveReferences(node);
