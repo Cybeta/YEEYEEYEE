@@ -3,6 +3,14 @@
   <ItemGroup>
     <ProjectReference Include="..\YEEYEEYEE.Host\YEEYEEYEE.Host.csproj" />
     <ProjectReference Include="..\YEEYEEYEE.Desktop.Core\YEEYEEYEE.Desktop.Core.csproj" />
+    <!--
+      泳道布局引擎（CanvasSwimlaneLayout 那一批）住在 Desktop.Shared 里。
+      它同样是 net10.0、而且刻意不含任何 UI 框架依赖，所以 Web 服务可以直接引用**同一份**，
+      不必在 TypeScript 里再写一份——两份实现在同一张画布上排出来的结果迟早会不一样。
+      注意 Shared 里带着 SecretCiphers / SecretProtector（DPAPI）：那部分在 Linux 上编译得过、
+      调用会抛，所以这条链上**不要碰到它**（容器部署跑的就是这个进程）。
+    -->
+    <ProjectReference Include="..\YEEYEEYEE.Desktop.Shared\YEEYEEYEE.Desktop.Shared.csproj" />
   </ItemGroup>
 
   <ItemGroup>

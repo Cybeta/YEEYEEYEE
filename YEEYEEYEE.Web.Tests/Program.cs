@@ -634,10 +634,146 @@ try
     using var noModeLease = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
     noModeLease.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
     Assert((await Check(noModeLease, HttpMethod.Get, "/api/web/edits", 503)).GetProperty("code").GetString() == "SCENE_MODE_NOT_CONFIGURED", "没有画布时锁接口也要如实报没配");
+    Assert((await Check(noModeLease, HttpMethod.Post, "/api/web/layout/plan", 503, "{}")).GetProperty("code").GetString() == "SCENE_MODE_NOT_CONFIGURED", "没有画布时整理布局也要如实报没配");
+
+    // ---------- 整理布局：服务端直接用桌面端那份泳道引擎，写入口与改文字是同一个 ----------
+    Stop();
+    var layoutRoot = Path.Combine(root, "layout-project");
+    var layoutCanvases = Path.Combine(layoutRoot, "canvases");
+    var layoutEntities = Path.Combine(layoutRoot, "project");
+    Directory.CreateDirectory(layoutCanvases);
+    Directory.CreateDirectory(layoutEntities);
+    File.WriteAllText(Path.Combine(layoutRoot, "project.json"), "{\"Name\":\"Layout test\"}");
+    File.WriteAllText(Path.Combine(layoutEntities, "entities.json"), "{\"formatVersion\":1,\"entities\":[]}");
+    var layoutCanvas = Path.Combine(layoutCanvases, "main.json");
+    var chapterNode = Guid.NewGuid();
+    var storyboardNode = Guid.NewGuid();
+    var productNode = Guid.NewGuid();
+    var planningNode = Guid.NewGuid();
+    var characterNode = Guid.NewGuid();
+    var chapterItem = Guid.NewGuid();
+    // 故意摆得又散又远：整理**必须**真的算出改动，否则下面那些断言等于没测。
+    File.WriteAllText(layoutCanvas, JsonSerializer.Serialize(new
+    {
+        Title = "排版测试",
+        Revision = 3,
+        FormatVersion = 0,
+        Canvas = new
+        {
+            Nodes = new object[]
+            {
+                new { Id = chapterNode, Title = "第一章", Category = 8, Content = "", X = 1500, Y = 900, WorkTreeItemId = chapterItem },
+                new { Id = storyboardNode, Title = "分镜一", Category = 3, Content = "", X = 1600, Y = 1000, WorkTreeItemId = chapterItem },
+                new { Id = productNode, Title = "成品一", Category = 5, Content = "", X = 1700, Y = 1100, ParentNodeId = (Guid?)storyboardNode },
+                new { Id = planningNode, Title = "总企划", Category = 6, Content = "", X = 1800, Y = 1200 },
+                new { Id = characterNode, Title = "林晚", Category = 1, Content = "", X = 1900, Y = 1300 }
+            },
+            Edges = Array.Empty<object>(),
+            Entities = Array.Empty<object>(),
+            WorkTree = new object[]
+            {
+                // Kind 必须显式写成章节：引擎按 WorkTreeKind.Chapter 找章节条目，
+                // 少了它这份工作树就只是一堆「能力」条目，泳道一条也建不出来。
+                new { Id = chapterItem, Kind = (int)YEEYEEYEE.Desktop.WorkTreeKind.Chapter, Name = "第一章", Order = 0, Prompt = "" }
+            }
+        }
+    }));
+    var layoutDatabase = Path.Combine(root, "users-layout.db");
+    foreach (var leftover in new[] { layoutDatabase, layoutDatabase + "-wal", layoutDatabase + "-shm" })
+        if (File.Exists(leftover)) File.Delete(leftover);
+    await Start(projectCanvas: layoutCanvas, userDatabase: layoutDatabase);
+
+    using var arranger = CookieClient();
+    await Check(arranger, HttpMethod.Post, "/api/auth/setup", 200, "{\"username\":\"lin\",\"password\":\"longenough\",\"displayName\":\"林晚\"}");
+    await Check(arranger, HttpMethod.Post, "/api/auth/users", 200, "{\"username\":\"suli\",\"password\":\"longenough\",\"role\":\"Viewer\"}");
+    await Check(arranger, HttpMethod.Post, "/api/auth/users", 200, "{\"username\":\"chenmo\",\"password\":\"longenough\",\"displayName\":\"陈默\",\"role\":\"Editor\"}");
+    using var viewerOnly = CookieClient();
+    await Check(viewerOnly, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"suli\",\"password\":\"longenough\"}");
+    using var rival = CookieClient();
+    await Check(rival, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"chenmo\",\"password\":\"longenough\"}");
+
+    string PlanBody(string? scope = null, bool overrideManual = false) => JsonSerializer.Serialize(new { scope, overrideManual });
+    string ApplyBody(long revision, string? scope = null) =>
+        JsonSerializer.Serialize(new { baseRevision = revision, scope, overrideManual = false, client = "web" });
+
+    var layoutBytesBefore = File.ReadAllBytes(layoutCanvas);
+    var revisionBefore = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64();
+
+    // 只读账号连预览都不给：它算的是「你会改什么」，给了只会让人以为能点应用。
+    Assert((await Check(viewerOnly, HttpMethod.Post, "/api/web/layout/plan", 403, PlanBody()))
+        .GetProperty("code").GetString() == "CANVAS_EDIT_FORBIDDEN", "只读账号不该能预览整理");
+
+    var plan = await Check(arranger, HttpMethod.Post, "/api/web/layout/plan", 200, PlanBody());
+    Assert(plan.GetProperty("wholeCanvas").GetBoolean() && plan.GetProperty("changed").GetBoolean(), "整画布整理应当算出改动：" + plan.GetRawText());
+    Assert(plan.GetProperty("lanes").GetArrayLength() > 0 && plan.GetProperty("changes").GetArrayLength() > 0, "泳道与改动清单都要回给界面");
+    Assert(layoutBytesBefore.SequenceEqual(File.ReadAllBytes(layoutCanvas)), "预览**绝不能**写盘");
+
+    // 章节范围：章节 ID 从泳道里拿，不去猜引擎的归属规则。
+    var chapterId = plan.GetProperty("lanes").EnumerateArray()
+        .First(lane => lane.GetProperty("kind").GetString() == "Chapter").GetProperty("chapterId").GetString()!;
+    Assert(!(await Check(arranger, HttpMethod.Post, "/api/web/layout/plan", 200, PlanBody(chapterId))).GetProperty("wholeCanvas").GetBoolean(),
+        "章节范围不该说自己在整画布排");
+    await Check(arranger, HttpMethod.Post, "/api/web/layout/plan", 400, PlanBody("not-a-guid"));
+
+    // 陈旧修订：必须被拒，而且**字节不变**。
+    await Check(arranger, HttpMethod.Post, "/api/web/layout/apply", 409, ApplyBody(revisionBefore + 1));
+    Assert(layoutBytesBefore.SequenceEqual(File.ReadAllBytes(layoutCanvas)), "陈旧修订的应用不该改动画布");
+    // 干跑挡住了它，所以也**不该因此占住整棵树锁**——否则一次手滑会把别人的结构改动挡到锁过期。
+    Assert((await Check(arranger, HttpMethod.Get, "/api/web/edits", 200)).GetProperty("leases").GetArrayLength() == 0,
+        "注定失败的整理不该占住整棵树锁");
+
+    // 别人正拿着整棵树锁时，整理请求要被挡住并说清等谁（此时画布确实还没排好，所以这条是真的挡住了改动）。
+    var rivalLease = (await Check(rival, HttpMethod.Post, "/api/web/edits", 200,
+        "{\"scope\":\"tree\",\"targetId\":null,\"client\":\"desktop\"}")).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    var conflicted = await Check(arranger, HttpMethod.Post, "/api/web/layout/apply", 409, ApplyBody(revisionBefore));
+    Assert(conflicted.GetProperty("code").GetString() == "EDIT_CONFLICT", "有人拿着整棵树锁时不该硬闯");
+    Assert(conflicted.GetProperty("holder").GetProperty("displayName").GetString() == "陈默", "冲突要说清等谁：" + conflicted.GetRawText());
+    Assert(layoutBytesBefore.SequenceEqual(File.ReadAllBytes(layoutCanvas)), "被锁挡住时不该改动画布");
+    await Check(rival, HttpMethod.Delete, $"/api/web/edits/{rivalLease}", 200);
+
+    // 真正应用：落盘坐标必须与预览逐项一致——计划是服务端按同一份引擎重算的，所以两者等价。
+    var applied = await Check(arranger, HttpMethod.Post, "/api/web/layout/apply", 200, ApplyBody(revisionBefore));
+    var moved = applied.GetProperty("moved").GetInt32();
+    Assert(moved > 0 && applied.GetProperty("revision").GetInt64() != revisionBefore, "应用整理要真的写入并推进修订");
+    Assert(applied.GetProperty("records").GetArrayLength() == moved, "回给界面的记录数应当等于被移动的节点数");
+    var planned = plan.GetProperty("changes").EnumerateArray().ToDictionary(
+        change => Guid.Parse(change.GetProperty("recordId").GetString()!),
+        change => (X: change.GetProperty("toX").GetSingle(), Y: change.GetProperty("toY").GetSingle()));
+    var landed = 0;
+    using (var document = JsonDocument.Parse(File.ReadAllText(layoutCanvas)))
+    {
+        foreach (var node in document.RootElement.GetProperty("Canvas").GetProperty("Nodes").EnumerateArray())
+        {
+            if (!planned.TryGetValue(node.GetProperty("Id").GetGuid(), out var expected)) continue;
+            Assert(Math.Abs(node.GetProperty("X").GetSingle() - expected.X) < 0.001f &&
+                Math.Abs(node.GetProperty("Y").GetSingle() - expected.Y) < 0.001f,
+                "落盘坐标要与预览一致：" + node.GetProperty("Title").GetString());
+            landed++;
+        }
+    }
+    Assert(landed == planned.Count, $"预览里的每一项都应当真的落盘（{landed}/{planned.Count}）");
+    Assert(Directory.GetFiles(Path.Combine(layoutCanvases, "backups"), "*.json").Length > 0, "整理布局也要留备份");
+
+    // 再应用一次：位置已经排好，就不该再写盘、也不该推进修订。这条同时证明了引擎与写入口是同一个口径。
+    var revisionAfter = applied.GetProperty("revision").GetInt64();
+    var bytesAfter = File.ReadAllBytes(layoutCanvas);
+    var again = await Check(arranger, HttpMethod.Post, "/api/web/layout/apply", 200, ApplyBody(revisionAfter));
+    Assert(again.GetProperty("moved").GetInt32() == 0 && again.GetProperty("revision").GetInt64() == revisionAfter,
+        "已排好的画布再整理应当是「无需改动」：" + again.GetRawText());
+    Assert(bytesAfter.SequenceEqual(File.ReadAllBytes(layoutCanvas)), "「无需改动」不该碰画布字节");
+
+    // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
+    Stop();
+    await Start(standalone: true, userDatabase: layoutDatabase);
+    using var standaloneArranger = CookieClient();
+    await Check(standaloneArranger, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"lin\",\"password\":\"longenough\"}");
+    Assert((await Check(standaloneArranger, HttpMethod.Post, "/api/web/layout/plan", 409, PlanBody()))
+        .GetProperty("code").GetString() == "LAYOUT_REQUIRES_PROJECT", "独立场景模式的整理应当明确拒绝");
 
     Stop();
     Console.WriteLine("HTTP regression passed: auth, live canvas.edit revocation, byte-preserving denials, jobs, assets, conflicts, persistence, and project/standalone modes");
     Console.WriteLine("Auth regression passed: first user becomes admin, role-derived claims, session persistence, disable/password revocation, setup token");
     Console.WriteLine("Edit-lease regression passed: node/tree granularity, idempotent acquire, holder identity, heartbeat renew, expiry vs missing, admin force takeover, corrupt-file self-healing, restart persistence, canvas bytes untouched");
+    Console.WriteLine("Layout regression passed: shared swimlane engine on the server, chapter scope, stale revision, tree-lease arbitration, preview equals what lands on disk, idempotent no-op, standalone refusal");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }

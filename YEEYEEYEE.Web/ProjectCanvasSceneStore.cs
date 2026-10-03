@@ -138,16 +138,19 @@ internal sealed class ProjectCanvasSceneStore
         }
     }
 
-    public async Task<IResult> Update(string recordId, HttpRequest request)
+    /// <summary>
+    /// 所有写入的唯一通道：修订校验 → 只读与校验闸门 → 项目库权威校验 → 变更 → 再校验 →
+    /// 原子落盘（带备份与跨进程租约）。「改标题内容」与「整理布局」共用它——
+    /// 两套写入规则各自演化出差异，是这类接口最典型的坏法。
+    ///
+    /// <paramref name="mutate"/> 返回 <c>(null, 结果)</c> 就立刻把那个结果回给调用方：
+    /// 错误与「本来就无需改动」都走这条路，所以它是「结果」而不是「拒绝」。
+    /// </summary>
+    private IResult Write(
+        long baseRevision,
+        Func<RecentCanvasState, (WorkflowCanvasState? Canvas, IResult? Result)> mutate,
+        Func<RecentCanvasState, byte[], object> respond)
     {
-        JsonElement input;
-        try { input = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body, cancellationToken: request.HttpContext.RequestAborted); }
-        catch (JsonException) { return Error(400, "INVALID_REQUEST", "请求 JSON 无效"); }
-        if (input.ValueKind != JsonValueKind.Object ||
-            !input.TryGetProperty("baseRevision", out var rev) || !rev.TryGetInt64(out var baseRevision) ||
-            !input.TryGetProperty("title", out var title) || title.ValueKind != JsonValueKind.String ||
-            !input.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.String)
-            return Error(400, "INVALID_REQUEST", "需要 baseRevision、title、content");
         var committed = false;
         try
         {
@@ -156,18 +159,14 @@ internal sealed class ProjectCanvasSceneStore
             if (current.Open.UnsupportedFormat) return Error(409, "CANVAS_READ_ONLY", "高版本画布只读，拒绝覆盖");
             if (current.Open.Validation.HasErrors || current.Open.Migration.Ambiguities.Count > 0)
                 return Error(409, "CANVAS_VALIDATION_FAILED", "画布引用或迁移存在未解决问题，拒绝保存");
-            CheckProjectAuthority(current.State);
-            var projected = NodeProjection.ProjectRecords(current.State.Canvas.Nodes, current.State.Canvas);
-            if (!Guid.TryParse(recordId, out var id) ||
-                !projected.Any(row => JsonSerializer.SerializeToElement(row).GetProperty("recordId").GetString() == recordId))
-                return Error(404, "RECORD_NOT_FOUND", "可编辑节点不存在");
-            var node = current.State.Canvas.Nodes.SingleOrDefault(node => node.Id == id);
-            if (node is null) return Error(404, "RECORD_NOT_FOUND", "该记录不是可编辑节点");
-            if (node.IsLocked) return Error(409, "NODE_LOCKED", "节点已锁定");
             if (current.State.Revision == int.MaxValue) return Error(409, "SCENE_REVISION_CONFLICT", "画布修订已达上限");
-            node.Title = title.GetString()!;
-            node.Content = content.GetString()!;
-            var next = current.State with { Revision = current.State.Revision + 1 };
+            CheckProjectAuthority(current.State);
+
+            var (canvas, result) = mutate(current.State);
+            if (result is not null) return result;
+            if (canvas is null) return Error(500, "CANVAS_INVALID", "变更没有产出可写入的画布");
+
+            var next = current.State with { Revision = current.State.Revision + 1, Canvas = canvas };
             var validation = CanvasIdentityValidator.Validate(next.Canvas);
             if (validation.HasErrors) return Error(409, "CANVAS_VALIDATION_FAILED", "修改后画布校验失败");
             CanvasSaveOutcome saved;
@@ -182,9 +181,7 @@ internal sealed class ProjectCanvasSceneStore
             committed = true;
             // Do not re-open the file after commit: another writer may already have replaced it.
             // Returning a failure after successful replacement would invite an unsafe retry.
-            var record = NodeProjection.ProjectRecords(next.Canvas.Nodes, next.Canvas)
-                .First(row => JsonSerializer.SerializeToElement(row).GetProperty("recordId").GetString() == recordId);
-            return Results.Json(new { revision = Revision(saved.WrittenBytes), record });
+            return Results.Json(respond(next, saved.WrittenBytes));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
         {
@@ -192,4 +189,194 @@ internal sealed class ProjectCanvasSceneStore
                 committed ? "项目画布已保存，但无法确认提交后的读取：" + ex.Message : "项目画布未安全保存：" + ex.Message);
         }
     }
+
+    public async Task<IResult> Update(string recordId, HttpRequest request)
+    {
+        JsonElement input;
+        try { input = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body, cancellationToken: request.HttpContext.RequestAborted); }
+        catch (JsonException) { return Error(400, "INVALID_REQUEST", "请求 JSON 无效"); }
+        if (input.ValueKind != JsonValueKind.Object ||
+            !input.TryGetProperty("baseRevision", out var rev) || !rev.TryGetInt64(out var baseRevision) ||
+            !input.TryGetProperty("title", out var title) || title.ValueKind != JsonValueKind.String ||
+            !input.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.String)
+            return Error(400, "INVALID_REQUEST", "需要 baseRevision、title、content");
+
+        return Write(baseRevision, current =>
+        {
+            var canvas = current.Canvas;
+            var projected = NodeProjection.ProjectRecords(canvas.Nodes, canvas);
+            if (!Guid.TryParse(recordId, out var id) ||
+                !projected.Any(row => JsonSerializer.SerializeToElement(row).GetProperty("recordId").GetString() == recordId))
+                return (null, Error(404, "RECORD_NOT_FOUND", "可编辑节点不存在"));
+            var node = canvas.Nodes.SingleOrDefault(item => item.Id == id);
+            if (node is null) return (null, Error(404, "RECORD_NOT_FOUND", "该记录不是可编辑节点"));
+            if (node.IsLocked) return (null, Error(409, "NODE_LOCKED", "节点已锁定"));
+            node.Title = title.GetString()!;
+            node.Content = content.GetString()!;
+            return (canvas, null);
+        }, (next, bytes) =>
+        {
+            var record = NodeProjection.ProjectRecords(next.Canvas.Nodes, next.Canvas)
+                .First(row => JsonSerializer.SerializeToElement(row).GetProperty("recordId").GetString() == recordId);
+            return new { revision = Revision(bytes), record };
+        });
+    }
+
+    /// <summary>
+    /// 整理布局的预览：**只算不写**，返回泳道划分与逐节点改动。
+    ///
+    /// 用的是桌面端同一份 <see cref="CanvasSwimlaneLayout"/>（Desktop.Shared 里的那个引擎，
+    /// 两边都是 net10.0 且它不含 UI 依赖）。所以这里算出来的排布与桌面端点「整理」的结果一致；
+    /// 要是在 TypeScript 里另写一份，两份实现在同一张画布上迟早会排出不同的样子。
+    /// </summary>
+    public IResult PlanLayout(string? scope, bool overrideManual)
+    {
+        var preview = BuildPreview(scope, overrideManual);
+        if (preview.Error is not null) return preview.Error;
+        return Results.Json(Wire(preview.Plan!, preview.Canvas!));
+    }
+
+    /// <summary>
+    /// 应用前的**干跑**：把「该不该写、写几项」先算清楚，一个字节都不动。
+    ///
+    /// 接口层靠它决定值不值得去拿整棵树锁——否则一次注定失败的整理（修订陈旧、布局被阻断）
+    /// 也会占住整棵树，把别人的结构改动挡在门外，直到锁自己过期。
+    /// </summary>
+    internal IResult? PreflightApply(long baseRevision, string? scope, bool overrideManual,
+        out bool willWrite, out long revision, out int moves, out string summary)
+    {
+        willWrite = false;
+        revision = 0;
+        moves = 0;
+        summary = string.Empty;
+        var preview = BuildPreview(scope, overrideManual);
+        if (preview.Error is not null) return preview.Error;
+        if (preview.Revision != baseRevision)
+            return Error(409, "SCENE_REVISION_CONFLICT", "项目画布已被修改，请重新加载");
+        var plan = preview.Plan!;
+        if (Refuse(plan, overrideManual, preview.Canvas!) is { } refusal) return refusal;
+        willWrite = plan.Changed;
+        revision = preview.Revision;
+        moves = plan.Changes.Count;
+        summary = plan.Changed ? plan.ToText(preview.Canvas!) : NoChangeSummary;
+        return null;
+    }
+
+    /// <summary>
+    /// 整理布局的写入。计划**在服务端按同一份引擎重算**，不接受客户端送来的坐标——
+    /// 「同一份画布 + 同一份引擎」的结果是确定的，所以重算一遍比信任请求体安全得多。
+    /// 调用方要先把整棵树锁拿到手（整理结构属于整棵树级的操作）。
+    /// </summary>
+    public IResult ApplyLayout(long baseRevision, string? scope, bool overrideManual)
+    {
+        // 被真正移动的节点：响应里只回这些记录的投影，客户端不必为一次整理重拉整张画布。
+        var movedIds = new HashSet<Guid>();
+        var summary = string.Empty;
+        return Write(baseRevision, current =>
+        {
+            var canvas = current.Canvas;
+            var plan = BuildPlan(canvas, scope, overrideManual);
+            if (plan is null) return (null, Error(400, "INVALID_REQUEST", "scope 必须是 all 或一个章节 ID"));
+            if (Refuse(plan, overrideManual, canvas) is { } refusal) return (null, refusal);
+            if (!plan.Changed)
+                // 干跑已经拦过这一种，这里是写入前的兜底：位置本来就排好了，不该写盘、也不该推进修订。
+                return (null, Results.Json(new
+                {
+                    revision = current.Revision,
+                    moved = 0,
+                    summary = NoChangeSummary,
+                    records = Array.Empty<object>()
+                }));
+            foreach (var change in plan.Changes) movedIds.Add(change.NodeId);
+            summary = plan.ToText(canvas);
+            return (CanvasSwimlaneLayout.Apply(canvas, plan), null);
+        }, (next, bytes) =>
+        {
+            return new
+            {
+                revision = Revision(bytes),
+                moved = movedIds.Count,
+                summary,
+                records = NodeProjection.ProjectRecords(next.Canvas.Nodes, next.Canvas)
+                    .Where(row => movedIds.Contains(Guid.Parse(JsonSerializer.SerializeToElement(row).GetProperty("recordId").GetString()!)))
+                    .ToArray()
+            };
+        });
+    }
+
+    internal const string NoChangeSummary = "位置已符合泳道布局，无需改动。";
+
+    /// <summary>加载并算出布局计划，不写盘、也不看修订。预览与干跑共用它。</summary>
+    private (CanvasLayoutPlan? Plan, WorkflowCanvasState? Canvas, long Revision, IResult? Error) BuildPreview(string? scope, bool overrideManual)
+    {
+        try
+        {
+            var current = Load();
+            CheckProjectAuthority(current.State);
+            var plan = BuildPlan(current.State.Canvas, scope, overrideManual);
+            if (plan is null) return (null, null, 0, Error(400, "INVALID_REQUEST", "scope 必须是 all 或一个章节 ID"));
+            return (plan, current.State.Canvas, current.Revision, null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
+        {
+            return (null, null, 0, Error(503, "PROJECT_CANVAS_READ_FAILED", "项目画布或项目资源无法安全读取：" + ex.Message));
+        }
+    }
+
+    /// <summary>拒绝写入的那几条规矩。预览之后的每一种入口都走它，免得同一个条件出现两种文案。</summary>
+    private static IResult? Refuse(CanvasLayoutPlan plan, bool overrideManual, WorkflowCanvasState canvas)
+    {
+        // 阻断冲突即使确认覆盖也不写：覆盖只解决「保护手动坐标」，不解决冲突。
+        if (plan.HasBlockingConflicts)
+            return Error(409, "LAYOUT_BLOCKED", "布局被阻断，画布未改动。" + Environment.NewLine + plan.ToText(canvas));
+        if (plan.RequiresConfirmation && !overrideManual)
+            return Error(409, "LAYOUT_NEEDS_CONFIRMATION",
+                $"有 {plan.ProtectedNodeIds.Count} 个手动摆放的节点会被移动，需要显式确认「自动布局覆盖」");
+        return null;
+    }
+
+    private static CanvasLayoutPlan? BuildPlan(WorkflowCanvasState canvas, string? scope, bool overrideManual)
+    {
+        var options = new CanvasLayoutOptions(OverrideManual: overrideManual);
+        if (string.IsNullOrWhiteSpace(scope) || string.Equals(scope, AllScope, StringComparison.OrdinalIgnoreCase))
+            return CanvasSwimlaneLayout.PlanAll(canvas, options);
+        return Guid.TryParse(scope, out var chapterId) ? CanvasSwimlaneLayout.PlanChapter(canvas, chapterId, options) : null;
+    }
+
+    /// <summary>整画布范围的名字。章节范围就直接传章节 ID。</summary>
+    public const string AllScope = "all";
+
+    private static object Wire(CanvasLayoutPlan plan, WorkflowCanvasState canvas) => new
+    {
+        wholeCanvas = plan.WholeCanvas,
+        changed = plan.Changed,
+        blocking = plan.HasBlockingConflicts,
+        requiresConfirmation = plan.RequiresConfirmation,
+        protectedRecordIds = plan.ProtectedNodeIds.Select(id => id.ToString()).ToArray(),
+        lanes = plan.Lanes.Select(lane => new
+        {
+            kind = lane.Kind.ToString(),
+            chapterId = lane.ChapterId,
+            title = lane.Title,
+            order = lane.Order,
+            recordIds = lane.NodeIds.Select(id => id.ToString()).ToArray()
+        }).ToArray(),
+        changes = plan.Changes.Select(change => new
+        {
+            recordId = change.NodeId.ToString(),
+            title = change.Title,
+            fromX = change.FromX,
+            fromY = change.FromY,
+            toX = change.ToX,
+            toY = change.ToY
+        }).ToArray(),
+        conflicts = plan.Conflicts.Select(conflict => new
+        {
+            recordId = conflict.NodeId,
+            code = conflict.Code,
+            message = conflict.Message,
+            blocking = conflict.Blocking
+        }).ToArray(),
+        summary = plan.ToText(canvas)
+    };
 }
