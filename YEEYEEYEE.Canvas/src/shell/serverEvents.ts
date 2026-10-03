@@ -82,3 +82,34 @@ export function canvasChangeText(event: CanvasChangedEvent, recordTitle?: string
     ? `${event.actor} 改动了「${recordTitle}」`
     : `${event.actor} 改动了 1 个节点`
 }
+
+/** 收到「画布有变动」之后该做什么。 */
+export type FollowAction = 'ignore' | 'notify' | 'reload'
+
+/**
+ * 收到「画布有变动」之后：本地干净就**自动跟上**，手上有草稿就只提示。
+ *
+ * 判据与桌面端（`RemoteCanvasChange.Decide`）是同一条：自动跟上会**替换手上这份**，
+ * 所以只在「手上确实没有没提交的东西」时才做。有草稿时给的是提示与按钮——把决定权留给用户，
+ * 而不是替他丢掉刚敲进去的那几行。
+ */
+export function followAction(isStale: boolean, hasDraft: boolean): FollowAction {
+  if (!isStale) return 'ignore'
+  return hasDraft ? 'notify' : 'reload'
+}
+
+/**
+ * 「手上有没有还没提交的东西」：编辑框聚焦中，或者内容已经和记录不一样了。
+ *
+ * 两个都要看：聚焦中但是还没改（点进去看了一眼）算「有可能要改」，
+ * 而**改完没保存就点了别处**（失焦）的那种，只有内容比对才能发现。
+ */
+export function hasUnsavedDraft(
+  focused: boolean,
+  current: { title: string; content: string },
+  record: { title: string; content: string } | null
+): boolean {
+  if (focused) return true
+  if (record === null) return false
+  return current.title !== record.title || current.content !== record.content
+}

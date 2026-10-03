@@ -12,7 +12,7 @@ import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layo
 import { describeLease, leaseCovering, shouldHoldNodeLease } from './shell/locks'
 import { RightDock } from './shell/RightDock'
 import { canvasBounds, chapterGroups, isEditableRecord, kindOf, parseScene, recordContent, recordTitle, type ShellScene } from './shell/records'
-import { canvasChangeText, isOtherRevision } from './shell/serverEvents'
+import { canvasChangeText, followAction, hasUnsavedDraft, isOtherRevision } from './shell/serverEvents'
 import { useLeases } from './shell/useLeases'
 import { useNodeLease } from './shell/useNodeLease'
 import { useServerEvents } from './shell/useServerEvents'
@@ -108,6 +108,23 @@ export function WebCanvasApp() {
     onEditsChanged: () => void refreshLeases(),
     onCanvasChanged: (event) => {
       if (!isOtherRevision(scene?.revision, event)) return
+
+      // 手上没有没提交的东西就跟上，省掉一次点击；有草稿就只提示。
+      // 判据与桌面端（RemoteCanvasChange.Decide）是同一条：自动跟上是**替换手上这份**。
+      const draft = hasUnsavedDraft(
+        editorFocused,
+        { title, content },
+        selected ? { title: recordTitle(selected), content: recordContent(selected) } : null
+      )
+      if (followAction(true, draft) === 'reload') {
+        setNotice({ kind: 'info', message: '别人改了画布，已自动跟进最新版本。' })
+        setRemoteChange(null)
+        // 整理预览的基准修订同样失效：自动跟上之后它也不能再被应用了。
+        setLayoutPlan(null)
+        void loadScene()
+        return
+      }
+
       const changed = event.recordId ? records.find((item) => item.recordId === event.recordId) : null
       setRemoteChange({
         revision: event.revision,

@@ -127,6 +127,19 @@ internal static class SettingsServerPage
             Children = { signIn, signOut, refresh }
         };
 
+        // 默认关：桌面端一直是「要不要落盘由『保存修订』决定」，这是刻意设计。
+        // 自动同步把落盘时机拿走了，所以只能显式打开。
+        var autoSync = new CheckBox
+        {
+            Content = "改完自动同步（静默约 2 秒就推给服务端，不用点「保存修订」）",
+            IsChecked = config.CollaborationAutoSync,
+            FontSize = 11,
+            Foreground = AgentDialogUi.Brush("DfInk2")
+        };
+        var autoSyncNote = AgentDialogUi.Note(
+            "打开后：改动停下来约两秒就自动推给服务端，别人那边会自动跟上；被别人的编辑锁挡住时只提示一句、"
+            + "改动留在本地等你点「保存修订」。关掉就是原来的样子：什么时候落盘由你决定。");
+
         var root = new StackPanel
         {
             Spacing = 6,
@@ -140,6 +153,8 @@ internal static class SettingsServerPage
                 accountLabel, accountBox,
                 passwordLabel, passwordBox,
                 buttons,
+                autoSync,
+                autoSyncNote,
                 status
             }
         };
@@ -148,12 +163,14 @@ internal static class SettingsServerPage
         {
             config.CollaborationServerUrl = (urlBox.Text ?? string.Empty).Trim();
             config.CollaborationAccount = (accountBox.Text ?? string.Empty).Trim();
+            config.CollaborationAutoSync = autoSync.IsChecked == true;
         }
 
         void Reload()
         {
             urlBox.Text = config.CollaborationServerUrl;
             accountBox.Text = config.CollaborationAccount;
+            autoSync.IsChecked = config.CollaborationAutoSync;
             passwordBox.Text = string.Empty;
             ShowStatus();
         }
