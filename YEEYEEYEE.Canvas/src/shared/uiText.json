@@ -1,0 +1,11 @@
+{
+  "separator": " · ",
+  "gesture.pan": "空白处拖拽平移",
+  "gesture.zoom": "滚轮缩放",
+  "gesture.dragNode": "拖节点改位置",
+  "gesture.connect": "拖端口连线",
+  "gesture.select": "点节点或连线选中",
+  "gesture.delete": "Delete 删除",
+  "gesture.cancel": "Esc 取消",
+  "connect.mode": "连接模式：点另一个节点作为终点"
+}

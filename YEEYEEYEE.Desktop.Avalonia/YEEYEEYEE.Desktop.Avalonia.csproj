@@ -34,6 +34,15 @@
        构建时拷进输出目录，程序就从**程序目录旁的 provider-art/** 读到它们；用户配置目录里那一份优先，
        所以用户自己换的图不会被版本更新覆盖掉。
        CopyToOutputDirectory 用 PreserveNewest：重复构建不会每次重拷这几 MB。 -->
+  <!-- 两端共读的界面文案（见 UiText）：**唯一的一份**在网页端项目里——TS 只能 import 项目内的文件，
+       而 MSBuild 嵌哪个路径都行，所以让文件迁就 TS，这边多写一行。
+       LogicalName 写死：不写的话资源名是跟着路径算出来的，哪天挪一下目录就变成运行期才炸。
+       别把它挪进 Desktop.Shared / Web 那一条链——那些项目会在 Docker 镜像里构建，
+       而镜像上下文里没有 Desktop.Avalonia 的源码。 -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\YEEYEEYEE.Canvas\src\shared\uiText.json" LogicalName="UiText.json" Visible="false" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="..\provider-art\**\*"
           Link="provider-art\%(RecursiveDir)%(Filename)%(Extension)"

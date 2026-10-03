@@ -1,5 +1,6 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:YEEYEEYEE.Desktop.Avalonia"
              x:Class="YEEYEEYEE.Desktop.Avalonia.CanvasSurface"
              Focusable="True">
   <Panel x:Name="FxRoot" ClipToBounds="True" Background="#070A0F">
@@ -35,7 +36,8 @@
     <Border x:Name="HintChip" HorizontalAlignment="Left" VerticalAlignment="Bottom"
             Margin="14" Background="#A60D131B" BorderBrush="{StaticResource DfLine}"
             BorderThickness="1" CornerRadius="10" Padding="10,6" IsHitTestVisible="False">
-      <TextBlock x:Name="HintText" Text="拖拽平移 · 滚轮缩放 · 点击节点选中 · Delete 删除"
+      <!-- 初值也走共享文案（x:Static 直接绑 UiText），不在 XAML 里再抄一份字符串。 -->
+      <TextBlock x:Name="HintText" Text="{x:Static local:UiText.CanvasIdleHint}"
                  Foreground="{StaticResource DfInk3}" FontSize="11" />
     </Border>
 

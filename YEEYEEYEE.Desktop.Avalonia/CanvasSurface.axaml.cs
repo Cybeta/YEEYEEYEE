@@ -1398,8 +1398,10 @@ public partial class CanvasSurface : UserControl
     {
         var total = state?.Nodes.Count ?? 0;
         var shown = state is null ? 0 : VisibleNodes(state.Nodes).Count;
+        // 手势那一串走共享文案（UiText，唯一的一份在网页端项目里的 uiText.json），
+        // 不再在代码里写死一份——两端的措辞与分隔符以前就是这么走散的。
         var info = stageFilter == ProductionStage.All
-            ? $"{total} 节点 · 拖节点改位置 / 拖端口连线 / 点线选中后 Delete 删除 / 空白处拖拽平移 / Esc 取消"
+            ? $"{total} 节点 · {UiText.CanvasIdleHint}"
             : $"筛选「{ProductionStageRules.LabelOf(stageFilter)}」（{ProductionStageRules.RuleOf(stageFilter)}）：显示 {shown} / {total} 个节点，再点一次该阶段回到全部";
         HintText.Text = string.IsNullOrWhiteSpace(StatusTextHint) ? info : $"{StatusTextHint} · {info}";
 

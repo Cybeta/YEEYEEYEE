@@ -7,6 +7,7 @@ import {
   canvasBounds, chapterGroups, isEditableRecord, kindOf, NODE_KINDS, nodeX, nodeY,
   recordContent, recordStatus, recordTitle, visibleEdges, type ShellEdge, type ViewRecord
 } from './records'
+import { gestureHint } from './uiText'
 
 /**
  * 无限画布视图：按节点在画布上的**真实坐标**摆放。
@@ -25,6 +26,9 @@ import {
  */
 
 export type Pan = { x: number; y: number }
+
+// 画布上的手势提示（底部那一条）走两端共读的共享文案：措辞与分隔符都在 uiText.json 里，
+// 桌面端嵌的是同一个文件。以前两端各写一份，措辞与分隔符已经走散过。
 
 /**
  * 一次拖动的现场。放在 ref 里而不是 state：指针每动一下它都在变，但**只有落点需要重画**——
@@ -628,11 +632,13 @@ export function CanvasView(props: CanvasViewProps) {
       </div>
       {/* 提示条跟着当前手势走：连接模式下必须说清「下一次点击是干什么的」，
           否则点下去凭空多一根线，比没有这个功能更让人困惑。
-          （桌面端那句末尾还有「Delete 删除」；网页端的删除在检查器与工作树上，不挂快捷键。） */}
+          每一句措辞与分隔符都走**共享文案**（uiText.json，桌面端嵌的是同一份文件）：
+          以前两端各写一份，措辞与分隔符已经走散过。
+          **列哪几个手势两端各定**：桌面端末尾还有「Delete 删除」，网页端的删除在检查器与工作树上，不挂快捷键。 */}
       <div className="df-hint">
         {props.connectFrom
-          ? '连接模式：再点一个节点作为终点 · Esc 取消'
-          : '拖空白平移 · 滚轮缩放 · 拖节点挪位置 · 拖右缘圆点连线 · 点击选中'}
+          ? gestureHint('connect.mode', 'gesture.cancel')
+          : gestureHint('gesture.pan', 'gesture.zoom', 'gesture.dragNode', 'gesture.connect', 'gesture.select')}
       </div>
     </div>
   )
