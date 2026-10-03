@@ -11,7 +11,10 @@ import { InspectorPanel } from './shell/InspectorPanel'
 import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layoutPlan'
 import { describeLease, leaseCovering, shouldHoldNodeLease } from './shell/locks'
 import { RightDock } from './shell/RightDock'
-import { canvasBounds, chapterGroups, isEditableRecord, kindOf, parseScene, recordContent, recordTitle, type ShellScene } from './shell/records'
+import {
+  canvasBounds, chapterGroups, isEditableRecord, kindOf, nodeX, nodeY, parseScene, recordContent, recordTitle,
+  type ShellScene, type ViewRecord
+} from './shell/records'
 import { canvasChangeText, followAction, hasUnsavedDraft, isOtherRevision } from './shell/serverEvents'
 import { useLeases } from './shell/useLeases'
 import { useNodeLease } from './shell/useNodeLease'
@@ -631,6 +634,55 @@ export function WebCanvasApp() {
     }
   }
 
+  /**
+   * 位置写入：在画布上把节点拖到别处，松手时调它。**记录级**写入，与「改标题内容」同一档
+   * （服务端不要整棵树锁），所以拖一张卡片不会把别人的结构改动挡在门外。
+   *
+   * 先乐观地把卡片放在松手的位置：请求要跑几十毫秒，不先落地的话卡片会先弹回旧位置再跳过去。
+   * 请求回来用服务端那份覆盖；失败就撤回原处——不然界面会一直显示一个没落盘的位置。
+   * （撤回这一步本身就是「失败如实反馈」：位置回到服务端那一份，再加上一句说明。）
+   */
+  async function moveNode(recordId: string, x: number, y: number) {
+    const current = scene
+    if (!current) return
+    const previous = current.records.find((item) => item.recordId === recordId)
+    if (!previous) return
+    // 拖出去又拖回来、或者往左拖被夹在 0：坐标没变就别发这次请求（服务端也会当成无需改动）。
+    if (nodeX(previous) === x && nodeY(previous) === y) return
+    if (!canEdit(role)) {
+      setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
+      return
+    }
+
+    const baseRevision = current.revision
+    // 「把这一份记录换进场景里」——乐观更新与失败撤回共用它，免得两处各写一遍替换逻辑。
+    const swap = (record: ViewRecord) => setScene((now) => now
+      ? { ...now, records: now.records.map((item) => item.recordId === recordId ? record : item) }
+      : now)
+    swap({ ...previous, record: { ...previous.record, x, y } })
+    setNotice({ kind: 'info', message: '正在写入位置…' })
+    try {
+      const result = await request<{ revision: number; record: ViewRecord }>(
+        `/api/web/records/${encodeURIComponent(recordId)}/position`,
+        { method: 'PUT', body: JSON.stringify({ baseRevision, x, y }) })
+      if (!Number.isFinite(result?.revision) || !result.record || result.record.recordId !== recordId)
+        throw new Error('移动响应格式不正确')
+      setScene((now) => now
+        ? { ...now, revision: result.revision, records: now.records.map((item) => item.recordId === recordId ? result.record : item) }
+        : now)
+      setLastSaved(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+      // 位置变了，整理预览的基准修订随之失效——与保存同理，不能留着让人点「应用整理」才发现。
+      setLayoutPlan(null)
+      setNotice({ kind: 'success', message: `已移动「${recordTitle(result.record)}」，画布修订 ${result.revision}。` })
+    } catch (error) {
+      swap(previous)
+      setNotice({
+        kind: 'error',
+        message: `移动失败：${errorMessage(error)}。位置已回到原处；修订冲突时请重新加载画布。`
+      })
+    }
+  }
+
   return (
     <WorkbenchShell
       chrome={chrome}
@@ -675,6 +727,10 @@ export function WebCanvasApp() {
           onConnectStart={() => setConnecting(true)}
           onConnectCancel={() => setConnecting(false)}
           onConnectTarget={(targetId) => void createEdge(targetId)}
+          // 拖动与「改标题内容」同一档（记录级）：角色可编辑、画布不是只读就能拖；
+          // 单个节点还会再看锁——那一条在画布里判，因为它要看每张卡各自的锁。
+          draggable={editable}
+          onMove={(recordId, x, y) => void moveNode(recordId, x, y)}
         />
       )}
       dock={dockOpen ? (

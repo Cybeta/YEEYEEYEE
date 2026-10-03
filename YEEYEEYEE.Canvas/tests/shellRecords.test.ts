@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampZoom, wheelNotches, wheelZoomFactor, zoomAround } from '../src/shell/CanvasView'
+import { DRAG_THRESHOLD, clampZoom, dragDrop, wheelNotches, wheelZoomFactor, zoomAround } from '../src/shell/CanvasView'
 import {
   PLANNING_GROUP_ID, UNFILED_GROUP_ID, canvasBounds, chapterGroups, isEditableRecord, isPlanning,
   kindOf, NODE_KINDS, parseScene, scriptEntries, stageSummaries, type ViewRecord
@@ -201,5 +201,30 @@ describe('缩放换算', () => {
     expect(next).toEqual({ x: -100, y: -150 })
     expect(next.x + 200 * 2).toBe(300)
     expect(next.y + 200 * 2).toBe(250)
+  })
+})
+
+/**
+ * 拖节点改位置。两条规则各自错一次都很难看出来：阈值错了会把每次「点一下节点」当成移动去写盘，
+ * 夹取错了能让节点被拖到画布外面（坐标为负）而界面上看不出来。所以单独钉住它们。
+ */
+describe('拖动节点的落点', () => {
+  it('差一点点算点击，不算拖动——否则每点一下节点都会白写一次盘', () => {
+    expect(dragDrop({ x: 100, y: 50 }, 0, 0)).toEqual({ x: 100, y: 50, moved: false })
+    expect(dragDrop({ x: 100, y: 50 }, 1, 1).moved).toBe(false)   // |1| + |1| = 2 < 3
+    expect(dragDrop({ x: 100, y: 50 }, 3, 0).moved).toBe(true)    // 刚好到阈值
+    expect(dragDrop({ x: 100, y: 50 }, -2, -2).moved).toBe(true)  // 4 >= 3，方向不参与判断
+  })
+
+  it('位移是增量而不是绝对坐标', () => {
+    expect(dragDrop({ x: 100, y: 50 }, 40, -20)).toEqual({ x: 140, y: 30, moved: true })
+  })
+
+  it('往左 / 往上拖会被夹在 0：节点拖不出画布左上角', () => {
+    expect(dragDrop({ x: 10, y: 10 }, -100, -100)).toEqual({ x: 0, y: 0, moved: true })
+  })
+
+  it('阈值与桌面端是同一个数（同一个手势在两端不能被判成不同的事）', () => {
+    expect(DRAG_THRESHOLD).toBe(3)
   })
 })

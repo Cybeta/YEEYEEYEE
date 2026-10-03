@@ -1291,6 +1291,111 @@ try
         Assert(edPairAfter.GetProperty("edges").EnumerateArray().All(item =>
             item.GetProperty("sourceId").GetString() != edPairA && item.GetProperty("targetId").GetString() != edPairA),
             "删节点要连带删掉它的连线，否则画布校验会在写入时拦下（用户看到的是「删了却保存不了」）");
+
+        // ---------- 节点位置：在画布上把它拖到别处 ----------
+        // 这一条是**记录级**写入（不动画布结构），所以**不占整棵树锁**——
+        // 下面「别人占着别的节点时照样能挪」那一条，就是钉住这个决定的。
+        using (var mpEvents = await rival.GetAsync("/api/web/events", HttpCompletionOption.ResponseHeadersRead))
+        {
+            var mpReader = new StreamReader(await mpEvents.Content.ReadAsStreamAsync());
+            var mpPending = ReadFrame(mpReader);
+
+            var mpScene = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+            var mpBase = mpScene.GetProperty("revision").GetInt64();
+            // 拿「分镜一」当样本：它有坐标、不是章节、也没有别的节点挂在它下面。
+            var mpTarget = efSecond;
+            var mpStart = mpScene.GetProperty("records").EnumerateArray()
+                .First(row => row.GetProperty("recordId").GetString() == mpTarget).GetProperty("record");
+            Assert(mpStart.GetProperty("x").GetDouble() != 4321.5, "起点不能正好等于下面要写进去的坐标，否则断言等于没测");
+
+            // 广播：位置改动按**记录级**报（不是结构级），并说清改的是哪一条。
+            var mpMoved = await Check(arranger, HttpMethod.Put, $"/api/web/records/{mpTarget}/position", 200,
+                "{\"baseRevision\":" + mpBase + ",\"x\":4321.5,\"y\":1234.25}");
+            var mpRevision = mpMoved.GetProperty("revision").GetInt64();
+            Assert(mpRevision != mpBase, "移动要推进修订");
+            var mpRecord = mpMoved.GetProperty("record");
+            Assert(mpRecord.GetProperty("recordId").GetString() == mpTarget, "回的是同一条记录");
+            Assert(mpRecord.GetProperty("record").GetProperty("x").GetDouble() == 4321.5 &&
+                mpRecord.GetProperty("record").GetProperty("y").GetDouble() == 1234.25, "落点要照说的写");
+
+            var mpPushed = await Task.WhenAny(mpPending, Task.Delay(5000)) == mpPending ? await mpPending : null;
+            Assert(mpPushed is { Type: "canvas.changed" } mpFrame &&
+                mpFrame.Data.GetProperty("scope").GetString() == "record" &&
+                mpFrame.Data.GetProperty("recordId").GetString() == mpTarget,
+                "位置改动要按记录级广播，并说清改的是哪一条：" + (mpPushed is { } gotMp ? gotMp.Data.GetRawText() : "(没收到)"));
+
+            var mpReread = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200))
+                .GetProperty("records").EnumerateArray()
+                .First(row => row.GetProperty("recordId").GetString() == mpTarget).GetProperty("record");
+            Assert(mpReread.GetProperty("x").GetDouble() == 4321.5 && mpReread.GetProperty("y").GetDouble() == 1234.25,
+                "重读要拿到新位置");
+
+            // 落盘的不只是坐标，还有「手动摆放」这个标记——整理布局据此绕开它。
+            // 投影里没有这个字段，所以直接看文件：这正是「文件是唯一权威」那句话该被验的地方。
+            using (var mpDoc = JsonDocument.Parse(File.ReadAllText(layoutCanvas)))
+            {
+                var mpNode = mpDoc.RootElement.GetProperty("Canvas").GetProperty("Nodes").EnumerateArray()
+                    .First(node => node.GetProperty("Id").GetString() == mpTarget);
+                Assert(mpNode.GetProperty("X").GetDouble() == 4321.5 && mpNode.GetProperty("Y").GetDouble() == 1234.25,
+                    "文件里的坐标要真的是这个落点");
+                Assert(mpNode.GetProperty("ManualPosition").GetBoolean(), "拖过的节点要标上手动摆放");
+            }
+
+            // 拒绝的几种：陈旧修订、节点不存在、缺坐标、不是 GUID、坐标不是数字、坐标溢出成无穷大。
+            await Check(arranger, HttpMethod.Put, $"/api/web/records/{mpTarget}/position", 409,
+                "{\"baseRevision\":" + mpBase + ",\"x\":1,\"y\":1}");
+            Assert((await Check(arranger, HttpMethod.Put, $"/api/web/records/{Guid.NewGuid()}/position", 404,
+                "{\"baseRevision\":" + mpRevision + ",\"x\":1,\"y\":1}"))
+                .GetProperty("code").GetString() == "RECORD_NOT_FOUND", "不存在的节点要如实拒绝");
+            await Check(arranger, HttpMethod.Put, $"/api/web/records/{mpTarget}/position", 400,
+                "{\"baseRevision\":" + mpRevision + ",\"x\":1}");
+            await Check(arranger, HttpMethod.Put, "/api/web/records/not-a-guid/position", 400,
+                "{\"baseRevision\":" + mpRevision + ",\"x\":1,\"y\":1}");
+            Assert((await Check(arranger, HttpMethod.Put, $"/api/web/records/{mpTarget}/position", 400,
+                "{\"baseRevision\":" + mpRevision + ",\"x\":\"12\",\"y\":1}"))
+                .GetProperty("code").GetString() == "INVALID_REQUEST", "坐标不是数字要拒绝");
+            // 1e40 是**有限**的 double（过得了接口那一层），但收成 float 就是 Infinity——
+            // 所以「坐标必须是有限数」这道闸门必须留在真正落盘的那一层。
+            Assert((await Check(arranger, HttpMethod.Put, $"/api/web/records/{mpTarget}/position", 400,
+                "{\"baseRevision\":" + mpRevision + ",\"x\":1e40,\"y\":1}"))
+                .GetProperty("code").GetString() == "CANVAS_POSITION_INVALID", "溢出成无穷大的坐标要在落盘前拦下");
+
+            // 「位置没变」服务端**不单独判**（与「改标题内容」那条路同一个态度）：客户端会先挡一道
+            // （拖出去又拖回来时根本不发请求），而这里再来一次也只是照写。
+            // 把这件事钉成一条断言，是为了让「它不是漏的」这句话有个地方站着——
+            // 只有整理布局会在服务端判「无需改动」，因为那一条要跑完整张画布的引擎。
+            var mpNoopBase = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64();
+            var mpAgain = await Check(arranger, HttpMethod.Put, $"/api/web/records/{mpTarget}/position", 200,
+                "{\"baseRevision\":" + mpNoopBase + ",\"x\":4321.5,\"y\":1234.25}");
+            Assert(mpAgain.GetProperty("record").GetProperty("record").GetProperty("x").GetDouble() == 4321.5,
+                "重复写同一个落点照旧成功（「无需改动」挡在客户端那一层，不在这里）");
+
+            // **记录级**的要点：别人占着**别的**节点时，位置改动照样能做。
+            // 要是按结构级对待，一个人挪一下卡片就会挡住别人的结构改动。
+            using var mpHolder = new YEEYEEYEE.Desktop.CollaborationSession($"http://127.0.0.1:{port}");
+            Assert((await mpHolder.SignInAsync("chenmo", "longenough")).Ok, "锁的持有者先登录");
+            Assert((await mpHolder.AcquireNodeLeaseAsync(Guid.Parse(efFirst))).Ok, "占住另一个节点");
+            var mpBusyBase = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64();
+            await Check(arranger, HttpMethod.Put, $"/api/web/records/{mpTarget}/position", 200,
+                "{\"baseRevision\":" + mpBusyBase + ",\"x\":500.5,\"y\":600.5}");
+            await mpHolder.ReleaseHeldLeaseAsync();
+        }
+
+        // 锁定的节点不能移动——这是**数据层**的强制，不该只在界面上挡。
+        // 现成数据里没有锁定节点，所以直接往文件里加一个（校验器不看 IsLocked，加它不会让画布变成只读）。
+        {
+            var mpLockJson = JsonNode.Parse(File.ReadAllText(layoutCanvas))!;
+            var mpLockNode = mpLockJson["Canvas"]!["Nodes"]!.AsArray().OfType<JsonObject>()
+                .First(node => node["Id"]!.GetValue<string>() == efSecond);
+            mpLockNode["IsLocked"] = true;
+            File.WriteAllBytes(layoutCanvas, Encoding.UTF8.GetBytes(mpLockJson.ToJsonString()));
+            var mpLockRevision = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64();
+            Assert((await Check(arranger, HttpMethod.Put, $"/api/web/records/{efSecond}/position", 409,
+                "{\"baseRevision\":" + mpLockRevision + ",\"x\":7,\"y\":7}"))
+                .GetProperty("code").GetString() == "NODE_LOCKED", "锁定的节点不能移动");
+            mpLockNode["IsLocked"] = false;
+            File.WriteAllBytes(layoutCanvas, Encoding.UTF8.GetBytes(mpLockJson.ToJsonString()));
+        }
     }
 
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
@@ -1306,6 +1411,15 @@ try
         .GetProperty("code").GetString() == "CANVAS_REQUIRES_PROJECT", "独立场景模式的新建连线应当明确拒绝");
     Assert((await Check(standaloneArranger, HttpMethod.Delete, $"/api/web/edges/{Guid.NewGuid()}?baseRevision=0", 409))
         .GetProperty("code").GetString() == "CANVAS_REQUIRES_PROJECT", "独立场景模式的断开连线应当明确拒绝");
+    // 位置写入**两个模式都支持**（改位置与改标题是同一档，不该在一个模式里被拒）：
+    // 独立场景的节点没有泳道，但坐标是它自己的字段。
+    var standaloneScene = await Check(standaloneArranger, HttpMethod.Get, "/api/web/scene", 200);
+    var standaloneTarget = standaloneScene.GetProperty("records")[0].GetProperty("recordId").GetString()!;
+    await Check(standaloneArranger, HttpMethod.Put, $"/api/web/records/{standaloneTarget}/position", 200,
+        "{\"baseRevision\":" + standaloneScene.GetProperty("revision").GetInt64() + ",\"x\":321,\"y\":654}");
+    Assert((await Check(standaloneArranger, HttpMethod.Get, "/api/web/scene", 200))
+        .GetProperty("records")[0].GetProperty("record").GetProperty("x").GetDouble() == 321,
+        "独立场景模式下也要能写位置");
 
     Stop();
     Console.WriteLine("HTTP regression passed: auth, live canvas.edit revocation, byte-preserving denials, jobs, assets, conflicts, persistence, and project/standalone modes");
@@ -1350,5 +1464,6 @@ try
     Console.WriteLine("Desktop subscribe regression passed: frames parsed and unknown ones dropped, real canvas.changed and edits.changed reach the desktop, sign-out stops the stream, auto-reload only when the local copy is clean and idle, auto-push only when the user turned it on");
     Console.WriteLine("Structure regression passed: create lands in the named chapter with the asked category and broadcasts scope=structure, unknown category/chapter/missing anchor/stale revision all refused, another user's node lease blocks it, viewer refused, chapter entries not deletable through this path, delete removes the node");
     Console.WriteLine("Edge regression passed: connect lands on the asked endpoints with a fresh GUID and broadcasts scope=structure, self-loop/duplicate/missing endpoint/malformed body/stale revision each refuse with their own code, another user's node lease arbitrates, anonymous refused, disconnect removes exactly that one, a node delete takes its edges along, standalone mode refuses both");
+    Console.WriteLine("Node-position regression passed: a drag lands the exact coordinates and stamps ManualPosition in the file, broadcasts canvas.changed as record scope with that record id, stale revision/missing node/missing coordinate/non-numeric coordinate/float-overflowing coordinate each refuse with their own code, a repeated identical position is still accepted (the client is the one that skips it), another user's node lease elsewhere does not block it, a locked node refuses, and standalone mode supports it too");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }

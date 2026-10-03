@@ -232,6 +232,39 @@ internal static class WebSceneApi
                 hub.CanvasChanged(after.Revision, recordId, WebAccessGuard.ActorName(request.HttpContext), "record");
             return result;
         });
+        // 移动一个节点（网页端在画布上把它拖到别处）。**记录级**写入，与「改标题内容」同一档：
+        // 要 canvas.edit、要修订 CAS，但**不要**整棵树锁——它不动画布结构，而结构级那道锁
+        // 会让一个人挪一下卡片就挡住别人的结构改动。落点由客户端给：这是拖动，坐标本来就是人摆的。
+        app.MapPut("/api/web/records/{recordId}/position", async (string recordId, HttpRequest request) =>
+        {
+            if (!WebAccessGuard.Permissions(request.HttpContext).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+            if (!Guid.TryParse(recordId, out var nodeId))
+                return Error(400, "INVALID_REQUEST", "这个 recordId 不是一个画布节点（章节是工作树条目，没有坐标）");
+
+            JsonElement input;
+            try { input = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body, cancellationToken: request.HttpContext.RequestAborted); }
+            catch (JsonException) { return Error(400, "INVALID_REQUEST", "请求 JSON 无效"); }
+            // 这里用 double 收（JSON 只有一种数字），到 store 那层才收成 float 并**再验一次**有限性：
+            // 大到溢出的 double（1e40）转 float 就是 Infinity，那道闸门必须留在真正落盘的那一层。
+            //
+            // `ValueKind == Number` 那一句不能省：`TryGetDouble` 在遇到字符串 / null 时会**抛**
+            // InvalidOperationException（不像 TryGetInt64 那样老实返回 false），少了它请求体会变成 500。
+            if (input.ValueKind != JsonValueKind.Object ||
+                !input.TryGetProperty("baseRevision", out var rev) || !rev.TryGetInt64(out var baseRevision) ||
+                !input.TryGetProperty("x", out var x) || x.ValueKind != JsonValueKind.Number || !x.TryGetDouble(out var px) ||
+                !input.TryGetProperty("y", out var y) || y.ValueKind != JsonValueKind.Number || !y.TryGetDouble(out var py) ||
+                !double.IsFinite(px) || !double.IsFinite(py))
+                return Error(400, "INVALID_REQUEST", "需要 baseRevision、有限数值的 x 与 y");
+
+            var before = CommitToken();
+            var result = projectStore is not null ? projectStore.MoveNode(baseRevision, nodeId, (float)px, (float)py)
+                : store is not null ? store.MoveNode(baseRevision, nodeId, (float)px, (float)py) : unavailable!;
+            var after = CommitToken();
+            if (after.Serial > before.Serial)
+                hub.CanvasChanged(after.Revision, recordId, WebAccessGuard.ActorName(request.HttpContext), "record");
+            return result;
+        });
         app.MapGet("/api/web/assets", () =>
         {
             var entitiesPath = LegacyConfig.Text(app.Configuration, "ProjectEntitiesPath");
@@ -313,6 +346,33 @@ internal static class WebSceneApi
                 input["content"] is not JsonValue contentValue || !contentValue.TryGetValue<string>(out var content))
                 return Error(400, "INVALID_REQUEST", "需要 baseRevision、title、content");
 
+            return MutateRecord(baseRevision, recordId, fields =>
+            {
+                fields["title"] = title;
+                fields["content"] = content;
+            });
+        }
+
+        /// <summary>
+        /// 移动一个记录的位置（独立场景模式的同一件事）。
+        ///
+        /// 两个模式都支持它：改一个节点的位置和改它的标题是同一档写入，没有理由在一个模式里能用、
+        /// 在另一个模式里被拒——那只会让人以为「容器里拖不动是坏的」。独立场景的节点本来就没有泳道可言，
+        /// 但坐标是它自己的字段，写得进去。
+        /// </summary>
+        public IResult MoveNode(long baseRevision, Guid nodeId, float x, float y) =>
+            MutateRecord(baseRevision, nodeId.ToString(), fields =>
+            {
+                fields["x"] = x;
+                fields["y"] = y;
+            });
+
+        /// <summary>
+        /// 改一个记录并原子落盘。「改标题内容」与「移动位置」共用它——两套写入规则各自演化出差异，
+        /// 是这类接口最典型的坏法。返回的 <c>record</c> 是**改完之后**那一份，调用方直接拿去替换手上的。
+        /// </summary>
+        private IResult MutateRecord(long baseRevision, string recordId, Action<JsonObject> apply)
+        {
             lock (gate)
             {
                 try
@@ -328,9 +388,7 @@ internal static class WebSceneApi
                     var next = scene.DeepClone();
                     var updated = ((JsonArray)next["records"]!).OfType<JsonObject>()
                         .First(item => item["recordId"]!.GetValue<string>() == recordId);
-                    var fields = (JsonObject)updated["record"]!;
-                    fields["title"] = title;
-                    fields["content"] = content;
+                    apply((JsonObject)updated["record"]!);
                     next["revision"] = current + 1;
                     var directory = Path.GetDirectoryName(filePath)!;
                     Directory.CreateDirectory(directory);

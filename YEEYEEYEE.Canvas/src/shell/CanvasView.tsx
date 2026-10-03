@@ -20,11 +20,29 @@ import {
  * 如实说明，不假装有：
  *   - 连线**能读也能改了**：服务端投影连线（只投影两端都还在的），画布画得出来，
  *     新建与断开也接上了（新建走「连接模式」：点起点 → 点终点，见下面的 connectFrom）；
- *   - 网页端的写路径是「改标题与内容 / 新建与删除节点 / 新建与删除连线 / 整理布局」，
- *     改类别与移动单个节点还没有。
+ *   - 网页端的写路径是「改标题与内容 / 移动单个节点 / 新建与删除节点 / 新建与删除连线 / 整理布局」，
+ *     改类别还没有（也还没有拖拽式画线）。
  */
 
 export type Pan = { x: number; y: number }
+
+/**
+ * 一次拖动的现场。放在 ref 里而不是 state：指针每动一下它都在变，但**只有落点需要重画**——
+ * 把整个现场放进 state 会让每次移动都多一次无用的重渲染。
+ */
+type DragState = {
+  pointerId: number
+  recordId: string
+  originX: number
+  originY: number
+  /** 按下时的屏幕坐标：位移要在屏幕空间量，再除以缩放换成世界坐标。 */
+  startX: number
+  startY: number
+  /** 当前落点（世界坐标），阈值没到之前就等于起点。 */
+  x: number
+  y: number
+  moved: boolean
+}
 
 /**
  * 画布对外的命令接口。工具栏上的「− / ＋ / 适应」要用它——
@@ -66,6 +84,13 @@ export type CanvasViewProps = {
   connectFrom?: string | null
   /** 连接模式下点了终点节点。只有连接模式会调它。 */
   onConnectTarget?: (recordId: string) => void
+  /** 现在能不能拖节点（角色可编辑、画布不是只读）。单个节点还会再看锁与连接模式。 */
+  draggable?: boolean
+  /**
+   * 拖动结束：把落点交出去（世界坐标）。**只有真的移动过才调**——
+   * 差一点点的那一下是点击，不该写盘。位置由调用方负责落库，画布只画。
+   */
+  onMove?: (recordId: string, x: number, y: number) => void
 }
 
 const MIN_ZOOM = 0.25
@@ -73,6 +98,31 @@ const MAX_ZOOM = 2.2
 
 export function clampZoom(value: number): number {
   return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, value))
+}
+
+/**
+ * 拖动节点的起手阈值：世界坐标下 |dx| + |dy| 小于它，就还是一次**点击**。
+ * 与桌面端同一个数（那边是 `Math.Abs(dx) + Math.Abs(dy) < 3`）——同一个手势在两端
+ * 判成不同的事，是最难被发现的那种不一致。
+ */
+export const DRAG_THRESHOLD = 3
+
+/**
+ * 一次拖动的落点。规则与桌面端一致：不小于 0（画布左上角就是原点）。
+ *
+ * 抽成纯函数是为了能单独钉住两件容易写错的事：差一点点要算点击而不是拖动（否则每点一下节点都会
+ * 被当成「挪了 0 像素」写一次盘），以及往左 / 往上拖会被夹在 0（否则节点能被拖到画布外面去）。
+ */
+export function dragDrop(
+  origin: { x: number; y: number },
+  dx: number,
+  dy: number
+): { x: number; y: number; moved: boolean } {
+  return {
+    x: Math.max(0, origin.x + dx),
+    y: Math.max(0, origin.y + dy),
+    moved: Math.abs(dx) + Math.abs(dy) >= DRAG_THRESHOLD
+  }
 }
 
 /**
@@ -123,10 +173,102 @@ export function CanvasView(props: CanvasViewProps) {
   const viewportRef = useRef<HTMLDivElement>(null)
   const panning = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null)
 
-  const bounds = useMemo(() => canvasBounds(records), [records])
-  const nodes = useMemo(() => records.filter(isEditableRecord), [records])
+  /** 拖动中的实时落点（世界坐标）。null = 没在拖。 */
+  const [drag, setDrag] = useState<{ recordId: string; x: number; y: number } | null>(null)
+  const dragState = useRef<DragState | null>(null)
+  /** 松手之后紧跟的那次 click 要吃掉：否则一次拖动会顺带把节点选中（还可能弹一次未保存确认）。 */
+  const swallowClick = useRef(false)
+
+  /**
+   * 拖动中的**预览**：把正在拖的那个节点的坐标换成手上的实时位置，其余原样。
+   *
+   * 卡片与连线都从这一份算（而不是给卡片单独套一个 CSS 位移），连线才会跟着节点走——
+   * 桌面端拖动时也是这么做的。松手之后这份预览就没了，位置交给服务端回来的那一份。
+   */
+  const shown = useMemo(() => {
+    if (!drag) return records
+    return records.map((record) => (record.recordId === drag.recordId
+      ? { ...record, record: { ...record.record, x: drag.x, y: drag.y } }
+      : record))
+  }, [records, drag])
+
+  // 以下都从 `shown` 算，不是从 `records`：拖动中的那一份预览要同时管到卡片与连线。
+  const bounds = useMemo(() => canvasBounds(shown), [shown])
+  const nodes = useMemo(() => shown.filter(isEditableRecord), [shown])
   const movingIds = useMemo(() => new Set(ghosts.map((ghost) => ghost.recordId)), [ghosts])
   const others = useMemo(() => leases.filter((lease) => !isMine(lease, props.myUserId)), [leases, props.myUserId])
+
+  /**
+   * 这个节点现在能不能拖。三道闸门，与「能不能改它的文字」是同一套：
+   * 角色可编辑（draggable）→ 没在连接模式（那时点卡片是「选终点」）→ 没有别人占着它、也没人占着整棵树。
+   * 「别人占着」这一条只做在界面上（服务端的记录级写入本来就不仲裁锁），与「改标题内容」那条路一致。
+   */
+  function canDragNode(recordId: string): boolean {
+    if (props.draggable !== true || !props.onMove) return false
+    if (props.connectFrom) return false
+    if (treeLease(others)) return false
+    return nodeLease(others, recordId) === null
+  }
+
+  /**
+   * 按下卡片：先记现场，指针捕获在**卡片自己**身上。
+   * DOM 里的卡片不会像桌面端那样在按下时被重建，所以捕获挂在它身上就能一直收到后续事件
+   * （桌面端必须捕获在画布上，那是 Avalonia 的约束，不是这里的）。
+   */
+  function beginCardDrag(event: React.PointerEvent<HTMLButtonElement>, record: ViewRecord) {
+    if (event.button !== 0 || !canDragNode(record.recordId)) return
+    const originX = nodeX(record)
+    const originY = nodeY(record)
+    dragState.current = {
+      pointerId: event.pointerId,
+      recordId: record.recordId,
+      originX,
+      originY,
+      startX: event.clientX,
+      startY: event.clientY,
+      x: originX,
+      y: originY,
+      moved: false
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  function moveCardDrag(event: React.PointerEvent<HTMLButtonElement>) {
+    const state = dragState.current
+    if (!state || state.pointerId !== event.pointerId) return
+    // 屏幕位移除以缩放才是世界位移：不除的话放大到 220% 时拖一格会走两倍多的距离。
+    const drop = dragDrop(
+      { x: state.originX, y: state.originY },
+      (event.clientX - state.startX) / zoom,
+      (event.clientY - state.startY) / zoom
+    )
+    state.x = drop.x
+    state.y = drop.y
+    // 阈值没到之前不认作拖动，也不重画：那一下还是「点击」。
+    if (!drop.moved) return
+    state.moved = true
+    setDrag({ recordId: state.recordId, x: drop.x, y: drop.y })
+  }
+
+  /** 松手：真的移动过就交出去；中途被取消（比如系统弹了别的东西）就什么都不做。 */
+  function endCardDrag(event: React.PointerEvent<HTMLButtonElement>, cancelled: boolean) {
+    const state = dragState.current
+    if (!state || state.pointerId !== event.pointerId) return
+    dragState.current = null
+    setDrag(null)
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    if (!state.moved || cancelled) return
+    swallowClick.current = true
+    props.onMove?.(state.recordId, state.x, state.y)
+  }
+
+  /** 卡片点进来先问这一句：刚拖完的那一下要吃掉（顺带把标记消费掉，只吃一次）。 */
+  function consumeClick(): boolean {
+    if (!swallowClick.current) return false
+    swallowClick.current = false
+    return true
+  }
 
   /**
    * 连线的**端点**：取卡片中心，与虚影连线同一套算法、同一份尺寸常量。
@@ -136,7 +278,7 @@ export function CanvasView(props: CanvasViewProps) {
    * 近似结果与真实卡片边缘只差几个像素——够用，也不必为此把几何算成矩形求交。
    */
   const lines = useMemo(() => {
-    const drawn = visibleEdges(props.edges ?? EMPTY_EDGES, records)
+    const drawn = visibleEdges(props.edges ?? EMPTY_EDGES, shown)
     if (drawn.length === 0) return []
     const byId = new Map(nodes.map((node) => [node.recordId, node]))
     return drawn.flatMap((edge) => {
@@ -155,7 +297,7 @@ export function CanvasView(props: CanvasViewProps) {
         y2: nodeY(to) + NODE_CARD_HEIGHT / 2 - (span > 0 ? (dy / span) * back : 0)
       }]
     })
-  }, [props.edges, records, nodes])
+  }, [props.edges, shown, nodes])
 
   /** 画布左上角那句「谁在编辑」。自己的锁不写在这里——自己当然知道自己刚点了什么。 */
   const whoLines = useMemo(() => {
@@ -165,13 +307,13 @@ export function CanvasView(props: CanvasViewProps) {
     const byNode = others.filter((lease) => lease.scope === 'node')
     if (byNode.length > 0) {
       const named = byNode.map((lease) => {
-        const target = records.find((record) => record.recordId === lease.targetId)
+        const target = shown.find((record) => record.recordId === lease.targetId)
         return `${describeLease(lease)} 编辑「${target ? recordTitle(target) : '这个节点'}」`
       })
       lines.push(named.slice(0, 2).join('；') + (named.length > 2 ? ` 等 ${named.length} 处` : ''))
     }
     return lines
-  }, [others, records])
+  }, [others, shown])
 
   /**
    * 「只看这一章」压暗的是**不在这一组里**的节点。
@@ -180,9 +322,9 @@ export function CanvasView(props: CanvasViewProps) {
    */
   const activeIds = useMemo(() => {
     if (activeChapter === ALL_CHAPTERS_ID) return null
-    const group = chapterGroups(records).find((item) => item.id === activeChapter)
+    const group = chapterGroups(shown).find((item) => item.id === activeChapter)
     return new Set(group ? group.records.map((item) => item.recordId) : [])
-  }, [records, activeChapter])
+  }, [shown, activeChapter])
 
   // 滚轮缩放要 preventDefault，阻止浏览器把整页缩放掉。React 的 onWheel 是被动监听，
   // 拿不到取消权，所以这里挂原生监听。
@@ -354,6 +496,12 @@ export function CanvasView(props: CanvasViewProps) {
               onSelect={onSelect}
               connectFrom={props.connectFrom ?? null}
               onConnectTarget={props.onConnectTarget}
+              draggable={canDragNode(node.recordId)}
+              dragging={drag?.recordId === node.recordId}
+              onDragStart={(event) => beginCardDrag(event, node)}
+              onDragMove={moveCardDrag}
+              onDragEnd={endCardDrag}
+              consumeClick={consumeClick}
             />
           ))}
 
@@ -396,13 +544,15 @@ export function CanvasView(props: CanvasViewProps) {
           否则点下去凭空多一根线，比没有这个功能更让人困惑。
           （桌面端那句末尾还有「Delete 删除」；网页端的删除在检查器与工作树上，不挂快捷键。） */}
       <div className="df-hint">
-        {props.connectFrom ? '连接模式：再点一个节点作为终点 · Esc 取消' : '拖拽平移 · 滚轮缩放 · 点击节点选中'}
+        {props.connectFrom
+          ? '连接模式：再点一个节点作为终点 · Esc 取消'
+          : '拖空白平移 · 滚轮缩放 · 拖节点挪位置 · 点击节点选中'}
       </div>
     </div>
   )
 }
 
-function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, onSelect, connectFrom, onConnectTarget }: {
+function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, onSelect, connectFrom, onConnectTarget, draggable, dragging, onDragStart, onDragMove, onDragEnd, consumeClick }: {
   node: ViewRecord
   selected: boolean
   dimmed: boolean
@@ -415,6 +565,15 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
   onSelect: (recordId: string) => void
   connectFrom: string | null
   onConnectTarget?: (recordId: string) => void
+  /** 这张卡现在能不能拖。不能拖时连指针事件也不接，免得按下去半天没反应。 */
+  draggable: boolean
+  /** 正在被拖：抬起来画（压过别的卡），并让连线跟着走。 */
+  dragging: boolean
+  onDragStart: (event: React.PointerEvent<HTMLButtonElement>) => void
+  onDragMove: (event: React.PointerEvent<HTMLButtonElement>) => void
+  onDragEnd: (event: React.PointerEvent<HTMLButtonElement>, cancelled: boolean) => void
+  /** 这次点击是不是刚拖完的那一下（是就得吃掉）。 */
+  consumeClick: () => boolean
 }) {
   const kind = kindOf(node.recordType)
   const meta = NODE_KINDS[kind]
@@ -426,15 +585,24 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
   return (
     <button
       type="button"
-      className={`df-node${selected ? ' is-selected' : ''}${moving ? ' is-moving' : ''}${connecting ? ' is-connecting' : ''}${armed ? ' is-connectable' : ''}`}
+      className={`df-node${selected ? ' is-selected' : ''}${moving ? ' is-moving' : ''}${connecting ? ' is-connecting' : ''}${armed ? ' is-connectable' : ''}${draggable && !armed && !connecting ? ' is-draggable' : ''}${dragging ? ' is-dragging' : ''}`}
       style={{ left: nodeX(node), top: nodeY(node), width: NODE_CARD_WIDTH, minHeight: NODE_CARD_HEIGHT, opacity: dimmed ? 0.35 : moving ? 0.4 : 1 }}
-      onPointerDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => {
+        event.stopPropagation()
+        onDragStart(event)
+      }}
+      onPointerMove={onDragMove}
+      // 松手与取消各走一次同一个收尾：取消时不该把半截位置落库。
+      onPointerUp={(event) => onDragEnd(event, false)}
+      onPointerCancel={(event) => onDragEnd(event, true)}
       onClick={(event) => {
         event.stopPropagation()
+        // 刚拖完的那一下吃掉：选中与「放到哪儿」是两件事，不该被一次拖动一起触发。
+        if (consumeClick()) return
         if (armed) { onConnectTarget!(node.recordId); return }
         onSelect(node.recordId)
       }}
-      title={`${meta.label} · ${recordStatus(node)}${lock ? ` · ${describeLease(lock)} 正在编辑` : ''}${armed ? ' · 点它连到这里' : ''}`}
+      title={`${meta.label} · ${recordStatus(node)}${lock ? ` · ${describeLease(lock)} 正在编辑` : ''}${armed ? ' · 点它连到这里' : draggable ? ' · 按住可拖动' : ''}`}
     >
       <span className="df-node-kind">
         <span className="df-node-dot" style={{ background: meta.hex }} aria-hidden="true" />

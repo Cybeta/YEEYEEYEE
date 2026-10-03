@@ -253,12 +253,57 @@ internal sealed class ProjectCanvasSceneStore
             node.Title = title.GetString()!;
             node.Content = content.GetString()!;
             return (canvas, null);
-        }, (next, bytes) =>
-        {
-            var record = NodeProjection.ProjectRecords(next.Canvas.Nodes, next.Canvas)
-                .First(row => JsonSerializer.SerializeToElement(row).GetProperty("recordId").GetString() == recordId);
-            return new { revision = Revision(bytes), record };
-        });
+        }, (next, bytes) => new { revision = Revision(bytes), record = ProjectRecord(next.Canvas, recordId) });
+    }
+
+    /// <summary>
+    /// 投影一条记录——写入响应里回给客户端的那一份。取不到就抛：调用方刚刚才确认过它存在，
+    /// 到这儿还取不到说明投影规则和存在性判断用的不是同一套，那正是要立刻炸出来的事。
+    /// </summary>
+    private static object ProjectRecord(WorkflowCanvasState canvas, string recordId) =>
+        NodeProjection.ProjectRecords(canvas.Nodes, canvas)
+            .First(row => JsonSerializer.SerializeToElement(row).GetProperty("recordId").GetString() == recordId);
+
+    /// <summary>
+    /// 移动一个节点（网页端在画布上把它拖到别处）。
+    ///
+    /// 这是**记录级**写入，不是结构级：它不动画布结构（不增删任何节点 / 连线、不改父子关系与章节归属），
+    /// 画布校验也从不看坐标。要是按结构级对待，一个人挪一下卡片就得先占住整棵树锁，
+    /// 别人的结构改动会被一次无关紧要的拖动挡在门外。
+    ///
+    /// 落点由**客户端**给——这是拖动，坐标本来就是人摆的（与「新建节点」那条相反：那条不让客户端送坐标，
+    /// 因为落位该由服务端一个人说了算）。服务端只把关三件事：坐标得是有限数、
+    /// 节点得真的在（且没被锁），以及给节点标上 <see cref="WorkflowNode.ManualPosition"/>。
+    ///
+    /// 那个标记就是「这是人摆的」：整理布局默认绕开它（除非显式确认覆盖），这与桌面端拖动节点的收尾一致。
+    /// 反过来，整理布局真的移动了它时会把标记清掉——那是整理布局那一侧的事。
+    ///
+    /// **「位置没变」不在这里挡**：客户端已经先挡了一道（拖出去又拖回来时它根本不发请求），
+    /// 而这里再写一次也无害——内容一样，只是文件里那个修订计数器 +1。
+    /// 这与「改标题内容」那条路是同一个态度（那条也从不判断「其实没改」），
+    /// 只有整理布局会在服务端判「无需改动」，因为那一条要跑完整张画布的引擎。
+    /// </summary>
+    public IResult MoveNode(long baseRevision, Guid nodeId, float x, float y)
+    {
+        if (!float.IsFinite(x) || !float.IsFinite(y))
+            return Error(400, "CANVAS_POSITION_INVALID", "坐标必须是有限数值");
+
+        var recordId = nodeId.ToString();
+        return Write(baseRevision, current =>
+            {
+                var canvas = current.Canvas;
+                if (canvas is null) return (null, Error(409, "CANVAS_EMPTY", "这张画布没有节点集合"));
+
+                var node = canvas.Nodes.FirstOrDefault(item => item.Id == nodeId);
+                if (node is null) return (null, Error(404, "RECORD_NOT_FOUND", "可编辑节点不存在"));
+                if (node.IsLocked) return (null, Error(409, "NODE_LOCKED", "节点已锁定"));
+
+                node.X = x;
+                node.Y = y;
+                node.ManualPosition = true;
+                return (canvas, null);
+            },
+            (next, bytes) => new { revision = Revision(bytes), record = ProjectRecord(next.Canvas, recordId) });
     }
 
     /// <summary>

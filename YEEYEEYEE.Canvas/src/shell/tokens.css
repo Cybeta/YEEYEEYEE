@@ -576,6 +576,9 @@ textarea.df-input {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* 拖卡片时不要顺手选中里面的文字；触屏上也不要把拖动当成滚动页面。 */
+  user-select: none;
+  touch-action: none;
 }
 
 .df-node:hover {
@@ -605,6 +608,20 @@ textarea.df-input {
   border-color: var(--df-primary);
   box-shadow: 0 0 0 3px rgba(77, 155, 255, 0.18);
   cursor: crosshair;
+}
+
+/* 可以拖的卡片把手形换成「抓」。不能拖的那几种（只读、别人占着、连接模式）保持普通指针——
+   「按下去会不会动」应该在按之前就看得出来。 */
+.df-node.is-draggable {
+  cursor: grab;
+}
+
+/* 正在被拖：抬起来画。不然卡片之间的层级看着没变，「到底抓住没有」只能靠猜。 */
+.df-node.is-dragging {
+  cursor: grabbing;
+  z-index: 5;
+  border-color: var(--df-primary);
+  box-shadow: 0 10px 30px -10px rgba(6, 12, 22, 0.75), 0 0 0 1px rgba(77, 155, 255, 0.5);
 }
 
 .df-node-kind {

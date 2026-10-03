@@ -58,6 +58,10 @@ export type WorkspaceProps = {
   onConnectCancel: () => void
   /** 连接模式下点了终点节点。 */
   onConnectTarget: (recordId: string) => void
+  /** 现在能不能在画布上拖节点（角色可编辑、画布不是只读）。 */
+  draggable?: boolean
+  /** 拖动结束：把落点交出去（世界坐标）。落库由调用方负责。 */
+  onMove?: (recordId: string, x: number, y: number) => void
 }
 
 const STAGE_FILTERS: Array<{ key: string; label: string; match: (layer: number) => boolean }> = [
@@ -223,6 +227,8 @@ export function Workspace(props: WorkspaceProps) {
             edges={edges}
             connectFrom={props.connectFrom ?? null}
             onConnectTarget={props.onConnectTarget}
+            draggable={props.draggable === true}
+            onMove={props.onMove}
           />
         )}
         {view === 'timeline' && (
