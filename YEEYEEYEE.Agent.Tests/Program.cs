@@ -228,6 +228,8 @@ var tests = new (string Name, Action Run)[]
     ("出视频：地址 + 模型齐了才给真执行方，缺的时候指明去哪里配", VideoProviderFactoryNeedsEndpointAndModel),
     ("节点协助：出视频那条可不可点跟着执行方走，没素材仍要挡住", NodeAssistVideoFollowsProviderAvailability),
     ("裂纹卡自动重出：只挑裂纹那几张，且受轮数上限约束", CrackedRedrawPicksOnlyCrackedWithinCap),
+    ("一键：时长与池子档位对不上要提醒，没写就交给服务端", OneClickDurationFollowsPoolTier),
+    ("一键：补图与出视频两笔分开报再给合计，算不出来就说算不出来", OneClickCostAddsBothLines),
 };
 
 var failures = new List<string>();
@@ -7665,7 +7667,7 @@ static void GenerationAuditReportsDependencyChain()
 	Expect(generationAuditReport.EstimateCost(null).Contains("算不出花费"), "单价未知时不许报 0，实际：" + generationAuditReport.EstimateCost(null));
 	string text = generationAuditReport.EstimateCost(0.12);
 	Expect(text.Contains("要补 2 张图") && text.Contains("0.24"), "2 张 × 0.12 = 0.24，实际：" + text);
-	Expect(text.Contains("3 段视频") && text.Contains("不计价"), "出视频那 3 段不报价，实际：" + text);
+	Expect(text.Contains("3 段视频") && text.Contains("一键"), "视频那 3 段在这里只报段数，报价交给「一键」那一栏：" + text);
 	GenerationAuditReport generationAuditReport2 = GenerationAudit.Build(workflowCanvasState, workflowNode, null, (string _) => false);
 	Expect(generationAuditReport2.Layers.First((GenerationAuditLayer layer) => layer.Stage == GenerationStage.SettingImage).MissingCount == 1, "文件不在的挂件不算数");
 	Expect(generationAuditReport2.Layers.First((GenerationAuditLayer layer) => layer.Stage == GenerationStage.StoryboardImage).MissingCount == 2, "两张分镜的挂件都指向已经不存在的文件，都要报出来，实际 " + generationAuditReport2.Layers.First((GenerationAuditLayer layer) => layer.Stage == GenerationStage.StoryboardImage).MissingCount);
@@ -9668,6 +9670,79 @@ static void CrackedRedrawPicksOnlyCrackedWithinCap()
 	batch.CrackedRedrawRounds = 0;
 	batch.Slots[0].Removed = true;
 	Expect(batch.CrackedIndicesToRedraw().Count == 0, "已删掉的格子不再重出");
+}
+
+/// <summary>
+/// 一键出视频前先校验时长与池子档位：清单写着别的秒数就提醒（不硬拦），没写就交给服务端。
+/// </summary>
+static void OneClickDurationFollowsPoolTier()
+{
+	var five = new SitePool { Model = "veo-3", Kind = "video", Tier = "5s", Seconds = 5, UnitPrice = 2 };
+	var any = new SitePool { Model = "wan-2", Kind = "video", Seconds = 0 };
+
+	// 清单写着 5s、用户要 15s：提醒一句，并说清清单里是多少。
+	var mismatch = VideoDurationPolicy.Check(five, 15);
+	Expect(mismatch.Mismatch, "清单写 5s 而用户要 15s 时要提醒");
+	Expect(mismatch.Note.Contains("5s") && mismatch.Note.Contains("15s"), "提醒要把两个数都写出来：" + mismatch.Note);
+
+	// 对得上：不提醒。
+	Expect(!VideoDurationPolicy.Check(five, 5).Mismatch, "秒数与清单一致时不该提醒");
+
+	// 清单没写时长（0）：不知道，交给服务端——不猜也不拦。
+	var unknown = VideoDurationPolicy.Check(any, 15);
+	Expect(!unknown.Mismatch && unknown.Note.Contains("没写时长"), "清单没写时长时交给服务端判断：" + unknown.Note);
+
+	// 不走池子（设置里的视频接口）：同样交给服务端。
+	Expect(!VideoDurationPolicy.Check(null, 15).Mismatch, "不走池子时不该提醒");
+
+	// 候选筛选：能接受这个秒数的池子才算（没写时长的也算「可以试」）。
+	var accepting = VideoDurationPolicy.Accepting(new[] { five, any }, 15);
+	Expect(accepting.Count == 1 && accepting[0].Model == "wan-2", "15s 时只剩「没写时长」那个可以试");
+	Expect(VideoDurationPolicy.Accepting(new[] { five, any }, 5).Count == 2, "5s 时两个都能用");
+}
+
+/// <summary>
+/// 一键的花费要**两笔分开报再给合计**；算不出来的如实说算不出来，不许报 0 冒充免费。
+/// </summary>
+static void OneClickCostAddsBothLines()
+{
+	var imageSite = new SiteProfile { Id = "s1", BaseUrl = "https://img.example.com/v1" };
+	var videoSite = new SiteProfile { Id = "s2", BaseUrl = "https://video.example.com/v1" };
+	var imagePool = new SitePoolChoice(imageSite, new SitePool { Model = "flux", UnitPrice = 0.5 });
+	var videoPool = new SitePoolChoice(videoSite, new SitePool { Model = "veo-3", Kind = "video", Seconds = 5, UnitPrice = 2 });
+
+	// 补 4 张图 + 出 3 段视频：两笔各自成行，最后一行是合计。
+	var fourImages = Enumerable.Range(1, 4)
+		.Select(index => new GenerationAuditItem(GenerationStage.StoryboardImage, Guid.NewGuid(), $"分镜{index}", "这一镜的画面", "还没有图", true))
+		.ToList();
+	var threeVideos = Enumerable.Range(1, 3)
+		.Select(index => new GenerationAuditItem(GenerationStage.StoryboardVideo, Guid.NewGuid(), $"分镜{index}", "这一镜的视频", "还没有视频", true))
+		.ToList();
+	var both = OneClickCost.Describe(new OneClickRunRequest(
+		GenerationIntent.Video, FillMissingImages: true, fourImages, threeVideos, imagePool, videoPool, Seconds: 5));
+	Expect(both.Count == 3, "两笔 + 一行合计，实际 " + both.Count + " 行");
+	Expect(both[0].Contains("4 张") && both[0].Contains("2"), "图那一行要写张数与钱：" + both[0]);
+	Expect(both[1].Contains("3 段") && both[1].Contains("6"), "视频那一行要写段数与钱：" + both[1]);
+	Expect(both[2].Contains("8"), "4×0.5 + 3×2 = 8：" + both[2]);
+
+	// 只出图（勾了补齐、但这次意图就是补图）：不该冒出视频那一行。
+	var imagesOnly = OneClickCost.Describe(new OneClickRunRequest(
+		GenerationIntent.Images, FillMissingImages: true, fourImages.Take(2).ToList(), Array.Empty<GenerationAuditItem>(),
+		imagePool, null, Seconds: 0));
+	Expect(imagesOnly.Count == 1 && imagesOnly[0].Contains("2 张"), "只补图时只有图那一行：" + string.Join(" / ", imagesOnly));
+
+	// 池子没登记数字单价：如实说算不出来，不许报 0。
+	var unknownPrice = OneClickCost.Describe(new OneClickRunRequest(
+		GenerationIntent.Video, FillMissingImages: true, fourImages.Take(1).ToList(), threeVideos.Take(1).ToList(),
+		new SitePoolChoice(imageSite, new SitePool { Model = "flux" }), videoPool, Seconds: 5));
+	Expect(unknownPrice.Any(line => line.Contains("算不出")), "没有数字单价时要说算不出来：" + string.Join(" / ", unknownPrice));
+	Expect(unknownPrice.Any(line => line.Contains("更多")), "只知道一半时要说明实际会比这更多：" + string.Join(" / ", unknownPrice));
+
+	// 什么都没缺：如实说没有要生成的。
+	var nothing = OneClickCost.Describe(new OneClickRunRequest(
+		GenerationIntent.Images, FillMissingImages: true, Array.Empty<GenerationAuditItem>(), Array.Empty<GenerationAuditItem>(),
+		imagePool, null, Seconds: 0));
+	Expect(nothing.Count == 1 && nothing[0].Contains("齐的"), "没缺东西时说清楚：" + nothing[0]);
 }
 
 /// <summary>一个 JSON 桩响应。</summary>

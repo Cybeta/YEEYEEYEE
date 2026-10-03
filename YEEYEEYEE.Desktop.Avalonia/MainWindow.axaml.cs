@@ -2274,28 +2274,36 @@ public partial class MainWindow : Window, IAgentSessionHost
     }
 
     /// <summary>
-    /// 生成链自检：**先看清楚缺什么、缺多少、要花多少钱，再决定动不动手**。
+    /// 生成链自检 + 一键开跑：**先看清楚缺什么、缺多少、要花多少钱，再决定动不动手**。
     ///
-    /// 这一步刻意只读——不生成、不落盘、不改画布。理由很实际：一次「按节点把缺的补上」
-    /// 会花掉几十次调用、等上十几分钟，还可能覆盖已经挑好的图。让用户看过清单与报价之后再动手，
-    /// 是这条链一直守着的规矩（与出图前先过一遍可改的提示词窗口同一个道理）。
+    /// 窗口本身只读（不生成、不落盘、不改画布）；用户在里面点「开始」之后，才由
+    /// <see cref="RunOneClickAsync"/> 照着那份清单一条条去跑。这个先后顺序是刻意的：
+    /// 「一键」省的是逐个节点右键的功夫，不是「不打招呼就花钱」。
     ///
-    /// 报告里的「定位」是唯一会改界面的动作：把那个节点选中并挪进视野，接下来怎么出图由用户决定。
+    /// 报告里的「定位」仍然只做一件事：把那个节点选中并挪进视野。
     /// </summary>
     private async Task RunGenerationAuditAsync(WorkflowNode node)
     {
         if (currentCanvas is null) return;
 
         var report = GenerationAudit.Build(currentCanvas.Canvas, node);
-        // 报价用「上次用过的那个池子」的单价。池子换了、或者没登记价格，就如实说算不出来——
-        // 报一个 0 比不报价更坏，用户会当成「免费」。
-        var pooled = RememberedPool();
-        var unitPrice = pooled is { Pool.UnitPrice: > 0 } ? pooled.Pool.UnitPrice : (double?)null;
-
         StatusText.Text = report.Describe();
-        var locate = await GenerationAuditDialog.ShowAsync(this, report, unitPrice);
 
-        if (locate is not { } nodeId) return;
+        var outcome = await GenerationAuditDialog.ShowAsync(
+            this,
+            report,
+            videoAvailable: VideoReady,
+            initialImagePool: RememberedPool(),
+            initialVideoPool: SuggestedVideoPool(),
+            initialSeconds: Math.Max(0, AiProviderSettings.Load().VideoDefaultSeconds));
+
+        if (outcome.Run is { } request)
+        {
+            await RunOneClickAsync(request);
+            return;
+        }
+
+        if (outcome.LocateNodeId is not { } nodeId) return;
         if (currentCanvas.Canvas.Nodes.FirstOrDefault(item => item.Id == nodeId) is not { } target)
         {
             StatusText.Text = "要定位的节点已经不在这张画布上了（自检之后画布被改过？）";
@@ -2304,6 +2312,178 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         CanvasSurfaceControl.FocusNode(target);
         StatusText.Text = $"已定位「{target.Title}」：在这一步右键就能出图（也可以回到这份自检里继续看别的）。";
+    }
+
+    /// <summary>
+    /// 一键把清单上要补的东西出完：**先补图，再逐镜出视频**。
+    ///
+    /// 三条规矩：
+    /// ① **先补图**：每一镜的视频都要一个首帧，缺图直接出视频等于让模型凭空编。
+    ///    用户没勾补齐时不硬拦，但会把「这次是文生视频、画面由模型自己编」写进状态栏；
+    /// ② **一条一条串行跑**：每一步都真花钱，串行才能让状态栏逐条报「第几步、在给谁出」，
+    ///    也不必给接口同时压上十几路并发；
+    /// ③ **如实收尾**：成几条、败几条、败的是谁与为什么，一次说清——不把「跑完了」说成「全成了」。
+    /// </summary>
+    private async Task RunOneClickAsync(OneClickRunRequest request)
+    {
+        if (currentCanvas is null) return;
+        var canvas = currentCanvas;
+
+        var total = (request.WantsImages ? request.ImageCount : 0) + (request.WantsVideos ? request.VideoCount : 0);
+        if (total == 0)
+        {
+            StatusText.Text = "没有什么要生成的：清单上那几层都是齐的。";
+            return;
+        }
+
+        var step = 0;
+        var imagesDone = 0;
+        var videosDone = 0;
+        var failures = new List<string>();
+
+        // ---------- ① 补图 ----------
+        if (request.WantsImages)
+        {
+            foreach (var item in request.ImageItems)
+            {
+                if (currentCanvas != canvas) return;   // 中途换了画布：不再往旧画布上写
+                step++;
+
+                var target = canvas.Canvas.Nodes.FirstOrDefault(candidate => candidate.Id == item.ActionNodeId);
+                if (target is null)
+                {
+                    failures.Add($"{item.Display}：这个节点已经不在这张画布上了");
+                    continue;
+                }
+
+                StatusText.Text = $"一键出图 {step}/{total}：正在给「{target.Title}」出图（{item.Target}）…";
+                var plan = NodeAssistPlanner.BuildPlan(canvas.Canvas, target);
+                var suggestion = plan.Suggestions.FirstOrDefault(candidate => candidate.Kind == NodeAssistKind.Image);
+                if (suggestion is null || !suggestion.CanRun)
+                {
+                    failures.Add($"{target.Title}：没有可用的出图建议（节点既没写内容，也没有可参考的素材）");
+                    continue;
+                }
+
+                await GenerateNodeImageAsync(target, suggestion, suggestion.Prompt, suggestion.NegativePrompt,
+                    forcedApproach: null, poolChoice: request.ImagePool, count: 1);
+                if (currentCanvas != canvas) return;
+
+                if (AdoptSingleResult(target)) imagesDone++;
+                else failures.Add($"{target.Title}：这一张没出来（把鼠标停在节点上方那排格子上能看到原因）");
+            }
+        }
+        else if (request.Intent == GenerationIntent.Video && request.ImageCount > 0)
+        {
+            // 没勾补齐：如实说清「这次的视频会没有首帧」，但不拦——用户可能就是要文生视频。
+            StatusText.Text = $"这次不补图：还有 {request.ImageCount} 处缺图，接下来的视频会按**文生视频**出，画面由模型自己编。";
+        }
+
+        // ---------- ② 出视频 ----------
+        if (request.WantsVideos)
+        {
+            IVideoProvider provider;
+            try { provider = VideoProviderFactory.Create(); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                StatusText.Text = $"出视频链路创建不出来：{error.Message}";
+                return;
+            }
+            if (!provider.IsConfigured)
+            {
+                StatusText.Text = "出视频链路没配好：请在「设置 → 生图与生视频 → 视频接口」里填上地址与模型。这次只补了图。";
+                return;
+            }
+
+            foreach (var item in request.VideoItems)
+            {
+                if (currentCanvas != canvas) return;
+                step++;
+
+                var target = canvas.Canvas.Nodes.FirstOrDefault(candidate => candidate.Id == item.ActionNodeId);
+                if (target is null)
+                {
+                    failures.Add($"{item.Display}：这个节点已经不在这张画布上了");
+                    continue;
+                }
+
+                var plan = NodeAssistPlanner.BuildPlan(canvas.Canvas, target, videoAvailable: true);
+                var suggestion = plan.Suggestions.FirstOrDefault(candidate => candidate.Kind == NodeAssistKind.Video);
+                if (suggestion is null || !suggestion.CanRun)
+                {
+                    failures.Add($"{target.Title}：这一镜现在不能出视频（{suggestion?.Blocked}）");
+                    continue;
+                }
+
+                StatusText.Text = $"一键出视频 {step}/{total}：正在给「{target.Title}」出视频（异步任务，可能要等几分钟）…";
+                await RunVideoAsync(target, suggestion.Prompt, LatestImageAttachmentPath(target),
+                    request.Seconds, request.VideoPool, provider);
+                if (currentCanvas != canvas) return;
+
+                if (target.Attachments.Any(attachment =>
+                        attachment.Kind == AttachmentKind.Video && AssetStore.Exists(attachment.Reference)))
+                    videosDone++;
+                else
+                    failures.Add($"{target.Title}：视频没出来（状态栏上有接口给的原因）");
+            }
+        }
+
+        // ---------- ③ 如实收尾 ----------
+        var parts = new List<string>();
+        if (request.WantsImages) parts.Add($"补图 {imagesDone}/{request.ImageCount}");
+        if (request.WantsVideos) parts.Add($"视频 {videosDone}/{request.VideoCount}");
+
+        var tail = failures.Count == 0
+            ? "，全部出好了——记得点「保存修订」"
+            : $"；{failures.Count} 条没成：\n· " + string.Join("\n· ", failures.Take(8))
+              + (failures.Count > 8 ? $"\n· （还有 {failures.Count - 8} 条，不在这里一一列了）" : string.Empty);
+        StatusText.Text = "一键出完了（" + string.Join(" · ", parts) + "）" + tail;
+
+        RefreshResourceList();
+        CanvasSurfaceControl.Refresh();
+    }
+
+    /// <summary>
+    /// 一键出图里「出一张就收下」。
+    ///
+    /// 一次只出一张时没有可挑的——不自动收下的话，用户还得回来把这几十张逐一点一次，
+    /// 「一键」就名不副实了。**只在「这一批恰好只有一张出好了」时才收**：
+    /// 有多张可选时那是真的选择，仍然交回用户手里（与「不自动采用、不自动弹大图」那条规矩不冲突，
+    /// 那条防的是**替用户在几张里挑**，这里根本无张可挑）。
+    /// </summary>
+    private bool AdoptSingleResult(WorkflowNode node)
+    {
+        if (currentCanvas is null) return false;
+        if (!imageBatches.TryGetValue(node.Id, out var batch)) return false;
+
+        var done = batch.Slots
+            .Select((slot, index) => (slot, index))
+            .Where(pair => !pair.slot.Removed && pair.slot.Status == BatchSlotStatus.Done && pair.slot.Path.Length > 0)
+            .ToList();
+        if (done.Count != 1) return false;
+
+        SavePickedSlot(node, batch, done[0].slot, done[0].index);
+        return true;
+    }
+
+    /// <summary>
+    /// 一键出视频时预选的视频池子：站点清单里的第一个（遍历顺序稳定，所以每次预选的都一样）。
+    /// **只是预选**——池子名字与单价都摆在窗口上，随时能换；一个视频池子都没有时返回 null，
+    /// 那时走设置里的视频接口，窗口上会如实写「没选」。
+    /// </summary>
+    private static SitePoolChoice? SuggestedVideoPool()
+    {
+        try
+        {
+            foreach (var site in SiteCatalog.Load().Sites)
+                foreach (var pool in site.UsablePools.Where(pool => pool.IsVideo))
+                    return new SitePoolChoice(site, pool);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            return null;
+        }
+        return null;
     }
 
     /// <summary>跑一条协助建议：三类动作分别走提示词窗口 / Agent 面板 / 图像链路。</summary>

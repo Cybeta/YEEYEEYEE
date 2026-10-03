@@ -21,13 +21,19 @@ namespace YEEYEEYEE.Desktop.Avalonia;
 internal static class SitePoolPicker
 {
     public static async Task<SitePoolChoice?> ShowAsync(
-        Window owner, IReadOnlyList<SiteProfile> sites, string nodeTitle, SitePoolChoice? preset = null)
+        Window owner, IReadOnlyList<SiteProfile> sites, string nodeTitle, SitePoolChoice? preset = null, bool? video = null)
     {
-        var usable = sites.Where(site => site.UsablePools.Count > 0).ToList();
+        // 只要某一类池子时（一键出图 / 一键出视频那两个入口），候选里就不出现另一类——
+        // 「出图选到视频池子、出视频选到图像池子」这种错，选完才发现已经晚了。
+        IReadOnlyList<SitePool> PoolsOf(SiteProfile site) => video is { } want
+            ? site.UsablePools.Where(pool => pool.IsVideo == want).ToList()
+            : site.UsablePools;
+
+        var usable = sites.Where(site => PoolsOf(site).Count > 0).ToList();
         if (usable.Count == 0)
         {
             await ConfirmAsync(owner, "还没有可用的池子",
-                "当前没有登记任何站点，或者登记过的站点里一个可用池子都没有。\n"
+                (video is { } kind ? $"当前没有登记任何{(kind ? "出视频" : "出图")}池子。\n" : "当前没有登记任何站点，或者登记过的站点里一个可用池子都没有。\n")
                 + "到「设置 → 生图与生视频」，用顶端的「智能导入」给一个接口说明网页，导入一次就有池子了。",
                 "知道了");
             return null;
@@ -94,7 +100,7 @@ internal static class SitePoolPicker
                     return;
                 }
                 // 模型层按「种类 + 模型名」聚合：同一个模型的不同档位是同一个模型的三个选项，不该平铺成三行。
-                models = usable[index].UsablePools
+                models = PoolsOf(usable[index])
                     .GroupBy(pool => $"{(pool.IsVideo ? "视频" : "图像")} · {pool.Model}")
                     .OrderBy(group => group.Key, StringComparer.Ordinal)
                     .ToList();
@@ -110,7 +116,9 @@ internal static class SitePoolPicker
         tierBox.SelectionChanged += (_, _) => { if (!loading) Describe(); };
 
         foreach (var site in usable)
-            siteBox.Items.Add($"{site.Label}（生图 {site.ImagePools.Count} / 视频 {site.VideoPools.Count}）");
+            siteBox.Items.Add(video is { } kind
+                ? $"{site.Label}（{(kind ? "视频" : "生图")} {PoolsOf(site).Count}）"
+                : $"{site.Label}（生图 {site.ImagePools.Count} / 视频 {site.VideoPools.Count}）");
         siteBox.SelectedIndex = 0;
 
         var body = new StackPanel { Margin = new Thickness(20), Spacing = 8 };

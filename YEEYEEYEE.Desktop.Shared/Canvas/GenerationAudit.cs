@@ -122,8 +122,9 @@ public sealed record GenerationAuditReport(
     }
 
     /// <summary>
-    /// 花费预估。图片那一层能按池子单价算；**视频没有单价口径**（各家按次、按时长、按档位，
-    /// 清单里也没有这个字段），所以视频只报「有几段」，不编一个数出来。
+    /// 花费预估（报告自带的这一句）。图片那一层能按传进来的单价算；
+    /// **视频这里只报段数、不报价**——报价要知道用的是哪个视频池子，而这份报告是纯计算、不知道；
+    /// 真正两笔都算的是「一键」那一栏（<see cref="OneClickCost"/>），它拿得到两个池子的单价。
     /// 单价未知时如实说算不出来，不要给一个看起来像报价的 0。
     /// </summary>
     public string EstimateCost(double? unitPrice)
@@ -145,7 +146,7 @@ public sealed record GenerationAuditReport(
 
         var video = videoCount == 0
             ? string.Empty
-            : $"另有 {videoCount} 段视频要出；视频按次计费而清单里没有单价，这次不计价";
+            : $"另有 {videoCount} 段视频要出；视频的钱在「一键」那一栏里报（它知道你选的是哪个池子）";
 
         return string.Join("；", new[] { image, video }.Where(part => part.Length > 0)) + "。";
     }
