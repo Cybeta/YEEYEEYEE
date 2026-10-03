@@ -16,9 +16,10 @@ import type { WorkbenchView } from './WorkbenchShell'
  * 中央工作流画布：标签条 + 工具栏 + 制作阶段芯片 + 三个视图。
  *
  * 桌面端这里是一个 Grid(RowDefinitions="Auto,Auto,Auto,*")，四个区的顺序与边距都一样。
- * 工具栏里还有几个动作在服务端没有对应接口（加资源、连接、删除），
+ * 工具栏里还有几个动作在服务端没有对应接口（加资源、删除节点），
  * 这里做成**可见但不可点并给出原因**——占位成可点、点了没反应，比灰着更让人困惑。
- * （新建与删除节点已经有了，但入口在工作树与检查器上，不是这几个按钮。）
+ * （新建与删除节点、断开连线都有了，但入口在工作树与检查器上，不是这几个按钮；
+ * 「连接」是这几个按钮里**唯一真的能点**的那个——它进连接模式，点终点即画线。）
  */
 
 export type WorkspaceProps = {
@@ -49,6 +50,14 @@ export type WorkspaceProps = {
   onLayoutCancel: () => void
   /** 画布上的连线（服务端投影的）。画布会自己再按「两端都画得出来」筛一遍。 */
   edges?: ShellEdge[]
+  /** 连接模式下的起点节点（= 当前选中的那个）。非空即「正在连线」。 */
+  connectFrom?: string | null
+  /** 现在能不能进连接模式；不能时这里是原因（直接写进按钮的 title）。 */
+  connectBlocked?: string
+  onConnectStart: () => void
+  onConnectCancel: () => void
+  /** 连接模式下点了终点节点。 */
+  onConnectTarget: (recordId: string) => void
 }
 
 const STAGE_FILTERS: Array<{ key: string; label: string; match: (layer: number) => boolean }> = [
@@ -110,6 +119,11 @@ export function Workspace(props: WorkspaceProps) {
         : ''
   const arrangeDisabled = props.layoutBusy || !!props.layoutPlan || arrangeBlocked.length > 0
 
+  // 连接模式：起点就是当前选中的那个节点，所以「没选中」时进不去模式。
+  // 但已经进了模式时必须让这个按钮能点——它是明面上的出口（另一个出口是 Esc）。
+  const connectBlocked = props.connectBlocked ?? ''
+  const connectDisabled = !props.connectFrom && connectBlocked.length > 0
+
   return (
     <div className="df-center-grid">
       <div style={{ margin: '12px 12px 0' }}>
@@ -126,7 +140,15 @@ export function Workspace(props: WorkspaceProps) {
           <button type="button" className="df-mini-button is-active">选择</button>
           <button type="button" className="df-mini-button" disabled title="新建节点的入口在工作树顶上（这里不再重复开一个）">＋ 节点</button>
           <button type="button" className="df-mini-button" disabled title="新增引用尚未接入服务端">＋ 资源</button>
-          <button type="button" className="df-mini-button" disabled title="连线画得出来了，但拖一根新的还没有写路径">连接</button>
+          <button
+            type="button"
+            className={`df-mini-button${props.connectFrom ? ' is-active' : ''}`}
+            disabled={connectDisabled}
+            title={props.connectFrom
+              ? '正在连线：点一个节点作为终点；再点这里或按 Esc 取消'
+              : connectBlocked || '从选中的节点拉一根线到另一个节点'}
+            onClick={() => (props.connectFrom ? props.onConnectCancel() : props.onConnectStart())}
+          >连接</button>
           <span className="df-divider-v" style={{ height: 18, margin: '0 4px' }} />
           <button type="button" className="df-mini-button" disabled title="删除节点的入口在检查器里（这里不再重复开一个）">删除</button>
           <span className="df-divider-v" style={{ height: 18, margin: '0 4px' }} />
@@ -199,6 +221,8 @@ export function Workspace(props: WorkspaceProps) {
             channelNotice={props.channelNotice}
             ghosts={ghosts}
             edges={edges}
+            connectFrom={props.connectFrom ?? null}
+            onConnectTarget={props.onConnectTarget}
           />
         )}
         {view === 'timeline' && (

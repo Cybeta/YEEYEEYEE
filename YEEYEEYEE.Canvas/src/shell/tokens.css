@@ -589,6 +589,24 @@ textarea.df-input {
   box-shadow: 0 0 0 1px rgba(77, 155, 255, 0.35), 0 0 30px -6px rgba(77, 155, 255, 0.62);
 }
 
+/* 连接模式的起点。与「选中」分开表达：选中是实线主色环，这里是**虚线**环 + 一圈柔光，
+   说的是「下一次点别的节点会连到它」，不是「这个节点被选中了」。
+   内外尺寸与选中态对齐（2px 边框 + 11/13 内边距），两种状态同时挂着时卡片不会跳一下。 */
+.df-node.is-connecting {
+  border: 2px dashed var(--df-primary);
+  padding: 11px 13px;
+  box-shadow: 0 0 0 3px rgba(77, 155, 255, 0.2);
+  cursor: crosshair;
+}
+
+/* 连接模式下的候选终点：平时不打扰，指针移上来才亮出虚线环——
+   说清「点这里有结果」，但不在整页上同时画满一圈圈提示。 */
+.df-node.is-connectable:hover {
+  border-color: var(--df-primary);
+  box-shadow: 0 0 0 3px rgba(77, 155, 255, 0.18);
+  cursor: crosshair;
+}
+
 .df-node-kind {
   font-size: 10px;
   letter-spacing: 0.04em;

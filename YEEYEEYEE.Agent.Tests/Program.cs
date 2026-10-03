@@ -25,6 +25,7 @@ var tests = new (string Name, Action Run)[]
     ("delete_edge 只删指定方向", DeleteEdgeTargetsDirection),
     ("删除不存在的连线会失败而不是静默成功", DeleteMissingEdgeFails),
     ("删节点会连带删掉相连的边", DeleteNodeRemovesEdges),
+    ("连线规则只有一份：自环拒、方向算身份、判重按节点对", SharedEdgeRuleIsOneCopy),
     ("锁定节点拒改拒删且预检提前告知", LockedNodeIsProtected),
     ("版本创建同步工作树并锁定节点引用", EntityVersionCreatesWorkTreeAndNodeReference),
     ("更新节点可切换历史版本或跟随当前版本", UpdateNodeChangesVersionReference),
@@ -415,6 +416,37 @@ static void DeleteNodeRemovesEdges()
         new[] { new AgentAction { Kind = "delete_node", Target = "第一章 剧情" } }, canvas, null);
     Expect(result.Applied == 1 && canvas.Nodes.Count == 1 && canvas.Edges.Count == 0,
         $"删节点应连带删边，实际剩 {canvas.Nodes.Count} 个节点 / {canvas.Edges.Count} 条边");
+}
+
+/// <summary>
+/// 「许不许连」这条规则只有一份（<see cref="CanvasEdgeRules"/>）：桌面端拖拽连接与网页端的「连接」动作
+/// 问的是同一个方法。这里钉住它本身的契约，而不是某一端的入口——两端各写一遍时，
+/// 同一次操作迟早会在两端得到不同的结果。
+/// </summary>
+static void SharedEdgeRuleIsOneCopy()
+{
+    var canvas = new WorkflowCanvasState();
+    var from = new WorkflowNode { Title = "起点" };
+    var to = new WorkflowNode { Title = "终点" };
+    canvas.Nodes.Add(from);
+    canvas.Nodes.Add(to);
+
+    Expect(CanvasEdgeRules.Refusal(canvas, from.Id, to.Id) is null, "两个不同节点之间应当可以连");
+
+    // 方向是这条边的身份：反过来的那一条还不存在，不能因为「已经有 a→b」就把 b→a 也拒了。
+    Expect(CanvasEdgeRules.Refusal(canvas, to.Id, from.Id) is null, "反向的连线是另一条，不该被当成重复");
+
+    canvas.Edges.Add(new WorkflowEdge { SourceNodeId = from.Id, TargetNodeId = to.Id });
+    Expect(CanvasEdgeRules.Refusal(canvas, from.Id, to.Id) is { Kind: EdgeRefusalKind.Duplicate } duplicate &&
+        duplicate.Message.Length > 0, "同一对节点之间的第二条要拒绝，并给出一句能直接显示的话");
+
+    // 判重**按节点对**（忽略端口）：界面上一个出口只有一根线，端口是协议字段不是界面概念。
+    canvas.Edges.Add(new WorkflowEdge { SourceNodeId = from.Id, SourcePort = 0, TargetNodeId = to.Id, TargetPort = 0 });
+    Expect(CanvasEdgeRules.Refusal(canvas, from.Id, to.Id) is { Kind: EdgeRefusalKind.Duplicate },
+        "端口不同也算重复——判重按节点对，与桌面端拖拽一致");
+
+    Expect(CanvasEdgeRules.Refusal(canvas, from.Id, from.Id) is { Kind: EdgeRefusalKind.SelfLoop },
+        "自环要拒绝（画布校验也会拦，但那时只能回一句「校验失败」）");
 }
 
 static void LockedNodeIsProtected()

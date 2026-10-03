@@ -31,6 +31,12 @@ internal static class WebSceneApi
         var hub = app.Services.GetRequiredService<CanvasEventHub>();
         // 两个模式共用一句：谁都不是就回 (0,0)，序号比较自然不成立（也就不会广播）。
         (long Serial, long Revision) CommitToken() => projectStore?.LastCommit ?? store?.LastCommit ?? (0, 0);
+        // 从 JSON 里取一个 GUID：缺字段、类型不对、不是合法 GUID 都算「没给」。
+        static bool TryGuid(JsonNode? node, out Guid value)
+        {
+            value = Guid.Empty;
+            return node is JsonValue json && json.TryGetValue<string>(out var text) && Guid.TryParse(text, out value);
+        }
 
         app.MapGet("/api/web/scene", () => projectStore is not null ? projectStore.Read() : store is not null ? store.Read() : unavailable!);
 
@@ -125,6 +131,87 @@ internal static class WebSceneApi
                 hub.CanvasChanged(after.Revision, null, WebAccessGuard.ActorName(request.HttpContext), "structure");
             return result;
         });
+        // 新建连线：与新建节点同一条结构级规矩（要账号、要 canvas.edit、要整棵树锁，写完就还）。
+        // 「许不许连」问的是共享的 CanvasEdgeRules（与桌面端拖拽连接同一条规则）；
+        // 端点存不存在则在这里先说清——否则画布校验会在写入时拦下，使用者看到的是「连上了却保存不了」。
+        app.MapPost("/api/web/edges", async (HttpRequest request) =>
+        {
+            if (projectStore is null || structureLeases is null)
+                return Error(409, "CANVAS_REQUIRES_PROJECT", "新建连线要的是项目画布；当前配置的是独立 Web 场景");
+            var user = WebAccessGuard.CurrentUser(request.HttpContext);
+            if (user is null)
+                return Error(403, "CANVAS_WRITE_REQUIRES_SESSION", "结构改动要记在某个账号名下，必须用账号登录");
+            if (!WebAccessGuard.Permissions(request.HttpContext).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+
+            JsonObject body;
+            try
+            {
+                if (await JsonNode.ParseAsync(request.Body, cancellationToken: request.HttpContext.RequestAborted) is not JsonObject parsed)
+                    return Error(400, "INVALID_REQUEST", "请求体要是一个 JSON 对象");
+                body = parsed;
+            }
+            catch (JsonException)
+            {
+                return Error(400, "INVALID_REQUEST", "请求体不是合法 JSON");
+            }
+
+            if (body["baseRevision"] is not JsonValue revisionValue || !revisionValue.TryGetValue<long>(out var baseRevision))
+                return Error(400, "INVALID_REQUEST", "缺少 baseRevision（你手上那份的修订号）");
+            if (!TryGuid(body["sourceId"], out var sourceId) || !TryGuid(body["targetId"], out var targetId))
+                return Error(400, "INVALID_REQUEST", "sourceId 与 targetId 都要是画布节点的 GUID");
+
+            var before = CommitToken();
+            var lease = structureLeases.Acquire(EditScope.Tree, null, user, "web", force: false);
+            if (lease.Status != EditLeaseStatus.Ok) return EditLeaseApi.Failure(lease);
+
+            IResult result;
+            try { result = projectStore.CreateEdge(baseRevision, sourceId, targetId); }
+            finally
+            {
+                // 与新建 / 删除节点同理：锁只为这一次结构改动排队，写完就还回去。
+                structureLeases.Release(lease.Lease!.LeaseId, user, force: false);
+            }
+
+            var after = CommitToken();
+            if (after.Serial > before.Serial)
+                hub.CanvasChanged(after.Revision, null, WebAccessGuard.ActorName(request.HttpContext), "structure");
+            return result;
+        });
+
+        // 断开一根连线：连线属于画布结构，所以同样是结构级写入。
+        // 它没有引用完整性可言（不像节点会被别人引用），所以只需要「它真的在这张画布里」。
+        app.MapDelete("/api/web/edges/{edgeId}", (string edgeId, long? baseRevision, HttpRequest request) =>
+        {
+            if (projectStore is null || structureLeases is null)
+                return Error(409, "CANVAS_REQUIRES_PROJECT", "断开连线要的是项目画布；当前配置的是独立 Web 场景");
+            var user = WebAccessGuard.CurrentUser(request.HttpContext);
+            if (user is null)
+                return Error(403, "CANVAS_WRITE_REQUIRES_SESSION", "结构改动要记在某个账号名下，必须用账号登录");
+            if (!WebAccessGuard.Permissions(request.HttpContext).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+            if (baseRevision is not { } revision)
+                return Error(400, "INVALID_REQUEST", "缺少 baseRevision（你手上那份的修订号）");
+            if (!Guid.TryParse(edgeId, out var id))
+                return Error(400, "INVALID_REQUEST", "这个 edgeId 不是一个连线（它是投影里的那个 edgeId，不是节点 ID）");
+
+            var before = CommitToken();
+            var lease = structureLeases.Acquire(EditScope.Tree, null, user, "web", force: false);
+            if (lease.Status != EditLeaseStatus.Ok) return EditLeaseApi.Failure(lease);
+
+            IResult result;
+            try { result = projectStore.DeleteEdge(revision, id); }
+            finally
+            {
+                structureLeases.Release(lease.Lease!.LeaseId, user, force: false);
+            }
+
+            var after = CommitToken();
+            if (after.Serial > before.Serial)
+                hub.CanvasChanged(after.Revision, null, WebAccessGuard.ActorName(request.HttpContext), "structure");
+            return result;
+        });
+
         app.MapPut("/api/web/records/{recordId}", async (string recordId, HttpRequest request) =>
         {
             // Read the resolved permissions for every write; neither Bearer nor a session cookie alone

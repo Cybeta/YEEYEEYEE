@@ -181,6 +181,26 @@ export function visibleEdges(edges: ShellEdge[], records: ViewRecord[]): ShellEd
   return edges.filter((edge) => present.has(edge.sourceId) && present.has(edge.targetId))
 }
 
+/** 一个节点自己的一根连线：方向 + 另一头是谁。 */
+export type NodeConnection = { edgeId: string; direction: 'out' | 'in'; otherId: string }
+
+/**
+ * 某个节点自己的连线（连出去 / 连进来），检查器用它列「这个节点连着谁」。
+ *
+ * 纯函数、不看 records：另一头的标题由调用方去解——把「谁连着谁」与「那一头叫什么」分开，
+ * 少一端的连线才不会在这里被悄悄改成另一种样子。
+ * 自环（两端同一个节点）只算一条：服务端的创建入口拒绝自环，但画布文件是多人共写的，
+ * 边界上出现一条自环完全可能，而列两遍会让人以为有两根线。
+ */
+export function nodeConnections(edges: ShellEdge[], nodeId: string): NodeConnection[] {
+  const result: NodeConnection[] = []
+  for (const edge of edges) {
+    if (edge.sourceId === nodeId) result.push({ edgeId: edge.edgeId, direction: 'out', otherId: edge.targetId })
+    else if (edge.targetId === nodeId) result.push({ edgeId: edge.edgeId, direction: 'in', otherId: edge.sourceId })
+  }
+  return result
+}
+
 /** 企划层不进章节泳道（它们本来就在章节之外），与桌面端的泳道语义一致。 */
 export const PLANNING_GROUP_ID = '__planning__'
 

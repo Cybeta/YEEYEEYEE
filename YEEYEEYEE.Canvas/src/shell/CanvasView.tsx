@@ -17,9 +17,11 @@ import {
  * 世界画布要固定 4200×3000 才不被压缩）。DOM 里这些约束不存在：
  * 卡片用普通流式布局，缩放平移交给一条 transform。
  *
- * 两点如实说明，不假装有：
- *   - 连线**画得出来了**（服务端会投影连线，只投影两端都还在的），但**拖一根新的**还没有接口；
- *   - 网页端的写路径是「改标题与内容 / 新建与删除节点 / 整理布局」，改类别与移动单个节点还没有。
+ * 如实说明，不假装有：
+ *   - 连线**能读也能改了**：服务端投影连线（只投影两端都还在的），画布画得出来，
+ *     新建与断开也接上了（新建走「连接模式」：点起点 → 点终点，见下面的 connectFrom）；
+ *   - 网页端的写路径是「改标题与内容 / 新建与删除节点 / 新建与删除连线 / 整理布局」，
+ *     改类别与移动单个节点还没有。
  */
 
 export type Pan = { x: number; y: number }
@@ -57,6 +59,13 @@ export type CanvasViewProps = {
   ghosts?: LayoutMove[]
   /** 画布上的连线（服务端只投影两端都还在的那些）。 */
   edges?: ShellEdge[]
+  /**
+   * 连接模式下的起点节点。非空时，点**另一个**节点是「连到它」而不是「选中它」。
+   * 起点自己那张卡点了仍是选中——自环在入口就被拒，没必要让第二次点击白跑一趟 HTTP。
+   */
+  connectFrom?: string | null
+  /** 连接模式下点了终点节点。只有连接模式会调它。 */
+  onConnectTarget?: (recordId: string) => void
 }
 
 const MIN_ZOOM = 0.25
@@ -343,6 +352,8 @@ export function CanvasView(props: CanvasViewProps) {
               assetsReady={assetsReady}
               showReferences={showReferencePreviews}
               onSelect={onSelect}
+              connectFrom={props.connectFrom ?? null}
+              onConnectTarget={props.onConnectTarget}
             />
           ))}
 
@@ -381,13 +392,17 @@ export function CanvasView(props: CanvasViewProps) {
           </div>
         )}
       </div>
-      {/* 桌面端那句提示末尾还有「Delete 删除」；网页端没有删除接口，所以不写上去。 */}
-      <div className="df-hint">拖拽平移 · 滚轮缩放 · 点击节点选中</div>
+      {/* 提示条跟着当前手势走：连接模式下必须说清「下一次点击是干什么的」，
+          否则点下去凭空多一根线，比没有这个功能更让人困惑。
+          （桌面端那句末尾还有「Delete 删除」；网页端的删除在检查器与工作树上，不挂快捷键。） */}
+      <div className="df-hint">
+        {props.connectFrom ? '连接模式：再点一个节点作为终点 · Esc 取消' : '拖拽平移 · 滚轮缩放 · 点击节点选中'}
+      </div>
     </div>
   )
 }
 
-function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, onSelect }: {
+function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, onSelect, connectFrom, onConnectTarget }: {
   node: ViewRecord
   selected: boolean
   dimmed: boolean
@@ -398,19 +413,28 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
   assetsReady: boolean
   showReferences: boolean
   onSelect: (recordId: string) => void
+  connectFrom: string | null
+  onConnectTarget?: (recordId: string) => void
 }) {
   const kind = kindOf(node.recordType)
   const meta = NODE_KINDS[kind]
   const references = recordReferences(node)
   const mine = isMine(lock, myUserId)
+  const connecting = connectFrom === node.recordId
+  /** 连接模式下，除了起点自己，每张卡都是可选的终点——点它就是画线。 */
+  const armed = connectFrom !== null && !connecting && !!onConnectTarget
   return (
     <button
       type="button"
-      className={`df-node${selected ? ' is-selected' : ''}${moving ? ' is-moving' : ''}`}
+      className={`df-node${selected ? ' is-selected' : ''}${moving ? ' is-moving' : ''}${connecting ? ' is-connecting' : ''}${armed ? ' is-connectable' : ''}`}
       style={{ left: nodeX(node), top: nodeY(node), width: NODE_CARD_WIDTH, minHeight: NODE_CARD_HEIGHT, opacity: dimmed ? 0.35 : moving ? 0.4 : 1 }}
       onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => { event.stopPropagation(); onSelect(node.recordId) }}
-      title={`${meta.label} · ${recordStatus(node)}${lock ? ` · ${describeLease(lock)} 正在编辑` : ''}`}
+      onClick={(event) => {
+        event.stopPropagation()
+        if (armed) { onConnectTarget!(node.recordId); return }
+        onSelect(node.recordId)
+      }}
+      title={`${meta.label} · ${recordStatus(node)}${lock ? ` · ${describeLease(lock)} 正在编辑` : ''}${armed ? ' · 点它连到这里' : ''}`}
     >
       <span className="df-node-kind">
         <span className="df-node-dot" style={{ background: meta.hex }} aria-hidden="true" />

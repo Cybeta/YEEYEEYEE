@@ -1175,6 +1175,122 @@ try
         Assert(efEdges[0].GetProperty("sourceId").GetString() == efFirst &&
             efEdges[0].GetProperty("targetId").GetString() == efSecond, "两端要照原样投影");
         Assert(Guid.TryParse(efEdges[0].GetProperty("edgeId").GetString(), out _), "连线要有稳定的 ID（将来断开它要用）");
+
+        // 那条悬空的连线只该活在上一步里：**画布一旦有校验错误就是只读的**（写入前会拦下），
+        // 带着它往后走，后面每一次写入都会 409 CANVAS_VALIDATION_FAILED。
+        // 这也正是读取端要容错、写入端要严格的原因：坏数据进得来（别人写的文件），但不能靠它继续写。
+        efArray.RemoveAt(1);
+        File.WriteAllBytes(layoutCanvas, Encoding.UTF8.GetBytes(efJson.ToJsonString()));
+        var efClean = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+        Assert(efClean.GetProperty("edges").EnumerateArray().Count() == 1, "摘掉悬空的那条之后，有效的那条仍要投影");
+
+        // ---------- 结构级写入：网页端的「连接」与「断开」 ----------
+        // 与新建 / 删除节点同一条规矩。验四件事：能建、拒绝的几种都如实拒绝、受树的锁约束、能断。
+        var edBase = efClean.GetProperty("revision").GetInt64();
+
+        // 广播：连线的进出也是结构级的。
+        using (var edEvents = await rival.GetAsync("/api/web/events", HttpCompletionOption.ResponseHeadersRead))
+        {
+            var edReader = new StreamReader(await edEvents.Content.ReadAsStreamAsync());
+            var edPending = ReadFrame(edReader);
+
+            // efFirst → efSecond 上一步已经直接写进文件了（见上面那段），所以这里**反着连**一根。
+            var edCreated = await Check(arranger, HttpMethod.Post, "/api/web/edges", 200,
+                "{\"baseRevision\":" + edBase + ",\"sourceId\":\"" + efSecond + "\",\"targetId\":\"" + efFirst + "\"}");
+            var edEdgeId = edCreated.GetProperty("edgeId").GetString()!;
+            var edRevision = edCreated.GetProperty("revision").GetInt64();
+            Assert(Guid.TryParse(edEdgeId, out _) && edRevision != edBase, "新建连线要回连线 ID 与推进后的修订");
+
+            var edReread = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+            var edList = edReread.GetProperty("edges").EnumerateArray().ToList();
+            Assert(edList.Count == 2, "新建之后应当有两条连线：" + edReread.GetProperty("edges").GetRawText());
+            Assert(edList.Any(item => item.GetProperty("edgeId").GetString() == edEdgeId &&
+                item.GetProperty("sourceId").GetString() == efSecond && item.GetProperty("targetId").GetString() == efFirst),
+                "新建的连线要按说的两端投影出来（方向不能反）");
+            // 另一条是上一步直接写进文件的那条：手写的 JSON 里没有 Id 这个字段，所以它每次读都是新生成的 GUID。
+            // 这次写入把它连同新连线一起落了盘，**从这一刻起它的 ID 才稳定**——断开时必须取这一份，
+            // 取上一次读到的那个会 404（那条线在磁盘上已经不是那个 ID 了）。
+            var edExisting = edList.First(item => item.GetProperty("edgeId").GetString() != edEdgeId)
+                .GetProperty("edgeId").GetString()!;
+
+            var edPushed = await Task.WhenAny(edPending, Task.Delay(5000)) == edPending ? await edPending : null;
+            Assert(edPushed is { Type: "canvas.changed" } edFrame && edFrame.Data.GetProperty("scope").GetString() == "structure",
+                "连线改动要广播，并说清是结构级的：" + (edPushed is { } gotEd ? gotEd.Data.GetRawText() : "(没收到)"));
+
+            // 四种如实拒绝：自环、重复、端点不存在、陈旧修订。
+            // 自环本可以留给画布校验去拦，但那时只能回一句「校验失败」，说不清是为什么。
+            Assert((await Check(arranger, HttpMethod.Post, "/api/web/edges", 400,
+                "{\"baseRevision\":" + edRevision + ",\"sourceId\":\"" + efFirst + "\",\"targetId\":\"" + efFirst + "\"}"))
+                .GetProperty("code").GetString() == "CANVAS_EDGE_SELF_LOOP", "自环要拒绝");
+            Assert((await Check(arranger, HttpMethod.Post, "/api/web/edges", 409,
+                "{\"baseRevision\":" + edRevision + ",\"sourceId\":\"" + efSecond + "\",\"targetId\":\"" + efFirst + "\"}"))
+                .GetProperty("code").GetString() == "CANVAS_EDGE_EXISTS", "重复的连线要拒绝（按节点对判，忽略端口）");
+            Assert((await Check(arranger, HttpMethod.Post, "/api/web/edges", 404,
+                "{\"baseRevision\":" + edRevision + ",\"sourceId\":\"" + Guid.NewGuid() + "\",\"targetId\":\"" + efFirst + "\"}"))
+                .GetProperty("code").GetString() == "CANVAS_NODE_NOT_FOUND", "端点不存在要如实拒绝，而不是留一条悬空的线");
+            Assert((await Check(arranger, HttpMethod.Post, "/api/web/edges", 404,
+                "{\"baseRevision\":" + edRevision + ",\"sourceId\":\"" + efFirst + "\",\"targetId\":\"" + Guid.NewGuid() + "\"}"))
+                .GetProperty("code").GetString() == "CANVAS_NODE_NOT_FOUND", "终点不存在也要说清是哪一头");
+            await Check(arranger, HttpMethod.Post, "/api/web/edges", 409,
+                "{\"baseRevision\":" + edBase + ",\"sourceId\":\"" + efFirst + "\",\"targetId\":\"" + Guid.NewGuid() + "\"}");
+            await Check(arranger, HttpMethod.Post, "/api/web/edges", 400,
+                "{\"baseRevision\":" + edRevision + ",\"sourceId\":\"不是 GUID\",\"targetId\":\"" + efFirst + "\"}");
+            await Check(arranger, HttpMethod.Post, "/api/web/edges", 400, "{\"baseRevision\":" + edRevision + "}");
+
+            // 别人正占着端点时，连线也要被挡住并说清等谁（与新建节点同一条约束）。
+            using (var edHolder = new YEEYEEYEE.Desktop.CollaborationSession($"http://127.0.0.1:{port}"))
+            {
+                Assert((await edHolder.SignInAsync("chenmo", "longenough")).Ok, "锁的持有者先登录");
+                Assert((await edHolder.AcquireNodeLeaseAsync(Guid.Parse(efFirst))).Ok, "占住其中一端");
+                var edBlocked = await Check(arranger, HttpMethod.Post, "/api/web/edges", 409,
+                    "{\"baseRevision\":" + edRevision + ",\"sourceId\":\"" + efSecond + "\",\"targetId\":\"" + efFirst + "\"}");
+                Assert(edBlocked.GetProperty("code").GetString() == "EDIT_CONFLICT", "连线要受树的锁约束");
+                Assert(edBlocked.GetProperty("message").GetString()!.Contains("陈默"), "冲突要说清等谁");
+                await edHolder.ReleaseHeldLeaseAsync();
+            }
+
+            // 没身份连试都不用试：更外层的身份闸门先拦下（401）。
+            using (var edAnonymous = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") })
+            {
+                var edDenied = await Check(edAnonymous, HttpMethod.Post, "/api/web/edges", 401,
+                    "{\"baseRevision\":" + edRevision + ",\"sourceId\":\"" + efSecond + "\",\"targetId\":\"" + efFirst + "\"}");
+                Assert(edDenied.GetProperty("code").GetString() == "UNAUTHORIZED", "没身份不能连线：" + edDenied.GetRawText());
+            }
+
+            // 断开：这里断的是**上一步直接写进文件**的那条，所以顺带验了
+            // 「断开一条不是本次请求建出来的线」也照样成立。
+            await Check(arranger, HttpMethod.Delete, $"/api/web/edges/{edExisting}?baseRevision={edRevision}", 200);
+            var edAfter = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+            var edLeft = edAfter.GetProperty("edges").EnumerateArray().ToList();
+            Assert(edLeft.Count == 1 && edLeft[0].GetProperty("edgeId").GetString() == edEdgeId, "断开的连线要消失，另一条不动");
+            var edAfterRevision = edAfter.GetProperty("revision").GetInt64();
+            Assert((await Check(arranger, HttpMethod.Delete, $"/api/web/edges/{edExisting}?baseRevision={edAfterRevision}", 404))
+                .GetProperty("code").GetString() == "CANVAS_EDGE_NOT_FOUND", "断开一条已经不存在的连线要如实说找不到");
+            await Check(arranger, HttpMethod.Delete, $"/api/web/edges/not-a-guid?baseRevision={edAfterRevision}", 400);
+        }
+
+        // 删节点要**连带**删掉它的连线（与桌面端同一条语义）。这一条不拿现成数据验：
+        // 现成的节点里，章节不能删、有下级的也不能删，所以临时建两个。
+        var edPairA = (await Check(arranger, HttpMethod.Post, "/api/web/records", 200,
+            "{\"baseRevision\":" + (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64() +
+            ",\"recordType\":\"prop\",\"title\":\"连线甲\"}")).GetProperty("nodeId").GetString()!;
+        var edPairB = (await Check(arranger, HttpMethod.Post, "/api/web/records", 200,
+            "{\"baseRevision\":" + (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64() +
+            ",\"recordType\":\"prop\",\"title\":\"连线乙\"}")).GetProperty("nodeId").GetString()!;
+        var edPairScene = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+        await Check(arranger, HttpMethod.Post, "/api/web/edges", 200,
+            "{\"baseRevision\":" + edPairScene.GetProperty("revision").GetInt64() +
+            ",\"sourceId\":\"" + edPairA + "\",\"targetId\":\"" + edPairB + "\"}");
+        var edPairLinked = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+        Assert(edPairLinked.GetProperty("edges").EnumerateArray().Count(item =>
+            item.GetProperty("sourceId").GetString() == edPairA && item.GetProperty("targetId").GetString() == edPairB) == 1,
+            "临时建的两个节点之间要真的连上");
+        await Check(arranger, HttpMethod.Delete,
+            $"/api/web/records/{edPairA}?baseRevision={edPairLinked.GetProperty("revision").GetInt64()}", 200);
+        var edPairAfter = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+        Assert(edPairAfter.GetProperty("edges").EnumerateArray().All(item =>
+            item.GetProperty("sourceId").GetString() != edPairA && item.GetProperty("targetId").GetString() != edPairA),
+            "删节点要连带删掉它的连线，否则画布校验会在写入时拦下（用户看到的是「删了却保存不了」）");
     }
 
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
@@ -1184,6 +1300,12 @@ try
     await Check(standaloneArranger, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"lin\",\"password\":\"longenough\"}");
     Assert((await Check(standaloneArranger, HttpMethod.Post, "/api/web/layout/plan", 409, PlanBody()))
         .GetProperty("code").GetString() == "LAYOUT_REQUIRES_PROJECT", "独立场景模式的整理应当明确拒绝");
+    // 连线也一样：独立场景是裸 JSON，没有节点集合可言，含糊地照着改只会写出一份它读不懂的文件。
+    Assert((await Check(standaloneArranger, HttpMethod.Post, "/api/web/edges", 409,
+        "{\"baseRevision\":0,\"sourceId\":\"" + Guid.NewGuid() + "\",\"targetId\":\"" + Guid.NewGuid() + "\"}"))
+        .GetProperty("code").GetString() == "CANVAS_REQUIRES_PROJECT", "独立场景模式的新建连线应当明确拒绝");
+    Assert((await Check(standaloneArranger, HttpMethod.Delete, $"/api/web/edges/{Guid.NewGuid()}?baseRevision=0", 409))
+        .GetProperty("code").GetString() == "CANVAS_REQUIRES_PROJECT", "独立场景模式的断开连线应当明确拒绝");
 
     Stop();
     Console.WriteLine("HTTP regression passed: auth, live canvas.edit revocation, byte-preserving denials, jobs, assets, conflicts, persistence, and project/standalone modes");
@@ -1227,5 +1349,6 @@ try
         "开关打开、登录着、有改动、不忙：这才推");
     Console.WriteLine("Desktop subscribe regression passed: frames parsed and unknown ones dropped, real canvas.changed and edits.changed reach the desktop, sign-out stops the stream, auto-reload only when the local copy is clean and idle, auto-push only when the user turned it on");
     Console.WriteLine("Structure regression passed: create lands in the named chapter with the asked category and broadcasts scope=structure, unknown category/chapter/missing anchor/stale revision all refused, another user's node lease blocks it, viewer refused, chapter entries not deletable through this path, delete removes the node");
+    Console.WriteLine("Edge regression passed: connect lands on the asked endpoints with a fresh GUID and broadcasts scope=structure, self-loop/duplicate/missing endpoint/malformed body/stale revision each refuse with their own code, another user's node lease arbitrates, anonymous refused, disconnect removes exactly that one, a node delete takes its edges along, standalone mode refuses both");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }

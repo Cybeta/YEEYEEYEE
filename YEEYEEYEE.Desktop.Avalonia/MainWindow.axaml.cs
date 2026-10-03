@@ -4043,9 +4043,11 @@ public partial class MainWindow : Window, IAgentSessionHost
     private void CanvasSurface_OnConnectionRequested(object? sender, (WorkflowNode Source, WorkflowNode Target) request)
     {
         if (currentCanvas is null || !canEdit) return;
-        if (request.Source.Id == request.Target.Id || currentCanvas.Canvas.Edges.Any(edge => edge.SourceNodeId == request.Source.Id && edge.TargetNodeId == request.Target.Id))
+        // 「许不许连」问共享的那一份规则（网页端的「连接」动作问的是同一条）：
+        // 两处各写一遍，同一次操作迟早会在两端得到不同的结果。文案也由它给，比一句「或」准确。
+        if (CanvasEdgeRules.Refusal(currentCanvas.Canvas, request.Source.Id, request.Target.Id) is { } refusal)
         {
-            StatusText.Text = "连接已存在或不能连接自身";
+            StatusText.Text = refusal.Message;
             return;
         }
         RecordSnapshot();

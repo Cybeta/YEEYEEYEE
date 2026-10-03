@@ -360,6 +360,69 @@ internal sealed class ProjectCanvasSceneStore
             (next, bytes) => new { revision = Revision(bytes), deleted = title, nodes = next.Canvas.Nodes.Count });
     }
 
+    /// <summary>
+    /// 新建一根连线（网页端的「连接」走这里，与新建节点同一条结构级通道）。
+    ///
+    /// 「许不许连」问的是共享的 <see cref="CanvasEdgeRules"/>——与桌面端拖拽连接**同一条规则**；
+    /// 端点存不存在则在这里先说清楚，否则画布校验会在写入时拦下，使用者看到的是「连上了却保存不了」。
+    /// 端口留默认值，与桌面端新建连线时一致（界面上一个出口只有一根线）。
+    /// </summary>
+    public IResult CreateEdge(long baseRevision, Guid sourceId, Guid targetId)
+    {
+        var created = Guid.Empty;
+        return Write(baseRevision, current =>
+            {
+                var canvas = current.Canvas;
+                if (canvas is null) return (null, Error(409, "CANVAS_EMPTY", "这张画布没有节点集合"));
+
+                if (!canvas.Nodes.Any(node => node.Id == sourceId))
+                    return (null, Error(404, "CANVAS_NODE_NOT_FOUND", "起点节点不在这张画布里"));
+                if (!canvas.Nodes.Any(node => node.Id == targetId))
+                    return (null, Error(404, "CANVAS_NODE_NOT_FOUND", "终点节点不在这张画布里"));
+
+                if (CanvasEdgeRules.Refusal(canvas, sourceId, targetId) is { } refusal)
+                    return (null, RefusalResult(refusal));
+
+                var edge = new WorkflowEdge { SourceNodeId = sourceId, TargetNodeId = targetId };
+                canvas.Edges.Add(edge);
+                created = edge.Id;
+                return (canvas, null);
+            },
+            (next, bytes) => new { revision = Revision(bytes), edgeId = created, edges = next.Canvas.Edges.Count });
+    }
+
+    /// <summary>
+    /// 把共享层的拒绝映射成 HTTP 响应。共享层不带 HTTP 词汇（它要同时服务桌面端与网页端），
+    /// 所以映射只此一处——散开写会出现「同一个原因在两个端点有两种错误码」。
+    /// </summary>
+    private static IResult RefusalResult(EdgeRefusal refusal) => refusal.Kind switch
+    {
+        EdgeRefusalKind.SelfLoop => Error(400, "CANVAS_EDGE_SELF_LOOP", refusal.Message),
+        _ => Error(409, "CANVAS_EDGE_EXISTS", refusal.Message)
+    };
+
+    /// <summary>
+    /// 断开一根连线。连线没有引用完整性可言，所以只需要「它真的在这张画布里」。
+    ///
+    /// 与桌面端选中连线后删除是同一条语义（那边是 DeleteSelection 里「连线优先」那一支）。
+    /// 注意方向：删节点会**连带**删掉它的连线（见 <see cref="DeleteNode"/>），反过来不成立。
+    /// </summary>
+    public IResult DeleteEdge(long baseRevision, Guid edgeId)
+    {
+        return Write(baseRevision, current =>
+            {
+                var canvas = current.Canvas;
+                if (canvas is null) return (null, Error(409, "CANVAS_EMPTY", "这张画布没有节点集合"));
+
+                var edge = canvas.Edges.FirstOrDefault(item => item.Id == edgeId);
+                if (edge is null) return (null, Error(404, "CANVAS_EDGE_NOT_FOUND", "这条连线不在这张画布里"));
+
+                canvas.Edges.Remove(edge);
+                return (canvas, null);
+            },
+            (next, bytes) => new { revision = Revision(bytes), edges = next.Canvas.Edges.Count });
+    }
+
     /// <summary>新节点的临时落点间距：它只是「别叠在一起」，摆好看是整理布局的事。</summary>
     private const float PlaceholderSpacing = 320f;
 

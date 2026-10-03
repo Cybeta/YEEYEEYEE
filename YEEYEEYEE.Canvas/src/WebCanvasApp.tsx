@@ -70,6 +70,11 @@ export function WebCanvasApp() {
   const [layoutBusy, setLayoutBusy] = useState(false)
   /** 检查器的编辑框是否拿到焦点——它是「打算改」的信号，用来决定要不要去占锁。 */
   const [editorFocused, setEditorFocused] = useState(false)
+  /**
+   * 连接模式：从**当前选中的节点**拉一根线出去。
+   * 起点不单独存一份——存两份的话，「选中被清掉、起点还留着」这种半截状态就得靠额外的清理代码兜住。
+   */
+  const [connecting, setConnecting] = useState(false)
   /** 服务端推来一条「画布变了」，且那个修订和我手上的不是同一个——我这份已经不是最新的了。 */
   const [remoteChange, setRemoteChange] = useState<{ revision: number; text: string } | null>(null)
   const generation = useRef(0)
@@ -101,6 +106,9 @@ export function WebCanvasApp() {
   // 申请被拒时拿到的持有者是**刚刚发生**的冲突，比 15 秒轮询那份新；两边取其一即可。
   const blockedBy = nodeLeaseState.blockedBy ?? polledBlocked
   const heldByMe = nodeLeaseState.held
+  // 连接模式的起点就是选中的那个节点。选中被清掉（点了空白处）时它自然变成 null，模式随之作废——
+  // 不会留下「没有起点的连接模式」这种点了没反应的状态。
+  const connectFrom = connecting && selected ? selected.recordId : null
 
   // 变更推送：锁变了立刻刷新锁列表；画布被改了就把「已同步」改成「有新版」。
   // 推送只说「变了」，所以这里不自动重载画布——把整页视角与选中项一起抽走，比晚看到几秒更烦人。
@@ -144,12 +152,22 @@ export function WebCanvasApp() {
     const item = id === null ? null : records.find((record) => record.recordId === id) ?? null
     if (id !== null && item === null) return
     if (dirty && !window.confirm('当前编辑尚未保存，确定放弃修改吗？')) return
+    // 选中变了，连接模式就作废：它的起点就是选中项，留着一个换了起点的半截状态只会让人点错。
+    setConnecting(false)
     setSelectedId(item?.recordId ?? '')
     setTitle(item ? recordTitle(item) : '')
     setContent(item ? recordContent(item) : '')
   }
 
-  async function loadScene() {
+  /**
+   * 重新加载整张画布。
+   *
+   * `select` 是「加载完之后把我放回哪个节点上」：结构级写入（新建节点 / 新建连线 / 断开连线）之后，
+   * 手上的选中项会随重载一起清掉，而按下那一下的人通常正停在某个节点上——不还回去，
+   * 每做一次结构改动就得重新点一遍。写回选中项用**刚解析出来的那份记录**，
+   * 不是闭包里那份旧的（旧的既没有新节点，也会把刚被改过的内容还原成旧值）。
+   */
+  async function loadScene(options?: { select?: string }) {
     if (dirty && !window.confirm('重新加载将放弃未保存的修改，确定继续吗？')) return
     const run = ++generation.current
     setLoading(true)
@@ -176,6 +194,15 @@ export function WebCanvasApp() {
       setScene(parsed)
       // 重新加载之后「画布有变动」这件事就已经解决了，标记必须跟着清掉。
       setRemoteChange(null)
+      // 要把选中项还回去时，用刚解析出来的这份记录——见 loadScene 的说明。
+      const restored = options?.select
+        ? parsed.records.find((record) => record.recordId === options.select) ?? null
+        : null
+      if (restored) {
+        setSelectedId(restored.recordId)
+        setTitle(recordTitle(restored))
+        setContent(recordContent(restored))
+      }
       setNotice({
         kind: 'success',
         // 章节数按**种类**数，不拿「非可编辑记录」当代理：章节可以是工作树行（recordId 是 wt-，
@@ -249,6 +276,15 @@ export function WebCanvasApp() {
     const timer = window.setInterval(() => void refresh(), 3000)
     return () => { active = false; window.clearInterval(timer) }
   }, [auth?.user?.id])
+
+  // Esc 退出连接模式。只退模式、**不清选中**：清选中会牵出「未保存的修改要不要放弃」那一问，
+  // 而按 Esc 的人想停的是「连线」这件事，不是想丢掉手上的草稿。
+  useEffect(() => {
+    if (!connecting) return
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setConnecting(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [connecting])
 
   async function taskAction(path: string, body?: object) {
     if (!auth?.user || taskBusy) return
@@ -466,6 +502,17 @@ export function WebCanvasApp() {
   ].filter((line) => line.length > 0).join(' · ')
 
   /**
+   * 为什么现在不能进连接模式。空串表示可以。
+   * 顺序就是「先撞上哪一条」：画布只读 → 角色只读 → 没选起点 → 起点被别人锁着。
+   * 连接模式下这个值不参与按钮的禁用判断（那时按钮是出口，见 Workspace）。
+   */
+  const connectBlocked = readOnly ? '这张画布被服务端标成只读，改不了'
+    : !canEdit(role) ? '你的账号是只读，改不了画布'
+      : !selected ? '先选中一个节点作为起点'
+        : blockedBy ? `${describeLease(blockedBy)} 正在编辑这个节点，等他保存或让管理员接管`
+          : ''
+
+  /**
    * 结构级写入：新建一个节点。
    *
    * 与「保存标题内容」分开走：那条路改的是一个节点的文字，这条改的是**画布结构**，
@@ -491,8 +538,9 @@ export function WebCanvasApp() {
         })
       })
       if (!created?.nodeId) throw new Error('新建响应里没有节点 ID')
-      await loadScene()
-      selectRecord(created.nodeId)
+      // 建完停在新节点上：`loadScene({ select })` 用**刚解析出来的**记录回填选中项——
+      // 以前这里是在重载之后按闭包里那份旧记录去选，新节点还不在里面，于是始终选不中。
+      await loadScene({ select: created.nodeId })
       setNotice({ kind: 'info', message: '已新建节点。' })
     } catch (error) {
       setNotice({ kind: 'error', message: `新建失败：${errorMessage(error)}` })
@@ -521,6 +569,63 @@ export function WebCanvasApp() {
       setNotice({ kind: 'info', message: '已删除。' })
     } catch (error) {
       setNotice({ kind: 'error', message: `删除失败：${errorMessage(error)}` })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /**
+   * 结构级写入：从连接模式的起点连到刚点的这个节点。
+   *
+   * 「许不许连」（自环、重复）由**服务端**用共享规则判——界面不先猜一遍：
+   * 猜错了会把一次合法操作挡在门外，而界面上的判断没有一个会被回归钉住。
+   * 失败的原因照服务端那句话显示（「这条连线已经存在」比「操作失败」有用得多）。
+   */
+  async function createEdge(targetId: string) {
+    const sourceId = connectFrom
+    if (!scene || !sourceId) return
+    // 先退出连接模式：这一次点击的目的已经用掉了。失败也退——留在模式里，下一次点击会重复同一件事。
+    setConnecting(false)
+    if (!canEdit(role)) {
+      setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
+      return
+    }
+
+    setSaving(true)
+    setNotice({ kind: 'info', message: '正在连接…' })
+    try {
+      const result = await request<{ revision: number; edgeId: string }>('/api/web/edges', {
+        method: 'POST',
+        body: JSON.stringify({ baseRevision: scene.revision, sourceId, targetId })
+      })
+      if (!result?.edgeId) throw new Error('连接响应里没有连线 ID')
+      await loadScene({ select: sourceId })
+      setNotice({ kind: 'success', message: `已连接，画布修订 ${result.revision}。` })
+    } catch (error) {
+      setNotice({ kind: 'error', message: `连接失败：${errorMessage(error)}` })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 结构级写入：断开一根连线。断开之前问一句——服务端那边没有撤销。 */
+  async function disconnectEdge(edgeId: string) {
+    if (!scene) return
+    if (!canEdit(role)) {
+      setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
+      return
+    }
+    if (!window.confirm('断开这条连线？服务端没有撤销。')) return
+
+    setSaving(true)
+    setNotice({ kind: 'info', message: '正在断开…' })
+    try {
+      await request(`/api/web/edges/${encodeURIComponent(edgeId)}?baseRevision=${scene.revision}`, { method: 'DELETE' })
+      // 断开之后停在原来那个节点上：连着看几条连线的人不必每断一条就重新点一遍。
+      await loadScene({ select: selected?.recordId })
+      setNotice({ kind: 'info', message: '已断开连线。' })
+    } catch (error) {
+      setNotice({ kind: 'error', message: `断开失败：${errorMessage(error)}` })
     } finally {
       setSaving(false)
     }
@@ -565,6 +670,11 @@ export function WebCanvasApp() {
           onLayoutApply={(overrideManual) => void applyLayout(overrideManual)}
           onLayoutCancel={() => setLayoutPlan(null)}
           edges={edges}
+          connectFrom={connectFrom}
+          connectBlocked={connectBlocked}
+          onConnectStart={() => setConnecting(true)}
+          onConnectCancel={() => setConnecting(false)}
+          onConnectTarget={(targetId) => void createEdge(targetId)}
         />
       )}
       dock={dockOpen ? (
@@ -590,6 +700,9 @@ export function WebCanvasApp() {
                 onContent={setContent}
                 onApply={() => void save()}
                 onDelete={canEdit(role) && selected !== null && isEditableRecord(selected) ? () => void deleteNode() : undefined}
+                edges={edges}
+                // 断开连线与「删除节点」同一档：都要编辑权限。不给就只显示列表、不显示按钮。
+                onDisconnect={editable ? (edgeId) => void disconnectEdge(edgeId) : undefined}
               />
             )
             : (

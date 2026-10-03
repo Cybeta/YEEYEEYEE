@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseScene, visibleEdges, type ShellEdge, type ViewRecord } from '../src/shell/records'
+import { nodeConnections, parseScene, visibleEdges, type ShellEdge, type ViewRecord } from '../src/shell/records'
 
 /**
  * 连线（edges）的读取口径。
@@ -75,5 +75,41 @@ describe('画得出来的连线', () => {
   it('没有连线、或者画布上什么都没有：都当空，不炸', () => {
     expect(visibleEdges([], [node(GUID_A)])).toEqual([])
     expect(visibleEdges([edge('e1', GUID_A, GUID_B)], [])).toEqual([])
+  })
+})
+
+/**
+ * 某个节点自己的连线（检查器用它列「这个节点连着谁」，并给每条一个「断开」）。
+ * 说清方向是必须的：只列另一头的话，「我连向它」与「它连向我」在界面上长得一模一样。
+ */
+describe('一个节点自己的连线', () => {
+  it('连出去的与连进来的分开说：方向 + 另一头是谁', () => {
+    const edges = [edge('e1', GUID_A, GUID_B), edge('e2', GUID_C, GUID_A)]
+    expect(nodeConnections(edges, GUID_A)).toEqual([
+      { edgeId: 'e1', direction: 'out', otherId: GUID_B },
+      { edgeId: 'e2', direction: 'in', otherId: GUID_C }
+    ])
+  })
+
+  it('与这个节点无关的连线一条都不列', () => {
+    expect(nodeConnections([edge('e1', GUID_B, GUID_C)], GUID_A)).toEqual([])
+  })
+
+  it('落在别处的连线不影响自己的那几条', () => {
+    const edges = [edge('e1', GUID_A, GUID_B), edge('e2', GUID_B, GUID_C), edge('e3', GUID_C, GUID_A)]
+    expect(nodeConnections(edges, GUID_B)).toEqual([
+      { edgeId: 'e1', direction: 'in', otherId: GUID_A },
+      { edgeId: 'e2', direction: 'out', otherId: GUID_C }
+    ])
+  })
+
+  it('自环只算一条（服务端拒绝创建，但画布文件是多人共写的，读进来要当真）', () => {
+    expect(nodeConnections([edge('e1', GUID_A, GUID_A)], GUID_A)).toEqual([
+      { edgeId: 'e1', direction: 'out', otherId: GUID_A }
+    ])
+  })
+
+  it('没有连线：空数组，不炸', () => {
+    expect(nodeConnections([], GUID_A)).toEqual([])
   })
 })

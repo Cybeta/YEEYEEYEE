@@ -1,12 +1,19 @@
 import { recordReferences, resolveReference, type Asset } from '../assets'
 import { chapterIdOf } from '../ChapterView'
 import { describeLease, type Lease } from './locks'
-import { chapterGroups, kindOf, NODE_KINDS, recordStatus, type ViewRecord } from './records'
+import {
+  chapterGroups, kindOf, NODE_KINDS, nodeConnections, recordStatus, recordTitle, type ShellEdge, type ViewRecord
+} from './records'
+
+// 空数组放模块级：写成 `?? []` 每次渲染都是新数组，会让下面的 map 白算。
+const EMPTY_EDGES: ShellEdge[] = []
 
 /**
  * 节点检查器：选中节点后在这里改名与内容，写回画布。
  *
- * 布局与桌面端一致（节点名称 / 节点内容 / 应用修改 / 所属章节 / 节点状态五段）。
+ * 布局与桌面端一致（节点名称 / 节点内容 / 应用修改 / 所属章节 / 节点状态五段）；
+ * 最上面另有一块**画布结构**（连线的列表与断开、删除节点）——那些改的是画布结构而不是这个节点的文字，
+ * 服务端按结构级对待（要整棵树锁），所以不混在「应用修改」里。
  * 桌面端那两张「所属章节 / 节点状态」原先摆的是写死的演示数据，后来换成了真实值，
  * 这里也一样：章节来自节点的稳定 chapterId，状态来自服务端的 readOnly 与当前角色权限。
  *
@@ -31,6 +38,14 @@ export type InspectorProps = {
   onEditingChange?: (focused: boolean) => void
   /** 删掉选中的这个节点（连带它的连线）。没给就不显示那个按钮。 */
   onDelete?: () => void
+  /**
+   * 画布上的连线。**断开连线放在这里**，而不是让线本身可点：
+   * 线是 1.4px 的细条、命中区域太小，而且连线层是 `pointer-events: none` 的
+   * （点线等于点空白，用来起平移）。检查器列的是「这个节点连着谁」，位置固定、点得准。
+   */
+  edges?: ShellEdge[]
+  /** 断开一根连线。没给（只读角色、画布只读）就不显示那个按钮，但列表照旧显示。 */
+  onDisconnect?: (edgeId: string) => void
   assets: Asset[]
   assetsReady: boolean
   onTitle: (value: string) => void
@@ -55,16 +70,36 @@ export function InspectorPanel(props: InspectorProps) {
         : canEdit
           ? { text: '可编辑', color: 'var(--df-success)', title: '可以改节点标题与内容；点进编辑框时会先占锁' }
           : { text: '无编辑权限', color: 'var(--df-error)', title: '当前角色没有 canvas.edit 权限' }
+  // 这个节点的连线。另一头的标题在这里解（纯函数只回答「谁连着谁」，不管那一头叫什么）。
+  const connections = selected ? nodeConnections(props.edges ?? EMPTY_EDGES, selected.recordId) : []
 
   return (
     <div className="df-section" style={{ gap: 16 }}>
       {/* 结构级动作与「改标题内容」分开摆：它动的是画布结构，服务端按结构级对待（要整棵树锁）。 */}
-      {props.onDelete && props.selected && (
+      {selected && (props.onDelete || connections.length > 0) && (
         <div className="df-section" style={{ gap: 6 }}>
           <span className="df-label">画布结构</span>
-          <button type="button" className="df-mini-button" onClick={props.onDelete}>
-            删除这个节点（连同它的连线）
-          </button>
+          {connections.map((connection) => {
+            const other = records.find((record) => record.recordId === connection.otherId)
+            const label = other ? recordTitle(other) : connection.otherId.slice(0, 8)
+            return (
+              <div key={connection.edgeId} className="df-card">
+                <div className="df-row-between" style={{ gap: 6 }}>
+                  <span className="df-muted df-ellipsis" style={{ fontSize: 11 }} title={`${connection.direction === 'out' ? '连到' : '来自'}：${label}（${connection.otherId}）`}>
+                    {connection.direction === 'out' ? '→' : '←'} {label}
+                  </span>
+                  {props.onDisconnect && (
+                    <button type="button" className="df-mini-button" onClick={() => props.onDisconnect!(connection.edgeId)}>断开</button>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+          {props.onDelete && (
+            <button type="button" className="df-mini-button" onClick={props.onDelete}>
+              删除这个节点（连同它的连线）
+            </button>
+          )}
         </div>
       )}
       <div className="df-section">
