@@ -210,6 +210,36 @@ public sealed class NodeImageBatch
     /// <summary>这一批里有几张是裂纹卡（踩中负面提示词）。</summary>
     public int CrackedCount => GradedSlots.Count(slot => slot.Quality!.IsCracked);
 
+    /// <summary>
+    /// 自动重出裂纹卡最多跑几轮。
+    ///
+    /// 为什么要有上限：裂纹来自「模型又踩了负面词」，它不是一个一次就能修好的确定性错误——
+    /// 没有上限的话，一个总是踩词的提示词会一轮一轮烧下去。两轮之后如实说「还是裂纹，请人工改提示词」，
+    /// 比无限重试诚实，也比静默放弃有用。
+    /// </summary>
+    public const int MaxCrackedRedrawRounds = 2;
+
+    /// <summary>这一批已经自动重出过几轮（界面据此说清「第几次重出」，也用来卡上限）。</summary>
+    public int CrackedRedrawRounds { get; set; }
+
+    /// <summary>还有没有自动重出的额度。</summary>
+    public bool CanRedrawCracked => CrackedRedrawRounds < MaxCrackedRedrawRounds;
+
+    /// <summary>
+    /// 这一批里需要重出的那些格（裂纹 + 额度还有）。**只挑裂纹的那几张**：
+    /// 好的那些没必要再花钱重来一遍——那正是「自动重出」与「整批重做」的区别。
+    /// </summary>
+    public IReadOnlyList<int> CrackedIndicesToRedraw()
+    {
+        if (!CanRedrawCracked) return Array.Empty<int>();
+        return Slots
+            .Select((slot, index) => (slot, index))
+            .Where(pair => !pair.slot.Removed && pair.slot.Status == BatchSlotStatus.Done
+                && pair.slot.Quality is { IsCracked: true })
+            .Select(pair => pair.index)
+            .ToList();
+    }
+
     /// <summary>一张都没成：这时该说的是「全都没出来，可以重做」，而不是摆一排失败。</summary>
     public bool AllFailed => !IsRunning && DoneCount == 0 && FailedCount > 0;
 

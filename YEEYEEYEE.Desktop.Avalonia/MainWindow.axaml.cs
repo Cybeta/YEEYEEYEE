@@ -2121,6 +2121,25 @@ public partial class MainWindow : Window, IAgentSessionHost
     // ==================== 节点右键：按内容算出来的「Agent 协助」 ====================
 
     /// <summary>
+    /// 出视频链路现在能不能跑。右键菜单据此决定那两条「出视频」建议可不可点。
+    ///
+    /// 为什么在界面这一层问：<see cref="NodeAssistPlanner"/> 是纯计算（不读配置、不碰网络），
+    /// 由拿得到设置的一侧把答案传进去——这样调度规则仍是可测的，而网页端天然只传 false
+    /// （它确实没有出视频执行方）。
+    /// </summary>
+    private bool VideoReady
+    {
+        get
+        {
+            try { return VideoProviderFactory.Create().IsConfigured; }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
     /// 右键节点 → 菜单。菜单里的条目**不是写死的**：由 <see cref="NodeAssistPlanner"/> 沿入边收集上游设定、
     /// 再按节点类型给出「提示词 / 交给 Agent / 直接出图」三类动作（角色给角色图，分镜给镜头画面，章节给拆解）。
     /// </summary>
@@ -2128,7 +2147,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         if (currentCanvas is null) return;
 
-        var plan = NodeAssistPlanner.BuildPlan(currentCanvas.Canvas, request.Node);
+        var plan = NodeAssistPlanner.BuildPlan(currentCanvas.Canvas, request.Node, videoAvailable: VideoReady);
         var menu = new MenuFlyout();
 
         // 第一行是「看到了什么」，让用户能判断待会儿的提示词是靠什么算出来的。
@@ -2228,9 +2247,16 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         if (choice.Pool.IsVideo)
         {
-            // 出视频执行方还没接入：如实拒绝，不偷偷起一个花钱的异步任务（这也是本轮明确的要求）。
-            StatusText.Text = $"「{choice.Pool.Label}」是出视频池子，但出视频执行方尚未接入：这次不生成。"
-                + "它会留在站点下，等接入执行方后可以直接用。";
+            // 视频池子只能走视频那条路：**绝不能**落进下面的出图逻辑——
+            // 那会拿一张静图冒充视频（与「图生图被偷偷改成文生图」同一类的事）。
+            var videoPlan = NodeAssistPlanner.BuildPlan(currentCanvas.Canvas, node, videoAvailable: true);
+            var videoSuggestion = videoPlan.Suggestions.FirstOrDefault(item => item.Kind == NodeAssistKind.Video);
+            if (videoSuggestion is null)
+            {
+                StatusText.Text = "这个节点没有可用的出视频建议：它既没有内容，也没有可参考的上游设定。";
+                return;
+            }
+            await ShowVideoPromptDialogAsync(node, videoSuggestion, choice);
             return;
         }
 
@@ -2304,17 +2330,201 @@ public partial class MainWindow : Window, IAgentSessionHost
                 return;
 
             case NodeAssistKind.Video:
-                // 必须**显式**挡住：default 那条路是「出图」。真让它落进 default，
-                // 将来一旦把这条建议的 CanRun 放开，用户点「出视频」会拿到一张静图——
-                // 那正是之前「图生图被偷偷改成文生图」同一类的事，不能再犯。
-                StatusText.Text = "出视频执行方还没接入：技能与站点的视频池子已经能导入，"
-                    + "但真正发请求的那一段还没写。这次不会生成任何东西。";
+                // **仍然显式分流**，不能让它落进 default：default 那条路是「出图」，
+                // 用户点「出视频」会拿到一张静图——那正是之前「图生图被偷偷改成文生图」同一类的事。
+                await ShowVideoPromptDialogAsync(node, suggestion, poolChoice: null);
                 return;
 
             default:
                 await ShowPromptDialogAsync(node, suggestion, allowGenerate: true);
                 return;
         }
+    }
+
+    /// <summary>
+    /// 出视频的提示词窗口。**与出图同一条规矩**：先把会发出去的话摆出来，再决定花不花这笔钱。
+    ///
+    /// 首帧默认用节点上最新那张图（= 这一镜的画面），没有就是文生视频——并**如实说明是哪种**，
+    /// 因为「有没有首帧」直接决定出来的是不是这一镜。视频是异步任务、动辄几分钟，这一点也先说清。
+    /// </summary>
+    private async Task ShowVideoPromptDialogAsync(WorkflowNode node, NodeAssistSuggestion suggestion, SitePoolChoice? poolChoice)
+    {
+        if (currentCanvas is null) return;
+
+        var config = AiProviderSettings.Load();
+        // 走站点池子时，地址 / 模型 / 密钥由**池子**说了算（它自带这三样）：
+        // 在配置的一份临时副本上覆盖，出视频那条链就按这一家去打——设置里那份只是兜底。
+        if (poolChoice is not null)
+        {
+            config.VideoEndpoint = poolChoice.Site.BaseUrl;
+            config.VideoModel = poolChoice.Pool.Model;
+            config.VideoApiKey = poolChoice.Site.ApiKey;
+        }
+
+        IVideoProvider provider;
+        try { provider = VideoProviderFactory.Create(config); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            StatusText.Text = $"出视频链路创建不出来：{error.Message}";
+            return;
+        }
+        if (!provider.IsConfigured)
+        {
+            StatusText.Text = poolChoice is null
+                ? "出视频链路没配好：请在「设置 → 生图与生视频 → 视频接口」里填上地址与模型。"
+                : $"「{poolChoice.Pool.Label}」这个池子缺地址或模型名，出不了视频。";
+            return;
+        }
+
+        var frame = LatestImageAttachmentPath(node);
+        var seconds = config.VideoDefaultSeconds;
+        var model = poolChoice?.Pool.Model ?? string.Empty;
+
+        var prompt = new TextBox
+        {
+            Text = suggestion.Prompt,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            Height = 190,
+            FontSize = 12
+        };
+
+        var body = new StackPanel { Margin = new Thickness(20), Spacing = 8 };
+        body.Children.Add(AgentDialogUi.Header(suggestion.Title));
+        body.Children.Add(AgentDialogUi.Note($"{node.Title} · {NodeAssistPlanner.KindLabelOf(node.Category)}"));
+        body.Children.Add(new TextBlock
+        {
+            Text = "提示词（发出去的就是这一段，可改）",
+            Foreground = AgentDialogUi.Brush("DfInk2"),
+            FontSize = 11,
+            FontWeight = FontWeight.SemiBold
+        });
+        body.Children.Add(prompt);
+        body.Children.Add(AgentDialogUi.Note(frame.Length > 0
+            ? $"首帧：节点上最新那张图（{Path.GetFileName(frame)}）——走图生视频，出来的是这一镜动起来的样子。"
+            : "这个节点上还没有图：这次走文生视频，画面由模型照着提示词自己编——先出一张这一镜的画面再来，会稳得多。",
+            frame.Length > 0 ? AgentNoteLevel.Info : AgentNoteLevel.Warning));
+        body.Children.Add(AgentDialogUi.Note(
+            $"模型：{(model.Length > 0 ? model : config.VideoModel.Length > 0 ? config.VideoModel : "（设置里没填）")}"
+            + (poolChoice is null ? string.Empty : $" · {poolChoice.Site.Label} · {poolChoice.Pool.Label}")
+            + $" · 时长：{(seconds > 0 ? seconds + " 秒" : "由服务端决定")}"
+            + "\n说明：视频是**异步任务**（提交 → 轮询 → 下载），可能等几分钟；"
+            + "这一条链一次只出一版、不会自动重试——按次计费，多出就是多花钱。"));
+
+        var go = AgentDialogUi.Primary("出这一镜的视频");
+        var cancel = AgentDialogUi.Secondary("取消");
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Spacing = 6,
+            Children = { cancel, go }
+        };
+        var dialog = DialogShell.Create($"出视频 · {node.Title}", AgentDialogUi.Layout(body, AgentDialogUi.Footer(buttons)), 620, 540);
+        cancel.Click += (_, _) => dialog.Close();
+        go.Click += (_, _) =>
+        {
+            var text = prompt.Text ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                StatusText.Text = "提示词是空的，没有发出任何请求。";
+                return;
+            }
+            dialog.Close();
+            _ = RunVideoAsync(node, text, frame, seconds, poolChoice, provider);
+        };
+        await dialog.ShowDialog(this);
+    }
+
+    /// <summary>
+    /// 真的去出这一段视频：提交、等结果、把文件挂到节点上。
+    ///
+    /// 与出图不同，这里**没有「一批」也没有「挑一张」**：一次就是一版、按次计费，
+    /// 所以成功就挂上去；失败就如实说失败，不留下半个文件冒充产物。
+    /// </summary>
+    private async Task RunVideoAsync(
+        WorkflowNode node, string prompt, string frame, int seconds, SitePoolChoice? poolChoice, IVideoProvider provider)
+    {
+        if (currentCanvas is null) return;
+
+        RecordSnapshot();
+        node.ExecutionStatus = NodeExecutionStatus.Generating;
+        CanvasSurfaceControl.Refresh();
+        StatusText.Text = $"正在出视频（{provider.Name}）：已提交，视频是异步任务，出好之前请别关窗口…";
+
+        // 走站点池子时，模型 / 地址 / 路径 / **密钥**都由选定的那个池子说了算——与出图同一条规矩。
+        var request = new VideoGenerationRequest
+        {
+            Prompt = prompt,
+            Model = poolChoice?.Pool.Model ?? string.Empty,
+            BaseUrl = poolChoice?.Site.BaseUrl ?? string.Empty,
+            EndpointPath = poolChoice?.Site.VideoPath ?? string.Empty,
+            ApiKey = poolChoice?.Site.ApiKey ?? string.Empty,
+            Seconds = seconds,
+            ReferenceImages = frame.Length > 0 ? new[] { frame } : Array.Empty<string>()
+        };
+
+        VideoGenerationResult result;
+        try
+        {
+            result = await provider.GenerateAsync(request);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
+        {
+            result = new VideoGenerationResult
+            {
+                Status = VideoGenerationStatus.Failed,
+                Provider = provider.Name,
+                Error = error.Message
+            };
+        }
+
+        // 等结果的这几分钟里用户可能已经换了画布：那时不该再往旧画布上挂东西。
+        if (currentCanvas is null) return;
+
+        if (result.Status != VideoGenerationStatus.Succeeded || result.FilePath.Length == 0)
+        {
+            node.ExecutionStatus = NodeExecutionStatus.Failed;
+            CanvasSurfaceControl.Refresh();
+            StatusText.Text = $"出视频没成（{result.Provider}）：{result.Error}";
+            return;
+        }
+
+        var reference = AssetStore.ToReference(result.FilePath);
+        if (!node.Attachments.Any(item => item.Reference == reference))
+            node.Attachments.Add(new WorkflowAttachment
+            {
+                Kind = AttachmentKind.Video,
+                Reference = reference,
+                Name = Path.GetFileName(result.FilePath),
+                Source = $"Agent 协助 · 出视频（{result.Provider} · {result.Model}）",
+                Prompt = prompt,
+                NegativePrompt = string.Empty
+            });
+        node.ExecutionStatus = NodeExecutionStatus.Completed;
+
+        CanvasSurfaceControl.Refresh();
+        RefreshResourceList();
+        // 与挂图同一个道理：少任何一步，切一次标签回来这段视频就没了。
+        RefreshOpenCenterView();
+        MarkCanvasDirty();
+        UpdateCanvasUi(currentCanvasPath ?? string.Empty);
+        StatusText.Text = $"已出视频并挂到「{node.Title}」：{Path.GetFileName(result.FilePath)} —— 记得点「保存修订」";
+    }
+
+    /// <summary>
+    /// 节点上最新那张图的本机路径（没有就返回空串）。出视频拿它当首帧。
+    /// **倒着找第一张能解析出文件的**：清单里可能留着已经进回收站的引用，那一条不能当首帧。
+    /// </summary>
+    private static string LatestImageAttachmentPath(WorkflowNode node)
+    {
+        for (var index = node.Attachments.Count - 1; index >= 0; index--)
+        {
+            var attachment = node.Attachments[index];
+            if (attachment.Kind != AttachmentKind.Image) continue;
+            if (AssetStore.Resolve(attachment.Reference) is { } path) return path;
+        }
+        return string.Empty;
     }
 
     /// <summary>
@@ -2473,7 +2683,8 @@ public partial class MainWindow : Window, IAgentSessionHost
             if (picked is null) return;
             if (picked.Pool.IsVideo)
             {
-                poolNote.Text = $"「{picked.Pool.Label}」是出视频池子：出视频执行方还没接入，选它出不了图。";
+                poolNote.Text = $"「{picked.Pool.Label}」是出视频池子，不能拿来出图；"
+                    + "出视频请到分镜节点右键选「出这一镜的视频」，或工具栏「运行技能」里挑它。";
                 return;
             }
             chosenPool = picked;
@@ -2618,7 +2829,12 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// <summary>出图后要不要让模型判档（设置里的开关，默认关——它要多花一次模型调用）。</summary>
     private bool judgeImageQuality;
 
-    /// <summary>按磁盘上的配置刷新「出图观感」那两个开关，并把开奖开关同步给画布。</summary>
+    /// <summary>
+    /// 判出裂纹卡时要不要自动重出（设置里的开关，默认开）。它**只有判档开着时才可能生效**。
+    /// </summary>
+    private bool autoRedrawCracked;
+
+    /// <summary>按磁盘上的配置刷新「出图观感」那几个开关，并把开奖开关同步给画布。</summary>
     private void RefreshRevealPreferences()
     {
         try
@@ -2626,14 +2842,17 @@ public partial class MainWindow : Window, IAgentSessionHost
             var settings = AiProviderSettings.Load();
             gachaReveal = settings.GachaReveal;
             judgeImageQuality = settings.JudgeImageQuality;
+            autoRedrawCracked = settings.AutoRedrawCrackedCards;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException
             or System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
         {
             // 读不出来就当它们关着——降级到「原来的样子」，与这两个开关的默认值一致。
             // 它们只影响观感，为它们把主流程拦下来（出图、开画布）不值得，所以这里不报错。
+            // 自动重出是**要花钱**的，读不出来时一律按关处理：宁可少花，不可多花。
             gachaReveal = false;
             judgeImageQuality = false;
+            autoRedrawCracked = false;
         }
         CanvasSurfaceControl.GachaReveal = gachaReveal;
     }
@@ -2800,6 +3019,16 @@ public partial class MainWindow : Window, IAgentSessionHost
             CanvasSurfaceControl.Refresh();
         }
 
+        // 裂纹卡自动重出：放在**判档之后**——先有档位才知道哪几张是裂纹卡（踩中了负面提示词）。
+        // 只提示、不需要用户操作，但受开关与轮数上限两道约束，见 RedrawCrackedSlotsAsync。
+        if (autoRedrawCracked && batch.CrackedCount > 0)
+        {
+            var crackNote = await RedrawCrackedSlotsAsync(node, batch, provider);
+            if (!IsLiveBatch(node.Id, batch)) return;
+            if (crackNote.Length > 0)
+                gradeNote = gradeNote.Length > 0 ? gradeNote + " " + crackNote : crackNote;
+        }
+
         // **不自动采用、不自动弹大图**。理由是一个真实反馈：出了 1 张之后照片自己弹出来、图也已经挂上了，
         // 用户既没法丢弃、也没法选择重出——因为选择权在弹出窗口之前就被替他做完了。
         // 现在单张与多张一样：图先落在节点上方那个窗口里，用不用、删不删、重做不重做都由用户点。
@@ -2818,6 +3047,76 @@ public partial class MainWindow : Window, IAgentSessionHost
                   + "：在节点上方那排窗口里挑——右键「用这一张」收进节点，「删除这一张」扔掉它，"
                   + "都不要就「全部不要，重做」；双击可以放大看。"
             : $"这一批 {count} 张都没出来：把鼠标停在格子上看原因，或点「重做这一批」。");
+    }
+
+    /// <summary>
+    /// 判出裂纹卡（踩中负面提示词）后**自动重出这几张**：同一套参数、只换结果，只提示、不需要用户操作。
+    ///
+    /// 三条边界：
+    /// ① **只重出裂纹的那几张**，不推倒整批——好的那些再花钱重来一遍是纯浪费（那正是它与「整批重做」的区别）。
+    /// ② **有轮数上限**（<see cref="NodeImageBatch.MaxCrackedRedrawRounds"/>）：总踩负面词的提示词会被一轮轮烧下去，
+    ///    到顶就如实说「还是裂纹，请人工改提示词」，而不是无限重试。
+    /// ③ **旧的那张进回收站**：出图是「生成即落盘」的，不搬走就是一个没人引用的孤儿文件。
+    ///
+    /// 返回一行给状态栏的说明（没做事就返回空串）。
+    /// </summary>
+    private async Task<string> RedrawCrackedSlotsAsync(WorkflowNode node, NodeImageBatch batch, IImageProvider provider)
+    {
+        var indices = batch.CrackedIndicesToRedraw();
+        if (indices.Count == 0)
+        {
+            // 额度用完了还在裂：如实说清，把决定权交回去（改提示词 / 改负面词，或者自己重做）。
+            return batch.CrackedCount > 0 && !batch.CanRedrawCracked
+                ? $"仍有 {batch.CrackedCount} 张裂纹卡，自动重出已达上限（{NodeImageBatch.MaxCrackedRedrawRounds} 次）：建议改改提示词或负面词再出。"
+                : string.Empty;
+        }
+
+        batch.CrackedRedrawRounds++;
+        StatusText.Text = $"判出 {indices.Count} 张裂纹卡（踩中负面提示词）：正在自动重出第 "
+            + $"{batch.CrackedRedrawRounds}/{NodeImageBatch.MaxCrackedRedrawRounds} 次，不用你操作；其余几张保持不动。";
+
+        var slots = new List<BatchSlot>();
+        foreach (var index in indices)
+        {
+            if (batch.SlotAt(index) is not { } slot) continue;
+            // 旧图先搬进回收站再把格子清空：只把 Path 清掉的话，那个文件会永远躺在资产目录里没人引用。
+            var stale = slot.Path;
+            slot.Path = string.Empty;
+            slot.Error = string.Empty;
+            slot.Quality = null;
+            slot.Status = BatchSlotStatus.Waiting;
+            if (stale.Length > 0) AssetStore.MoveToRecycleBin(AssetStore.ToReference(stale));
+            slots.Add(slot);
+        }
+        if (slots.Count == 0) return string.Empty;
+
+        var redrawn = slots.Select(slot => batch.Slots.IndexOf(slot)).Where(index => index >= 0).ToList();
+
+        batch.IsRunning = true;
+        CanvasSurfaceControl.Refresh();
+        await Task.WhenAll(slots.Select(slot => GenerateIntoSlotAsync(node, batch, slot, provider)));
+        if (!IsLiveBatch(node.Id, batch)) return string.Empty;
+        batch.IsRunning = false;
+        node.ExecutionStatus = batch.DoneCount > 0 ? NodeExecutionStatus.NeedsReview : NodeExecutionStatus.Failed;
+        CanvasSurfaceControl.Refresh();
+
+        // 重出的那几张要重新判一次（**只判它们**）：不判的话界面上留着的还是上一版的档位，
+        // 而整批再判一遍等于为没变的图白花一次模型调用。
+        if (judgeImageQuality && redrawn.Count > 0 && batch.DoneCount > 0)
+        {
+            batch.IsGrading = true;
+            CanvasSurfaceControl.Refresh();
+            await ImageQualityRunner.RunAsync(batch, redrawn);
+            if (!IsLiveBatch(node.Id, batch)) return string.Empty;
+            batch.IsGrading = false;
+            CanvasSurfaceControl.Refresh();
+        }
+
+        var note = $"已自动重出 {slots.Count} 张";
+        if (batch.CrackedCount == 0) return note + "：这一批现在没有裂纹卡了。";
+        return batch.CanRedrawCracked
+            ? note + $"，其中仍有 {batch.CrackedCount} 张是裂纹卡：还会再自动重出一次。"
+            : note + $"，但仍有 {batch.CrackedCount} 张是裂纹卡（自动重出已达上限）：建议改改提示词或负面词。";
     }
 
     /// <summary>

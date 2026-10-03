@@ -17,12 +17,19 @@ internal static class ImageQualityRunner
     /// <summary>
     /// 判完把结果写回 <paramref name="batch"/> 的格子上，并返回**一行给状态栏的说明**。
     /// 判不成时返回的是原因本身，不是「失败」两个字——用户需要知道是缺模型、还是模型给的分数不规范。
+    ///
+    /// <paramref name="onlyIndices"/> 只判指定的那几格（自动重出后补判用）：重出只换了裂纹的那几张，
+    /// 把整批再判一遍等于为没变的图白花一次模型调用。
     /// </summary>
-    public static async Task<string> RunAsync(NodeImageBatch batch, CancellationToken cancellationToken = default)
+    public static async Task<string> RunAsync(
+        NodeImageBatch batch,
+        IReadOnlyList<int>? onlyIndices = null,
+        CancellationToken cancellationToken = default)
     {
         var candidates = new List<int>();
         for (var index = 0; index < batch.Count; index++)
         {
+            if (onlyIndices is not null && !onlyIndices.Contains(index)) continue;
             if (batch.SlotAt(index) is { Removed: false, Status: BatchSlotStatus.Done, Path.Length: > 0 })
                 candidates.Add(index);
         }

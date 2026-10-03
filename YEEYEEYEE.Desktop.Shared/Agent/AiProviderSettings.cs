@@ -145,6 +145,17 @@ public sealed class AiProviderConfig
     public bool JudgeImageQuality { get; set; }
 
     /// <summary>
+    /// 出图后判出**裂纹卡**（踩中负面提示词的那几张）时，自动按同一套参数把这几张重出一遍，
+    /// 只在状态栏说一声，**不需要用户操作**。
+    ///
+    /// 为什么单独一个开关：它是在用户已经点过「出图」之后**再花一次钱**，不是零成本的自动化。
+    /// 默认开（这是产品要的行为），但它**只有判档开着时才可能生效**——判档默认关，
+    /// 所以没开判档的人不会被它多花一分钱。重出只针对裂纹的那几张，不会把整批推倒重来；
+    /// 轮数上限见 <see cref="NodeImageBatch.MaxCrackedRedrawRounds"/>，避免一直命中一直重出。
+    /// </summary>
+    public bool AutoRedrawCrackedCards { get; set; } = true;
+
+    /// <summary>
     /// 图像接口一次最多能同时使用几张参考图。1 表示只支持单张底图，0 表示不限制。
     /// 这是接口（模型）的能力，不是画布的限制；ComfyUI 链路的上限由工作流模板声明，不使用该值。
     /// </summary>

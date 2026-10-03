@@ -83,7 +83,10 @@ public enum NodeAssistKind
     /// <summary>直接调图像链路出图，结果挂到节点上。</summary>
     Image,
 
-    /// <summary>调出视频链路。**执行方当前尚未接入**，菜单上会如实标出这一条现在跑不了。</summary>
+    /// <summary>
+    /// 调出视频链路。**执行方已接入**（第 183 轮），但只有配置齐了、且这个节点有素材时才可点；
+    /// 不满足时菜单上如实标出原因。
+    /// </summary>
     Video
 }
 
@@ -306,11 +309,18 @@ public static class NodeAssistPlanner
         return string.Join("\n", lines);
     }
 
-    /// <summary>按节点类型算这一份计划（素材 + 可跑的建议 + 每条建议的提示词）。</summary>
+    /// <summary>
+    /// 按节点类型算这一份计划（素材 + 可跑的建议 + 每条建议的提示词）。
+    ///
+    /// <paramref name="videoAvailable"/> 由调用方从配置里问出来（这一层不碰配置文件、不碰网络）：
+    /// 出视频执行方接上之后，那两条「出视频」建议才可能可点。默认 false = 桌面端之外的调用方
+    /// （例如网页端）仍旧看到「跑不了」——它们确实没有那个执行方。
+    /// </summary>
     public static NodeAssistPlan BuildPlan(
         WorkflowCanvasState canvas,
         WorkflowNode node,
-        int maxDepth = DefaultMaxDepth)
+        int maxDepth = DefaultMaxDepth,
+        bool videoAvailable = false)
     {
         var sources = CollectUpstream(canvas, node, maxDepth);
         var materials = CollectMaterial(canvas, node, maxDepth);
@@ -347,9 +357,9 @@ public static class NodeAssistPlanner
 
             case NodeCategory.Storyboard:
                 suggestions.Add(Image(node, contextText, blocked, "storyboard-frame", "出这一镜的画面", "电影感单帧：按镜头描述构图，人物与场景沿用素材设定，注意景别与光线方向"));
-                // 出视频：先如实摆出来，再如实说它现在跑不了。
+                // 出视频：先如实摆出来，再如实说它现在跑不跑得了。
                 // 藏起来的话，用户会以为这个应用根本没有出视频这条路——而站点里明明已经导进视频池子了。
-                suggestions.Add(Video(node, contextText, "storyboard-video", "出这一镜的视频",
+                suggestions.Add(Video(node, contextText, blocked, videoAvailable, "storyboard-video", "出这一镜的视频",
                     "把这一镜拍成一段镜头：以这一镜的画面为首帧，人物与场景沿用素材设定，一个镜头内完成主体动作"));
                 suggestions.Add(PromptOnly(node, contextText, blocked, "storyboard-sheet", "生成镜头提示词（含景别与运镜）", "把这一个镜头写成可执行的出图提示词：景别、主体动作、环境、光线、画幅与运镜备注"));
                 suggestions.Add(Agent(node, hasMaterial, contextText, blocked, "storyboard-generation", "让 Agent 把这一镜拆细"));
@@ -367,8 +377,13 @@ public static class NodeAssistPlanner
                 break;
 
             case NodeCategory.Product:
-                suggestions.Add(Video(node, contextText, "product-video", "出这一版的成片视频",
-                    "把这一版做成成片：按分镜顺序串起每一镜的视频，保持人物与场景一致"));
+                // 成片那一条**恒不可执行**，而且与「有没有配视频接口」无关：
+                // 它的要求是「把每一镜串起来」，而出视频接口只会按提示词生成**一段**画面——
+                // 让它可点，用户拿到的就是一段凭空生成的镜头，而不是他那一版成片。
+                // 与其偷偷换成一个别的东西，不如如实说这一步还没做（与「图生图被改成文生图」同一类的事）。
+                suggestions.Add(Video(node, contextText, blocked, available: false, "product-video", "出这一版的成片视频",
+                    "把这一版做成成片：按分镜顺序串起每一镜的视频，保持人物与场景一致",
+                    alwaysBlocked: "「把每一镜串成成片」这一步还没实现：先到各个分镜节点出视频，成片暂时要自己拼。"));
                 suggestions.Add(PromptOnly(node, contextText, blocked, "product-note", "生成成品说明提示词", "描述这一版成品与前一版的差别、采纳理由与后续修改点"));
                 break;
 
@@ -445,22 +460,32 @@ public static class NodeAssistPlanner
     }
 
     /// <summary>
-    /// 出视频那一条。**恒定不可执行**：执行方还没接入。
+    /// 出视频那一条。能不能跑由 <paramref name="available"/> 决定（调用方问过配置），
+    /// 但**无论能不能跑都摆在菜单里**：站点下面确实能导进视频池子，菜单里一个字都没有的话，
+    /// 用户会以为「这个应用不支持出视频」，而不是「还差配置」——前者会让他去找别的工具。
     ///
-    /// 为什么照样列在菜单里：站点下面确实能导进视频池子，菜单里一个字都没有的话，
-    /// 用户会以为「这个应用不支持出视频」，而不是「代码还没接完」——前者会让他去找别的工具。
-    /// 说明写清楚，他就知道东西已经备好了、只等执行方。
+    /// 可跑时仍要过「有没有素材」那一关：一个既没内容又没上游的分镜，让模型去编是不负责任的。
+    ///
+    /// <paramref name="alwaysBlocked"/> 给的是**与配置无关**的挡住理由（成片那一层就是这种：
+    /// 出视频接口只会生成一段画面，串不成成片）。它优先于一切，因为「做不到」和「没配好」是两件事。
     /// </summary>
     private static NodeAssistSuggestion Video(
         WorkflowNode node,
         string contextText,
+        string blocked,
+        bool available,
         string id,
         string title,
-        string shot) =>
+        string shot,
+        string alwaysBlocked = "") =>
         new(id, title, NodeAssistKind.Video, "video-generation",
             ComposeShotPrompt(node, contextText, shot), NegativeFor(node),
-            "出视频执行方还没接入：技能与站点的视频池子都已经能导入，但真正发请求的那一段还没写。"
-            + "这一条现在跑不了，先按上面的「出图」把每一镜的底图做出来，接入后可以直接出视频。");
+            alwaysBlocked.Length > 0
+                ? alwaysBlocked
+                : available
+                    ? blocked
+                    : "还没有可用的出视频链路：请在「设置 → 生图与生视频 → 视频接口」里填上地址与模型。"
+                      + "在那之前，先按上面的「出图」把每一镜的底图做出来。");
 
     private static NodeAssistSuggestion Agent(
         WorkflowNode node,

@@ -24,7 +24,7 @@ namespace YEEYEEYEE.Desktop.Avalonia;
 ///
 /// 三条边界，与旧端一致：
 /// · **每一步都如实报出**：抓不到页面、没解析出接口、写不进配置、测试失败，都显示真实原因，不显示成功；
-/// · **不伪造产物**：最小测试真的调一次接口；出视频链路尚未接入实现时明说，不拿别的文件冒充视频；
+/// · **不伪造产物**：最小测试真的调一次接口；出视频链路没配好时明说，不拿别的文件冒充视频；
 /// · **只写该写的**：密钥加密落盘，界面绝不回显完整密钥。
 ///
 /// 一处**刻意的改进**：密钥写进图像 / 视频各自的字段（<see cref="AiProviderConfig.ImageApiKey"/> /
@@ -890,10 +890,10 @@ internal sealed class SettingsApiImportDialog
         var provider = videoProviderFactory();
         if (!provider.IsConfigured)
         {
-            // 出视频执行方还没接入：如实说明，不拿别的文件冒充视频。
+            // 视频链路没配好：如实说明，不拿别的文件冒充视频。
             SetStatus("最小测试未执行：出视频链路当前不可用。"
                 + Environment.NewLine + "· " + plan.Reason
-                + Environment.NewLine + "· 技能与密钥都已保存完成；等接入出视频执行方后可直接运行这些技能。"
+                + Environment.NewLine + "· 技能与密钥都已保存完成；在「设置 → 生图与生视频 → 视频接口」里填上地址与模型后，这些技能就能直接运行。"
                 + (plan.Warning.Length > 0 ? Environment.NewLine + "· " + plan.Warning : string.Empty));
             return;
         }

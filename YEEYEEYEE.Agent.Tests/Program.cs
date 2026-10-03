@@ -221,6 +221,13 @@ var tests = new (string Name, Action Run)[]
     ("返工 G6-T1：打开之后库被删也在执行前核验出来（旧标记不算数）", AuthorityRecheckCatchesLaterDeletedLibrary),
     ("返工 G6-T2：发布结果区分「真落库」与「本地内容」，本地实体不谎报已保存", PublishOutcomeDistinguishesLocalAndShared),
     ("版本策略：存在版本可锁定，缺失版本拒绝且不静默降级", ReferenceVersionPolicy),
+    ("出视频：按「提交 → 轮询 → 下载」跑通并把文件落到资产目录", VideoProviderSubmitsPollsAndDownloads),
+    ("出视频：任务失败带出接口原因，返回体不认识就把原文报出来（不产空文件）", VideoProviderReportsFailureAndUnknownShape),
+    ("出视频：密钥绝不外送到别的域（预签名 CDN 只收字节）", VideoProviderNeverSendsKeyToForeignHost),
+    ("出视频：容器按文件头认（mp4 / webm / 认不出退回 mp4）", VideoFormatSnifferReadsContainer),
+    ("出视频：地址 + 模型齐了才给真执行方，缺的时候指明去哪里配", VideoProviderFactoryNeedsEndpointAndModel),
+    ("节点协助：出视频那条可不可点跟着执行方走，没素材仍要挡住", NodeAssistVideoFollowsProviderAvailability),
+    ("裂纹卡自动重出：只挑裂纹那几张，且受轮数上限约束", CrackedRedrawPicksOnlyCrackedWithinCap),
 };
 
 var failures = new List<string>();
@@ -4657,16 +4664,15 @@ static void ApiSkillExecutionContractIsHonored()
     Expect(!body!.Contains("wrong-model"), "不得用设置里的默认模型覆盖步骤里的模型");
     Expect(variant.Attachments.Count == 1 && variant.Attachments[0].Kind == AttachmentKind.Image, "产出应写入变体附件");
 
-    // 规划态：异步视频链路还没有执行方，运行必须被明确拒绝
+    // 视频技能**不再是规划态**（第 183 轮接上了出视频执行方）；没配视频链路时由运行侧如实拒绝。
     var videoPlan = ApiSkillFactory.Build(ApiDocAnalyzer.Analyze(
         "POST /v1/videos\nmodel: veo-3\n720p\n文生视频", "https://api.example.com/docs"));
     var video = videoPlan.VideoSkills.FirstOrDefault();
     Expect(video is not null, "应建出视频技能");
-    Expect(video!.Definition.IsPlannedOnly, "视频技能应标为规划态");
-    Expect(videoPlan.Warnings.Any(warning => warning.Contains("规划态")), "应告知用户这类技能是规划态：" + string.Join("；", videoPlan.Warnings));
+    Expect(!video!.Definition.IsPlannedOnly, "出视频执行方已接入，视频技能不该再标成规划态");
     var refused = SkillRunner.RunAsync(video.Definition, new SkillTarget { Entity = entity, Variant = variant }, provider)
         .GetAwaiter().GetResult();
-    Expect(!refused.Succeeded && refused.Message.Contains("不可执行"), "规划态技能应被明确拒绝：" + refused.Message);
+    Expect(!refused.Succeeded && refused.Message.Contains("出视频链路"), "没有可用的出视频实现时要如实拒绝：" + refused.Message);
 
     // 不支持的协议在创建前就阻断
     var getOnly = ApiSkillFactory.Build(ApiDocAnalyzer.Analyze("GET /v1/images/generations 文生图", "https://api.example.com/docs"));
@@ -7643,16 +7649,16 @@ static void GenerationAuditReportsDependencyChain()
 	Expect(generationAuditLayer2.Missing[0].ActionNodeId == workflowNode4.Id, "缺的是分镜 2");
 	GenerationAuditLayer generationAuditLayer3 = generationAuditReport.Layers.First((GenerationAuditLayer layer) => layer.Stage == GenerationStage.StoryboardVideo);
 	Expect(generationAuditLayer3.TargetCount == 2 && generationAuditLayer3.MissingCount == 2, "两镜都还没有视频");
-	Expect(!generationAuditLayer3.Executable, "出视频执行方还没接入，这一层必须如实说不可执行");
-	Expect(generationAuditLayer3.ExecutableNote.Contains("没接入"), "不可执行要给原因，实际：" + generationAuditLayer3.ExecutableNote);
+	Expect(generationAuditLayer3.Executable, "出视频执行方已接入（第 183 轮），这一层应当是可执行的");
+	Expect(generationAuditLayer3.ExecutableNote.Contains("出这一镜的视频"), "可执行时要指出从哪儿出，实际：" + generationAuditLayer3.ExecutableNote);
 	GenerationAuditLayer generationAuditLayer4 = generationAuditReport.Layers.First((GenerationAuditLayer layer) => layer.Stage == GenerationStage.ProductVideo);
 	Expect(generationAuditLayer4.TargetCount == 1 && generationAuditLayer4.MissingCount == 1, "成品的成片视频也缺");
 	Expect(generationAuditLayer4.Missing[0].Stage == GenerationStage.ProductVideo, "成品缺的是第 4 层，不是分镜那一层");
 	Expect(generationAuditReport.Describe().Contains("设定图 缺 1/1"), "摘要要按层报数，实际：" + generationAuditReport.Describe());
 	Expect(generationAuditReport.Describe().Contains("成品视频 缺 1/1"), "四层都要报，实际：" + generationAuditReport.Describe());
 	IReadOnlyList<GenerationAuditItem> defaultChecked = generationAuditReport.DefaultChecked;
-	Expect(defaultChecked.Count == 2, "出视频意图下预勾 = 设定图 1 + 分镜图 1（跑不了的那两层不勾），实际 " + defaultChecked.Count);
-	Expect(defaultChecked.All((GenerationAuditItem item) => item.Stage != GenerationStage.StoryboardVideo), "跑不了的层不该被预勾");
+	Expect(defaultChecked.Count == 4, "出视频意图下预勾 = 设定图 1 + 分镜图 1 + 分镜视频 2，实际 " + defaultChecked.Count);
+	Expect(defaultChecked.Any((GenerationAuditItem item) => item.Stage == GenerationStage.StoryboardVideo), "视频那两层现在能跑，出视频意图下就该一起勾上");
 	Expect(defaultChecked.All((GenerationAuditItem item) => item.Actionable), "预勾的每一项都要真的能生成");
 	IReadOnlyList<GenerationAuditItem> defaultChecked2 = generationAuditReport.WithIntent(GenerationIntent.Images).DefaultChecked;
 	Expect(defaultChecked2.Count == 1 && defaultChecked2[0].Stage == GenerationStage.SettingImage, "只补图时分镜图不是前置（它就是这次要做的事），只剩设定图那 1 件，实际 " + defaultChecked2.Count);
@@ -9401,6 +9407,273 @@ static bool HasOwnRow(IEnumerable<StoryRow> roots, Guid nodeId)
 	return false;
 }
 
+/// <summary>
+/// 出视频：提交 → 轮询 → 下载。全程桩 HttpClient，不访问网络。
+/// 钉住三件：请求打在哪（路径 / 模型 / 提示词）、轮询真的等到了终态、字节真的落进资产目录。
+/// </summary>
+static void VideoProviderSubmitsPollsAndDownloads()
+{
+	using var stores = new IsolatedStores();
+	var previousInterval = HttpVideoProvider.PollInterval;
+	HttpVideoProvider.PollInterval = TimeSpan.Zero;   // 测试不白等 5 秒
+	try
+	{
+		var seen = new List<(string Method, string Url, string? Auth, string? Body)>();
+		var polls = 0;
+		var handler = new StubHttpHandler(request =>
+		{
+			var url = request.RequestUri!.ToString();
+			seen.Add((
+				request.Method.Method,
+				url,
+				request.Headers.TryGetValues("Authorization", out var values) ? values.FirstOrDefault() : null,
+				request.Content?.ReadAsStringAsync().GetAwaiter().GetResult()));
+
+			if (url.EndsWith("/videos", StringComparison.Ordinal))
+				return JsonResponse("""{"id":"vid-1","status":"queued"}""");
+			if (url.EndsWith("/content", StringComparison.Ordinal))
+				return BytesResponse(Mp4Bytes());
+			polls++;
+			return JsonResponse(polls == 1
+				? """{"id":"vid-1","status":"in_progress"}"""
+				: """{"id":"vid-1","status":"completed"}""");
+		});
+
+		var config = new AiProviderConfig
+		{
+			Endpoint = "https://api.example.com/v1",
+			Model = "chat",
+			ApiKey = "sk-secret",
+			VideoModel = "veo-3"
+		};
+		var provider = new HttpVideoProvider(config, new HttpClient(handler));
+		Expect(provider.IsConfigured, "视频地址留空可复用主接口，加上模型名就算配置好了");
+
+		var result = provider.GenerateAsync(new VideoGenerationRequest { Prompt = "雨夜码头，林晚回头" })
+			.GetAwaiter().GetResult();
+
+		Expect(result.Status == VideoGenerationStatus.Succeeded, "整条路应跑通：" + result.Error);
+		Expect(result.Model == "veo-3", "应把设置里的视频模型带上");
+		Expect(File.Exists(result.FilePath), "结果文件应真的落盘");
+		Expect(result.FilePath.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase),
+			"ftyp 开头的应认成 mp4：" + result.FilePath);
+		Expect(string.Equals(Path.GetDirectoryName(result.FilePath), AssetStore.EnsureDirectory(), StringComparison.OrdinalIgnoreCase),
+			"视频要落在项目资产目录里，不能落在临时目录");
+		Expect(seen[0].Url == "https://api.example.com/v1/videos", "提交应打 /videos：" + seen[0].Url);
+		Expect(seen[0].Method == "POST" && seen[0].Body is not null, "提交应当是 POST 且带体");
+		// 按 JSON 取值而不是拿字符串找中文：序列化器会把中文转义成 \uXXXX，直接 Contains 会误判成「没带上」。
+		using (var submitted = JsonDocument.Parse(seen[0].Body!))
+		{
+			Expect(submitted.RootElement.GetProperty("model").GetString() == "veo-3", "提交体要带模型");
+			Expect(submitted.RootElement.GetProperty("prompt").GetString() == "雨夜码头，林晚回头", "提交体要带提示词原文");
+		}
+		Expect(polls == 2, "应轮询到终态才停（in_progress → completed），实际 " + polls + " 次");
+		Expect(seen[^1].Auth == "Bearer sk-secret", "同源下载地址应带上鉴权");
+		Expect(new FileInfo(result.FilePath).Length == Mp4Bytes().Length, "落盘的应是下载回来的那几字节");
+	}
+	finally { HttpVideoProvider.PollInterval = previousInterval; }
+}
+
+/// <summary>
+/// 出视频的失败与「不认识」两种情形都要如实报：
+/// 任务状态 failed 要带出接口给的原因；返回体里既没有任务号也没有地址时，把原文摘一段报出来。
+/// **绝不产出空文件冒充视频**。
+/// </summary>
+static void VideoProviderReportsFailureAndUnknownShape()
+{
+	using var stores = new IsolatedStores();
+	var previousInterval = HttpVideoProvider.PollInterval;
+	HttpVideoProvider.PollInterval = TimeSpan.Zero;
+	try
+	{
+		var config = new AiProviderConfig { Endpoint = "https://api.example.com/v1", ApiKey = "sk-secret", VideoModel = "veo-3" };
+
+		// ① 不认识返回体：没有 id、没有下载地址。
+		var unknown = new HttpVideoProvider(config, new HttpClient(new StubHttpHandler(_ => JsonResponse("""{"ok":true}"""))));
+		var unknownResult = unknown.GenerateAsync(new VideoGenerationRequest { Prompt = "x" }).GetAwaiter().GetResult();
+		Expect(unknownResult.Status == VideoGenerationStatus.Failed, "形状不认识时应失败");
+		Expect(unknownResult.Error.Contains("""{"ok":true}"""), "应把返回体原文摘出来，而不是只说一句「失败」：" + unknownResult.Error);
+		Expect(unknownResult.FilePath.Length == 0, "失败时不得给出文件路径");
+
+		// ② 任务失败：原因要来自接口，不能是「视频任务失败」四个字。
+		var failing = new HttpVideoProvider(config, new HttpClient(new StubHttpHandler(request =>
+			request.RequestUri!.AbsolutePath.EndsWith("/videos", StringComparison.Ordinal)
+				? JsonResponse("""{"id":"vid-2","status":"queued"}""")
+				: JsonResponse("""{"id":"vid-2","status":"failed","error":{"message":"额度不足"}}"""))));
+		var failingResult = failing.GenerateAsync(new VideoGenerationRequest { Prompt = "x" }).GetAwaiter().GetResult();
+		Expect(failingResult.Status == VideoGenerationStatus.Failed, "任务失败应如实失败");
+		Expect(failingResult.Error.Contains("额度不足"), "失败原因要来自接口：" + failingResult.Error);
+
+		// ③ 提示词为空：一次请求都不该发出去。
+		var called = 0;
+		var empty = new HttpVideoProvider(config, new HttpClient(new StubHttpHandler(_ => { called++; return JsonResponse("{}"); })));
+		var emptyResult = empty.GenerateAsync(new VideoGenerationRequest()).GetAwaiter().GetResult();
+		Expect(emptyResult.Status == VideoGenerationStatus.Failed && called == 0, "提示词为空时不得发出任何请求");
+	}
+	finally { HttpVideoProvider.PollInterval = previousInterval; }
+}
+
+/// <summary>
+/// **密钥绝不外送**：下载地址落在别的域（预设签名的 CDN）时，请求不能带上我们的 API Key。
+/// 这条是安全边界，不是优化——附上去等于把密钥交给了第三方。
+/// </summary>
+static void VideoProviderNeverSendsKeyToForeignHost()
+{
+	using var stores = new IsolatedStores();
+	var previousInterval = HttpVideoProvider.PollInterval;
+	HttpVideoProvider.PollInterval = TimeSpan.Zero;
+	try
+	{
+		string? downloadAuth = "（没发出去）";
+		var handler = new StubHttpHandler(request =>
+		{
+			var url = request.RequestUri!.ToString();
+			if (url.EndsWith("/videos", StringComparison.Ordinal))
+				return JsonResponse("""{"id":"vid-3","status":"queued"}""");
+			if (url.StartsWith("https://cdn.other.example.net/", StringComparison.Ordinal))
+			{
+				downloadAuth = request.Headers.TryGetValues("Authorization", out var values) ? values.FirstOrDefault() : null;
+				return BytesResponse(Mp4Bytes());
+			}
+			return JsonResponse("""{"id":"vid-3","status":"completed","url":"https://cdn.other.example.net/v.mp4"}""");
+		});
+
+		var config = new AiProviderConfig { Endpoint = "https://api.example.com/v1", ApiKey = "sk-secret", VideoModel = "veo-3" };
+		var result = new HttpVideoProvider(config, new HttpClient(handler))
+			.GenerateAsync(new VideoGenerationRequest { Prompt = "x" }).GetAwaiter().GetResult();
+
+		Expect(result.Status == VideoGenerationStatus.Succeeded, "外域地址照样能下载成功：" + result.Error);
+		Expect(downloadAuth is null, "别的域上绝不能带 Authorization，实际：" + downloadAuth);
+		Expect(!HttpVideoProvider.IsSameOrigin("https://api.example.com/v1", "https://cdn.other.example.net/v.mp4"),
+			"不同主机应判为不同源");
+		Expect(HttpVideoProvider.IsSameOrigin("https://api.example.com/v1", "https://api.example.com/v1/videos/x/content"),
+			"同主机同端口应判为同源");
+	}
+	finally { HttpVideoProvider.PollInterval = previousInterval; }
+}
+
+/// <summary>视频容器按文件头认：存错扩展名会让播放器与后续转码判错格式。</summary>
+static void VideoFormatSnifferReadsContainer()
+{
+	Expect(VideoFormatSniffer.ExtensionOf(Mp4Bytes()) == ".mp4", "ftyp 头是 mp4");
+	Expect(VideoFormatSniffer.ExtensionOf(WebmBytes()) == ".webm", "EBML 头是 webm");
+	Expect(VideoFormatSniffer.ExtensionOf(new byte[4]) == ".mp4", "太短认不出来时退回 mp4，不抛异常");
+	Expect(VideoFormatSniffer.ExtensionOf(null) == ".mp4", "空字节退回 mp4");
+}
+
+/// <summary>出视频执行方要「地址 + 模型」齐了才给：缺一不可，且缺的时候如实说缺什么。</summary>
+static void VideoProviderFactoryNeedsEndpointAndModel()
+{
+	var noModel = VideoProviderFactory.Create(new AiProviderConfig { Endpoint = "https://api.example.com/v1", ApiKey = "sk" });
+	Expect(!noModel.IsConfigured, "只填地址没填模型不算配置好");
+
+	var ready = VideoProviderFactory.Create(new AiProviderConfig { Endpoint = "https://api.example.com/v1", ApiKey = "sk", VideoModel = "veo-3" });
+	Expect(ready.IsConfigured, "地址 + 模型齐了应给出真执行方");
+	Expect(ready is HttpVideoProvider, "应给出 HTTP 那条实现，而不是「未配置」兜底");
+
+	var bare = VideoProviderFactory.Create(new AiProviderConfig());
+	Expect(!bare.IsConfigured && bare is UnconfiguredVideoProvider, "什么都没填时是兜底执行方");
+	var refused = bare.GenerateAsync(new VideoGenerationRequest { Prompt = "x" }).GetAwaiter().GetResult();
+	Expect(refused.Status == VideoGenerationStatus.NotConfigured && refused.FilePath.Length == 0,
+		"兜底执行方不得产出任何文件");
+	Expect(refused.Error.Contains("视频接口"), "兜底的说法要指明去哪里配：" + refused.Error);
+}
+
+/// <summary>
+/// 「出这一镜的视频」这条建议的可点性跟着**有没有执行方**走，
+/// 但**没有素材时仍然要挡住**——让模型对着空节点编一段视频是不负责任的。
+/// </summary>
+static void NodeAssistVideoFollowsProviderAvailability()
+{
+	var canvas = new WorkflowCanvasState();
+	var storyboard = new WorkflowNode { Title = "分镜一 · 末班公交", Category = NodeCategory.Storyboard, Content = "林晚在雨里回头" };
+	canvas.Nodes.Add(storyboard);
+
+	var off = NodeAssistPlanner.BuildPlan(canvas, storyboard).Suggestions
+		.FirstOrDefault(item => item.Kind == NodeAssistKind.Video);
+	Expect(off is not null, "分镜节点应当有「出这一镜的视频」这一条");
+	Expect(!off!.CanRun && off.Blocked.Contains("出视频链路"), "没有执行方时挡住并说清去哪里配：" + off.Blocked);
+
+	var on = NodeAssistPlanner.BuildPlan(canvas, storyboard, videoAvailable: true).Suggestions
+		.FirstOrDefault(item => item.Kind == NodeAssistKind.Video);
+	Expect(on!.CanRun, "执行方就绪且有内容时这一条应当可点：" + on.Blocked);
+
+	var blank = new WorkflowNode { Title = "分镜二", Category = NodeCategory.Storyboard };
+	canvas.Nodes.Add(blank);
+	var blankVideo = NodeAssistPlanner.BuildPlan(canvas, blank, videoAvailable: true).Suggestions
+		.FirstOrDefault(item => item.Kind == NodeAssistKind.Video);
+	Expect(blankVideo is not null && !blankVideo.CanRun && blankVideo.Blocked.Length > 0,
+		"空节点即使执行方就绪也要写明为什么不能出");
+
+	// 成片那一条**恒不可执行**：出视频接口一次只生成一段画面，串不成成片——
+	// 让它跟着执行方变成可点，等于偷偷换成别的东西。
+	var product = new WorkflowNode { Title = "成片 v1", Category = NodeCategory.Product, Content = "全片" };
+	canvas.Nodes.Add(product);
+	var productVideo = NodeAssistPlanner.BuildPlan(canvas, product, videoAvailable: true).Suggestions
+		.FirstOrDefault(item => item.Kind == NodeAssistKind.Video);
+	Expect(productVideo is not null && !productVideo.CanRun && productVideo.Blocked.Contains("串成成片"),
+		"成片那一条要如实说「串片还没做」，而不是跟着执行方变成可点：" + productVideo?.Blocked);
+}
+
+/// <summary>
+/// 裂纹卡自动重出：**只挑「出好了且是裂纹」的那几张**，并且受轮数上限约束（避免一直命中一直烧钱）。
+/// </summary>
+static void CrackedRedrawPicksOnlyCrackedWithinCap()
+{
+	var cracked = QualityJudgement.ToGrades(
+		new[] { 0 },
+		new[] { new QualityScore(1, 8, new[] { "水印" }, "画面上有字") })[0].Quality;
+
+	var batch = new NodeImageBatch { NodeId = Guid.NewGuid() };
+	batch.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done, Path = "a.png", Quality = cracked });
+	batch.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done, Path = "b.png" });
+	batch.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Failed });
+	Expect(batch.CrackedCount == 1, "只有那一张踩中负面词，数出来就该是 1");
+
+	var picked = batch.CrackedIndicesToRedraw();
+	Expect(picked.Count == 1 && picked[0] == 0, "只重出裂纹那张，好的与失败的不动：" + string.Join(",", picked));
+	Expect(batch.CanRedrawCracked, "还没重出过，额度应还在");
+
+	batch.CrackedRedrawRounds++;
+	Expect(batch.CanRedrawCracked, "第 1 轮之后额度还没用完");
+	batch.CrackedRedrawRounds = NodeImageBatch.MaxCrackedRedrawRounds;
+	Expect(!batch.CanRedrawCracked, "到上限就不再有额度");
+	Expect(batch.CrackedIndicesToRedraw().Count == 0, "没额度时不再挑任何一张，避免无限烧钱");
+
+	// 用户自己删掉的那一格也不该被重出。
+	batch.CrackedRedrawRounds = 0;
+	batch.Slots[0].Removed = true;
+	Expect(batch.CrackedIndicesToRedraw().Count == 0, "已删掉的格子不再重出");
+}
+
+/// <summary>一个 JSON 桩响应。</summary>
+static HttpResponseMessage JsonResponse(string body) => new(HttpStatusCode.OK)
+{
+	Content = new StringContent(body, Encoding.UTF8, "application/json")
+};
+
+/// <summary>一段字节桩响应（下载视频用）。</summary>
+static HttpResponseMessage BytesResponse(byte[] bytes) => new(HttpStatusCode.OK)
+{
+	Content = new ByteArrayContent(bytes)
+};
+
+/// <summary>一个最小 mp4 文件头（第 4-8 字节是 ftyp）。</summary>
+static byte[] Mp4Bytes()
+{
+	var bytes = new byte[32];
+	bytes[4] = 0x66; bytes[5] = 0x74; bytes[6] = 0x79; bytes[7] = 0x70;
+	return bytes;
+}
+
+/// <summary>一个最小 webm 文件头（EBML 魔数）。</summary>
+static byte[] WebmBytes()
+{
+	var bytes = new byte[32];
+	bytes[0] = 0x1A; bytes[1] = 0x45; bytes[2] = 0xDF; bytes[3] = 0xA3;
+	return bytes;
+}
+
 static class Sample
 {
     /// <summary>1x1 透明 PNG：用真实图片字节，而不是随便凑一段数据。</summary>
@@ -9482,6 +9755,7 @@ sealed class IsolatedStores : IDisposable
         try { if (Directory.Exists(Root)) Directory.Delete(Root, true); } catch (IOException) { }
     }
 }
+
 
 /// <summary>按请求返回响应的桩 HttpClient：账号查询这类要按路径分支的调用用它，不访问网络。</summary>
 sealed class StubHttpHandler : HttpMessageHandler

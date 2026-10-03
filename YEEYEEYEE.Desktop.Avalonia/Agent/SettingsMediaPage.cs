@@ -324,8 +324,10 @@ internal static class SettingsMediaPage
         // 这句是「如实相告」而不是客套：视频是异步任务、要轮询、也可能按次计费，
         // 用户看到「测试连接」很自然会以为它会跑一次生成，必须先说清不会。
         root.Children.Add(Note(
-            "说明：视频接口的「测试连接」只验证链路是否已配置（地址 + 模型）以及执行方是否接入，" +
-            "不会真的提交生成任务——视频是异步任务，要花钱、还要轮询，一个测试按钮不该顺手起这个任务。"));
+            "说明：视频接口的「测试连接」只验证链路是否已配置（地址 + 模型），" +
+            "不会真的提交生成任务——视频是异步任务，要花钱、还要轮询，一个测试按钮不该顺手起这个任务。" +
+            "真要出视频：在分镜节点上右键选「出这一镜的视频」，它按「提交 → 轮询 → 下载」走，" +
+            "首帧默认用节点上最新那张图（= 这一镜的画面）。"));
 
         var testVideo = Secondary("测试连接");
         testVideo.HorizontalAlignment = HorizontalAlignment.Left;
@@ -338,16 +340,14 @@ internal static class SettingsMediaPage
             var provider = VideoProviderFactory.Create(config);
             if (!provider.IsConfigured)
             {
-                var reason = config.IsVideoConfigured
-                    ? "地址与模型已填，但出视频执行方尚未接入实现。"
-                    : "请在「视频接口」里填上地址与模型。";
-                report($"视频链路未就绪（{provider.Name}）：{reason}本次只做配置检查，没有提交生成任务。",
+                report($"视频链路未就绪（{provider.Name}）：请在「视频接口」里填上地址与模型。"
+                    + "本次只做配置检查，没有提交生成任务。",
                     YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Warning);
                 return;
             }
 
-            report($"视频链路已配置（{provider.Name} · {config.VideoModel}）。本次没有提交生成任务。",
-                YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Success);
+            report($"视频链路已就绪（{provider.Name} · {config.VideoModel}）：提交 → 轮询 → 下载这条路已经能跑。"
+                + "本次没有提交生成任务。", YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Success);
         };
         root.Children.Add(testVideo);
 
@@ -398,6 +398,24 @@ internal static class SettingsMediaPage
             "角色与物体互相嵌进去。**踩中负面提示词的那张是裂纹卡**（卡面裂开），它的分数再高也不计入预兆。" +
             "另外本地还会先筛一道客观坏图（读不出来 / 整张一个颜色 / 尺寸只有要求的一半以下），那些直接是白档。" +
             "档位是模型的判断而不是客观结论，同一张图换个模型可能换档——界面上会写明这一点。"));
+
+        // 裂纹卡自动重出：**只有判档开着时才可能生效**，所以它的可勾状态跟判档绑在一起。
+        var autoRedraw = new CheckBox
+        {
+            Content = "判出裂纹卡就自动重出那几张（只提示，不用你操作）",
+            IsChecked = config.AutoRedrawCrackedCards,
+            IsEnabled = judgeQuality.IsEnabled,
+            FontSize = 11,
+            Foreground = Brush("DfInk2")
+        };
+        root.Children.Add(autoRedraw);
+        root.Children.Add(Note(judgeBlocked.Length > 0
+            ? "现在打不开这条：" + judgeBlocked
+            : "它**只在判档开着时才生效**——判档关着就没有「裂纹卡」这个结论，也就没有可重出的对象。"
+              + "重出只针对踩中负面词的那几张，不推倒整批；同一批最多自动重出 "
+              + $"{NodeImageBatch.MaxCrackedRedrawRounds} 次，到顶会如实说「还是裂纹，请人工改提示词」。"
+              + "它是在你点过「出图」之后再花一次钱，不想花就把它关掉。"));
+
         root.Children.Add(Note(
             "**每个厂家可以有自己的形象**（开奖许愿那一拍用它，没有就用回自绘的 ◈ 徽记）：把图放进下面任一个 `"
             + ProviderAvatar.FolderName + "` 目录，文件名用厂家 id —— "
@@ -463,6 +481,7 @@ internal static class SettingsMediaPage
             // 出图观感（文档顶层，不属于某一份接口配置）：勾选框是三态的，只有 true 才算开。
             config.GachaReveal = gachaReveal.IsChecked == true;
             config.JudgeImageQuality = judgeQuality.IsChecked == true;
+            config.AutoRedrawCrackedCards = autoRedraw.IsChecked == true;
         }
 
         /// <summary>
@@ -490,6 +509,7 @@ internal static class SettingsMediaPage
             videoSeconds.Text = config.VideoDefaultSeconds.ToString();
             gachaReveal.IsChecked = config.GachaReveal;
             judgeQuality.IsChecked = config.JudgeImageQuality;
+            autoRedraw.IsChecked = config.AutoRedrawCrackedCards;
         }
 
         /// <summary>

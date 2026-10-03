@@ -95,7 +95,8 @@ public sealed record GenerationAuditReport(
     /// 打开报告时默认该勾上的：**会挡住这次操作的那些**，而且必须是现在真能跑的。
     ///
     /// 不是「一键全补」：用户要出的是第三章的视频，把其它章节缺的图也勾上，等于让他在别的章上花钱。
-    /// 也**不勾跑不了的层**（出视频那两层）：勾上却生成不出来，用户会以为是自己点错了。
+    /// 「能不能跑」这一条问的是层自己（<see cref="GenerationAuditLayer.Executable"/>）——第 183 轮之前
+    /// 视频那两层恒为 false，所以它们从不出现在预勾里；现在它们能跑了，出视频意图下就该一起勾上。
     /// </summary>
     public IReadOnlyList<GenerationAuditItem> DefaultChecked =>
         Layers.Where(layer => layer.Executable && BlockingStages.Contains(layer.Stage))
@@ -121,7 +122,8 @@ public sealed record GenerationAuditReport(
     }
 
     /// <summary>
-    /// 花费预估。**只算真能跑的那两层**：出视频执行方还没接入，把还没发生的事算进预算就是虚报。
+    /// 花费预估。图片那一层能按池子单价算；**视频没有单价口径**（各家按次、按时长、按档位，
+    /// 清单里也没有这个字段），所以视频只报「有几段」，不编一个数出来。
     /// 单价未知时如实说算不出来，不要给一个看起来像报价的 0。
     /// </summary>
     public string EstimateCost(double? unitPrice)
@@ -143,7 +145,7 @@ public sealed record GenerationAuditReport(
 
         var video = videoCount == 0
             ? string.Empty
-            : $"另有 {videoCount} 段视频未接入执行方，这次不计价、也不会生成";
+            : $"另有 {videoCount} 段视频要出；视频按次计费而清单里没有单价，这次不计价";
 
         return string.Join("；", new[] { image, video }.Where(part => part.Length > 0)) + "。";
     }
@@ -436,7 +438,14 @@ public static class GenerationAudit
             ExecutableNote: "现在就能出：节点右键 →「出这一镜的画面」。");
     }
 
-    /// <summary>第三层：范围内的分镜，各自有没有视频。</summary>
+    /// <summary>
+    /// 第三层：范围内的分镜，各自有没有视频。
+    ///
+    /// 第 183 轮起这一层**可执行**了（出视频执行方接上：提交 → 轮询 → 下载）。
+    /// 但这份报告是**纯计算**：它不读配置、不知道这台机器配没配视频接口，
+    /// 所以它说的是「这个应用有没有这条能力」，不是「你现在跑不跑得动」；
+    /// 真跑不动时由出视频那条链自己如实拒绝（见 <see cref="VideoProviderFactory"/>）。
+    /// </summary>
     private static GenerationAuditLayer StoryboardVideoLayer(
         WorkflowCanvasState canvas,
         IReadOnlyList<WorkflowNode> storyboards,
@@ -459,9 +468,12 @@ public static class GenerationAudit
             "每一个分镜的镜头",
             storyboards.Count,
             missing,
-            Executable: VideoExecutable,
-            ExecutableNote: VideoNote);
+            Executable: true,
+            ExecutableNote: VideoHowTo);
     }
+
+    /// <summary>视频那两层可执行时给的那句「怎么出」——与图片层同一副面孔，别让人两头找入口。</summary>
+    private const string VideoHowTo = "现在就能出：节点右键 →「出这一镜的视频」（需要先在设置里配好视频接口）。";
 
     /// <summary>第四层：范围内的成品，各自有没有视频。</summary>
     private static GenerationAuditLayer ProductVideoLayer(
@@ -486,19 +498,17 @@ public static class GenerationAudit
             "成品（成片）的视频",
             products.Count,
             missing,
-            Executable: VideoExecutable,
-            ExecutableNote: VideoNote);
+            Executable: false,
+            ExecutableNote: ProductVideoNote);
     }
 
     /// <summary>
-    /// 出视频执行方当前**没有接入**。这里如实说「不可执行」，而不是把这两层假装成能跑：
-    /// 报告上写着「可生成」、点下去却什么都不发生，比直接说没接入糟得多。
-    /// 接入执行方后把这两个常量改掉即可，报告与测试都不用动（有测试正反向钉着）。
+    /// 成片那一层**仍然不可执行**，而这次不是「执行方没接」：出视频接口只会按提示词生成**一段**画面，
+    /// 而这一层要的是「把每一镜串起来」。把它标成可执行，用户拿到的就是一段凭空生成的镜头，
+    /// 而不是他那一版成片——那正是「不偷偷换成别的东西」这条规矩要挡的。串片那一步还没做。
     /// </summary>
-    private const bool VideoExecutable = false;
-
-    private const string VideoNote =
-        "出视频执行方还没接入：这一层这次不会生成，报告只负责把缺的数量列清楚。";
+    private const string ProductVideoNote =
+        "把每一镜串成成片这一步还没实现：先在各个分镜节点出视频，成片暂时要自己拼。";
 
     private static bool HasKind(
         IReadOnlyList<WorkflowAttachment> attachments,

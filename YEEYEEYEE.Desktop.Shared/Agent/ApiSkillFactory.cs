@@ -63,8 +63,10 @@ public sealed record ApiSkillWriteResult(IReadOnlyList<string> Written, IReadOnl
 /// 返工 R4/R5 后的边界：
 /// · **技能自带执行配置**：来源地址、请求路径、HTTP 方法、鉴权方式都写进步骤（<see cref="SkillEndpoint"/>），
 ///   运行与最小测试都按它发请求，不再一律去打 <c>/images/generations</c> 加 Bearer；
-/// · **不支持的协议在创建前就阻断**：只接受 POST/PUT/PATCH；异步视频链路还没接入执行方，
-///   这类技能一律标成**规划态**（<see cref="SkillDefinition.IsPlannedOnly"/>），运行时会被明确拒绝，不冒充可用；
+/// · **不支持的协议在创建前就阻断**：只接受 POST/PUT/PATCH；
+///   视频技能**不再是规划态**（第 183 轮接上了出视频执行方：提交 → 轮询 → 下载），
+///   没配视频接口时由运行侧如实拒绝——比一律标成「不可执行」准确；
+///   只有**归属不明**的池子仍然标成规划态（<see cref="SkillDefinition.IsPlannedOnly"/>），不冒充可用；
 /// · **来源命名空间**：技能 Id 与文件名都带来源前缀（<c>api-video-example-image-pool-1-1k.json</c>），
 ///   A、B 两个来源的同名池子不会互相覆盖；重导同一份文档是幂等覆盖；
 /// · **只动自己名下的文件**：清理只删「同一来源上次写过、本次不再产出」的文件，手工技能与其它来源一律不碰；
@@ -145,10 +147,9 @@ public static class ApiSkillFactory
             return;
         }
 
-        // 异步视频链路（提交任务 → 轮询 → 下载）还没有执行方：这一类只能以「规划态」存在，
-        // 明确标注不可执行，运行时直接拒绝，而不是让用户以为它能跑。
-        var plannedOnly = kind == VideoKind;
-        const string plannedReason = "异步视频链路（提交任务 → 轮询 → 下载）尚未接入执行方，这条技能是规划态：可以保存与查看，运行会被明确拒绝。";
+        // 视频技能**不再标规划态**：第 183 轮把出视频执行方接上了（提交任务 → 轮询 → 下载），
+        // 所以它与出图技能同一条规矩——跑的时候问「这条链配好了没有」，没配就如实拒绝并说明。
+        // 仍然标规划态的只剩**归属不明**的那种池子（下面 unattributed）：它连该打哪个路径都不确定。
 
         var parentId = $"api-{sourceId}-{kind}";
         if (usable.Count > 0)
@@ -168,8 +169,8 @@ public static class ApiSkillFactory
                 SourceId = sourceId,
                 SourceUrl = report.SourceUrl,
                 SourceIdentity = report.SourceIdentity,
-                IsPlannedOnly = plannedOnly,
-                PlannedReason = plannedOnly ? plannedReason : string.Empty
+                IsPlannedOnly = false,
+                PlannedReason = string.Empty
             };
             skills.Add(new PlannedApiSkill(parent, $"{parentId}.json", kind, SourceOf(usable)));
         }
@@ -217,10 +218,10 @@ public static class ApiSkillFactory
                 SourceId = sourceId,
                 SourceUrl = report.SourceUrl,
                 SourceIdentity = report.SourceIdentity,
-                IsPlannedOnly = plannedOnly || unattributed,
+                IsPlannedOnly = unattributed,
                 PlannedReason = unattributed
                     ? "无法确定这条池子属于文档里的哪条接口（文档有多条同能力接口且没写明模型与档位的归属）：请手工指定接口路径后再执行。"
-                    : (plannedOnly ? plannedReason : string.Empty)
+                    : string.Empty
             };
             skills.Add(new PlannedApiSkill(definition, $"{id}.json", kind, $"模型 {spec.DescribeModel}｜{PoolSizeText(label)}"));
         }
@@ -230,7 +231,6 @@ public static class ApiSkillFactory
                 + "这些池子**不写死接口路径、也不可执行**（返工 U4/V4：无归属不许回退到默认执行方），"
                 + "需要精确绑定请手工指定接口路径后再执行。");
 
-        if (plannedOnly) warnings.Add($"{parentName}：{skills.Count(skill => skill.Kind == kind)} 条技能都是**规划态**（{plannedReason}）。");
         notes.Add($"{parentName}：{(usable.Count > 0 ? "1 条父技能 + " : string.Empty)}{skills.Count(skill => skill.Kind == kind && skill.IsPool)} 条池子子技能"
             + $"（{specs.Count} 个模型池{(HasModels(report, kind) ? "，来自文档的可用模型表" : string.Empty)}）。");
     }
@@ -926,7 +926,7 @@ public static class ApiImportSummary
             lines.Add($"· 基础地址：{(site.BaseUrl.Length == 0 ? "（未解析到）" : site.BaseUrl)}");
             if (site.ImagePath.Length > 0) lines.Add($"· 文生图：{site.Method} {site.ImagePath}");
             if (site.ImageEditPath.Length > 0) lines.Add($"· 图生图：{site.Method} {site.ImageEditPath}");
-            if (site.VideoPath.Length > 0) lines.Add($"· 出视频：{site.Method} {site.VideoPath}（执行方未接入，登记为规划态）");
+            if (site.VideoPath.Length > 0) lines.Add($"· 出视频：{site.Method} {site.VideoPath}");
             lines.Add($"· 池子：生图 {site.ImagePools.Count} 个（{site.ImagePools.Select(pool => pool.Model).Distinct().Count()} 个模型）、"
                 + $"视频 {site.VideoPools.Count} 个（{site.VideoPools.Select(pool => pool.Model).Distinct().Count()} 个模型）");
             lines.Add(site.ListSource.Length > 0

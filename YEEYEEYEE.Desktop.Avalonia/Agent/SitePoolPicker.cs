@@ -69,7 +69,7 @@ internal static class SitePoolPicker
             if (pool is null) { detail.Text = string.Empty; return; }
             var parts = new List<string> { pool.IsVideo ? "出视频" : "出图", pool.Describe() };
             detail.Text = string.Join(" · ", parts)
-                + (pool.IsVideo ? "\n注意：出视频执行方还没接入，选它只会得到一句「不可执行」，不会真的起任务。" : string.Empty);
+                + (pool.IsVideo ? "\n注意：这是出视频池子，出图选它没用；出视频请在分镜节点右键选「出这一镜的视频」。" : string.Empty);
         }
 
         SitePool? CurrentPool(int modelIndex, int tierIndex)

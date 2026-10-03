@@ -135,7 +135,8 @@ public sealed class SkillDefinition
     public string FilePath { get; set; } = string.Empty;
 
     /// <summary>
-    /// 规划态（返工 R4）：技能已按接口文档建好，但当前执行方还不能真跑（例如异步视频链路尚未接入）。
+    /// 规划态（返工 R4）：技能已按接口文档建好，但当前执行方还不能真跑（例如**归属不明**的池子——
+    /// 文档里有多条同能力接口、对不出唯一一条，连该打哪个路径都不确定）。
     /// 界面要显示「不可执行」，运行入口要直接拒绝并说明原因——不能让它失败得莫名其妙，更不能标成可用。
     /// </summary>
     public bool IsPlannedOnly { get; set; }
