@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 
 namespace YEEYEEYEE.Desktop;
@@ -59,6 +60,9 @@ public sealed class CollaborationSession : IDisposable
     private readonly CookieContainer cookies = new();
 
     private HttpClient http;
+
+    /// <summary>后台订阅的取消源（没在订阅时是 null）。</summary>
+    private CancellationTokenSource? watchCancellation;
 
     /// <summary>服务器基地址（已去掉结尾斜杠）。空串表示这台机器还没配服务器。</summary>
     public string BaseUrl { get; private set; }
@@ -342,6 +346,97 @@ public sealed class CollaborationSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// 起一个后台订阅（重复调用只起一个；没登录就什么都不做）。
+    ///
+    /// 退出登录、会话失效时它会**自己停下**——这一点必须有：服务端只在订阅那一刻校验过身份，
+    /// 不主动断开的话，退出之后那条流还开着，桌面端会继续收到「别人改了画布」。
+    /// 回调跑在后台线程上，界面自己负责切回 UI 线程。
+    /// </summary>
+    public void StartWatching(Action<CanvasChangedNotice> onCanvasChanged, Action onEditsChanged)
+    {
+        if (watchCancellation is not null || !IsSignedIn) return;
+        var cancellation = new CancellationTokenSource();
+        watchCancellation = cancellation;
+        _ = Task.Run(() => WatchAsync(onCanvasChanged, onEditsChanged, cancellation.Token));
+    }
+
+    /// <summary>
+    /// 订阅服务端的变更推送，直到取消。**断线自己重连**（退避 3 秒）：
+    /// 浏览器的 <c>EventSource</c> 会按服务端给的 <c>retry</c> 自己回来，HttpClient 读流不会。
+    /// </summary>
+    public async Task WatchAsync(
+        Action<CanvasChangedNotice> onCanvasChanged, Action onEditsChanged, CancellationToken cancellationToken)
+    {
+        if (!IsConfigured) return;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                using var response = await http.GetAsync(
+                    $"{BaseUrl}/api/web/events", HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                if (response.StatusCode == HttpStatusCode.Unauthorized)
+                {
+                    // 会话已经失效：别再空转，把身份清掉，让界面提示重新登录。
+                    Forget();
+                    return;
+                }
+
+                if (response.IsSuccessStatusCode)
+                {
+                    using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                    using var reader = new StreamReader(stream);
+                    await ReadFramesAsync(reader, onCanvasChanged, onEditsChanged, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception error) when (IsTransport(error))
+            {
+                // 服务器暂时不在（重启、断网）：退避之后再来。
+            }
+
+            try { await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken); }
+            catch (OperationCanceledException) { return; }
+        }
+    }
+
+    /// <summary>
+    /// 读帧：**空行才算一帧读完**；<c>:</c> 开头是心跳、<c>retry:</c> 是重连提示，都不是事件。
+    /// 与服务端写帧的格式一一对应（那边写 <c>event:</c> + <c>data:</c> + 空行）。
+    /// </summary>
+    private static async Task ReadFramesAsync(
+        StreamReader reader, Action<CanvasChangedNotice> onCanvasChanged, Action onEditsChanged,
+        CancellationToken cancellationToken)
+    {
+        var type = (string?)null;
+        var data = new StringBuilder();
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(cancellationToken);
+            if (line is null) return;   // 流关了：交给外层退避重连
+            if (line.Length == 0)
+            {
+                if (type is not null)
+                {
+                    if (CollaborationEvents.ParseCanvasChanged(type, data.ToString()) is { } notice) onCanvasChanged(notice);
+                    else if (CollaborationEvents.IsEditsChangedFrame(type, data.ToString())) onEditsChanged();
+                }
+
+                type = null;
+                data.Clear();
+                continue;
+            }
+
+            if (line[0] == ':') continue;
+            if (line.StartsWith("event:", StringComparison.Ordinal)) type = line[6..].Trim();
+            else if (line.StartsWith("data:", StringComparison.Ordinal)) data.Append(line[5..].Trim());
+        }
+    }
+
     /// <summary>会话与身份一起清掉（cookie 也要丢：留着过期 cookie 只会让下一次请求白跑）。</summary>
     private void Forget()
     {
@@ -349,6 +444,10 @@ public sealed class CollaborationSession : IDisposable
         Leases = Array.Empty<CollaborationLease>();
         // 身份没了，手上那条锁也就不再代表任何人了：本地记录必须跟着清。
         HeldNodeLease = null;
+        // 订阅也要停：服务端只在订阅那一刻校验过身份，不主动断开的话退出之后它还在推。
+        watchCancellation?.Cancel();
+        watchCancellation?.Dispose();
+        watchCancellation = null;
         // 逐个置为过期，而不是换一个容器：容器是 HttpClientHandler 建的时候拿走的，
         // 换字段只是换了我们手上的引用，请求照样会带着旧 cookie 出去。
         foreach (Cookie cookie in cookies.GetAllCookies()) cookie.Expired = true;
@@ -381,7 +480,13 @@ public sealed class CollaborationSession : IDisposable
         return new ErrorResponse($"HTTP_{(int)response.StatusCode}", $"服务器回了 {(int)response.StatusCode}，没给原因", null);
     }
 
-    public void Dispose() => http.Dispose();
+    public void Dispose()
+    {
+        watchCancellation?.Cancel();
+        watchCancellation?.Dispose();
+        watchCancellation = null;
+        http.Dispose();
+    }
 
     private sealed record UserResponse(CollaborationUser? User);
 
