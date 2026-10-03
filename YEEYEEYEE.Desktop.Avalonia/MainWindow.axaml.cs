@@ -4142,7 +4142,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         SetInspectorEditable(canEdit && !node.IsLocked,
             node.IsLocked
                 ? $"正在看「{node.Title}」（{NodeAssistPlanner.KindLabelOf(node.Category)}）· 节点已锁定，先在节点上解锁再改"
-                : $"正在看「{node.Title}」（{NodeAssistPlanner.KindLabelOf(node.Category)}）· 改完点「应用修改」或按 Ctrl+Enter 写回画布");
+                : $"正在看「{node.Title}」（{NodeAssistPlanner.KindLabelOf(node.Category)}）· {UiText.Text("inspector.applyHint")}");
         if (node.References.Count > 0) StatusText.Text = $"已选中 {node.References.Count} 个引用，双击节点进入临时引用画布";
 
         // 画布 → 左栏：选中一个节点就把故事画布展开、选中并滚到它那一行。

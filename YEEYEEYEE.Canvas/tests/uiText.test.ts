@@ -85,6 +85,28 @@ describe('共享界面文案', () => {
       expect(axaml).not.toContain(literal)
   })
 
+  it('检查器那两句提示（含 Ctrl+Enter 这个快捷键）只有一份，三处都读它', () => {
+    expect(uiText('inspector.applyHint')).toContain('Ctrl+Enter')
+    // 初值那句就是前一句前面多了「选中节点后可改；」——分开住但必须同源，改一处别忘另一处。
+    expect(uiText('inspector.idleHint')).toContain(uiText('inspector.applyHint'))
+
+    // 三处写法：XAML 的初值、.cs 的状态行、网页端。谁再抄一遍这句，这里当场红。
+    for (const relative of [
+      '../../YEEYEEYEE.Desktop.Avalonia/MainWindow.axaml',
+      '../../YEEYEEYEE.Desktop.Avalonia/MainWindow.axaml.cs',
+      '../src/WebCanvasApp.tsx'
+    ]) {
+      const source = readFileSync(new URL(relative, import.meta.url), 'utf8')
+      expect(source, relative).not.toContain('按 Ctrl+Enter 写回画布')
+    }
+
+    const axaml = readFileSync(
+      new URL('../../YEEYEEYEE.Desktop.Avalonia/MainWindow.axaml', import.meta.url), 'utf8')
+    expect(axaml).toContain('{x:Static shared:UiText.InspectorIdleHint}')
+    const web = readFileSync(new URL('../src/WebCanvasApp.tsx', import.meta.url), 'utf8')
+    expect(web).toContain("uiText('inspector.applyHint')")
+  })
+
   it('占位符填不干净就抛出，不让界面显示半句话', () => {
     expect(() => uiTextFill('lease.who', { name: '陈默' })).toThrow(/占位符/)
   })

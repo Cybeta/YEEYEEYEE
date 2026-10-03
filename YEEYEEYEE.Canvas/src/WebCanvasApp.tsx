@@ -19,6 +19,7 @@ import { canvasChangeText, followAction, hasUnsavedDraft, isOtherRevision } from
 import { useLeases } from './shell/useLeases'
 import { useNodeLease } from './shell/useNodeLease'
 import { useServerEvents } from './shell/useServerEvents'
+import { uiText } from './shell/uiText'
 import { Workspace } from './shell/Workspace'
 import {
   WorkbenchShell, type DockMode, type RailSection, type StatusFacts, type WorkbenchChrome, type WorkbenchView
@@ -493,7 +494,7 @@ export function WebCanvasApp() {
       : heldByMe ? '锁在你手上：离开编辑框后会自动还回去'
         : readOnly ? '这张画布被服务端标成只读，改不了'
           : !canEdit(role) ? '你的账号是只读，改不了画布'
-            : dirty ? '改完点「应用修改」或按 Ctrl+Enter 写回画布' : '点进编辑框会先占锁，别人这时改不了这个节点'
+            : dirty ? uiText('inspector.applyHint') : '点进编辑框会先占锁，别人这时改不了这个节点'
 
   // 通道自己的问题。它不该把画布变成不可用，但也不能悄悄吞掉——
   // 否则界面上的「没有人编辑」会被读成「现在没人编辑」，「已同步」会被读成「推送通着」。

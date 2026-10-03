@@ -344,7 +344,7 @@
                                 IsEnabled="False" HorizontalAlignment="Left" Click="InspectorApply_OnClick" />
                         <TextBlock x:Name="InspectorEditHintText" Classes="dim" FontSize="10"
                                    TextWrapping="Wrap"
-                                   Text="选中节点后可改；改完点「应用修改」或按 Ctrl+Enter 写回画布" />
+                                   Text="{x:Static shared:UiText.InspectorIdleHint}" />
                       </StackPanel>
                     </StackPanel>
 

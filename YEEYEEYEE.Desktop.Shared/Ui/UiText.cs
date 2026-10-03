@@ -78,6 +78,16 @@ public static class UiText
     public static string PanelStoryCanvas => Text("panel.storyCanvas");
 
     /// <summary>
+    /// 检查器的两句提示：一句是**改完怎么落盘**（含 Ctrl+Enter 这个快捷键，网页端那一句逐字相同），
+    /// 一句是**还没选节点时的初值**——它是前一句前面加了「选中节点后可改；」。
+    /// 两句话之所以都在这里，是因为它们同时出现在三个地方（XAML 的初值、.cs 的状态行、网页端），
+    /// 而键位一改（比如以后换成别的组合）必须三处一起改。
+    /// </summary>
+    public static string InspectorApplyHint => Text("inspector.applyHint");
+
+    public static string InspectorIdleHint => Text("inspector.idleHint");
+
+    /// <summary>
     /// 编辑锁的来源端说法（wire 值只有 <c>web</c> / <c>desktop</c>）。**认不出的按「网页端」**——
     /// 这条规则过去在服务端 <c>EditClient.Label</c>、桌面端 <c>CollaborationSession.ClientLabel</c>
     /// 与网页端 <c>locks.ts</c> 各写了一遍，每处的注释都指着另一处。现在只有这一份。
