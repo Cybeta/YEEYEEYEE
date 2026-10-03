@@ -19,7 +19,8 @@ export type WorkspaceProps = {
   view: WorkbenchView
   records: ViewRecord[]
   selectedId: string
-  onSelect: (recordId: string) => void
+  /** 传 null 表示取消选中（在画布上点空白处）。 */
+  onSelect: (recordId: string | null) => void
   search: string
   canvasTitle: string
   activeChapter: string
