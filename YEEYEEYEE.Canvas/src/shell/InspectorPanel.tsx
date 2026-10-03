@@ -2,7 +2,8 @@ import { recordReferences, resolveReference, type Asset } from '../assets'
 import { chapterIdOf } from '../ChapterView'
 import { describeLease, type Lease } from './locks'
 import {
-  chapterGroups, kindOf, NODE_KINDS, nodeConnections, recordStatus, recordTitle, type ShellEdge, type ViewRecord
+  categoryOptions, chapterGroups, kindOf, NODE_KINDS, nodeConnections, recordStatus, recordTitle,
+  type ShellEdge, type ViewRecord
 } from './records'
 
 // 空数组放模块级：写成 `?? []` 每次渲染都是新数组，会让下面的 map 白算。
@@ -46,6 +47,11 @@ export type InspectorProps = {
   edges?: ShellEdge[]
   /** 断开一根连线。没给（只读角色、画布只读）就不显示那个按钮，但列表照旧显示。 */
   onDisconnect?: (edgeId: string) => void
+  /**
+   * 改这个节点的类别。没给就不显示那个下拉。
+   * 注意它**不进草稿**——下拉一改就写一次（与旁边的名称/内容不同，那两个要点「应用修改」）。
+   */
+  onCategory?: (recordType: string) => void
   assets: Asset[]
   assetsReady: boolean
   onTitle: (value: string) => void
@@ -150,6 +156,29 @@ export function InspectorPanel(props: InspectorProps) {
           <span className="df-dim" style={{ fontSize: 10, lineHeight: 1.6 }}>{hint}</span>
         </div>
       </div>
+
+      {/* 节点类别：**不进草稿**，选一下就写一次。所以它单独一块并写明这一点——
+          摆在编辑框旁边会让人以为要跟着「应用修改」一起提交。 */}
+      {selected && props.onCategory && editable && (
+        <div className="df-section" style={{ gap: 6 }}>
+          <span className="df-label">节点类别</span>
+          <div className="df-field is-boxed">
+            <select
+              className="df-input"
+              value={selected.recordType}
+              disabled={saving}
+              onChange={(event) => props.onCategory!(event.target.value)}
+            >
+              {categoryOptions(selected.recordType).map((option) => (
+                <option key={option.recordType} value={option.recordType}>{option.label}</option>
+              ))}
+            </select>
+          </div>
+          <span className="df-dim" style={{ fontSize: 10, lineHeight: 1.6 }}>
+            选一下就写进画布（与名称 / 内容不同，它不进草稿）。改成章节要走桌面端。
+          </span>
+        </div>
+      )}
 
       <hr className="df-divider" />
 

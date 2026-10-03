@@ -1396,6 +1396,81 @@ try
             mpLockNode["IsLocked"] = false;
             File.WriteAllBytes(layoutCanvas, Encoding.UTF8.GetBytes(mpLockJson.ToJsonString()));
         }
+
+        // ---------- 节点类别：把节点改成另一种 ----------
+        // 与「改标题内容」「移动位置」同一档：**记录级**（要 canvas.edit 与修订 CAS，不占树锁）。
+        {
+            var ctScene = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+            var ctBase = ctScene.GetProperty("revision").GetInt64();
+            var ctTarget = efSecond;
+            var ctBefore = ctScene.GetProperty("records").EnumerateArray()
+                .First(row => row.GetProperty("recordId").GetString() == ctTarget);
+            Assert(ctBefore.GetProperty("recordType").GetString() != "prop", "改之前不能已经是 prop，否则这条断言等于没测");
+            var ctY = ctBefore.GetProperty("record").GetProperty("y").GetDouble();
+
+            using var ctEvents = await rival.GetAsync("/api/web/events", HttpCompletionOption.ResponseHeadersRead);
+            var ctReader = new StreamReader(await ctEvents.Content.ReadAsStreamAsync());
+            var ctPending = ReadFrame(ctReader);
+
+            var ctChanged = await Check(arranger, HttpMethod.Put, $"/api/web/records/{ctTarget}/category", 200,
+                "{\"baseRevision\":" + ctBase + ",\"recordType\":\"prop\"}");
+            var ctRevision = ctChanged.GetProperty("revision").GetInt64();
+            Assert(ctRevision != ctBase, "改类别要推进修订");
+            Assert(ctChanged.GetProperty("record").GetProperty("recordType").GetString() == "prop", "响应要回改完之后的类别");
+
+            var ctPushed = await Task.WhenAny(ctPending, Task.Delay(5000)) == ctPending ? await ctPending : null;
+            Assert(ctPushed is { Type: "canvas.changed" } ctFrame &&
+                ctFrame.Data.GetProperty("scope").GetString() == "record" &&
+                ctFrame.Data.GetProperty("recordId").GetString() == ctTarget,
+                "改类别要按记录级广播，并说清改的是哪一条：" + (ctPushed is { } gotCt ? gotCt.Data.GetRawText() : "(没收到)"));
+
+            // 落盘的**只有类别**：坐标不该被这次改动碰到（那是移动那条路的事）。
+            using (var ctDoc = JsonDocument.Parse(File.ReadAllText(layoutCanvas)))
+            {
+                var ctNode = ctDoc.RootElement.GetProperty("Canvas").GetProperty("Nodes").EnumerateArray()
+                    .First(node => node.GetProperty("Id").GetString() == ctTarget);
+                Assert(ctNode.GetProperty("Category").GetInt32() == (int)YEEYEEYEE.Desktop.NodeCategory.Prop,
+                    "文件里的类别要跟着改");
+                Assert(ctNode.GetProperty("Y").GetDouble() == ctY, "改类别不该动坐标");
+            }
+
+            // 拒绝的几种：认不出的类别、改成章节、改章节节点、不存在的节点、陈旧修订、缺字段、不是 GUID。
+            Assert((await Check(arranger, HttpMethod.Put, $"/api/web/records/{ctTarget}/category", 400,
+                "{\"baseRevision\":" + ctRevision + ",\"recordType\":\"spaceship\"}"))
+                .GetProperty("code").GetString() == "CANVAS_UNKNOWN_RECORD_TYPE",
+                "认不出的类别要拒绝（猜一个 general 会静默把一个角色改成通用）");
+            Assert((await Check(arranger, HttpMethod.Put, $"/api/web/records/{ctTarget}/category", 400,
+                "{\"baseRevision\":" + ctRevision + ",\"recordType\":\"chapter\"}"))
+                .GetProperty("code").GetString() == "CANVAS_CHAPTER_NOT_SUPPORTED", "不能把节点改成章节");
+            Assert((await Check(arranger, HttpMethod.Put, $"/api/web/records/{efFirst}/category", 400,
+                "{\"baseRevision\":" + ctRevision + ",\"recordType\":\"general\"}"))
+                .GetProperty("code").GetString() == "CANVAS_CHAPTER_NOT_SUPPORTED",
+                "也不能改章节节点的类别——它那一整章会失去落点");
+            await Check(arranger, HttpMethod.Put, $"/api/web/records/{Guid.NewGuid()}/category", 404,
+                "{\"baseRevision\":" + ctRevision + ",\"recordType\":\"prop\"}");
+            await Check(arranger, HttpMethod.Put, $"/api/web/records/{ctTarget}/category", 409,
+                "{\"baseRevision\":" + ctBase + ",\"recordType\":\"general\"}");
+            await Check(arranger, HttpMethod.Put, $"/api/web/records/{ctTarget}/category", 400,
+                "{\"baseRevision\":" + ctRevision + "}");
+            await Check(arranger, HttpMethod.Put, "/api/web/records/not-a-guid/category", 400,
+                "{\"baseRevision\":" + ctRevision + ",\"recordType\":\"prop\"}");
+
+            // **记录级**的要点：别人占着**别的**节点时照样能改（与移动那一条同理）。
+            using (var ctHolder = new YEEYEEYEE.Desktop.CollaborationSession($"http://127.0.0.1:{port}"))
+            {
+                Assert((await ctHolder.SignInAsync("chenmo", "longenough")).Ok, "锁的持有者先登录");
+                Assert((await ctHolder.AcquireNodeLeaseAsync(Guid.Parse(efFirst))).Ok, "占住另一个节点");
+                var ctBusyBase = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64();
+                await Check(arranger, HttpMethod.Put, $"/api/web/records/{ctTarget}/category", 200,
+                    "{\"baseRevision\":" + ctBusyBase + ",\"recordType\":\"general\"}");
+                await ctHolder.ReleaseHeldLeaseAsync();
+            }
+
+            using var ctAnonymous = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            var ctDeniedBase = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64();
+            await Check(ctAnonymous, HttpMethod.Put, $"/api/web/records/{ctTarget}/category", 401,
+                "{\"baseRevision\":" + ctDeniedBase + ",\"recordType\":\"prop\"}");
+        }
     }
 
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
@@ -1420,6 +1495,13 @@ try
     Assert((await Check(standaloneArranger, HttpMethod.Get, "/api/web/scene", 200))
         .GetProperty("records")[0].GetProperty("record").GetProperty("x").GetDouble() == 321,
         "独立场景模式下也要能写位置");
+    // 类别也一样：独立场景存的就是协议形状，recordType 是它自己的字段。
+    var standaloneAfterMove = (await Check(standaloneArranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64();
+    await Check(standaloneArranger, HttpMethod.Put, $"/api/web/records/{standaloneTarget}/category", 200,
+        "{\"baseRevision\":" + standaloneAfterMove + ",\"recordType\":\"prop\"}");
+    Assert((await Check(standaloneArranger, HttpMethod.Get, "/api/web/scene", 200))
+        .GetProperty("records")[0].GetProperty("recordType").GetString() == "prop",
+        "独立场景模式下也要能改类别");
 
     Stop();
     Console.WriteLine("HTTP regression passed: auth, live canvas.edit revocation, byte-preserving denials, jobs, assets, conflicts, persistence, and project/standalone modes");
@@ -1465,5 +1547,6 @@ try
     Console.WriteLine("Structure regression passed: create lands in the named chapter with the asked category and broadcasts scope=structure, unknown category/chapter/missing anchor/stale revision all refused, another user's node lease blocks it, viewer refused, chapter entries not deletable through this path, delete removes the node");
     Console.WriteLine("Edge regression passed: connect lands on the asked endpoints with a fresh GUID and broadcasts scope=structure, self-loop/duplicate/missing endpoint/malformed body/stale revision each refuse with their own code, another user's node lease arbitrates, anonymous refused, disconnect removes exactly that one, a node delete takes its edges along, standalone mode refuses both");
     Console.WriteLine("Node-position regression passed: a drag lands the exact coordinates and stamps ManualPosition in the file, broadcasts canvas.changed as record scope with that record id, stale revision/missing node/missing coordinate/non-numeric coordinate/float-overflowing coordinate each refuse with their own code, a repeated identical position is still accepted (the client is the one that skips it), another user's node lease elsewhere does not block it, a locked node refuses, and standalone mode supports it too");
+    Console.WriteLine("Node-category regression passed: a change lands the asked recordType and leaves the coordinates alone (checked in the file), broadcasts canvas.changed as record scope with that record id, unknown recordType / to-chapter / from-chapter / missing node / missing field / malformed id / stale revision each refuse with their own code, another user's node lease elsewhere does not block it, anonymous refused, and standalone mode supports it too");
 }
 finally { Stop(); try { Directory.Delete(root, recursive: true); } catch (IOException) { } }

@@ -307,6 +307,41 @@ internal sealed class ProjectCanvasSceneStore
     }
 
     /// <summary>
+    /// 改一个节点的类别（网页端的「节点类别」下拉）。
+    ///
+    /// 与移动位置同一档：**记录级**。它只改一个字段，不增删节点 / 连线，也不动父子关系与章节归属；
+    /// 类别影响的是「整理布局时它落到哪条泳道」，那是布局引擎读它，不是结构变了
+    /// （成品没有父分镜时引擎会把它排到泳道最后一行，不会坏）。所以同样不要整棵树锁。
+    ///
+    /// **两侧都拒章节**：把普通节点改成章节会造出一个没有工作树条目撑着的章节；
+    /// 把章节改成别的，会让它那一整章（工作树条目与分章关系）失去落点。这两件事都该在桌面端做（那边有撤销）。
+    /// </summary>
+    public IResult SetCategory(long baseRevision, Guid nodeId, NodeCategory category)
+    {
+        if (category == NodeCategory.Chapter)
+            return Error(400, "CANVAS_CHAPTER_NOT_SUPPORTED",
+                "这一版不能把节点改成章节：章节挂着工作树与分章关系，请到桌面端建（那边有撤销）");
+
+        var recordId = nodeId.ToString();
+        return Write(baseRevision, current =>
+            {
+                var canvas = current.Canvas;
+                if (canvas is null) return (null, Error(409, "CANVAS_EMPTY", "这张画布没有节点集合"));
+
+                var node = canvas.Nodes.FirstOrDefault(item => item.Id == nodeId);
+                if (node is null) return (null, Error(404, "RECORD_NOT_FOUND", "可编辑节点不存在"));
+                if (node.Category == NodeCategory.Chapter)
+                    return (null, Error(400, "CANVAS_CHAPTER_NOT_SUPPORTED",
+                        "不能改章节节点的类别：它挂着工作树与分章关系，请到桌面端改（那边有撤销）"));
+                if (node.IsLocked) return (null, Error(409, "NODE_LOCKED", "节点已锁定"));
+
+                node.Category = category;
+                return (canvas, null);
+            },
+            (next, bytes) => new { revision = Revision(bytes), record = ProjectRecord(next.Canvas, recordId) });
+    }
+
+    /// <summary>
     /// 整张画布的写入：桌面端把画布字节交回来，由服务端校验、推进修订、原子落盘。
     ///
     /// 为什么要有这条路：桌面端编辑的是**本地文件**，它自己保存时既不经锁仲裁、别人也收不到通知。

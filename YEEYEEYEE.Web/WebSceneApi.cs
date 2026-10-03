@@ -265,6 +265,35 @@ internal static class WebSceneApi
                 hub.CanvasChanged(after.Revision, recordId, WebAccessGuard.ActorName(request.HttpContext), "record");
             return result;
         });
+        // 改一个节点的类别。与「改标题内容」「移动位置」同一档：**记录级**（要 canvas.edit 与修订 CAS，
+        // 不占树锁）。认不出的类别如实拒绝——与新建节点同一条规矩：猜一个 general 收下会把角色静默变成通用。
+        app.MapPut("/api/web/records/{recordId}/category", async (string recordId, HttpRequest request) =>
+        {
+            if (!WebAccessGuard.Permissions(request.HttpContext).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+            if (!Guid.TryParse(recordId, out var nodeId))
+                return Error(400, "INVALID_REQUEST", "这个 recordId 不是一个画布节点");
+
+            JsonElement input;
+            try { input = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body, cancellationToken: request.HttpContext.RequestAborted); }
+            catch (JsonException) { return Error(400, "INVALID_REQUEST", "请求 JSON 无效"); }
+            if (input.ValueKind != JsonValueKind.Object ||
+                !input.TryGetProperty("baseRevision", out var rev) || !rev.TryGetInt64(out var baseRevision) ||
+                !input.TryGetProperty("recordType", out var type) || type.ValueKind != JsonValueKind.String)
+                return Error(400, "INVALID_REQUEST", "需要 baseRevision 与 recordType");
+
+            var recordType = type.GetString()!;
+            if (YEEYEEYEE.Desktop.NodeProjection.RecordTypeToCategory(recordType) is not { } category)
+                return Error(400, "CANVAS_UNKNOWN_RECORD_TYPE", "认不出这个类别：" + recordType);
+
+            var before = CommitToken();
+            var result = projectStore is not null ? projectStore.SetCategory(baseRevision, nodeId, category)
+                : store is not null ? store.SetCategory(baseRevision, nodeId, recordType) : unavailable!;
+            var after = CommitToken();
+            if (after.Serial > before.Serial)
+                hub.CanvasChanged(after.Revision, recordId, WebAccessGuard.ActorName(request.HttpContext), "record");
+            return result;
+        });
         app.MapGet("/api/web/assets", () =>
         {
             var entitiesPath = LegacyConfig.Text(app.Configuration, "ProjectEntitiesPath");
@@ -346,7 +375,7 @@ internal static class WebSceneApi
                 input["content"] is not JsonValue contentValue || !contentValue.TryGetValue<string>(out var content))
                 return Error(400, "INVALID_REQUEST", "需要 baseRevision、title、content");
 
-            return MutateRecord(baseRevision, recordId, fields =>
+            return MutateRecord(baseRevision, recordId, (_, fields) =>
             {
                 fields["title"] = title;
                 fields["content"] = content;
@@ -361,17 +390,27 @@ internal static class WebSceneApi
         /// 但坐标是它自己的字段，写得进去。
         /// </summary>
         public IResult MoveNode(long baseRevision, Guid nodeId, float x, float y) =>
-            MutateRecord(baseRevision, nodeId.ToString(), fields =>
+            MutateRecord(baseRevision, nodeId.ToString(), (_, fields) =>
             {
                 fields["x"] = x;
                 fields["y"] = y;
             });
 
         /// <summary>
-        /// 改一个记录并原子落盘。「改标题内容」与「移动位置」共用它——两套写入规则各自演化出差异，
-        /// 是这类接口最典型的坏法。返回的 <c>record</c> 是**改完之后**那一份，调用方直接拿去替换手上的。
+        /// 改一个记录的类别（独立场景模式的同一件事）。
+        /// 注意它写的是**外层**的 <c>recordType</c>——独立场景存的就是协议形状，类别不在 <c>record</c> 里。
         /// </summary>
-        private IResult MutateRecord(long baseRevision, string recordId, Action<JsonObject> apply)
+        public IResult SetCategory(long baseRevision, Guid nodeId, string recordType) =>
+            MutateRecord(baseRevision, nodeId.ToString(), (record, _) => record["recordType"] = recordType);
+
+        /// <summary>
+        /// 改一个记录并原子落盘。「改标题内容」「移动位置」「改类别」共用它——两套写入规则各自演化出差异，
+        /// 是这类接口最典型的坏法。返回的 <c>record</c> 是**改完之后**那一份，调用方直接拿去替换手上的。
+        ///
+        /// <paramref name="apply"/> 收到「外层记录对象」与「它里面的 record 字段表」两样：
+        /// 标题 / 坐标在里层，类别（recordType）在外层——只给里层的话，改类别就没法复用这条路。
+        /// </summary>
+        private IResult MutateRecord(long baseRevision, string recordId, Action<JsonObject, JsonObject> apply)
         {
             lock (gate)
             {
@@ -388,7 +427,7 @@ internal static class WebSceneApi
                     var next = scene.DeepClone();
                     var updated = ((JsonArray)next["records"]!).OfType<JsonObject>()
                         .First(item => item["recordId"]!.GetValue<string>() == recordId);
-                    apply((JsonObject)updated["record"]!);
+                    apply(updated, (JsonObject)updated["record"]!);
                     next["revision"] = current + 1;
                     var directory = Path.GetDirectoryName(filePath)!;
                     Directory.CreateDirectory(directory);

@@ -3,8 +3,8 @@ import {
   DRAG_THRESHOLD, clampZoom, connectDropTarget, dragDrop, wheelNotches, wheelZoomFactor, zoomAround
 } from '../src/shell/CanvasView'
 import {
-  PLANNING_GROUP_ID, UNFILED_GROUP_ID, canvasBounds, chapterGroups, isEditableRecord, isPlanning,
-  kindOf, NODE_KINDS, parseScene, scriptEntries, stageSummaries, type ViewRecord
+  PLANNING_GROUP_ID, UNFILED_GROUP_ID, canvasBounds, categoryOptions, chapterGroups, isEditableRecord,
+  isPlanning, kindOf, NODE_KINDS, parseScene, scriptEntries, stageSummaries, type ViewRecord
 } from '../src/shell/records'
 
 /**
@@ -70,6 +70,18 @@ describe('节点身份与种类', () => {
   it('只有稳定 GUID 的记录是画布节点，工作树章节行不是', () => {
     expect(isEditableRecord(node(GUID_A, 'chapter', {}))).toBe(true)
     expect(isEditableRecord(node(`wt-${GUID_A}`, 'chapter', {}))).toBe(false)
+  })
+
+  it('节点类别下拉：当前那个必须看得见，否则下拉会显示一个假的类别', () => {
+    // 当前类别在能改的那几个里：就是那张表，不加重复项。
+    const inList = categoryOptions('storyboard')
+    expect(inList).toHaveLength(6)
+    expect(inList[0].recordType).toBe('storyboard')
+    expect(new Set(inList.map((item) => item.recordType)).size).toBe(inList.length)
+    // 不在表里的（故事企划 / 章节）：前置一条标着「当前」，且不重复。
+    expect(categoryOptions('story-plan')[0]).toEqual({ recordType: 'story-plan', label: '故事企划（当前）' })
+    expect(categoryOptions('chapter')[0]).toEqual({ recordType: 'chapter', label: '章节（当前）' })
+    expect(categoryOptions('story-plan')).toHaveLength(7)
   })
 
   it('九个种类各有各的颜色，映射跟着 NodeProjection 的取值走', () => {

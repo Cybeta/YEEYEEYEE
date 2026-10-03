@@ -12,8 +12,8 @@ import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layo
 import { describeLease, leaseCovering, shouldHoldNodeLease } from './shell/locks'
 import { RightDock } from './shell/RightDock'
 import {
-  canvasBounds, chapterGroups, isEditableRecord, kindOf, nodeX, nodeY, parseScene, recordContent, recordTitle,
-  type ShellScene, type ViewRecord
+  canvasBounds, chapterGroups, isEditableRecord, kindOf, NODE_KINDS, nodeX, nodeY, parseScene, recordContent,
+  recordTitle, type ShellScene, type ViewRecord
 } from './shell/records'
 import { canvasChangeText, followAction, hasUnsavedDraft, isOtherRevision } from './shell/serverEvents'
 import { useLeases } from './shell/useLeases'
@@ -684,6 +684,51 @@ export function WebCanvasApp() {
     }
   }
 
+  /**
+   * 改选中节点的类别。同样是**记录级**写入（与改标题内容 / 移动位置同一档，不占树锁）。
+   *
+   * 它**不进草稿**：下拉选一下就写一次。所以这里直接读「有没有草稿」是没意义的——
+   * 判断的是「有没有人在编辑这个节点」和「我能不能改」。失败时界面上的下拉会退回服务端那一份
+   * （它由 scene 里的 recordType 驱动，而不是本地状态），不需要额外的撤回代码。
+   */
+  async function changeCategory(recordType: string) {
+    const target = selected
+    if (!scene || !target || saving) return
+    if (recordType === target.recordType) return
+    if (blockedBy) {
+      setNotice({ kind: 'error', message: `${describeLease(blockedBy)} 正在编辑这个节点，等他保存或让管理员接管。` })
+      return
+    }
+    if (!canEdit(role)) {
+      setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
+      return
+    }
+
+    setSaving(true)
+    setNotice({ kind: 'info', message: '正在改类别…' })
+    try {
+      const result = await request<{ revision: number; record: ViewRecord }>(
+        `/api/web/records/${encodeURIComponent(target.recordId)}/category`,
+        { method: 'PUT', body: JSON.stringify({ baseRevision: scene.revision, recordType }) })
+      if (!Number.isFinite(result?.revision) || !result.record || result.record.recordId !== target.recordId)
+        throw new Error('改类别响应格式不正确')
+      setScene((now) => now
+        ? { ...now, revision: result.revision, records: now.records.map((item) => item.recordId === target.recordId ? result.record : item) }
+        : now)
+      setLastSaved(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+      // 类别变了，整理布局的落点也跟着变，旧预览的基准修订一并失效。
+      setLayoutPlan(null)
+      setNotice({
+        kind: 'success',
+        message: `已把「${recordTitle(result.record)}」改成${NODE_KINDS[kindOf(recordType)].label}，画布修订 ${result.revision}。`
+      })
+    } catch (error) {
+      setNotice({ kind: 'error', message: `改类别失败：${errorMessage(error)}。下拉已退回原类别；修订冲突时请重新加载画布。` })
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <WorkbenchShell
       chrome={chrome}
@@ -761,6 +806,8 @@ export function WebCanvasApp() {
                 edges={edges}
                 // 断开连线与「删除节点」同一档：都要编辑权限。不给就只显示列表、不显示按钮。
                 onDisconnect={editable ? (edgeId) => void disconnectEdge(edgeId) : undefined}
+                // 改类别也是记录级，与「改标题内容」同一档：能编辑就给。
+                onCategory={editable ? (recordType) => void changeCategory(recordType) : undefined}
               />
             )
             : (

@@ -50,6 +50,19 @@ export const CREATABLE_RECORD_TYPES: { kind: keyof typeof NODE_KINDS; recordType
   { kind: 'general', recordType: 'general', label: '通用' }
 ]
 
+/**
+ * 「节点类别」下拉的选项：能新建的那几个，外加**这个节点当前那一个**。
+ *
+ * 为什么不直接用 CREATABLE_RECORD_TYPES：当前类别可能不在这张表里（故事企划 / 大纲 / 章节都是）。
+ * 不给它留一个选项，下拉就会显示成表里的第一个，而那是假的——它明明还是原来那个类别。
+ * 所以把它前置一条并标上「当前」：能看见真相，也仍然只能改成表里那几个。
+ */
+export function categoryOptions(currentRecordType: string): Array<{ recordType: string; label: string }> {
+  const options = CREATABLE_RECORD_TYPES.map((item) => ({ recordType: item.recordType, label: item.label }))
+  if (options.some((item) => item.recordType === currentRecordType)) return options
+  return [{ recordType: currentRecordType, label: `${NODE_KINDS[kindOf(currentRecordType)].label}（当前）` }, ...options]
+}
+
 export function kindOf(recordType: string): NodeKind {
   const t = recordType.toLowerCase()
   if (t.includes('story') && t.includes('plan')) return 'plan'
