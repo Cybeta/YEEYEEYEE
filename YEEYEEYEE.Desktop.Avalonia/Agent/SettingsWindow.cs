@@ -9,14 +9,14 @@ using static YEEYEEYEE.Desktop.Avalonia.AgentDialogUi;
 namespace YEEYEEYEE.Desktop.Avalonia;
 
 /// <summary>
-/// 设置窗口（左页签三页：模型接入 / 生图生视频 / 技能管理）。
+/// 设置窗口（左页签四页：模型接入 / 生图生视频 / 技能管理 / 协作）。
 ///
 /// 为什么不继续用「一扇门一个弹窗」：模型接入原本只有 Agent 面板右上角那一个入口，
 /// 生图 / 生视频、技能则各自散在别处。用户问「我要配个出图接口该去哪」时，
 /// 答案是「先点 Agent 面板的 ⚙，但那是聊天模型的设置」——这种答案本身就是问题。
-/// 现在左下角一个「设置」把三类配置收进同一个窗口，用页签分开，谁都不挡谁。
+/// 现在左下角一个「设置」把四类配置收进同一个窗口，用页签分开，谁都不挡谁。
 ///
-/// 落盘只在这里做一次：三页各自把「界面 → 内存 config」的转换交出来，
+/// 落盘只在这里做一次：四页各自把「界面 → 内存 config」的转换交出来，
 /// 外壳在保存时先依次 Commit 再写盘。分开写盘会出现「切页丢改动」和半截配置落盘。
 /// </summary>
 internal static class SettingsWindow
@@ -35,7 +35,7 @@ internal static class SettingsWindow
         var config = AiProviderSettings.Load();
         var saved = false;
 
-        // 三页的 Commit 收集到一起。注意 list 在 Build 之后才填满，
+        // 四页的 Commit 收集到一起。注意 list 在 Build 之后才填满，
         // 但 SaveAll 只在用户点击时执行，那时列表已经完整。
         var commits = new List<Action>();
         bool SaveAll()
@@ -85,7 +85,7 @@ internal static class SettingsWindow
             Report = Report
         };
 
-        // ---------- 三页 ----------
+        // ---------- 四页 ----------
 
         var modelPage = SettingsModelPage.Build(config, context);
         pages.Add(modelPage);
@@ -106,6 +106,10 @@ internal static class SettingsWindow
         var skillPage = SettingsSkillsPage.Build(config, context);
         pages.Add(skillPage);
         commits.Add(skillPage.Commit);
+
+        var serverPage = SettingsServerPage.Build(config, context);
+        pages.Add(serverPage);
+        commits.Add(serverPage.Commit);
 
         // ---------- 左栏页签 ----------
 

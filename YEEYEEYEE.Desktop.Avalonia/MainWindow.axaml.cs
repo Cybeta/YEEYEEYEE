@@ -5241,7 +5241,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     }
 
     /// <summary>
-    /// 左下角「设置」：模型接入 / 生图生视频 / 技能管理三页。
+    /// 左下角「设置」：模型接入 / 生图生视频 / 技能管理 / 协作四页。
     ///
     /// 用同一个窗口、同一条落盘路径（<see cref="SettingsWindow"/>）打开，不再每类配置各开一扇门：
     /// 用户问「配个出图接口该去哪」时，答案应该是一个地方，而不是「先点 Agent 面板的 ⚙，但那是聊天模型的设置」。

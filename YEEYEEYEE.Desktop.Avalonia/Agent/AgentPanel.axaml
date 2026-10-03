@@ -100,7 +100,7 @@
             <ComboBox Grid.Column="1" x:Name="ModelBox" Classes="panelCombo" HorizontalAlignment="Stretch"
                       SelectionChanged="Model_OnSelectionChanged" />
             <Button Grid.Column="2" Classes="miniButton" Content="管理…" FontSize="10"
-                    ToolTip.Tip="打开设置：模型接入 / 生图生视频 / 技能管理" Click="ModelSettings_OnClick" />
+                    ToolTip.Tip="打开设置：模型接入 / 生图生视频 / 技能管理 / 协作" Click="ModelSettings_OnClick" />
           </Grid>
 
           <!-- 上一轮的用量。取不到的服务端一律显示 ——，不拿 0 冒充（0 会被读成"没花 token"）。 -->

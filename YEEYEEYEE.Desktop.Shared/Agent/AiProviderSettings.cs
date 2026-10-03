@@ -99,6 +99,21 @@ public sealed class AiProviderConfig
     public string Theme { get; set; } = nameof(AppTheme.Dark);
 
     /// <summary>
+    /// 协作服务器（YEEYEEYEE.Web）的基地址，形如 <c>http://127.0.0.1:5000</c>。
+    ///
+    /// 与 <see cref="Theme"/> 同级：这是这台机器接不接协作，不属于某一份接口配置，
+    /// 所以切换「当前选中的那一份」时不会被换掉。留空 = 不接协作，桌面端照旧独立工作——
+    /// **没有服务器不是错误状态，是默认状态**。
+    /// </summary>
+    public string CollaborationServerUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 上一次登录用的账号名。**只记名字，不记密码**：密码不落盘、会话只在进程内，
+    /// 所以重启要重新登录。真要「开机就是在编辑」，得先把会话安全地存起来，那是另一件事。
+    /// </summary>
+    public string CollaborationAccount { get; set; } = string.Empty;
+
+    /// <summary>
     /// 出图「开奖」：一批图出完后不直接把缩略图铺在画布上，而是留一排**背面朝上**的卡，
     /// 由用户点开，再走一段全屏揭晓（自有形象许愿 → 光点飞入 → 卡片依次翻面），挑一张收进节点。
     ///

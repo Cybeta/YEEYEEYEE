@@ -493,7 +493,7 @@ internal static class SettingsMediaPage
         }
 
         /// <summary>
-        /// 智能导入：先把三页的编辑写回 config，再让导入窗口在这份 config 上写，最后把所有页按结果重新回显。
+        /// 智能导入：先把四页的编辑写回 config，再让导入窗口在这份 config 上写，最后把所有页按结果重新回显。
         ///
         /// 第一步不能省：导入窗口最后会 Save「config 里那份」，
         /// 用户在别的页刚填、还没提交的内容会被那次写盘悄悄丢掉。
