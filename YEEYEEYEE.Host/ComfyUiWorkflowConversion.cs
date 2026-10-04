@@ -25,6 +25,11 @@ public sealed record ComfyUiConversionResult(JsonObject ApiWorkflow, IReadOnlyLi
 ///   2. 不是后端节点的（备注、rgthree 的 Label 之类）不进 API —— 官方靠 <c>node.comfyClass</c> 为空自然落空，
 ///      我们这里改成「<c>/object_info</c> 里查不到这个类型」来判定；
 ///   2b. <b>但 Reroute 是转发而不是丢弃</b>：穿过它的连线要跟到真正的源头（否则下游输入整项消失）；
+///   2c. <b>被绕过的节点（mode=4）同样是转发</b>：官方在 <c>ExecutableNodeDTO.resolveOutput()</c> 里
+///       「按类型挑一个顶得上的输入槽」再顺着它的连线往上走。只删节点不接线，下游那个输入就整项消失——
+///       实测 U01-minimax_h3_多图参考生视频基础版：RTXVideoSuperResolution(157) 被绕过，它一丢，
+///       必填的 <c>CreateVideo.images</c> 跟着没了；服务端照样回 success，只是产出为空——
+///       几十秒到几分钟的算力白烧，一个文件都不落。静音（mode=2）则本来就该删：它不产出。
 ///   3. 控件值按**位置**对齐 <c>widgets_values</c>；声明了 <c>control_after_generate</c> 的控件后面
 ///      还跟着一个「生成后随机/固定」的值，它占位但**不进 API**（KSampler.seed 就是这种）；
 ///   4. 连线还原成 <c>[源节点id, 源槽]</c>，id 一律字符串（官方就是 <c>[origin_id, origin_slot]</c>）；
@@ -350,23 +355,28 @@ public static class ComfyUiWorkflowConversion
     private static string? AsText(JsonNode? node)
         => node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
-    private static Dictionary<long, (string OriginId, int OriginSlot)> ReadLinks(JsonArray? links)
+    /// <summary>一条连线：源头（输出端）与去向（输入端）都留着——去向那个槽位的类型决定旁路时该怎么穿透。</summary>
+    private readonly record struct LinkRow(string OriginId, int OriginSlot, string? TargetId, int TargetSlot);
+
+    private static Dictionary<long, LinkRow> ReadLinks(JsonArray? links)
     {
-        var map = new Dictionary<long, (string, int)>();
+        var map = new Dictionary<long, LinkRow>();
         if (links is null) return map;
         foreach (var entry in links)
         {
             if (entry is not JsonArray row || row.Count < 3) continue;
             if (ReadLong(row[0]) is not { } id) continue;
             var originId = IdText(row[1]);
-            var originSlot = (int)(ReadLong(row[2]) ?? 0);
             if (originId is null) continue;
-            map[id] = (originId, originSlot);
+            var originSlot = (int)(ReadLong(row[2]) ?? 0);
+            var targetId = row.Count > 3 ? IdText(row[3]) : null;
+            var targetSlot = row.Count > 4 ? (int)(ReadLong(row[4]) ?? 0) : 0;
+            map[id] = new LinkRow(originId, originSlot, targetId, targetSlot);
         }
         return map;
     }
 
-    /// <summary>按 id 建节点索引，供「跟随 Reroute」用。</summary>
+    /// <summary>按 id 建节点索引，供「跟随 Reroute / 旁路」用。</summary>
     private static Dictionary<string, JsonObject> IndexById(JsonArray nodes)
     {
         var map = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
@@ -379,53 +389,135 @@ public static class ComfyUiWorkflowConversion
     }
 
     /// <summary>
-    /// 把「穿过 Reroute 的连线」接到真正的源头。
+    /// 把「穿过 Reroute 或穿过被绕过节点」的连线接到真正的源头。
     ///
-    /// 为什么必须做：Reroute 在 <c>/object_info</c> 里查不到，会像备注一样被跳过——但它的作用是
-    /// **转发**，不是丢弃。不跟过去，下游那个输入就整项消失。实测 Y05-图像生成Qwen2512：
-    /// <c>VAEDecode.vae</c> 的源头是 Reroute(391)，而它自己接的是 VAELoader(39)；转出来的 API 里
-    /// vae 这一项没了，提交时服务端判成 <c>required_input_missing</c>，整份工作流一张图都跑不出来。
-    /// 官方前端是在内存的图上顺着虚拟节点走，这里在 JSON 上做同一件事。
+    /// 为什么必须做：这两类节点都不进 API，但它们的作用是**转发**，不是丢弃。不跟过去，下游那个
+    /// 输入就整项消失。两个实测：
+    ///   · Reroute——Y05-图像生成Qwen2512 的 <c>VAEDecode.vae</c> 源头是 Reroute(391)，它自己接的是
+    ///     VAELoader(39)；不跟，vae 这一项没了，提交时判 <c>required_input_missing</c>，一张图都跑不出来。
+    ///   · 被绕过（mode=4）——U01-minimax_h3_多图参考生视频基础版的 RTXVideoSuperResolution(157) 被绕过，
+    ///     不跟，必填的 <c>CreateVideo.images</c> 没了；这次服务端没报错，回的是 success，只是产出为空。
+    ///
+    /// 规则照搬官方 <c>ExecutableNodeDTO.resolveOutput()</c> / <c>resolveInput()</c>：
+    /// 从一个输出槽往外走，遇到旁路就按类型挑一个输入槽顶上去，遇到静音（mode=2）就到此为止——
+    /// 静音节点本来就不产出，下游那一项确实该被删掉。
     /// </summary>
     private static Dictionary<long, (string OriginId, int OriginSlot)> ResolvePassThroughs(
-        Dictionary<long, (string OriginId, int OriginSlot)> links,
+        Dictionary<long, LinkRow> links,
         IReadOnlyDictionary<string, JsonObject> nodesById)
     {
         var resolved = new Dictionary<long, (string OriginId, int OriginSlot)>();
-        foreach (var pair in links) resolved[pair.Key] = Follow(pair.Value);
+        foreach (var pair in links)
+        {
+            var hit = ResolveOutput(
+                pair.Value.OriginId,
+                pair.Value.OriginSlot,
+                TargetSlotType(pair.Value),
+                new HashSet<string>(StringComparer.Ordinal));
+            // 穿不过去（静音、旁路时找不到顶得上的输入、上游根本没接线）就保留原样，
+            // 交给 PruneDanglingLinks 把这一项删掉——和官方「删掉这个输入」的结果一致。
+            resolved[pair.Key] = hit ?? (pair.Value.OriginId, pair.Value.OriginSlot);
+        }
         return resolved;
 
-        (string OriginId, int OriginSlot) Follow((string OriginId, int OriginSlot) origin)
+        (string, int)? ResolveOutput(string nodeId, int slot, string type, HashSet<string> visited)
         {
-            var visited = new HashSet<string>(StringComparer.Ordinal);
-            var current = origin;
-            // 环就停：坏文件里 Reroute 互相接是可能的。宁可留一个指向被跳过节点的连线让
+            // 环就停：坏文件里互相接是可能的。宁可留一个指向被跳过节点的连线让
             // PruneDanglingLinks 删掉，也不要在这里转不出来。
-            while (IsPassThrough(current.OriginId) && visited.Add(current.OriginId))
+            if (!nodesById.TryGetValue(nodeId, out var node)) return null;
+            if (!visited.Add("O:" + nodeId + "@" + slot.ToString(CultureInfo.InvariantCulture))) return null;
+
+            var mode = ReadInt(node["mode"]) ?? 0;
+            // 静音节点不产出：官方 resolveOutput 开头第一句就是这个。
+            if (mode == ModeNever) return null;
+
+            if (mode == ModeBypass)
             {
-                if (FirstInputLink(nodesById[current.OriginId]) is not { } incoming) break;
-                if (!links.TryGetValue(incoming, out var upstream)) break;
-                current = upstream;
+                var index = BypassSlotIndex(node, slot, type);
+                return index < 0 ? null : ResolveInput(nodeId, index, type: null, visited);
             }
-            return current;
+
+            // Reroute 这类虚拟节点：自己不产出，但把上游原样转发。
+            if (IsVirtualPassThrough(node)) return ResolveInput(nodeId, slot, type, visited);
+
+            return (nodeId, slot);
         }
 
-        bool IsPassThrough(string id) =>
-            nodesById.TryGetValue(id, out var node)
-            && (AsText(node["type"]) ?? string.Empty).StartsWith("Reroute", StringComparison.Ordinal);
-    }
-
-    /// <summary>节点第一个挂着连线的输入槽（Reroute 只有一个）。</summary>
-    private static long? FirstInputLink(JsonObject node)
-    {
-        if (node["inputs"] is not JsonArray slots) return null;
-        foreach (var slot in slots)
+        (string, int)? ResolveInput(string nodeId, int slot, string? type, HashSet<string> visited)
         {
-            if (slot is not JsonObject input) continue;
-            if (ReadLong(input["link"]) is { } link) return link;
+            if (!nodesById.TryGetValue(nodeId, out var node)) return null;
+            if (!visited.Add("I:" + nodeId + "@" + slot.ToString(CultureInfo.InvariantCulture))) return null;
+            if (InputTypeAt(node, slot) is not { } declared) return null;  // 没有这个输入槽
+            if (node["inputs"] is not JsonArray inputs || inputs[slot] is not JsonObject input) return null;
+            if (ReadLong(input["link"]) is not { } linkId || !links.TryGetValue(linkId, out var link)) return null;
+            // 官方旁路那一支不再传 type（`resolveInput(matchingIndex, visited)`），这里照做。
+            return ResolveOutput(link.OriginId, link.OriginSlot, type ?? declared, visited);
         }
-        return null;
+
+        // 去向那一端的输入槽类型，就是官方传下来的 type；查不到就当「任意类型」。
+        string TargetSlotType(LinkRow link)
+            => link.TargetId is { } targetId && nodesById.TryGetValue(targetId, out var node)
+                ? InputTypeAt(node, link.TargetSlot) ?? string.Empty
+                : string.Empty;
     }
+
+    /// <summary>
+    /// 官方 <c>ExecutableNodeDTO._getBypassSlotIndex()</c>：被绕过的节点该拿哪个输入顶上去。
+    /// 顺序是「同号槽 → 类型完全相同的 → 类型兼容的」，都没有就返回 -1（穿不过去）。
+    /// </summary>
+    private static int BypassSlotIndex(JsonObject node, int slot, string type)
+    {
+        var inputs = node["inputs"] as JsonArray;
+        var count = inputs?.Count ?? 0;
+        var outputType = OutputTypeAt(node, slot) ?? string.Empty;
+
+        // 「任意类型」：同号优先，越界就退到第一个槽。
+        if (type.Length == 0 || type == "*") return count > slot ? slot : 0;
+
+        // 同号的那个槽自己就顶得上就用它。
+        if (InputTypeAt(node, slot) is { } opposite
+            && Connects(opposite, outputType) && Connects(opposite, type))
+            return slot;
+
+        if (inputs is null) return -1;
+
+        // 先找类型完全相同的（官方说的 legacy 行为）。
+        for (var index = 0; index < inputs.Count; index++)
+            if (inputs[index] is JsonObject candidate && AsText(candidate["type"]) == type) return index;
+
+        // 再放宽到类型兼容的。
+        for (var index = 0; index < inputs.Count; index++)
+            if (inputs[index] is JsonObject candidate
+                && AsText(candidate["type"]) is { } candidateType
+                && Connects(candidateType, outputType) && Connects(candidateType, type))
+                return index;
+
+        return -1;
+    }
+
+    /// <summary>官方 <c>LiteGraph.isValidConnection</c>：任一端是空或 <c>*</c> 就通融，否则要求类型相同。</summary>
+    private static bool Connects(string a, string b)
+    {
+        if (a.Length == 0 || b.Length == 0) return true;
+        if (a == "*" || b == "*") return true;
+        return string.Equals(a, b, StringComparison.Ordinal);
+    }
+
+    private static string? InputTypeAt(JsonObject node, int slot)
+        => node["inputs"] is JsonArray inputs && slot >= 0 && slot < inputs.Count
+           && inputs[slot] is JsonObject input
+            ? AsText(input["type"])
+            : null;
+
+    private static string? OutputTypeAt(JsonObject node, int slot)
+        => node["outputs"] is JsonArray outputs && slot >= 0 && slot < outputs.Count
+           && outputs[slot] is JsonObject output
+            ? AsText(output["type"])
+            : null;
+
+    /// <summary>Reroute 这类「只转发」的前端节点：<c>/object_info</c> 里查不到，但连线要跟着穿过去。</summary>
+    private static bool IsVirtualPassThrough(JsonObject node)
+        => (AsText(node["type"]) ?? string.Empty).StartsWith("Reroute", StringComparison.Ordinal);
 
     /// <summary>官方最后一步：连到「已不进 API 的节点」的输入整条删掉。</summary>
     private static void PruneDanglingLinks(JsonObject output)

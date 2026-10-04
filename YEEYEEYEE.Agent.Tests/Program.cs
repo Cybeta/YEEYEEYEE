@@ -256,6 +256,7 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 当前这一台：切换把地址与底模写成站点那一份，同一台不重复写", ComfyUiActivationProjectsSiteOntoConfig),
     ("对话用量：流式末尾那条 usage 要读出来（含缓存命中 / 未命中）", AiStreamReportsUsage),
     ("ComfyUI 转换：穿过 Reroute 的连线要跟到源头，不能整项丢掉", ComfyUiConversionFollowsReroute),
+    ("ComfyUI 转换：被绕过的节点要按类型顶上去，不能只删节点（否则必填项整项消失）", ComfyUiConversionFollowsBypassedNodes),
     ("ComfyUI 转换：被转成连线的控件仍按定义顺序对齐 widgets_values", ComfyUiConversionAlignsConvertedWidgetsByDefinition),
     ("ComfyUI 转换：动态下拉（SaveVideo.format）不能被当成连线槽位丢掉", ComfyUiConversionKeepsDynamicComboWidgets),
     ("对话用量：胶囊与明细的口径（命中率分母、没有就不给速率、缺失说成「不是 0」）", UsageReportFormatsWithoutLying),
@@ -1082,6 +1083,46 @@ static void ComfyUiConversionFollowsReroute()
     var vae = api["4"]!["inputs"]!["vae"]!.AsArray();
     Expect(vae[0]!.GetValue<string>() == "1",
         $"穿过 Reroute 的连线应跟到源头 VAELoader(1)，实际指到了 {vae[0]}");
+}
+
+static void ComfyUiConversionFollowsBypassedNodes()
+{
+    // 被绕过（mode=4）的节点不进 API，和 Reroute 一样是**转发**，不是丢弃。只删节点不接线，
+    // 下游那个输入就整项消失。实测 U01-minimax_h3_多图参考生视频基础版：RTXVideoSuperResolution(157)
+    // 被绕过，它一丢，必填的 CreateVideo.images 跟着没了——服务端这次没报错，回的是 success，
+    // 只是产出为空：几分钟算力换不来一个文件。静音（mode=2）则本来就该删，它不产出。
+    const string defs = """
+        {"VAEDecodeAudio":{"input":{"required":{"samples":["LATENT"],"vae":["VAE"]}},"output":["AUDIO"],"output_name":["AUDIO"]},
+         "VAEDecode":{"input":{"required":{"samples":["LATENT"],"vae":["VAE"]}},"output":["IMAGE"],"output_name":["IMAGE"]},
+         "RTXVideoSuperResolution":{"input":{"required":{"images":["IMAGE"],"resize_type":["COMBO",{"options":["scale by multiplier"]}],"quality":["COMBO",{"options":["ULTRA"]}]}},"output":["IMAGE"],"output_name":["upscaled_images"]},
+         "CreateVideo":{"input":{"required":{"images":["IMAGE"],"fps":["INT",{"default":24}]},"optional":{"audio":["AUDIO"],"codec":["COMBO",{"options":["none"]}]}},"output":["VIDEO"],"output_name":["VIDEO"]}}
+        """;
+    const string ui = """
+        {"nodes":[
+          {"id":121,"type":"VAEDecodeAudio","mode":0,"inputs":[{"name":"samples","type":"LATENT","link":281},{"name":"vae","type":"VAE","link":250}]},
+          {"id":122,"type":"VAEDecode","mode":0,"inputs":[{"name":"samples","type":"LATENT","link":280},{"name":"vae","type":"VAE","link":251}]},
+          {"id":157,"type":"RTXVideoSuperResolution","mode":4,
+           "inputs":[{"name":"images","type":"IMAGE","link":296}],
+           "outputs":[{"name":"upscaled_images","type":"IMAGE","links":[297]}],
+           "widgets_values":["scale by multiplier",2,"ULTRA"]},
+          {"id":130,"type":"CreateVideo","mode":0,
+           "inputs":[{"name":"images","type":"IMAGE","link":297},{"name":"audio","type":"AUDIO","link":259}],
+           "widgets_values":[24,"sRGB"]}
+        ],
+        "links":[[259,121,0,130,1,"AUDIO"],[296,122,0,157,0,"IMAGE"],[297,157,0,130,0,"IMAGE"]]}
+        """;
+
+    var api = ComfyUiWorkflowConversion.Convert(ui, defs).ApiWorkflow;
+    Expect(api["157"] is null, "被绕过的节点自己不该出现在 API 里");
+    var images = api["130"]!["inputs"]!["images"]!.AsArray();
+    Expect(images[0]!.GetValue<string>() == "122",
+        $"被绕过的节点要按类型顶上去：images 应指到上游 VAEDecode(122)，实际指到了 {images[0]}");
+    var audio = api["130"]!["inputs"]!["audio"]!.AsArray();
+    Expect(audio[0]!.GetValue<string>() == "121", "没被绕过的线照旧，不该被连累");
+
+    // 静音（mode=2）不产出：下游那一项该整项删掉，而不是留一个指向不存在节点的连线。
+    var mutedApi = ComfyUiWorkflowConversion.Convert(ui.Replace("\"mode\":4", "\"mode\":2"), defs).ApiWorkflow;
+    Expect(mutedApi["130"]!["inputs"]!["images"] is null, "静音节点不产出，下游该项应被删掉");
 }
 
 static void ComfyUiConversionAlignsConvertedWidgetsByDefinition()
