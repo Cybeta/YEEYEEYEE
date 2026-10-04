@@ -11862,9 +11862,12 @@ static byte[] TinyTrack(
 	stsz.AddRange(BigEndian32(deltas.Length));
 	for (var index = 0; index < deltas.Length; index++) stsz.AddRange(BigEndian32(sampleSize));
 	children.Add(TinyBox("stsz", stsz.ToArray()));
+	// stco / co64 也是 full box：version/flags(4) + entry_count(4) + 条目。
+	// **这里原先漏了那 4 个字节**，而产品侧读的时候也少算 4（两边错得一样），
+	// 于是真文件全解不开、254 项测试却全绿——见 Mp4Concatenator.ExpandOffsets 的注释。
 	children.Add(useCo64
-		? TinyBox("co64", TinyJoin(BigEndian32(1), BitConverter.GetBytes((ulong)mdatStart).Reverse().ToArray()))
-		: TinyBox("stco", TinyJoin(BigEndian32(1), BigEndian32((int)mdatStart))));
+		? TinyBox("co64", TinyJoin(BigEndian32(0), BigEndian32(1), BitConverter.GetBytes((ulong)mdatStart).Reverse().ToArray()))
+		: TinyBox("stco", TinyJoin(BigEndian32(0), BigEndian32(1), BigEndian32((int)mdatStart))));
 
 	var minf = TinyJoin(
 		handler == "vide"
@@ -11947,12 +11950,15 @@ static ulong Mp4MvhdDuration(byte[] data)
 	return 0;
 }
 
-static long Mp4FirstElstMediaTime(byte[] data)
+/// <summary>成品里每条轨道的 elst.media_time，按轨道出现顺序——**视频与音频这里就该不一样**，
+/// 所以不能只看第一条（见 Mp4ConcatAlignsAudioHeadAndKeepsVideoIntact）。</summary>
+static List<long> Mp4ElstMediaTimes(byte[] data)
 {
-	for (var index = 0; index + 16 <= data.Length; index++)
+	var values = new List<long>();
+	for (var index = 0; index + 20 <= data.Length; index++)
 		if (data[index] == (byte)'e' && data[index + 1] == (byte)'l' && data[index + 2] == (byte)'s' && data[index + 3] == (byte)'t')
-			return BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(index + 16, 4));
-	return -1;
+			values.Add(BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(index + 16, 4)));
+	return values;
 }
 
 static byte[] Mp4MdatPayload(byte[] data)
@@ -12014,7 +12020,10 @@ static void Mp4ConcatAlignsAudioHeadAndKeepsVideoIntact()
 		+ "；实际前40字节 " + string.Join(" ", payload.Take(40).Select(value => value.ToString("X2")))
 		+ "；期望前40字节 " + string.Join(" ", expected.Take(40).Select(value => value.ToString("X2"))));
 
-	Expect(Mp4FirstElstMediaTime(data) == 0, "预听样本已经在并表时丢掉了，成品的 elst 不能再剪一次");
+	var editTimes = Mp4ElstMediaTimes(data);
+	Expect(editTimes.Count == 2, "两条轨道各要有一份 elst，实际 " + editTimes.Count);
+	Expect(editTimes[0] == 1024, "视频没丢样本，原来的合成偏移 1024 必须留着（写 0 会让整条时间轴晚 83ms），实际 " + editTimes[0]);
+	Expect(editTimes[1] == 0, "音频的预听样本已经在并表时丢掉了，elst 不能再剪一次，实际 " + editTimes[1]);
 	// 每段 125ms（视频与音频剪完之后相等），两段 250ms
 	Expect(Mp4MvhdDuration(data) == 250, "成品总时长应是 250ms，实际 " + Mp4MvhdDuration(data));
 	Expect(result.Note.Contains("预听样本"), "说明里要写清接缝是怎么对齐的");

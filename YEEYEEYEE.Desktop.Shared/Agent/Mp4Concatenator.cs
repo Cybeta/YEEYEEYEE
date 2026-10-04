@@ -206,6 +206,7 @@ public static class Mp4Concatenator
 
         // ── 1. 按轨道把各段的样本并起来，并算出每段占多长 ──────────────────────
         var merged = head.Tracks.Select(_ => new List<Sample>()).ToList();
+        var droppedPerTrack = new int[head.Tracks.Count];
         var segmentDurations = new List<ulong>();
         var primingDropped = 0;
 
@@ -217,6 +218,7 @@ public static class Mp4Concatenator
                 var track = file.Tracks[t];
                 var skip = PrimingSamplesToDrop(track);
                 primingDropped += skip;
+                droppedPerTrack[t] += skip;
                 var kept = track.Samples.Skip(skip).ToList();
                 var duration = (ulong)kept.Sum(sample => (long)sample.Duration);
                 var inMovieTime = (ulong)Math.Round(duration * (double)movieTimescale / track.Timescale);
@@ -261,10 +263,10 @@ public static class Mp4Concatenator
 
         // moov 的长度取决于样本表，而样本表里的 chunk 偏移取决于 moov 有多长 —— 先写一遍量长度，
         // 再带着正确偏移写第二遍。两遍的 stco 条数一样，所以长度相等。
-        var measuring = BuildMoov(head, merged, chunks, totalDuration, movieTimescale);
+        var measuring = BuildMoov(head, merged, chunks, totalDuration, movieTimescale, droppedPerTrack);
         var headerLength = head.FtypBytes.Length + measuring.Length + 8;
         var fixedChunks = chunks.Select(chunk => (chunk.Track, chunk.Offset + headerLength, chunk.Count)).ToList();
-        var moov = BuildMoov(head, merged, fixedChunks, totalDuration, movieTimescale);
+        var moov = BuildMoov(head, merged, fixedChunks, totalDuration, movieTimescale, droppedPerTrack);
 
         using (var output = File.Create(outputPath))
         {
@@ -287,7 +289,7 @@ public static class Mp4Concatenator
 
     private static byte[] BuildMoov(
         Mp4File head, List<List<Sample>> merged, List<(int Track, long Offset, int Count)> chunks,
-        ulong totalDuration, uint movieTimescale)
+        ulong totalDuration, uint movieTimescale, int[] droppedPerTrack)
     {
         var payload = new MemoryStream();
         payload.Write(BuildMvhd(movieTimescale, totalDuration, head.NextTrackId));
@@ -297,7 +299,7 @@ public static class Mp4Concatenator
             payload.Write(BuildTrak(
                 head.Tracks[t], merged[t],
                 chunks.Where(chunk => chunk.Track == t).ToList(),
-                totalDuration, movieTimescale));
+                totalDuration, movieTimescale, droppedPerTrack[t]));
         }
         return Box("moov", payload.ToArray());
     }
@@ -319,7 +321,7 @@ public static class Mp4Concatenator
     }
 
     private static byte[] BuildTrak(Track track, List<Sample> samples, List<(int Track, long Offset, int Count)> chunks,
-        ulong totalDuration, uint movieTimescale)
+        ulong totalDuration, uint movieTimescale, int droppedSamples)
     {
         var payload = new MemoryStream();
         foreach (var child in track.BodyChildren)
@@ -330,9 +332,7 @@ public static class Mp4Concatenator
                     payload.Write(Box("tkhd", PatchDuration(track.TkhdPayload, track, totalDuration, movieTimescale, isTkhd: true)));
                     break;
                 case "edts":
-                    // 统一改成「从头播满」：每段的预听样本已经在并表时丢掉了，
-                    // 再保留原来的 media_time 会多剪一次。
-                    payload.Write(BuildEdts(totalDuration));
+                    payload.Write(BuildEdts(totalDuration, EditMediaTimeFor(track, droppedSamples)));
                     break;
                 case "mdia":
                     payload.Write(Box("mdia", BuildMdia(track, samples, chunks)));
@@ -344,6 +344,17 @@ public static class Mp4Concatenator
         }
         return Box("trak", payload.ToArray());
     }
+
+    /// <summary>
+    /// 成品的编辑列表该写什么时间原点——**这一条也得分轨道，判据与丢预听样本同一个**：
+    ///
+    /// · **丢过样本的（音频）**：预听样本已经在并表时丢掉了，原点写 0——再保留原来的 media_time 等于多剪一次；
+    /// · **没丢的（视频）**：原样的 media_time 必须留着。实测它正好等于首帧的 ctts 偏移（1024），
+    ///   源文件正是靠它把首帧的 PTS 映射到 t=0。这里若一律写 0，整条时间轴会晚 83ms，
+    ///   最后一帧就落到声明时长之外（实测解码帧数从 744 变 743——数据没丢，是时间轴错位）。
+    /// </summary>
+    private static long EditMediaTimeFor(Track track, int droppedSamples) =>
+        droppedSamples > 0 ? 0 : track.EditMediaTime;
 
     private static byte[] BuildMdia(Track track, List<Sample> samples, List<(int Track, long Offset, int Count)> chunks)
     {
@@ -387,12 +398,14 @@ public static class Mp4Concatenator
         return payload.ToArray();
     }
 
-    private static byte[] BuildEdts(ulong movieDuration)
+    /// <summary>编辑列表。movieDuration 是这段在影片时间轴上占的长度，mediaTime 是它的时间原点——
+    /// **两者都得分轨道，别一律写 0**（见 <see cref="EditMediaTimeFor"/>）。</summary>
+    private static byte[] BuildEdts(ulong movieDuration, long mediaTime)
     {
         var elst = new byte[20];
         BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(4, 4), 1);                       // entry_count
         BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(8, 4), (uint)Math.Min(movieDuration, uint.MaxValue));
-        BinaryPrimitives.WriteInt32BigEndian(elst.AsSpan(12, 4), 0);                       // media_time = 0
+        BinaryPrimitives.WriteInt32BigEndian(elst.AsSpan(12, 4), (int)mediaTime);          // media_time
         BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(16, 4), 0x00010000);             // rate 1.0
         var payload = new MemoryStream();
         payload.Write(Box("elst", elst));
@@ -780,7 +793,12 @@ internal sealed class Mp4File
             foreach (var run in runs)
                 if (run.FirstChunk <= chunk) perChunk = run.PerChunk;
             if (perChunk == 0) continue;
-            var position = (long)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(stco.PayloadStart + 4 + (chunk - 1) * 4, 4));
+            // stco 也是 full box：内容先有 version/flags(4)，才是 entry_count(4)，条目从 +8 起。
+            // **这里原先写成 +4**，第一个 chunk 的偏移就被读成了 entry_count（真文件里是 123 这种小数字），
+            // 于是从第一帧起读到的都是垃圾字节——而解码器只会报「Invalid NAL unit size」，
+            // 看不出是容器表的问题。更要命的是当时那个造样本的小工具也漏了 version/flags，
+            // 两边错得一样，254 项测试全绿——**是独立解码判读把它揪出来的**（见 README）。
+            var position = (long)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(stco.PayloadStart + 8 + (chunk - 1) * 4, 4));
             for (var i = 0u; i < perChunk && sample < sizes.Count; i++)
             {
                 offsets[sample] = position;
