@@ -247,6 +247,8 @@ var tests = new (string Name, Action Run)[]
     ("返工 G6-T1：打开之后库被删也在执行前核验出来（旧标记不算数）", AuthorityRecheckCatchesLaterDeletedLibrary),
     ("返工 G6-T2：发布结果区分「真落库」与「本地内容」，本地实体不谎报已保存", PublishOutcomeDistinguishesLocalAndShared),
     ("版本策略：存在版本可锁定，缺失版本拒绝且不静默降级", ReferenceVersionPolicy),
+    ("版本状态：五档（历史保留/已采纳/当前适用/需要确认/未来版本）与三个边界", CanvasNodeVersionStatusHasFiveStates),
+    ("换画布不许把自身状态当来源：必须是真复制（旧 R16-1 清空画布那条路）", CanvasSwitchNeverAliasesItsOwnState),
     ("出视频：按「提交 → 轮询 → 下载」跑通并把文件落到资产目录", VideoProviderSubmitsPollsAndDownloads),
     ("出视频：一次只收一张图（首帧），多出来的参考图要如实说出来而不是静默丢", VideoProviderSaysWhatItCouldNotUse),
     ("出视频：任务失败带出接口原因，返回体不认识就把原文报出来（不产空文件）", VideoProviderReportsFailureAndUnknownShape),
@@ -6660,10 +6662,129 @@ static void CommitRejectsNewBatchWhileRecoveryPending()
 }
 
 /// <summary>
-/// 返工 R16-1：把画布控件**自己的状态**当来源加载会先清空 State、再从刚清空的集合里取，
-/// 结果画布被清成空。标签快照一旦与活动状态共用同一对象（切标签、关标签时都会发生），
-/// 就会走到这条路径；这里断言控件直接拒绝自身别名。
+/// 返工 R16-1 的原始缺陷：把画布控件**自己的状态**当来源加载，会先清空 State、再从刚清空的集合里取，
+/// 结果画布被清成空——切标签、关标签时标签快照与活动状态可能共用同一对象。
+/// 旧 WinForms 控件是在 `LoadState` 里用 `ReferenceEquals(state, State)` 直接拒绝自身别名。
+///
+/// 这一版从结构上不会再踩它：换画布是**整体换引用**（没有「先清空再回填」那一步），
+/// 而换进来的那份来自 `CanvasCloner.Clone` 的 JSON 往返——必须是**另一个对象**，不能是同一份。
+/// 所以今天该钉住的是这条「必须是真复制」，而不是复活一个没人调用的守卫
+/// （第 183 轮就是照着「没人调用就删掉」清的死代码）。
 /// </summary>
+static void CanvasSwitchNeverAliasesItsOwnState()
+{
+    var state = new WorkflowCanvasState();
+    var chapter = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章", Order = 10 };
+    state.WorkTree.Add(chapter);
+    state.Nodes.Add(new WorkflowNode { Title = "分镜一", Category = NodeCategory.Storyboard, WorkTreeItemId = chapter.Id });
+
+    var clone = CanvasCloner.Clone(state);
+    Expect(!ReferenceEquals(clone, state),
+        "换画布必须给另一份对象：同一份会让「清空再回填」那类写法把画布清空");
+    Expect(!ReferenceEquals(clone.Nodes, state.Nodes) && !ReferenceEquals(clone.WorkTree, state.WorkTree),
+        "连集合也得各是各的：共用集合等于换画布时两边一起动");
+    Expect(clone.Nodes.Count == 1 && clone.WorkTree.Count == 1 && clone.Nodes[0].WorkTreeItemId == chapter.Id,
+        "复制要连内容与稳定 ID 一起带过来");
+
+    clone.Nodes.Clear();
+    clone.WorkTree.Clear();
+    Expect(state.Nodes.Count == 1 && state.WorkTree.Count == 1 && state.Nodes[0].Title == "分镜一",
+        "动复制品不能碰到原状态——这正是「把自身当来源」会踩的那条路");
+}
+
+/// <summary>
+/// 版本状态那五档（历史保留 / 已采纳 / 当前适用 / 需要确认 / 未来版本）。
+///
+/// 这段判定原先长在旧 WinForms 画布控件里（`GetNodeVersionStatusSummary` / `GetVersionStatus`），
+/// 随那个控件一起删掉之后就没人算了——「这一镜锁的那版设定还算不算数」在界面上一个字都没有，
+/// 而这正是「第一集是剑、第二集变刀」唯一能提前发现的地方。搬回共享层后，五档与三个边界逐条钉住。
+/// </summary>
+static void CanvasNodeVersionStatusHasFiveStates()
+{
+    var canvas = new WorkflowCanvasState();
+    var first = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章", Order = 10 };
+    var second = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第2章", Order = 20 };
+    canvas.WorkTree.Add(first);
+    canvas.WorkTree.Add(second);
+
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "林晚" };
+    var variant = entity.CreateVariant("默认", "藏青风衣");   // 自带 v1
+    canvas.Entities.Add(entity);
+    var v1 = variant.Versions[0];
+    variant.Description = "藏青风衣（加了围巾）";
+    var v2 = variant.Commit("换装");
+
+    // 「这一版是哪一章立项的」写在工作树的 Version 条目上，挂在章下——走稳定 ID，不解析名字。
+    canvas.WorkTree.Add(new WorkTreeItem
+    {
+        Kind = WorkTreeKind.Version, Name = "v1", ParentId = first.Id,
+        SourceEntityId = entity.Id, SourceVariantId = variant.Id, SourceVersionId = v1.Id
+    });
+    canvas.WorkTree.Add(new WorkTreeItem
+    {
+        Kind = WorkTreeKind.Version, Name = "v2", ParentId = second.Id,
+        SourceEntityId = entity.Id, SourceVariantId = variant.Id, SourceVersionId = v2.Id
+    });
+
+    var shot = new WorkflowNode { Title = "分镜一", Category = NodeCategory.Storyboard, WorkTreeItemId = first.Id };
+    shot.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = v1.Id });
+    canvas.Nodes.Add(shot);
+
+    var summary = CanvasNodeVersions.Of(canvas, shot);
+    Expect(summary.HasPinnedVersions && summary.Statuses.Count == 1, "锁了一版就该报一条状态");
+    Expect(summary.Statuses[0].Status == VersionStatus.Current, "第1章里锁 v1 就是当前适用，实际 " + summary.Statuses[0].Label);
+    Expect(summary.Text == "版本状态：林晚 v1 · 当前适用", "整句要与旧界面一致，实际 " + summary.Text);
+    Expect(summary.Badge == "V1 · 当前适用" && !summary.Warn, "徽标文案：" + summary.Badge);
+
+    // 同一镜挪到第 2 章：那一章当前适用的是 v2，锁着 v1 就旧了
+    shot.WorkTreeItemId = second.Id;
+    var moved = CanvasNodeVersions.Of(canvas, shot);
+    Expect(moved.Statuses[0].Status == VersionStatus.NeedsConfirmation, "应报需要确认，实际 " + moved.Statuses[0].Label);
+    Expect(moved.Warn, "需要确认要按警告显示");
+    Expect(moved.Badge == "V1 · 需要确认", "徽标要跟着状态走：" + moved.Badge);
+
+    // 同一章里锁 v2 就是当前适用
+    shot.References[0].VariantVersionId = v2.Id;
+    Expect(CanvasNodeVersions.Of(canvas, shot).Statuses[0].Status == VersionStatus.Current, "第2章锁 v2 是当前适用");
+
+    // 节点自己的声明优先：保留历史一律说历史保留，采纳且确实等于当前适用才说已采纳
+    shot.VersionDecision = VersionDecision.KeepHistorical;
+    Expect(CanvasNodeVersions.Of(canvas, shot).Statuses[0].Status == VersionStatus.KeptHistorical, "声明保留历史就说历史保留");
+    shot.VersionDecision = VersionDecision.Adopted;
+    Expect(CanvasNodeVersions.Of(canvas, shot).Statuses[0].Status == VersionStatus.Adopted, "声明采纳且等于当前适用 → 已采纳");
+    shot.References[0].VariantVersionId = v1.Id;
+    Expect(CanvasNodeVersions.Of(canvas, shot).Statuses[0].Status != VersionStatus.Adopted,
+        "声明采纳、锁的却不是当前适用那一版时，不能跟着说已采纳");
+    shot.VersionDecision = VersionDecision.None;
+    shot.References[0].VariantVersionId = v2.Id;
+
+    // 未来版本：第 1 章里锁 v2（v2 是第 2 章才立项的）
+    var early = new WorkflowNode { Title = "分镜零", Category = NodeCategory.Storyboard, WorkTreeItemId = first.Id };
+    early.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = v2.Id });
+    canvas.Nodes.Add(early);
+    Expect(CanvasNodeVersions.Of(canvas, early).Statuses[0].Status == VersionStatus.Future, "应报未来版本");
+
+    // 边界一：不在任何章节里的节点没有「这一章适用哪一版」这回事，按当前适用处理，不硬比
+    var loose = new WorkflowNode { Title = "游离节点", Category = NodeCategory.Storyboard };
+    loose.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = v1.Id });
+    canvas.Nodes.Add(loose);
+    Expect(CanvasNodeVersions.Of(canvas, loose).Statuses[0].Status == VersionStatus.Current, "不在章节里就不比章节");
+
+    // 边界二：没锁版本（跟随最新）要说清「未引用固定版本」，而且不该显示成警告
+    var following = new WorkflowNode { Title = "跟随最新", Category = NodeCategory.Storyboard, WorkTreeItemId = second.Id };
+    following.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+    canvas.Nodes.Add(following);
+    var none = CanvasNodeVersions.Of(canvas, following);
+    Expect(!none.HasPinnedVersions && none.Text == "版本状态：未引用固定版本", "实际 " + none.Text);
+    Expect(none.Badge.Length == 0 && !none.Warn, "没锁版本不该有徽标、也不该报警");
+
+    // 边界三：章节出处查不到（没有对应的 Version 条目）时当作「不晚于任何章」，
+    // 于是最新那版就是当前适用——**宁可说「当前适用」也不猜它是旧版**：误报会让人白忙。
+    canvas.WorkTree.RemoveAll(entry => entry.Kind == WorkTreeKind.Version);
+    Expect(CanvasNodeVersions.Of(canvas, shot).Statuses[0].Status == VersionStatus.Current,
+        "出处查不到就不硬比：" + CanvasNodeVersions.Of(canvas, shot).Statuses[0].Label);
+}
+
 /// <summary>目标 6 / G6-1：项目级资源库的读写、原子写、写前备份与幂等 upsert。</summary>
 static void ProjectLibraryRoundTrip()
 {

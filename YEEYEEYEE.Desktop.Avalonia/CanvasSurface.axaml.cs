@@ -1569,6 +1569,31 @@ public partial class CanvasSurface : UserControl
             TextTrimming = TextTrimming.CharacterEllipsis
         });
 
+        // 「这一镜锁的那一版设定还算不算数」：旧画布控件在卡片右上角画的就是这枚徽标，
+        // 随控件一起删掉之后，卡片上只剩「引用 · 林晚 · 默认 · v1」——看不出 v1 是不是已经旧了。
+        // 判定在共享层（CanvasNodeVersions），桌面端与网页端将来读的是同一份。
+        if (state is not null && CanvasNodeVersions.Of(state, node) is { HasPinnedVersions: true } pinned)
+        {
+            var badge = new Border
+            {
+                Background = new SolidColorBrush(Color.Parse(pinned.Warn ? "#3A2A16" : "#16283A")),
+                BorderBrush = new SolidColorBrush(Color.Parse(pinned.Warn ? "#7A5A2A" : "#2C3D52")),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(6, 2),
+                HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Left,
+                Child = new TextBlock
+                {
+                    Text = pinned.Badge,
+                    Foreground = new SolidColorBrush(Color.Parse(pinned.Warn ? "#E8B45A" : "#8FD3A0")),
+                    FontSize = 9
+                }
+            };
+            // 完整那句挂在提示上：卡片上放不下「林晚 v1 · 需要确认」这一整串。
+            ToolTip.SetTip(badge, pinned.Text);
+            content.Children.Add(badge);
+        }
+
         // 摘要
         var summary = string.IsNullOrWhiteSpace(node.Content) ? node.Chapter : node.Content;
         if (!string.IsNullOrWhiteSpace(summary))
