@@ -2661,6 +2661,25 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         // 走站点池子时，模型 / 地址 / 路径 / **密钥**都由选定的那个池子说了算——与出图同一条规矩。
         var pool = source?.Pool;
+        // 参考图：**首帧在前，引用的设定图跟在后**。
+        //
+        // 顺序不能颠倒：这条路上 `ReferenceImages[0]` 就是图生视频的首帧，换成别的就等于换了
+        // 这一镜的起点。设定图排在后面，是「这一镜还想让模型看到什么」——**执行方能用几张由它
+        // 自己说**（视频接口目前只收一张，多出来的由它在 ReferenceNote 里如实报出来）。
+        // 不让执行方静默丢，与出图那条路同一条规矩：一镜引用了角色 / 道具 / 场景却没说用没用，
+        // 用户会以为设定带上了、只是模型没画好。
+        var frames = new List<string>();
+        if (frame.Length > 0) frames.Add(frame);
+        if (node.References.Count > 0)
+        {
+            var settings = ReferenceImagePicker.Plan(
+                currentCanvas?.Canvas ?? new WorkflowCanvasState(),
+                node,
+                int.MaxValue,
+                attachment => AssetStore.Resolve(attachment.Reference) is { } candidate && File.Exists(candidate) ? candidate : null);
+            frames.AddRange(settings.Paths);
+        }
+
         var request = new VideoGenerationRequest
         {
             Prompt = prompt,
@@ -2669,7 +2688,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             EndpointPath = pool?.Site.VideoPath ?? string.Empty,
             ApiKey = pool?.Site.ApiKey ?? string.Empty,
             Seconds = seconds,
-            ReferenceImages = frame.Length > 0 ? new[] { frame } : Array.Empty<string>()
+            ReferenceImages = frames
         };
 
         VideoGenerationResult result;
@@ -2690,11 +2709,15 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 等结果的这几分钟里用户可能已经换了画布：那时不该再往旧画布上挂东西。
         if (currentCanvas is null) return;
 
+        // 执行方说「有几张没吃下」就写在最前面：这话比「成功」更重要——不说的话，
+        // 用户会以为设定图生效了，然后一直纳闷为什么不像。
+        var referenceNote = result.ReferenceNote.Length > 0 ? result.ReferenceNote + " " : string.Empty;
+
         if (result.Status != VideoGenerationStatus.Succeeded || result.FilePath.Length == 0)
         {
             node.ExecutionStatus = NodeExecutionStatus.Failed;
             CanvasSurfaceControl.Refresh();
-            StatusText.Text = $"出视频没成（{result.Provider}）：{result.Error}";
+            StatusText.Text = referenceNote + $"出视频没成（{result.Provider}）：{result.Error}";
             return;
         }
 
@@ -2717,7 +2740,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         RefreshOpenCenterView();
         MarkCanvasDirty();
         UpdateCanvasUi(currentCanvasPath ?? string.Empty);
-        StatusText.Text = $"已出视频并挂到「{node.Title}」：{Path.GetFileName(result.FilePath)} —— 记得点「保存修订」";
+        StatusText.Text = referenceNote + $"已出视频并挂到「{node.Title}」：{Path.GetFileName(result.FilePath)} —— 记得点「保存修订」";
     }
 
     /// <summary>

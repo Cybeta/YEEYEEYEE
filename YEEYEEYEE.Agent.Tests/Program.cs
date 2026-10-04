@@ -237,6 +237,7 @@ var tests = new (string Name, Action Run)[]
     ("返工 G6-T2：发布结果区分「真落库」与「本地内容」，本地实体不谎报已保存", PublishOutcomeDistinguishesLocalAndShared),
     ("版本策略：存在版本可锁定，缺失版本拒绝且不静默降级", ReferenceVersionPolicy),
     ("出视频：按「提交 → 轮询 → 下载」跑通并把文件落到资产目录", VideoProviderSubmitsPollsAndDownloads),
+    ("出视频：一次只收一张图（首帧），多出来的参考图要如实说出来而不是静默丢", VideoProviderSaysWhatItCouldNotUse),
     ("出视频：任务失败带出接口原因，返回体不认识就把原文报出来（不产空文件）", VideoProviderReportsFailureAndUnknownShape),
     ("出视频：密钥绝不外送到别的域（预签名 CDN 只收字节）", VideoProviderNeverSendsKeyToForeignHost),
     ("出视频：容器按文件头认（mp4 / webm / 认不出退回 mp4）", VideoFormatSnifferReadsContainer),
@@ -11234,6 +11235,78 @@ static void VideoProviderSubmitsPollsAndDownloads()
 }
 
 /// <summary>
+/// 视频接口只收一张图（首帧），多带的参考图必须如实说出来。
+/// </summary>
+static void VideoProviderSaysWhatItCouldNotUse()
+{
+	// 视频接口的提交体只有一个 image 字段，所以一次只收一张（首帧）。而一镜可能引用了
+	// 角色 / 道具 / 场景好几张——**用不完的必须说出来**，不许静默丢（与出图那条路同一条规矩）。
+	// 不说的话，用户会以为设定带上了、只是模型没画好，然后一直找模型的问题。
+	using var stores = new IsolatedStores();
+	var previousInterval = HttpVideoProvider.PollInterval;
+	HttpVideoProvider.PollInterval = TimeSpan.Zero;
+	var frames = new List<string>();
+	try
+	{
+		for (var index = 0; index < 3; index++)
+		{
+			var path = Path.Combine(Path.GetTempPath(), "vref-" + Guid.NewGuid().ToString("N") + ".png");
+			File.WriteAllBytes(path, new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A });
+			frames.Add(path);
+		}
+
+		var bodies = new List<string>();
+		var handler = new StubHttpHandler(request =>
+		{
+			bodies.Add(request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? string.Empty);
+			return request.RequestUri!.ToString().EndsWith("/videos/generations", StringComparison.Ordinal)
+				? JsonResponse("""{"id":"vid-9","status":"completed","url":"https://api.example.com/v1/videos/vid-9/content"}""")
+				: BytesResponse(Mp4Bytes());
+		});
+		var config = new AiProviderConfig
+		{
+			Endpoint = "https://api.example.com/v1",
+			Model = "chat",
+			ApiKey = "sk-secret",
+			VideoModel = "veo-3"
+		};
+		var provider = new HttpVideoProvider(config, new HttpClient(handler));
+		Expect(provider.ReferenceCapacity.MaxImages == 1, "视频接口一次只收一张图（首帧）");
+
+		var result = provider.GenerateAsync(new VideoGenerationRequest
+		{
+			Prompt = "雨夜码头",
+			Seconds = 5,
+			ReferenceImages = frames
+		}).GetAwaiter().GetResult();
+
+		Expect(result.Status == VideoGenerationStatus.Succeeded, "这条用例只关心说明，链路本身要跑通：" + result.Error);
+		Expect(result.ReferenceNote.Contains("忽略其余 2 张"), "多出来的两张要说出来，实际：" + result.ReferenceNote);
+		Expect(result.ReferenceNote.Contains("设定图在这条路上带不上"), "还要说清是为什么，实际：" + result.ReferenceNote);
+
+		// 提交体里只该有一张图：只带首帧，另外两张连字节都不该发出去。
+		var body = bodies.Count > 0 ? bodies[0] : string.Empty;
+		Expect(body.Contains(Path.GetFileName(frames[0])), "首帧要带上");
+		Expect(!body.Contains(Path.GetFileName(frames[1])) && !body.Contains(Path.GetFileName(frames[2])),
+			"接口只收一张，多出来的两张不该发出去");
+
+		// 只有一张时不该冒出这句话。
+		var single = provider.GenerateAsync(new VideoGenerationRequest
+		{
+			Prompt = "雨夜码头",
+			Seconds = 5,
+			ReferenceImages = new[] { frames[0] }
+		}).GetAwaiter().GetResult();
+		Expect(single.ReferenceNote.Length == 0, "没多带图就不该有这句说明，实际：" + single.ReferenceNote);
+	}
+	finally
+	{
+		HttpVideoProvider.PollInterval = previousInterval;
+		foreach (var path in frames) { try { File.Delete(path); } catch (IOException) { } }
+	}
+}
+
+/// <summary>
 /// 出视频的失败与「不认识」两种情形都要如实报：
 /// 任务状态 failed 要带出接口给的原因；返回体里既没有任务号也没有地址时，把原文摘一段报出来。
 /// **绝不产出空文件冒充视频**。
@@ -11898,6 +11971,9 @@ sealed class RecordingVideoProvider : IVideoProvider
 
     public bool IsConfigured => true;
     public string Name => "RecordingVideo";
+
+    /// <summary>桩不限制张数（真实那条路目前只收一张，见 HttpVideoProvider）。</summary>
+    public ReferenceCapacity ReferenceCapacity => new(0, "测试桩不限制参考图。");
 
     /// <summary>最近一次请求；没有调用过时为 null。</summary>
     public VideoGenerationRequest? LastRequest { get; private set; }

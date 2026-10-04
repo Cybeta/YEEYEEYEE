@@ -51,12 +51,28 @@ public sealed class VideoGenerationResult
     public string Error { get; init; } = string.Empty;
     public string Provider { get; init; } = string.Empty;
     public string Model { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 执行方对参考图的实际使用说明。**用不了全部时必须在这里说明，不许静默丢弃**——
+    /// 与出图那条路（<see cref="ImageGenerationResult.ReferenceNote"/>）同一条规矩：
+    /// 一镜引用了角色 / 道具 / 场景，视频却只用了首帧，不说的话用户会以为设定带上了、
+    /// 只是模型没画好。
+    /// </summary>
+    public string ReferenceNote { get; init; } = string.Empty;
 }
 
 public interface IVideoProvider
 {
     bool IsConfigured { get; }
+
     string Name { get; }
+
+    /// <summary>
+    /// 这条链路一次能用几张参考图。与出图侧的 <see cref="IImageProvider.ReferenceCapacity"/> 对称。
+    /// 现在恒为 1（图生视频的首帧）——**不是**猜的：我们这家接口的提交体只有一个 <c>image</c> 字段。
+    /// 将来哪家接口支持多图，改这里一处即可，调用方不必跟着动。
+    /// </summary>
+    ReferenceCapacity ReferenceCapacity { get; }
 
     Task<VideoGenerationResult> GenerateAsync(VideoGenerationRequest request, CancellationToken cancellationToken = default);
 }
@@ -73,6 +89,8 @@ public sealed class UnconfiguredVideoProvider : IVideoProvider
 
     public bool IsConfigured => false;
     public string Name => "出视频未配置";
+
+    public ReferenceCapacity ReferenceCapacity => new(0, "还没配出视频链路，无从判断能收几张参考图。");
 
     public Task<VideoGenerationResult> GenerateAsync(VideoGenerationRequest request, CancellationToken cancellationToken = default) =>
         Task.FromResult(new VideoGenerationResult
@@ -150,6 +168,12 @@ public sealed class HttpVideoProvider : IVideoProvider
     public bool IsConfigured => config.IsVideoConfigured;
     public string Name => "OpenAiCompatibleVideo";
 
+    /// <summary>
+    /// 一次只收一张图。**不是保守，是接口就这样**：提交时只有一个 <c>image</c> 字段（见 SubmitAsync）。
+    /// 所以一镜引用的角色 / 道具 / 场景在这条路上带不上——那就得说出来，不能装作带上了。
+    /// </summary>
+    public ReferenceCapacity ReferenceCapacity => new(1, "视频接口一次只收一张图（图生视频的首帧）。");
+
     public async Task<VideoGenerationResult> GenerateAsync(VideoGenerationRequest request, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(request.Prompt)) return Failed("视频提示词为空，无法生成。", request, request.Model);
@@ -172,6 +196,13 @@ public sealed class HttpVideoProvider : IVideoProvider
         var references = request.ReferenceImages
             .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
             .ToList();
+        // 用不完的参考图要**说出来**，不静默丢弃（与出图那条路同一条规矩）。视频这条路上
+        // 「用不完」是常态：接口只收一张，而一镜可能引用了角色 / 道具 / 场景几张。
+        var capacity = ReferenceCapacity;
+        var referenceNote = capacity.IsLimited && references.Count > capacity.MaxImages
+            ? $"视频接口一次只收 {capacity.MaxImages} 张图：已用第 1 张（首帧），"
+              + $"忽略其余 {references.Count - capacity.MaxImages} 张——设定图在这条路上带不上。"
+            : string.Empty;
 
         try
         {
@@ -210,7 +241,8 @@ public sealed class HttpVideoProvider : IVideoProvider
                 Status = VideoGenerationStatus.Succeeded,
                 FilePath = path,
                 Provider = Name,
-                Model = model
+                Model = model,
+                ReferenceNote = referenceNote
             };
         }
         catch (OperationCanceledException)
