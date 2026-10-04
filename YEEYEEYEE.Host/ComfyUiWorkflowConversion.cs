@@ -24,6 +24,7 @@ public sealed record ComfyUiConversionResult(JsonObject ApiWorkflow, IReadOnlyLi
 ///   1. 被静音（mode=2）/ 被绕过（mode=4）的节点不进 API —— 官方那条 <c>mode === NEVER || BYPASS</c>；
 ///   2. 不是后端节点的（备注、rgthree 的 Label 之类）不进 API —— 官方靠 <c>node.comfyClass</c> 为空自然落空，
 ///      我们这里改成「<c>/object_info</c> 里查不到这个类型」来判定；
+///   2b. <b>但 Reroute 是转发而不是丢弃</b>：穿过它的连线要跟到真正的源头（否则下游输入整项消失）；
 ///   3. 控件值按**位置**对齐 <c>widgets_values</c>；声明了 <c>control_after_generate</c> 的控件后面
 ///      还跟着一个「生成后随机/固定」的值，它占位但**不进 API**（KSampler.seed 就是这种）；
 ///   4. 连线还原成 <c>[源节点id, 源槽]</c>，id 一律字符串（官方就是 <c>[origin_id, origin_slot]</c>）；
@@ -42,7 +43,12 @@ public static class ComfyUiWorkflowConversion
     /// </summary>
     private static readonly HashSet<string> WidgetTypeNames = new(StringComparer.Ordinal)
     {
-        "INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"
+        "INT", "FLOAT", "STRING", "BOOLEAN", "COMBO",
+        // 新前端（0.3x）的**动态下拉**：取值仍是一个字符串，但候选项按当前选中的 key 动态展开
+        // （SaveVideo 的 format：auto/mp4/mkv/webm，选 mp4 又长出 codec）。
+        // 不认它就会把整项当成连线槽位跳过——实测 SaveVideo 因此缺了必填的 format，
+        // 渲染全部跑完、最后一步 save_video 抛 TypeError，几十秒的算力只换来一句报错。
+        "COMFY_DYNAMICCOMBO_V3"
     };
 
     private const int ModeNever = 2;   // 官方 LGraphEventMode.NEVER
@@ -63,7 +69,7 @@ public static class ComfyUiWorkflowConversion
         var nodes = ui["nodes"] as JsonArray
             ?? throw new InvalidOperationException("工作流里没有 nodes");
 
-        var links = ReadLinks(ui["links"] as JsonArray);
+        var links = ResolvePassThroughs(ReadLinks(ui["links"] as JsonArray), IndexById(nodes));
 
         var output = new JsonObject();
         var skipped = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -224,11 +230,15 @@ public static class ComfyUiWorkflowConversion
     /// </summary>
     private static List<WidgetSpec> WidgetSpecsOf(JsonObject node, JsonObject def)
     {
-        var fromDef = DefWidgetSpecs(def);
-        var known = fromDef.ToDictionary(spec => spec.Name, StringComparer.Ordinal);
-
-        var specs = new List<WidgetSpec>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
+        // **顺序以节点定义为准**，节点自己加的控件排最后。
+        //
+        // 为什么不是「节点 inputs[] 的顺序」：widgets_values 是按控件**在节点上的排列顺序**写的，
+        // 而那个顺序由定义决定。被转成连线的控件（inputs[] 里带 widget 又带 link）**仍然占着原来的位置**
+        // ——实测 MiniMaxH3ImageToVideo 的值是 [提示词, 宽, 高, 长度]，宽/高/长度虽然改由连线供给，
+        // 槽位还在（随后被连线覆盖）。按 inputs[] 顺序排的话，这些「转换后的控件」会排到前头，
+        // 提示词就被对到最后一个值上去了：实测拿到 73，而不是那段真正的提示词。
+        var specs = new List<WidgetSpec>(DefWidgetSpecs(def));
+        var seen = new HashSet<string>(specs.Select(spec => spec.Name), StringComparer.Ordinal);
 
         if (node["inputs"] is JsonArray slots)
         {
@@ -244,18 +254,12 @@ public static class ComfyUiWorkflowConversion
                 if (!IsWidgetType(input["type"])) continue;
                 if (!seen.Add(name)) continue;
 
-                // 定义里声明过的，用定义那一份（类型、默认值、控制位都以定义为准）；
-                // 定义里没有的才是节点包动态加的（如 VHS 的 pix_fmt/crf），只能用节点自己写的类型。
-                specs.Add(known.TryGetValue(name, out var declaredSpec)
-                    ? declaredSpec
-                    : new WidgetSpec(name, DeclaredTypeOf(input["type"]), false, null));
+                // 走到这里的就是**定义里没有的**：节点包动态加的（如 VHS 的 pix_fmt/crf），
+                // 只能用节点自己写的类型。
+                specs.Add(new WidgetSpec(name, DeclaredTypeOf(input["type"]), false, null));
             }
         }
 
-        foreach (var spec in fromDef)
-        {
-            if (seen.Add(spec.Name)) specs.Add(spec);
-        }
         return specs;
     }
 
@@ -360,6 +364,67 @@ public static class ComfyUiWorkflowConversion
             map[id] = (originId, originSlot);
         }
         return map;
+    }
+
+    /// <summary>按 id 建节点索引，供「跟随 Reroute」用。</summary>
+    private static Dictionary<string, JsonObject> IndexById(JsonArray nodes)
+    {
+        var map = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var entry in nodes)
+        {
+            if (entry is not JsonObject node) continue;
+            if (IdText(node["id"]) is { } id) map[id] = node;
+        }
+        return map;
+    }
+
+    /// <summary>
+    /// 把「穿过 Reroute 的连线」接到真正的源头。
+    ///
+    /// 为什么必须做：Reroute 在 <c>/object_info</c> 里查不到，会像备注一样被跳过——但它的作用是
+    /// **转发**，不是丢弃。不跟过去，下游那个输入就整项消失。实测 Y05-图像生成Qwen2512：
+    /// <c>VAEDecode.vae</c> 的源头是 Reroute(391)，而它自己接的是 VAELoader(39)；转出来的 API 里
+    /// vae 这一项没了，提交时服务端判成 <c>required_input_missing</c>，整份工作流一张图都跑不出来。
+    /// 官方前端是在内存的图上顺着虚拟节点走，这里在 JSON 上做同一件事。
+    /// </summary>
+    private static Dictionary<long, (string OriginId, int OriginSlot)> ResolvePassThroughs(
+        Dictionary<long, (string OriginId, int OriginSlot)> links,
+        IReadOnlyDictionary<string, JsonObject> nodesById)
+    {
+        var resolved = new Dictionary<long, (string OriginId, int OriginSlot)>();
+        foreach (var pair in links) resolved[pair.Key] = Follow(pair.Value);
+        return resolved;
+
+        (string OriginId, int OriginSlot) Follow((string OriginId, int OriginSlot) origin)
+        {
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+            var current = origin;
+            // 环就停：坏文件里 Reroute 互相接是可能的。宁可留一个指向被跳过节点的连线让
+            // PruneDanglingLinks 删掉，也不要在这里转不出来。
+            while (IsPassThrough(current.OriginId) && visited.Add(current.OriginId))
+            {
+                if (FirstInputLink(nodesById[current.OriginId]) is not { } incoming) break;
+                if (!links.TryGetValue(incoming, out var upstream)) break;
+                current = upstream;
+            }
+            return current;
+        }
+
+        bool IsPassThrough(string id) =>
+            nodesById.TryGetValue(id, out var node)
+            && (AsText(node["type"]) ?? string.Empty).StartsWith("Reroute", StringComparison.Ordinal);
+    }
+
+    /// <summary>节点第一个挂着连线的输入槽（Reroute 只有一个）。</summary>
+    private static long? FirstInputLink(JsonObject node)
+    {
+        if (node["inputs"] is not JsonArray slots) return null;
+        foreach (var slot in slots)
+        {
+            if (slot is not JsonObject input) continue;
+            if (ReadLong(input["link"]) is { } link) return link;
+        }
+        return null;
     }
 
     /// <summary>官方最后一步：连到「已不进 API 的节点」的输入整条删掉。</summary>

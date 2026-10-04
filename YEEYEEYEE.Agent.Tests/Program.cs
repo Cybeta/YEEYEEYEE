@@ -248,6 +248,9 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 槽位：按一次调用绑值，不改模板本身，连线槽位不硬写", ComfyUiBinderBindsWithoutDamagingTemplate),
     ("ComfyUI 当前这一台：切换把地址与底模写成站点那一份，同一台不重复写", ComfyUiActivationProjectsSiteOntoConfig),
     ("对话用量：流式末尾那条 usage 要读出来（含缓存命中 / 未命中）", AiStreamReportsUsage),
+    ("ComfyUI 转换：穿过 Reroute 的连线要跟到源头，不能整项丢掉", ComfyUiConversionFollowsReroute),
+    ("ComfyUI 转换：被转成连线的控件仍按定义顺序对齐 widgets_values", ComfyUiConversionAlignsConvertedWidgetsByDefinition),
+    ("ComfyUI 转换：动态下拉（SaveVideo.format）不能被当成连线槽位丢掉", ComfyUiConversionKeepsDynamicComboWidgets),
     ("对话用量：胶囊与明细的口径（命中率分母、没有就不给速率、缺失说成「不是 0」）", UsageReportFormatsWithoutLying),
     ("密钥框：脱敏显示不是密钥，存回去就是 401；新敲的、清空的、解不开的三条路各自分明", RedactedKeyDisplayIsNotAKey),
 };
@@ -1045,6 +1048,80 @@ static void ThinkingOnlyIsStillAnError()
 
     Expect(thinking.Count == 1, "思考增量仍应被回调出来");
     Expect(message is not null, "只有思考没有正文时应报错");
+}
+
+static void ComfyUiConversionFollowsReroute()
+{
+    // Reroute 在 object_info 里查不到，会被当成「不是后端节点」跳过——但它的作用是**转发**。
+    // 不跟过去，下游那个输入就整项消失，服务端判 required_input_missing，整份工作流跑不了。
+    // 实测 Y05-图像生成Qwen2512 的 VAEDecode.vae 就是这么没的（源头是 Reroute(2)，再接 VAELoader(1)）。
+    const string defs = """
+        {"VAELoader":{"input":{"required":{"vae_name":[["a.safetensors"]]}},"output":["VAE"],"output_name":["VAE"]},
+         "EmptyLatentImage":{"input":{"required":{"width":["INT",{"default":512}],"height":["INT",{"default":512}],"batch_size":["INT",{"default":1}]}},"output":["LATENT"],"output_name":["LATENT"]},
+         "VAEDecode":{"input":{"required":{"vae":["VAE"],"samples":["LATENT"]}},"output":["IMAGE"],"output_name":["IMAGE"]}}
+        """;
+    const string ui = """
+        {"nodes":[
+          {"id":1,"type":"VAELoader","mode":0,"inputs":[{"name":"vae_name","type":"COMBO","link":null}],"widgets_values":["a.safetensors"]},
+          {"id":2,"type":"Reroute","mode":0,"inputs":[{"name":"","type":"*","link":10}],"widgets_values":[]},
+          {"id":3,"type":"EmptyLatentImage","mode":0,"inputs":[{"name":"width","type":"INT","link":null},{"name":"height","type":"INT","link":null},{"name":"batch_size","type":"INT","link":null}],"widgets_values":[512,512,1]},
+          {"id":4,"type":"VAEDecode","mode":0,"inputs":[{"name":"vae","type":"VAE","link":11},{"name":"samples","type":"LATENT","link":12}]}
+        ],
+        "links":[[10,1,0,2,0,"VAE"],[11,2,0,4,0,"VAE"],[12,3,0,4,1,"LATENT"]]}
+        """;
+
+    var api = ComfyUiWorkflowConversion.Convert(ui, defs).ApiWorkflow;
+    Expect(api["2"] is null, "Reroute 自己不该出现在 API 里");
+    var vae = api["4"]!["inputs"]!["vae"]!.AsArray();
+    Expect(vae[0]!.GetValue<string>() == "1",
+        $"穿过 Reroute 的连线应跟到源头 VAELoader(1)，实际指到了 {vae[0]}");
+}
+
+static void ComfyUiConversionAlignsConvertedWidgetsByDefinition()
+{
+    // 控件被「转成连线」之后**仍然占着它在定义里的位置**：这份的 values 是 [提示词, 宽, 高, 长]，
+    // 宽/高/长虽然改由连线供给，槽位还在。若按「节点 inputs 的顺序」排（转换后的控件会排到前头），
+    // 提示词就会被对到最后一个值上去——实测 MiniMaxH3ImageToVideo 拿到了 73，而不是那段真提示词。
+    const string defs = """
+        {"MiniMaxH3ImageToVideo":{"input":{"required":{"clip":["CLIP"],"vae":["VAE"],"prompt":["STRING",{"multiline":true}],"width":["INT",{"default":864}],"height":["INT",{"default":480}],"length":["INT",{"default":124}]},"optional":{"first_frame":["IMAGE"]}},"output":["VIDEO"],"output_name":["VIDEO"]}}
+        """;
+    const string ui = """
+        {"nodes":[
+          {"id":139,"type":"MiniMaxH3ImageToVideo","mode":0,
+           "inputs":[{"name":"first_frame","type":"IMAGE","link":1},{"name":"width","type":"INT","widget":{"name":"width"},"link":null},{"name":"height","type":"INT","widget":{"name":"height"},"link":null},{"name":"length","type":"INT","widget":{"name":"length"},"link":null}],
+           "widgets_values":["subject_definitions: 少女站在渡轮栏杆前",864,480,73]}
+        ],
+        "links":[]}
+        """;
+
+    var inputs = ComfyUiWorkflowConversion.Convert(ui, defs).ApiWorkflow["139"]!["inputs"]!;
+    Expect(inputs["prompt"]!.GetValue<string>() == "subject_definitions: 少女站在渡轮栏杆前",
+        $"提示词应对到第一个值，实际 {inputs["prompt"]}");
+    Expect(inputs["width"]!.GetValue<long>() == 864 && inputs["height"]!.GetValue<long>() == 480,
+        $"宽高应各就各位，实际 {inputs["width"]}x{inputs["height"]}");
+}
+
+static void ComfyUiConversionKeepsDynamicComboWidgets()
+{
+    // 新前端（0.3x）的动态下拉：取值仍是字符串。不认这个类型就会把整项当成连线槽位跳过，
+    // 必填项整个丢掉——实测 SaveVideo 因此缺了 format，几十秒的渲染全跑完、最后一步抛 TypeError，
+    // 一个文件都没落下来。同类节点还有别的，所以这条要钉住。
+    const string defs = """
+        {"SaveVideo":{"input":{"required":{"video":["VIDEO"],"filename_prefix":["STRING",{"default":"video/x"}],"format":["COMFY_DYNAMICCOMBO_V3",{"options":[{"key":"auto"},{"key":"mp4"}]}]},"optional":{"codec":["COMFY_DYNAMICCOMBO_V3",{"hidden":true,"options":[{"key":"auto"},{"key":"h264"}]}]}},"output":[],"output_name":[]}}
+        """;
+    const string ui = """
+        {"nodes":[
+          {"id":92,"type":"SaveVideo","mode":0,"inputs":[{"name":"video","type":"VIDEO","link":236}],
+           "widgets_values":["video/MiniMax_H3","mp4","h264","re-encode",16,"auto"]}
+        ],
+        "links":[]}
+        """;
+
+    var inputs = ComfyUiWorkflowConversion.Convert(ui, defs).ApiWorkflow["92"]!["inputs"]!;
+    Expect(inputs["format"] is not null && inputs["format"]!.GetValue<string>() == "mp4",
+        $"format 是必填的动态下拉，不能丢；实际 {inputs["format"]?.ToJsonString() ?? "（没这一项）"}");
+    Expect(inputs["codec"]!.GetValue<string>() == "h264", $"codec 应取到 h264，实际 {inputs["codec"]}");
+    Expect(inputs["filename_prefix"]!.GetValue<string>() == "video/MiniMax_H3", "filename_prefix 被挤掉了");
 }
 
 static void AiStreamReportsUsage()
