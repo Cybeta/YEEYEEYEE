@@ -520,7 +520,14 @@ public static class CanvasWorkTreeSync
 public sealed class CanvasSyncSession
 {
     private static readonly JsonSerializerOptions Options = new();
-    private readonly Stack<string> snapshots = new();
+
+    /// <summary>
+    /// 快照连同**它属于哪张画布**一起记（调用方给的身份，桌面端给的是画布标签的 ID）。
+    ///
+    /// 为什么要记：快照只对生成它的那张画布有效。同步完又切了画布再撤销，等于把 A 的内容灌进 B——
+    /// 这条判断放在这里，而不是让每个调用方各自记得比一遍。
+    /// </summary>
+    private readonly Stack<(string Owner, string Json)> snapshots = new();
 
     public SyncPlan? LastPlan { get; private set; }
 
@@ -535,21 +542,29 @@ public sealed class CanvasSyncSession
         return LastPlan;
     }
 
-    /// <summary>应用计划；应用前记录快照，失败或拒绝时不记录。</summary>
-    public SyncApplyResult Apply(WorkflowCanvasState canvas, bool applyUnconfirmed = false)
+    /// <summary>应用计划；应用前记录快照，失败或拒绝时不记录。<paramref name="owner"/> 是这张画布的身份。</summary>
+    public SyncApplyResult Apply(WorkflowCanvasState canvas, bool applyUnconfirmed = false, string owner = "")
     {
         if (LastPlan is null) throw new InvalidOperationException("请先生成同步计划。");
         var result = CanvasWorkTreeSync.Apply(canvas, LastPlan, applyUnconfirmed);
         LastApply = result;
-        if (!result.Refused && result.Changed) snapshots.Push(JsonSerializer.Serialize(canvas, Options));
+        if (!result.Refused && result.Changed) snapshots.Push((owner, JsonSerializer.Serialize(canvas, Options)));
         return result;
     }
 
-    /// <summary>撤销最近一次同步，返回恢复后的画布；没有快照时返回 null。</summary>
-    public WorkflowCanvasState? Undo()
+    /// <summary>这一份快照能不能用来撤销<paramref name="owner"/> 那张画布。</summary>
+    public bool CanUndoFor(string owner) =>
+        snapshots.Count > 0 && string.Equals(snapshots.Peek().Owner, owner, StringComparison.Ordinal);
+
+    /// <summary>
+    /// 撤销最近一次同步，返回恢复后的画布；没有快照、或者最近那份快照**不属于这张画布**时返回 null
+    /// （不抛异常：调用方据此如实说一句「没有可撤销的」即可）。不属于的那种会被丢掉——它那张画布已经换走了。
+    /// </summary>
+    public WorkflowCanvasState? Undo(string owner = "")
     {
-        if (!snapshots.TryPop(out var json)) return null;
-        return JsonSerializer.Deserialize<WorkflowCanvasState>(json, Options);
+        if (!snapshots.TryPop(out var snapshot)) return null;
+        if (!string.Equals(snapshot.Owner, owner, StringComparison.Ordinal)) return null;
+        return JsonSerializer.Deserialize<WorkflowCanvasState>(snapshot.Json, Options);
     }
 
     public void Reset()

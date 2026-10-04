@@ -27,6 +27,15 @@ public partial class MainWindow : Window, IAgentSessionHost
     private string? currentCanvasPath;
 
     /// <summary>
+    /// 「同步工作树」那一次会话：留着它只为了能撤销（引擎在应用前会把画布快照记在里面）。
+    ///
+    /// 为什么是**一个**长期存活的会话、而不是每次点都新建：新建的那个里面没有快照，
+    /// 「撤销上次同步」就永远点不动。快照属于哪张画布由会话自己记（见 CanvasSyncSession.Apply 的 owner），
+    /// 所以换一张画布再撤销会被会话拒掉，不需要这里再存一份身份去比。
+    /// </summary>
+    private CanvasSyncSession? workTreeSyncSession;
+
+    /// <summary>
     /// 画布标签（浏览器标签式）。顺序就是界面顺序，<see cref="activeCanvasTab"/> 指向正在编辑的那张。
     ///
     /// 与 <see cref="currentCanvas"/> 的分工要记住：currentCanvas / currentCanvasPath 是**活动标签的实时状态**
@@ -2029,6 +2038,115 @@ public partial class MainWindow : Window, IAgentSessionHost
         {
             StatusText.Text = $"删除失败：{error.Message}";
         }
+    }
+
+    /// <summary>
+    /// 「同步工作树」先开菜单而不是直接动手：撤销得有地方放，而「一键直改结构」也不该没有预览。
+    /// </summary>
+    private void WorkTreeSyncMenu_OnClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button) return;
+        var menu = new MenuFlyout();
+
+        var run = new MenuItem { Header = "预览并同步…" };
+        ToolTip.SetTip(run, "先给一份只读预览：哪几项不一致、哪些要人工确认。动手之后还能撤销。");
+        run.Click += async (_, _) => await SyncWorkTreeAsync();
+        menu.Items.Add(run);
+
+        var undo = new MenuItem { Header = "撤销上次同步" };
+        // 能不能撤销由**会话**说了算（它记着快照属于哪张画布）：同步完又换了画布就不该能点，
+        // 否则「撤销」会把上一张画布的内容灌进这一张。
+        var canUndo = workTreeSyncSession?.CanUndoFor(CanvasSyncOwner()) == true;
+        undo.IsEnabled = canUndo;
+        ToolTip.SetTip(undo, canUndo
+            ? "退回同步前的画布（只在内存里退回，落盘仍要你自己点「保存修订」）"
+            : "没有可撤销的同步：同步过之后又换了画布的话，这里会失效（那份快照属于上一张画布）");
+        undo.Click += (_, _) => UndoSyncWorkTree();
+        menu.Items.Add(undo);
+
+        menu.ShowAt(button);
+    }
+
+    /// <summary>
+    /// 当前这张画布的身份：用**标签 ID**，不是路径——路径在「另存 / 改标题」时会变，
+    /// 而没落盘的新画布压根没有路径（那样的两张画布会撞成同一个身份）。
+    /// </summary>
+    private string CanvasSyncOwner() =>
+        activeCanvasTab?.Id.ToString("D") ?? currentCanvasPath ?? string.Empty;
+
+    /// <summary>
+    /// 同步工作树：预览 → 选择应用范围 → 应用（在副本上算完再换回当前画布）→ 如实报告。
+    /// 与「整理布局」同一条路子：都不落盘，「保存修订」时才写文件——所以这之后撤销是有意义的。
+    /// </summary>
+    private async Task SyncWorkTreeAsync()
+    {
+        if (currentCanvas is null) { StatusText.Text = "请先新建画布"; return; }
+        if (referenceCanvas is not null) { StatusText.Text = "临时引用画布不参与同步（它不落盘）"; return; }
+
+        var session = new CanvasSyncSession();
+        var plan = session.Plan(currentCanvas.Canvas);
+        if (plan.HasBlockingConflicts)
+        {
+            await CanvasSyncDialog.NoticeAsync(this, "同步被阻断（画布未改动）",
+                plan.ToText() + Environment.NewLine + Environment.NewLine
+                + "冲突不解决就不能同步：按上面那几行先修掉，再回来。", warning: true);
+            return;
+        }
+
+        if (!plan.Changed)
+        {
+            await CanvasSyncDialog.NoticeAsync(this, "本来就没有可同步的",
+                "画布与工作树已经一致：没有名字对不上、没有该补的顺序、也没有悬空的锚点。", warning: false);
+            return;
+        }
+
+        var choice = await CanvasSyncDialog.ChooseAsync(this, plan);
+        if (choice == SyncChoice.Cancel) { StatusText.Text = "已取消同步：画布未改动。"; return; }
+
+        var result = session.Apply(currentCanvas.Canvas, choice == SyncChoice.IncludingPending, CanvasSyncOwner());
+        if (result.Refused)
+        {
+            await CanvasSyncDialog.NoticeAsync(this, "同步被拒（画布未改动）", result.ToText(), warning: true);
+            return;
+        }
+
+        // 会话写在**副本**上，所以要换回当前画布——否则接着保存下去的还是旧结构。
+        currentCanvas = currentCanvas with { Canvas = result.Canvas };
+        workTreeSyncSession = session;
+        MarkCanvasDirty();
+        CanvasSurfaceControl.Refresh();
+        if (currentCanvasPath is not null) UpdateCanvasUi(currentCanvasPath);
+        RefreshOpenCenterView();
+        StatusText.Text = $"工作树已同步：应用 {result.Applied.Count} 项"
+            + (result.Skipped.Count > 0 ? $"，{result.Skipped.Count} 项待确认没动" : string.Empty)
+            + "。记得点保存修订（改错了可在「同步工作树」里撤销）。";
+    }
+
+    /// <summary>退回同步前的画布。只在内存里退回——落盘仍要用户自己点「保存修订」。</summary>
+    private void UndoSyncWorkTree()
+    {
+        if (currentCanvas is null || workTreeSyncSession is null)
+        {
+            StatusText.Text = "没有可撤销的同步。";
+            return;
+        }
+
+        // 身份交给会话判断：它记着快照属于哪张画布，对不上就给 null（那种快照属于已经换走的那张）。
+        var restored = workTreeSyncSession.Undo(CanvasSyncOwner());
+        if (restored is null)
+        {
+            StatusText.Text = "没有可撤销的同步（那份快照属于换走的那张画布）。";
+            return;
+        }
+
+        currentCanvas = currentCanvas with { Canvas = restored };
+        MarkCanvasDirty();
+        CanvasSurfaceControl.Refresh();
+        if (currentCanvasPath is not null) UpdateCanvasUi(currentCanvasPath);
+        RefreshOpenCenterView();
+        StatusText.Text = workTreeSyncSession.CanUndoFor(CanvasSyncOwner())
+            ? "已退回上一版画布。"
+            : "已退回同步前的画布。";
     }
 
     /// <summary>

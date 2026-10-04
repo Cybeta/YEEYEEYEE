@@ -4167,7 +4167,10 @@ static void SyncWorkTreeToCanvasRespectsConfirmation()
     Expect(JsonSerializer.Serialize(canvas) == before, "应用不得改动调用方画布");
 }
 
-/// <summary>同步会话：应用可撤销，撤销回到同步前状态。</summary>
+/// <summary>
+/// 同步会话：应用可撤销，撤销回到同步前状态；而**快照只对生成它的那张画布有效**——
+/// 同步完又切了画布再来撤销，等于把上一张画布的内容灌进这一张，所以身份对不上时不给。
+/// </summary>
 static void SyncSessionSupportsUndo()
 {
     var canvas = new WorkflowCanvasState();
@@ -4187,6 +4190,20 @@ static void SyncSessionSupportsUndo()
 
     // 撤销用到的是内存快照，磁盘文件不受影响
     Expect(CanvasWorkTreeSync.Plan(canvas, SyncDirection.CanvasToWorkTree).Changes.Count > 0, "撤销后画布仍是同步前的待同步状态");
+
+    // 身份对得上：照常拿得回；对不上：给 null，并且把那份没用的快照丢掉。
+    var owned = new CanvasSyncSession();
+    owned.Plan(canvas, SyncDirection.CanvasToWorkTree);
+    owned.Apply(canvas, applyUnconfirmed: false, owner: "画布A");
+    Expect(owned.CanUndoFor("画布A") && !owned.CanUndoFor("画布B"), "能不能撤销要按画布身份判");
+    Expect(owned.Undo("画布B") is null, "另一张画布不该拿到这份快照");
+    Expect(!owned.CanUndoFor("画布A"), "对不上的那份快照已被丢掉");
+
+    var again = new CanvasSyncSession();
+    again.Plan(canvas, SyncDirection.CanvasToWorkTree);
+    again.Apply(canvas, applyUnconfirmed: false, owner: "画布A");
+    var back = again.Undo("画布A");
+    Expect(back is not null && JsonSerializer.Serialize(back) == original, "同一张画布才拿得回快照");
 }
 
 /// <summary>章节元数据随保存重开、复制与资产包往返保真，且只读画布仍拒绝覆盖保存。</summary>

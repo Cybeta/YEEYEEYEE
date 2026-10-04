@@ -234,6 +234,13 @@
                   <Button Classes="miniButton" Content="整理布局"
                           ToolTip.Tip="按章节泳道重排节点位置（与网页端用的是同一份引擎）；手动摆放的节点默认留在原位"
                           Click="ArrangeLayout_OnClick" />
+                  <!-- 同步工作树：画布与工作树互相补齐（改过的名字、章节顺序、悬空锚点）。
+                       引擎（CanvasWorkTreeSync）与网页端读的是同一份计划，但它此前没有任何入口——
+                       唯一的生产调用是导入摘要里数冲突条数。它改的是**结构**，不落盘，
+                       「保存修订」时才写文件；所以菜单里还留了一个撤销。 -->
+                  <Button Classes="miniButton" Content="同步工作树"
+                          ToolTip.Tip="把画布与工作树互相补齐：先给只读预览，可只应用稳当的那部分，也能撤销"
+                          Click="WorkTreeSyncMenu_OnClick" />
                   <Border Width="1" Height="18" Background="{StaticResource DfLine}" Margin="4,0" />
                   <!-- 预览引用节点：勾上之后，有引用的节点卡下方会按引用顺序排出一串小小的预览框，
                        图片给缩略图、视频给 ▶ 占位，点一下放大图片 / 播放视频。
