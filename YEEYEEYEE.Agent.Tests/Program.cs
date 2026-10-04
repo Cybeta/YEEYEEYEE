@@ -128,6 +128,7 @@ var tests = new (string Name, Action Run)[]
     ("参考图装配：顺序固定 角色→道具→场景、变体只取第一张、超上限要说出丢了谁", ReferenceImagePlanOrdersCapsAndSaysWhatItDropped),
     ("参考图上限：设置 / 池子 / 工作流三处取小，「0」与「没声明」不能混，note 要说对是谁定的", ReferenceCapResolverPicksTheTightestLimit),
     ("ComfyUI 绑定：每个底图入口按顺序各收一张参考图，给不满不拿同一张凑数", BinderFillsEveryImageSlotInOrder),
+    ("ComfyUI 绑定：合集型工作流（几组各自带输出）要按组填，不能把图平铺到前几个入口", BinderFillsImageGroupsInsteadOfFlattening),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
     ("AI 建实体：内容同时落到核心设定与默认变体，引用卡不再空白", AgentEntityContentReachesVariantAndCard),
@@ -8823,6 +8824,83 @@ static void ReferenceImagePlanOrdersCapsAndSaysWhatItDropped()
 
 	WorkflowNode bare = new WorkflowNode { Title = "分镜 3", Category = NodeCategory.Storyboard };
 	Expect(ReferenceImagePicker.Plan(canvas, bare, 3, locate).Note.Contains("还没有图"), "没引用任何设定时如实说按文生图出");
+}
+
+static void BinderFillsImageGroupsInsteadOfFlattening()
+{
+	// 合集型的工作流：几组各自独立的管线并排放在一个文件里，每组各带一个输出（B03 就是
+	// 「单双三图」三档并排，各自走自己的 SaveImage，整份里一个开关都没有）。
+	// 「按节点 id 顺序平铺前 N 个入口」对这种是错的：3 张图会全落进前两个小组，
+	// 真正能收三张的那组一张都拿不到。要按组填，每组各取前 k 张。
+	const string template = """
+	{
+	  "1": {"class_type": "LoadImage", "inputs": {"image": "e1.png"}},
+	  "2": {"class_type": "LoadImage", "inputs": {"image": "e2.png"}},
+	  "3": {"class_type": "LoadImage", "inputs": {"image": "e3.png"}},
+	  "4": {"class_type": "LoadImage", "inputs": {"image": "e4.png"}},
+	  "5": {"class_type": "LoadImage", "inputs": {"image": "e5.png"}},
+	  "6": {"class_type": "LoadImage", "inputs": {"image": "e6.png"}},
+	  "10": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"image1": ["1", 0], "prompt": "p"}},
+	  "20": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"image1": ["2", 0], "image2": ["3", 0], "prompt": "p"}},
+	  "30": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"image1": ["4", 0], "image2": ["5", 0], "image3": ["6", 0], "prompt": "p"}},
+	  "90": {"class_type": "SaveImage", "inputs": {"images": ["10", 0], "filename_prefix": "a"}},
+	  "91": {"class_type": "SaveImage", "inputs": {"images": ["20", 0], "filename_prefix": "b"}},
+	  "92": {"class_type": "SaveImage", "inputs": {"images": ["30", 0], "filename_prefix": "c"}},
+	  "101": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["102", 0], "negative": ["103", 0], "latent_image": ["104", 0]}},
+	  "102": {"class_type": "CLIPTextEncode", "inputs": {"text": "x", "clip": ["105", 0]}},
+	  "103": {"class_type": "CLIPTextEncode", "inputs": {"text": "y", "clip": ["105", 0]}},
+	  "104": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+	  "105": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "m.safetensors"}}
+	}
+	""";
+
+	ComfyUiWorkflowSlots slots = ComfyUiWorkflowBinder.Detect(template);
+	Expect(slots.ImageGroups.Count == 3, "应认出 3 组（1图 / 2图 / 3图），实际 " + slots.ImageGroups.Count);
+	Expect(string.Join("/", slots.ImageGroups.Select((List<string> group) => string.Join(",", group))) == "1/2,3/4,5,6",
+		"三组应按节点 id 分好，实际 " + string.Join(" | ", slots.ImageGroups.Select((List<string> group) => string.Join(",", group))));
+	Expect(slots.ImageCapacity == 3, "能喂几张取最大那一组的槽数（3），不是入口总数（6），实际 " + slots.ImageCapacity);
+	Expect(slots.Notes.Any((string note) => note.Contains("按组填")), "要如实说这是按组填的");
+
+	JsonObject filled = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues
+	{
+		Prompt = "改一下",
+		Negative = string.Empty,
+		Width = 512,
+		Height = 512,
+		ImageNames = new[] { "a.png", "b.png", "c.png" }
+	});
+	Expect(filled["1"]!["inputs"]!["image"]!.GetValue<string>() == "a.png", "1 图组拿第 1 张");
+	Expect(filled["2"]!["inputs"]!["image"]!.GetValue<string>() == "a.png"
+		&& filled["3"]!["inputs"]!["image"]!.GetValue<string>() == "b.png", "2 图组各拿前两张");
+	Expect(filled["4"]!["inputs"]!["image"]!.GetValue<string>() == "a.png"
+		&& filled["5"]!["inputs"]!["image"]!.GetValue<string>() == "b.png"
+		&& filled["6"]!["inputs"]!["image"]!.GetValue<string>() == "c.png", "3 图组各拿前三张");
+
+	// 只给一张时：每组各拿第 1 张，组内没分到的保持它原来的示例图（不拿同一张去凑数）。
+	JsonObject one = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues
+	{
+		Prompt = "改一下",
+		Negative = string.Empty,
+		Width = 512,
+		Height = 512,
+		ImageName = "a.png"
+	});
+	Expect(one["1"]!["inputs"]!["image"]!.GetValue<string>() == "a.png"
+		&& one["2"]!["inputs"]!["image"]!.GetValue<string>() == "a.png"
+		&& one["4"]!["inputs"]!["image"]!.GetValue<string>() == "a.png", "每组都拿第 1 张");
+	Expect(one["3"]!["inputs"]!["image"]!.GetValue<string>() == "e3.png"
+		&& one["6"]!["inputs"]!["image"]!.GetValue<string>() == "e6.png", "组内没分到的保持示例图");
+
+	// 分不清就退回一整组：有一个入口走不到任何保存节点时，按组填没有依据，不该硬分。
+	const string dangling = """
+	{
+	  "1": {"class_type": "LoadImage", "inputs": {"image": "e1.png"}},
+	  "6": {"class_type": "LoadImage", "inputs": {"image": "e6.png"}},
+	  "10": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "a"}}
+	}
+	""";
+	Expect(ComfyUiWorkflowBinder.Detect(dangling).ImageGroups.Count == 1,
+		"有入口走不到输出时应退回一整组（等于原先的平铺），而不是硬分组");
 }
 
 static void ReferenceCapResolverPicksTheTightestLimit()

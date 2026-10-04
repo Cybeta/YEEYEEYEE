@@ -41,6 +41,29 @@ public sealed class ComfyUiWorkflowSlots
     public List<string> ImageNodeIds { get; set; } = new();
 
     /// <summary>
+    /// 底图入口的**分组**：同一组 = 这些入口能通到同一个输出（保存类）节点。每组内按节点 id 排。
+    ///
+    /// 为什么需要分组：有一类工作流是**几条各自独立的管线并排放在一个文件里**
+    /// （`B03编辑Qwen2511单双三图编辑V2` 就是：1图组走 `SaveImage(216)`、2图组走 `243`、3图组走 `277`，
+    /// 整份里一个开关都没有）。对这种，「按节点 id 顺序平铺前 N 个入口」会把 3 张图塞进 1 图组和
+    /// 2 图组的第一槽，而真正能收三张的 3 图组一张都拿不到。按组填就没有这个问题：
+    /// **每组各取「角色 → 道具 → 场景」的前 k 张**（k = 这组有几个并列槽），组与组互不干扰。
+    ///
+    /// 只有一组时（绝大多数工作流）等于不分——<see cref="Bind"/> 那条平铺的路一字未动。
+    /// </summary>
+    public List<List<string>> ImageGroups { get; set; } = new();
+
+    /// <summary>
+    /// 这一次**最多能喂几张**参考图（按组填时，取最大那一组的槽数）。
+    ///
+    /// 不能用 <see cref="ImageNodeIds"/>.Count：合集型的份里那个数是各组的**总和**
+    /// （B03 是 6），而没有任何一组收得下 6 张——拿它当上限会算出一个虚高的额度。
+    /// </summary>
+    public int ImageCapacity => ImageGroups.Count > 0
+        ? ImageGroups.Max(group => group.Count)
+        : ImageNodeId.Length > 0 ? 1 : 0;
+
+    /// <summary>
     /// 这份工作流**故意**不要负面词（negative 指向 ConditioningZeroOut 这类显式置空节点）。
     ///
     /// 为什么单独立一项、而不是算作「没认出来」：这是正规写法，不是缺陷。
@@ -314,11 +337,99 @@ public static class ComfyUiWorkflowBinder
         slots.ImageNodeId = loaders[0].Key;
         slots.ImageInput = "image";
         slots.ImageNodeIds.AddRange(loaders.Select(pair => pair.Key));
+        slots.ImageGroups.AddRange(GroupByOutput(graph, slots.ImageNodeIds));
         if (loaders.Count > 1)
             slots.Notes.Add($"这份工作流有 {loaders.Count} 个底图入口（节点 {string.Join("、", slots.ImageNodeIds)}）："
                 + "按顺序各收一张参考图——「角色 + 道具 + 场景」一起喂就走这里。"
                 + "给不满时多出来的入口保持它原来的示例图，不拿同一张图去凑数。");
+        if (slots.ImageGroups.Count > 1)
+            slots.Notes.Add($"这份工作流是 {slots.ImageGroups.Count} 组并列（每组各带一个输出）："
+                + string.Join("；", slots.ImageGroups.Select(group => "[" + string.Join("、", group) + "]"))
+                + "。参考图**按组填**：每组各取「角色 → 道具 → 场景」的前几张（前面那组少拿几张），"
+                + "不再按节点顺序把图平铺到前几个入口上——那样会喂错组。");
     }
+
+    /// <summary>
+    /// 把入口按「能通到哪个输出节点」分组（并查集：共用同一个输出的算一组）。
+    ///
+    /// 为什么要按**输出**分：合集型的工作流（`B03` 那种「单双三图」并排三档）里，三组各自走向
+    /// 自己的 `SaveImage`，组与组之间在图上是连通的、没有任何开关——只有顺着连线走到输出才分得开。
+    ///
+    /// **分不清就退回一整组**（等于原先的平铺行为），不硬分：只要有一个入口走不到任何保存节点，
+    /// 说明这份的图没接进产出、或输出节点不是保存类，这时分组没有依据。
+    /// </summary>
+    private static List<List<string>> GroupByOutput(JsonObject graph, IReadOnlyList<string> entries)
+    {
+        var sinks = entries.ToDictionary(entry => entry, entry => SaveNodesUnder(graph, entry), StringComparer.Ordinal);
+        if (sinks.Values.Any(set => set.Count == 0)) return new List<List<string>> { entries.ToList() };
+
+        var parent = entries.ToDictionary(entry => entry, entry => entry, StringComparer.Ordinal);
+        string Find(string id)
+        {
+            while (parent[id] != id)
+            {
+                parent[id] = parent[parent[id]];
+                id = parent[id];
+            }
+            return id;
+        }
+
+        for (var i = 0; i < entries.Count; i++)
+            for (var j = i + 1; j < entries.Count; j++)
+                if (sinks[entries[i]].Overlaps(sinks[entries[j]]))
+                    parent[Find(entries[i])] = Find(entries[j]);
+
+        return entries
+            .GroupBy(Find)
+            .Select(group => group.ToList())          // entries 本身就是 id 序，组内因此天然有序
+            .OrderBy(group => group[0], NodeIdComparer.Instance)
+            .ToList();
+    }
+
+    /// <summary>从一个节点往下游走，能到达的「保存类」节点（这些才是真输出）。</summary>
+    private static HashSet<string> SaveNodesUnder(JsonObject graph, string start)
+    {
+        var savers = new HashSet<string>(StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal) { start };
+        var queue = new Queue<string>();
+        queue.Enqueue(start);
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            foreach (var pair in graph)
+            {
+                if (pair.Value is not JsonObject node || node["inputs"] is not JsonObject inputs) continue;
+                if (!FeedsInto(inputs, current)) continue;
+                if (IsSaveNode(ClassTypeOf(node))) savers.Add(pair.Key);
+                if (seen.Add(pair.Key)) queue.Enqueue(pair.Key);
+            }
+        }
+        return savers;
+    }
+
+    /// <summary>某个节点的 inputs 里是否有连线指向 <paramref name="nodeId"/>。</summary>
+    private static bool FeedsInto(JsonObject inputs, string nodeId)
+    {
+        foreach (var pair in inputs)
+        {
+            if (pair.Value is not JsonArray link || link.Count < 2) continue;
+            var origin = link[0] switch
+            {
+                JsonValue value when value.TryGetValue<string>(out var text) => text,
+                JsonValue value when value.TryGetValue<long>(out var number) => number.ToString(CultureInfo.InvariantCulture),
+                _ => string.Empty
+            };
+            if (origin.Length > 0 && string.Equals(origin, nodeId, StringComparison.Ordinal)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>保存类节点：真正会落文件的那种。预览类不算——它只是给你看一眼。</summary>
+    private static bool IsSaveNode(string classType) =>
+        classType.Contains("SaveImage", StringComparison.OrdinalIgnoreCase)
+        || classType.Contains("SaveVideo", StringComparison.OrdinalIgnoreCase)
+        || classType.Contains("SaveAudio", StringComparison.OrdinalIgnoreCase)
+        || classType.Contains("VideoCombine", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// 视频长度：帧数由上游节点算出来时如实说明。**这一项我们不动**——
@@ -421,6 +532,22 @@ public static class ComfyUiWorkflowBinder
             : values.ImageName.Length > 0
                 ? (IReadOnlyList<string>)new[] { values.ImageName }
                 : Array.Empty<string>();
+        var imageInput = slots.ImageInput.Length > 0 ? slots.ImageInput : "image";
+
+        // 合集型（多组并列、每组各带一个输出）要**按组填**，不能平铺：平铺会把图塞进前几个入口，
+        // 而那几个入口很可能全落在同一个小组里，真正能收多张的那组一张都拿不到（实测 B03）。
+        // 每组各取前几张（角色 → 道具 → 场景 的前缀），组与组互不干扰。
+        if (slots.ImageGroups.Count > 1)
+        {
+            foreach (var group in slots.ImageGroups)
+                for (var index = 0; index < group.Count && index < imageNames.Count; index++)
+                {
+                    if (imageNames[index].Length == 0) continue;
+                    SetInput(graph, group[index], imageInput, JsonValue.Create(imageNames[index]));
+                }
+            return graph;
+        }
+
         var imageSlots = slots.ImageNodeIds.Count > 0
             ? (IReadOnlyList<string>)slots.ImageNodeIds
             : slots.ImageNodeId.Length > 0
@@ -429,8 +556,7 @@ public static class ComfyUiWorkflowBinder
         for (var index = 0; index < imageSlots.Count && index < imageNames.Count; index++)
         {
             if (imageNames[index].Length == 0) continue;
-            var input = slots.ImageInput.Length > 0 ? slots.ImageInput : "image";
-            SetInput(graph, imageSlots[index], input, JsonValue.Create(imageNames[index]));
+            SetInput(graph, imageSlots[index], imageInput, JsonValue.Create(imageNames[index]));
         }
 
         return graph;

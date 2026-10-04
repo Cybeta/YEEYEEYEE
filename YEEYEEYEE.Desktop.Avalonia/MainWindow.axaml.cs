@@ -4004,11 +4004,12 @@ public partial class MainWindow : Window, IAgentSessionHost
 
                 if (source?.Workflow is { } chosenWorkflow)
                 {
-                    // 走工作流时它自己能收几张由底图入口数决定。读不懂正文或没有底图入口的，
-                    // 按 0 处理——塞给一个没有底图入口的工作流只会白跑一次，不如先如实说清。
+                    // 走工作流时它自己能收几张由**入口数**决定——注意用 ImageCapacity（最大一组的槽数），
+                    // 不能用入口总数：合集型的工作流那个数是各组之和（B03 是 6），没有一组收得下 6 张。
+                    // 读不懂正文或没有底图入口的按 0 处理——塞给一个没有底图入口的工作流只会白跑一次。
                     var (workflowSlots, _) = ComfyUiWorkflowInspector.Inspect(chosenWorkflow.Site, chosenWorkflow.Workflow);
-                    declarations.Add(workflowSlots is { ImageNodeIds.Count: > 0 } slots
-                        ? new($"这份工作流的 {slots.ImageNodeIds.Count} 个底图入口", slots.ImageNodeIds.Count)
+                    declarations.Add(workflowSlots is { ImageCapacity: > 0 } slots
+                        ? new($"这份工作流的 {slots.ImageCapacity} 个底图入口", slots.ImageCapacity)
                         : new("这份工作流（没有底图入口，或正文读不懂）", 0));
                 }
 
