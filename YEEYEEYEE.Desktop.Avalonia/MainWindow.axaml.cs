@@ -172,8 +172,10 @@ public partial class MainWindow : Window, IAgentSessionHost
         CanvasSurfaceControl.ReferenceDoubleClicked += CanvasSurface_OnReferenceTagDoubleClicked;
         // 点了节点下方的引用预览框：图片放大看、视频交给系统播放器放。
         CanvasSurfaceControl.ReferencePreviewActivated += (_, preview) => ShowReferenceMedia(preview);
-        // 点节点**自己**出的图 → 放大看。卡片上那排缩略图既是「挂上了」的凭据，也是看大图的入口。
-        CanvasSurfaceControl.OwnMediaActivated += (_, media) => ShowImagePreview(media.Path, media.Title);
+        // 点节点**自己**出的产物：图放大看，视频 / 音频交给系统播放器。
+        // 早先这里一律走 ShowImagePreview，而它是 `new Bitmap(path)`——点开一段视频（含刚拼出来的成片）
+        // 只会得到一句「图已存好，但预览打不开」，看着像缺陷。判种类用附件那套现成规则，不另立一套。
+        CanvasSurfaceControl.OwnMediaActivated += (_, media) => ShowOwnMedia(media.Path, media.Title);
         // 右键这一张 → 可以删掉它（文件移入回收站）。删除的规矩在这里，画布只说「删哪个」。
         CanvasSurfaceControl.OwnMediaDeleteRequested += (_, media) => RemoveOwnMedia(media.NodeId, media.Reference);
         // 浮层里双击一张引用卡：以这条引用为源头另开一张临时画布，在那里改它的名称 / 描述 / 子引用。
@@ -2790,10 +2792,31 @@ public partial class MainWindow : Window, IAgentSessionHost
             body.Children.Add(AgentDialogUi.Note(
                 $"共 {ledger.Versions.Count} 版（旧的都留着，不会被覆盖）："));
             foreach (var version in ledger.Versions)
-                body.Children.Add(AgentDialogUi.Note(
-                    $"· {version.Label}{(version.IsLatest ? "（最新）" : string.Empty)} · {version.FactsText}"
-                    + $" · 接了 {version.CompositionText} · {version.AddedAt.ToLocalTime():MM-dd HH:mm}",
-                    version.Film.Readable ? AgentNoteLevel.Info : AgentNoteLevel.Warning));
+            {
+                var line = $"· {version.Label}{(version.IsLatest ? "（最新）" : string.Empty)} · {version.FactsText}"
+                    + $" · 接了 {version.CompositionText} · {version.AddedAt.ToLocalTime():MM-dd HH:mm}";
+                // 每一版都要能**看**：光比数字选不出片子，而「哪一版更好」最终只能靠看。
+                var path = AssetStore.Resolve(version.Reference);
+                if (path is null)
+                {
+                    body.Children.Add(AgentDialogUi.Note(line, AgentNoteLevel.Warning));
+                    continue;
+                }
+
+                var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto") };
+                row.Children.Add(AgentDialogUi.Note(line));
+                var play = AgentDialogUi.Secondary("播放这一版");
+                Grid.SetColumn(play, 1);
+                play.Margin = new Thickness(6, 0, 0, 0);
+                play.Click += (_, _) => OpenInShell(path, "视频");
+                row.Children.Add(play);
+                var locate = AgentDialogUi.Secondary("打开所在文件夹");
+                Grid.SetColumn(locate, 2);
+                locate.Margin = new Thickness(6, 0, 0, 0);
+                locate.Click += (_, _) => OpenInShell(Path.GetDirectoryName(path) ?? path, "文件夹");
+                row.Children.Add(locate);
+                body.Children.Add(row);
+            }
             if (ledger.LatestChanges.Count > 0)
             {
                 body.Children.Add(AgentDialogUi.Note("最新一版与上一版比："));
@@ -4325,6 +4348,31 @@ public partial class MainWindow : Window, IAgentSessionHost
         await RunImageBatchAsync(node, prompt, negative, modeNote, provider, source, decision,
             references, denoise, count,
             sourceLabel: $"Agent 协助 · {suggestion.Title}");
+    }
+
+    /// <summary>
+    /// 节点自己出的一个产物，按**文件本身的种类**决定怎么打开：图放大看，视频 / 音频交给系统播放器。
+    ///
+    /// 种类走 <see cref="WorkflowAttachment.KindOf"/>（按扩展名，与附件落库时同一份规则），
+    /// 不按「它挂在哪个节点上」猜——分镜节点上同时可能有图和视频。认不出的种类如实说没有内置预览，
+    /// 不拿一句「打不开」冒充。
+    /// </summary>
+    private void ShowOwnMedia(string path, string title)
+    {
+        var kind = WorkflowAttachment.KindOf(path);
+        if (kind is AttachmentKind.Video or AttachmentKind.Audio)
+        {
+            OpenInShell(path, WorkflowAttachment.DisplayName(kind));
+            return;
+        }
+
+        if (kind == AttachmentKind.Other)
+        {
+            StatusText.Text = $"这个产物既不是图片也不是视频，没有内置预览；「打开所在文件夹」里可以找到它：{Path.GetFileName(path)}";
+            return;
+        }
+
+        ShowImagePreview(path, title);
     }
 
     /// <summary>出完图给一眼能看到的结果：不然「生成成功」只体现在状态栏和文件里。</summary>

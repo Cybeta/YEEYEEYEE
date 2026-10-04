@@ -1748,7 +1748,7 @@ public partial class CanvasSurface : UserControl
                 {
                     // 吃掉事件：不然这一下会冒泡成「选中节点」。
                     args.Handled = true;
-                    // 右键：这一张图自己的菜单（放大 / 删除）。删除是「节点上这个附件」的事，
+                    // 右键：这一个产物自己的菜单（看 / 删除）。删除是「节点上这个附件」的事，
                     // 不牵动节点本身——用户说「已经生成的图片没有删除选项」，指的就是这里。
                     if (args.GetCurrentPoint(tile).Properties.IsRightButtonPressed)
                     {
@@ -1758,7 +1758,8 @@ public partial class CanvasSurface : UserControl
                     var path = AssetStore.Resolve(captured.Reference) ?? string.Empty;
                     if (path.Length > 0) OwnMediaActivated?.Invoke(this, (path, node.Title));
                 };
-                ToolTip.SetTip(tile, $"{attachment.Name}\n{attachment.Source}\n（单击放大 · 右键可删除）");
+                // 提示里的动词跟着种类走：视频那一路是交给系统播放器，不是「放大」。
+                ToolTip.SetTip(tile, $"{attachment.Name}\n{attachment.Source}\n（单击{OwnMediaVerb(IsPlayable(attachment.Kind), menu: false)} · 右键可删除）");
                 strip.Children.Add(tile);
             }
             content.Children.Add(strip);
@@ -2214,12 +2215,30 @@ public partial class CanvasSurface : UserControl
         return glow is null ? frame : new Panel { Children = { glow, frame } };
     }
 
-    /// <summary>节点**自己出的一张图**上的右键菜单：放大 / 删除。</summary>
+    /// <summary>这一类产物要交给系统播放器打开吗（图走内置预览，视频 / 音频交给系统）。</summary>
+    private static bool IsPlayable(AttachmentKind kind) => kind is AttachmentKind.Video or AttachmentKind.Audio;
+
+    /// <summary>产物在中文里的量词：图是「张」，视频 / 音频是「段」，其余是「个」。</summary>
+    private static string OwnMediaUnit(AttachmentKind kind) => kind switch
+    {
+        AttachmentKind.Image => "一张",
+        AttachmentKind.Video or AttachmentKind.Audio => "一段",
+        _ => "一个"
+    };
+
+    /// <summary>节点自己产物上「看」这个动作的措辞。菜单里说完整，工具提示里说短。</summary>
+    private static string OwnMediaVerb(bool playable, bool menu) => playable
+        ? menu ? "用系统播放器播放" : "播放"
+        : menu ? "放大看看" : "放大";
+
+    /// <summary>节点**自己出的一个产物**上的右键菜单：看（放大 / 播放）/ 删除。</summary>
     private void ShowOwnMediaMenu(WorkflowNode node, WorkflowAttachment attachment, Control anchor)
     {
         var menu = new ContextMenu();
 
-        var open = new MenuItem { Header = "放大看看" };
+        // 视频 / 音频那一条不能写「放大」：放大那一路是解码图片（`new Bitmap(path)`），
+        // 对 mp4 只会得到一句「预览打不开」——措辞得跟真正会发生的事一致。
+        var open = new MenuItem { Header = OwnMediaVerb(IsPlayable(attachment.Kind), menu: true) };
         open.Click += (_, _) =>
         {
             var path = AssetStore.Resolve(attachment.Reference) ?? string.Empty;
@@ -2230,7 +2249,7 @@ public partial class CanvasSurface : UserControl
         // 删除**只动这一张**：文件移入回收站、引用从这个节点上摘掉，节点本身与别的图都不受影响。
         // 移文件与记账的规矩在主窗口（画布只说「要删哪一个」）——这样「删除必须真的移走文件」
         // 这条规矩只有一个地方需要守住。
-        var remove = new MenuItem { Header = "删除这一张（移入回收站）" };
+        var remove = new MenuItem { Header = $"删除这{OwnMediaUnit(attachment.Kind)}（移入回收站）" };
         remove.Click += (_, _) => OwnMediaDeleteRequested?.Invoke(this, (node.Id, attachment.Reference));
         menu.Items.Add(remove);
 
