@@ -50,6 +50,16 @@ public sealed class WorkflowAttachment
     public string ShotList { get; set; } = string.Empty;
 
     /// <summary>
+    /// 与 <see cref="ShotList"/> 配套的**分镜节点 ID**（「、」分隔，顺序一一对应）。
+    ///
+    /// 为什么两个字段而不是一个：`ShotList` 是给人看的（标题，改名之后仍显示当时拼的是哪一镜），
+    /// 这一份是给机器比的。两版成片比对「多了哪一镜」时**只能按 ID**——按标题比的话，
+    /// 改一个分镜标题就会被读成「少了一镜、多了一镜」，而那种误报没人查得出来。
+    /// GUID 里不会有「、」，所以两个字段各自解析都不会歧义。
+    /// </summary>
+    public string ShotRefs { get; set; } = string.Empty;
+
+    /// <summary>
     /// 这张产物是**照着哪一版设定**做出来的：引用键（<c>实体Id/变体Id</c>）→ 当时的设定指纹。
     ///
     /// 与 <see cref="Prompt"/> 是两类不同的凭据：那个记「我发出去的是什么话」，
@@ -192,7 +202,10 @@ public sealed class WorkflowCanvasState
         var variant = reference.VariantId != Guid.Empty
             ? entity.Variants.FirstOrDefault(candidate => candidate.Id == reference.VariantId)
             : null;
-        variant ??= entity.Variants.FirstOrDefault();
+        // 老引用不带变体 ID：按约定落到第一个变体（这是有意的兼容，那些引用本来就只认「这个角色」）。
+        // 但**带了一个查不到的 ID** 不能也这么办——那说明这条引用已经对不上了，
+        // 默默换一个变体出图是最坏的结果：画出来是另一个设定，界面上却什么都不说。
+        if (variant is null && reference.VariantId == Guid.Empty) variant = entity.Variants.FirstOrDefault();
         if (variant is null) return null;
         var version = reference.VariantVersionId is { } versionId ? variant.FindVersion(versionId) : null;
         return version is null

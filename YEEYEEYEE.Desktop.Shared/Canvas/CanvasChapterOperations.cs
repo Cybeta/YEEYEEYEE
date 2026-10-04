@@ -138,7 +138,7 @@ public static class CanvasChapterOperations
             $"章节「{previous}」改名为「{trimmed}」；节点锚点不变。"));
 
         // 显示文本跟随：只有仍旧等于旧名称的节点文本会被更新，避免误改人工文本。
-        foreach (var node in working.Nodes.Where(node => string.Equals(node.Chapter.Trim(), previous.Trim(), StringComparison.Ordinal)))
+        foreach (var node in FollowersOf(working, chapterId, previous))
         {
             node.Chapter = trimmed;
             changes.Add(new ChapterChange(ChapterChangeKind.Renamed, "WorkflowNode", node.Id.ToString(),
@@ -147,6 +147,18 @@ public static class CanvasChapterOperations
 
         return new ChapterOperationResult(working, changes, conflicts);
     }
+
+    /// <summary>
+    /// 章节改名 / 合并时要跟着改**显示文本**的那些节点：只动「文本仍等于旧名」的（人工改过的文本不动）。
+    ///
+    /// 为什么要两个条件一起看：有锚点的节点按**章节 ID** 判它属不属于这一章——只按文本选的话，
+    /// 两个同名章节里改一个，另一个的节点文本也会被一起改掉（章节身份本来就是 ID，文本只是显示）。
+    /// 没有锚点的那种老节点（只有文本字段）只能照旧按文本认，否则它们的显示文本从此不再跟随。
+    /// </summary>
+    private static IEnumerable<WorkflowNode> FollowersOf(WorkflowCanvasState canvas, Guid chapterId, string previousName) =>
+        canvas.Nodes.Where(node =>
+            string.Equals(node.Chapter.Trim(), previousName.Trim(), StringComparison.Ordinal)
+            && (CanvasChapters.ResolveChapterId(canvas, node) is not { } owner || owner == chapterId));
 
     /// <summary>设置章节显式顺序；与同级冲突时按请求值重排同级并记录归一化。</summary>
     public static ChapterOperationResult Reorder(WorkflowCanvasState canvas, Guid chapterId, int order)
@@ -282,7 +294,7 @@ public static class CanvasChapterOperations
         }
 
         var sourceName = source.Name;
-        foreach (var node in working.Nodes.Where(node => string.Equals(node.Chapter.Trim(), sourceName.Trim(), StringComparison.Ordinal)))
+        foreach (var node in FollowersOf(working, sourceChapterId, sourceName))
             node.Chapter = target.Name;
 
         var reparented = 0;

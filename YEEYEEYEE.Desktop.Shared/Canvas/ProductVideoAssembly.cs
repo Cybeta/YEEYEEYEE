@@ -1,7 +1,13 @@
 namespace YEEYEEYEE.Desktop;
 
-/// <summary>成片里的一个镜头：第几镜（按分镜顺序）、标题、视频文件。</summary>
-public sealed record ProductShot(int Index, string Title, string Path);
+/// <summary>
+/// 成片里的一段：第几镜、哪一镜、哪个文件。
+///
+/// <paramref name="NodeId"/> 是**分镜节点的稳定 ID**，不只是给人看的信息：成片拼完会把
+/// 「这一版接了哪几镜」记进产物，事后比对两版差别时要靠它——用标题比的话，
+/// 改一个分镜标题就会被读成「少了一镜、多了一镜」。
+/// </summary>
+public sealed record ProductShot(int Index, Guid NodeId, string Title, string Path);
 
 /// <summary>这一版成片的镜头清单：按分镜顺序，谁有视频、谁还没有。</summary>
 public sealed record ProductVideoPlan(
@@ -45,7 +51,7 @@ public static class ProductVideoAssembly
             // 序号按**分镜顺序**算，不按「有视频的第几个」算：缺了第 2 镜时，
             // 第 3 镜仍然是第 3 镜——报出来的位置要和画布上看到的一致。
             if (path.Length == 0) missing.Add($"{index + 1}. {storyboard.Title}");
-            else shots.Add(new ProductShot(index + 1, storyboard.Title, path));
+            else shots.Add(new ProductShot(index + 1, storyboard.Id, storyboard.Title, path));
         }
 
         var note = Describe(product, storyboards.Count, shots, missing);

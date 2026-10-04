@@ -9,6 +9,7 @@ public sealed record ProductVersion(
     DateTimeOffset AddedAt,
     bool IsLatest,
     IReadOnlyList<string> Shots,
+    IReadOnlyList<Guid> ShotIds,
     Mp4FilmInfo Film)
 {
     /// <summary>这一版接了哪几镜。没记就直说没记——不按当前分镜去猜（猜出来的「差在哪一镜」比不给更坏）。</summary>
@@ -87,6 +88,7 @@ public static class ProductVersions
                 attachment.AddedAt,
                 index == films.Count - 1,
                 Shots(attachment.ShotList),
+                ShotIds(attachment.ShotRefs),
                 Probe(find, attachment.Reference)));
         }
 
@@ -186,21 +188,45 @@ public static class ProductVersions
 
     private static string DescribeShots(ProductVersion baseline, ProductVersion candidate)
     {
+        // 有 ID 就按 ID 比：标题是给人看的，改名不该被读成「少了一镜、多了一镜」。
+        if (baseline.ShotIds.Count > 0 && candidate.ShotIds.Count > 0)
+        {
+            var addedIds = candidate.ShotIds.Where(id => !baseline.ShotIds.Contains(id)).ToList();
+            var removedIds = baseline.ShotIds.Where(id => !candidate.ShotIds.Contains(id)).ToList();
+            if (addedIds.Count == 0 && removedIds.Count == 0)
+                return $"接的镜头没变（{candidate.ShotIds.Count} 镜）";
+
+            var detail = new List<string>();
+            if (addedIds.Count > 0) detail.Add("新增 " + string.Join("、", addedIds.Select(id => TitleOf(candidate, id))));
+            if (removedIds.Count > 0) detail.Add("去掉 " + string.Join("、", removedIds.Select(id => TitleOf(baseline, id))));
+            return $"接的镜数 {baseline.ShotIds.Count} → {candidate.ShotIds.Count}；{string.Join("；", detail)}";
+        }
+
         if (baseline.Shots.Count == 0 || candidate.Shots.Count == 0)
         {
             var missing = baseline.Shots.Count == 0 ? baseline.Label : candidate.Label;
             return $"接的镜数：{missing}没记（拼的时候还没开始记镜头清单），比不了";
         }
 
+        // 只有标题（第 191 轮之前拼的那些）：**按标题比并如实说明**——改名会被读成增删，
+        // 与其假装准确，不如把这条限制说出来。
         var added = candidate.Shots.Where(shot => !baseline.Shots.Contains(shot)).ToList();
         var removed = baseline.Shots.Where(shot => !candidate.Shots.Contains(shot)).ToList();
         if (added.Count == 0 && removed.Count == 0)
             return $"接的镜头没变（{candidate.Shots.Count} 镜）";
 
-        var detail = new List<string>();
-        if (added.Count > 0) detail.Add("新增 " + string.Join("、", added));
-        if (removed.Count > 0) detail.Add("去掉 " + string.Join("、", removed));
-        return $"接的镜数 {baseline.Shots.Count} → {candidate.Shots.Count}；{string.Join("；", detail)}";
+        var lines = new List<string>();
+        if (added.Count > 0) lines.Add("新增 " + string.Join("、", added));
+        if (removed.Count > 0) lines.Add("去掉 " + string.Join("、", removed));
+        return $"接的镜数 {baseline.Shots.Count} → {candidate.Shots.Count}；{string.Join("；", lines)}"
+            + "（这两版只记了标题，改过标题的话这里会读成增删）";
+    }
+
+    /// <summary>按 ID 找那一镜的标题；那一镜和它当时的标题都不在了就如实说不知道。</summary>
+    private static string TitleOf(ProductVersion version, Guid id)
+    {
+        var index = version.ShotIds.ToList().IndexOf(id);
+        return index >= 0 && index < version.Shots.Count ? version.Shots[index] : "（不在这一版的记录里）";
     }
 
     private static Mp4FilmInfo Probe(Func<string, string?> locate, string reference)
@@ -216,4 +242,17 @@ public static class ProductVersions
         string.IsNullOrWhiteSpace(shotList)
             ? Array.Empty<string>()
             : shotList.Split('、', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    /// <summary>与标题一一对应的分镜节点 ID。解析不出来的整条丢掉——宁可退到「按标题比」，也不拿半个 ID 去比。</summary>
+    private static IReadOnlyList<Guid> ShotIds(string shotRefs)
+    {
+        if (string.IsNullOrWhiteSpace(shotRefs)) return Array.Empty<Guid>();
+        var ids = new List<Guid>();
+        foreach (var piece in shotRefs.Split('、', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!Guid.TryParse(piece, out var id)) return Array.Empty<Guid>();
+            ids.Add(id);
+        }
+        return ids;
+    }
 }

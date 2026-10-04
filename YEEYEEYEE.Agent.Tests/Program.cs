@@ -170,6 +170,7 @@ var tests = new (string Name, Action Run)[]
     ("成片拼接：认不出的形状（分片 / co64 / 只有一段 / 文件不在）如实拒绝", Mp4ConcatRefusesUnsupportedShapes),
     ("成片装配：顺序跟画布（工作树显式顺序）、缺哪一镜就拒绝且镜号不往前挪", ProductVideoJoinsShotsInStoryboardOrder),
     ("成品版本对比：只认成片、旧的在前、事实来自容器头（时长/帧数/分辨率）", ProductVersionLedgerListsOnlyFilmsOldestFirst),
+    ("成品版本对比：镜头按稳定 ID 比（改名不算增删），只记了标题的老版本如实说明", ProductVersionComparesShotsByIdentityNotTitle),
     ("成品版本对比：读不出来就点名，其余照比；镜头清单没记就说没记", ProductVersionComparisonNamesTheVersionItCannotRead),
     ("章节 → 成品：一章下每个成品都列出来、顺序跟工作树、没拼过的也写清楚", ProductVersionsForChapterGroupsByProductInReadingOrder),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
@@ -251,6 +252,8 @@ var tests = new (string Name, Action Run)[]
     ("返工 G6-S3：删除变体先落库后动画布，失败时引用与实体原样、库回滚", VariantDeletionKeepsReferencesWhenPublishFails),
     ("返工 G6-T1：打开之后库被删也在执行前核验出来（旧标记不算数）", AuthorityRecheckCatchesLaterDeletedLibrary),
     ("返工 G6-T2：发布结果区分「真落库」与「本地内容」，本地实体不谎报已保存", PublishOutcomeDistinguishesLocalAndShared),
+    ("引用：查不到的变体 ID 要报失效，不悄悄换成第一个变体", ReferenceWithUnknownVariantFailsInsteadOfSwitching),
+    ("章节改名/合并只跟随自己这一章的节点（同名章节不许互相改文本）", ChapterRenameOnlyFollowsItsOwnNodes),
     ("版本策略：存在版本可锁定，缺失版本拒绝且不静默降级", ReferenceVersionPolicy),
     ("版本状态：五档（历史保留/已采纳/当前适用/需要确认/未来版本）与三个边界", CanvasNodeVersionStatusHasFiveStates),
     ("换画布不许把自身状态当来源：必须是真复制（旧 R16-1 清空画布那条路）", CanvasSwitchNeverAliasesItsOwnState),
@@ -503,6 +506,9 @@ static void ProductVersionLedgerListsOnlyFilmsOldestFirst()
 	var locate = (string reference) => reference.StartsWith("asset://", StringComparison.Ordinal)
 		? Path.Combine(directory, reference["asset://".Length..])
 		: null;
+	// 两镜的稳定 ID：清单里记的标题是给人看的，比增删靠的是这两个。
+	var shotA = Guid.NewGuid();
+	var shotB = Guid.NewGuid();
 
 	var canvas = new WorkflowCanvasState();
 	var chapterItem = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章", Order = 10 };
@@ -520,12 +526,13 @@ static void ProductVersionLedgerListsOnlyFilmsOldestFirst()
 			new WorkflowAttachment
 			{
 				Kind = AttachmentKind.Video, Name = "成片-第1次.mp4", Reference = "asset://v1.mp4",
-				Source = WorkflowAttachment.SourceFilmJoin, ShotList = "分镜一"
+				Source = WorkflowAttachment.SourceFilmJoin, ShotList = "分镜一", ShotRefs = shotA.ToString("D")
 			},
 			new WorkflowAttachment
 			{
 				Kind = AttachmentKind.Video, Name = "成片-第2次.mp4", Reference = "asset://v2.mp4",
-				Source = WorkflowAttachment.SourceFilmJoin, ShotList = "分镜一、分镜二"
+				Source = WorkflowAttachment.SourceFilmJoin,
+				ShotList = "分镜一、分镜二", ShotRefs = $"{shotA:D}、{shotB:D}"
 			}
 		}
 	};
@@ -559,6 +566,140 @@ static void ProductVersionLedgerListsOnlyFilmsOldestFirst()
 	Expect(changes[3].StartsWith("体积 ", StringComparison.Ordinal), "体积那条要报出来，实际：" + changes[3]);
 	Expect(changes[4] == "接的镜数 1 → 2；新增 分镜二", "要指出新增了哪一镜，实际：" + changes[4]);
 	Expect(changes[5].StartsWith("时间：第 1 版 ", StringComparison.Ordinal), "时间那条要报出来，实际：" + changes[5]);
+	Expect(ledger.Latest!.ShotIds.Count == 2 && ledger.Latest.ShotIds[0] == shotA && ledger.Latest.ShotIds[1] == shotB,
+		"镜头 ID 也要记下来——比「多了哪一镜」靠的是它，不是标题");
+}
+
+/// <summary>
+/// 引用的变体：**老引用**（不带变体 ID）按约定落到第一个变体，这是有意的兼容；
+/// 但带了一个**查不到**的变体 ID 时不能也这么办——那说明这条引用已经对不上了，
+/// 默默换成第一个变体去出图是最坏的结果：画出来是另一个设定，界面上却什么都不说。
+/// </summary>
+static void ReferenceWithUnknownVariantFailsInsteadOfSwitching()
+{
+	var canvas = new WorkflowCanvasState();
+	var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "林晚" };
+	var first = entity.CreateVariant("默认", "藏青风衣");
+	entity.CreateVariant("雨衣", "黄色雨衣");
+	canvas.Entities.Add(entity);
+	Expect(entity.Variants.Count == 2, "两个变体——所以「悄悄换成第一个」确实有东西可换");
+
+	// 老引用不带变体 ID：落到第一个变体
+	var legacy = new NodeReference { EntityId = entity.Id };
+	Expect(canvas.ResolveReferenceContent(legacy)?.Variant.Id == first.Id, "老引用按约定落到第一个变体");
+
+	// 带了查不到的变体 ID：报「引用失效」而不是悄悄换一个
+	var stale = new NodeReference { EntityId = entity.Id, VariantId = Guid.NewGuid() };
+	Expect(canvas.ResolveReferenceContent(stale) is null, "查不到的变体 ID 不该被替换成别的变体");
+
+	// 变体被删掉之后，指向它的引用也一样：失效，而不是换个变体接着画
+	var doomed = entity.CreateVariant("废弃", "不要了");
+	canvas.Entities[0].Variants.Remove(doomed);
+	Expect(canvas.ResolveReferenceContent(new NodeReference { EntityId = entity.Id, VariantId = doomed.Id }) is null,
+		"变体删掉之后，指着它的引用要失效");
+}
+
+/// <summary>
+/// 章节改名只跟随**自己这一章**的节点：两个同名章节里改一个，另一个的节点显示文本不该被一起改掉
+/// （章节身份本来就靠 ID，文本只是显示）。没有锚点的那种老节点仍按文本跟随，否则它们的文本再也不更新。
+/// </summary>
+static void ChapterRenameOnlyFollowsItsOwnNodes()
+{
+	var canvas = new WorkflowCanvasState();
+	var first = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "雨夜", Order = 10 };
+	var second = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "雨夜", Order = 20 };
+	canvas.WorkTree.Add(first);
+	canvas.WorkTree.Add(second);
+	var anchorA = new WorkTreeItem { Kind = WorkTreeKind.Ability, ParentId = first.Id, Name = "甲", Order = 10 };
+	var anchorB = new WorkTreeItem { Kind = WorkTreeKind.Ability, ParentId = second.Id, Name = "乙", Order = 10 };
+	canvas.WorkTree.Add(anchorA);
+	canvas.WorkTree.Add(anchorB);
+
+	var nodeA = new WorkflowNode { Title = "甲镜", Category = NodeCategory.Storyboard, Chapter = "雨夜", WorkTreeItemId = anchorA.Id };
+	var nodeB = new WorkflowNode { Title = "乙镜", Category = NodeCategory.Storyboard, Chapter = "雨夜", WorkTreeItemId = anchorB.Id };
+	var loose = new WorkflowNode { Title = "旧镜", Category = NodeCategory.Storyboard, Chapter = "雨夜" };
+	canvas.Nodes.Add(nodeA);
+	canvas.Nodes.Add(nodeB);
+	canvas.Nodes.Add(loose);
+	var original = JsonSerializer.Serialize(canvas);
+
+	var result = CanvasChapterOperations.Rename(canvas, first.Id, "雨夜（重写）");
+	Expect(result.Conflicts.All(item => !item.Blocking), "改名不该被阻断");
+	Expect(JsonSerializer.Serialize(canvas) == original, "章节操作在副本上算，不改动传入的画布");
+
+	var renamed = result.Canvas;
+	Expect(renamed.Nodes.Single(node => node.Id == nodeA.Id).Chapter == "雨夜（重写）", "自己这一章的节点要跟着改");
+	Expect(renamed.Nodes.Single(node => node.Id == nodeB.Id).Chapter == "雨夜", "同名另一章的节点不该被动");
+	Expect(renamed.Nodes.Single(node => node.Id == loose.Id).Chapter == "雨夜（重写）", "没锚点的老节点仍按文本跟随");
+
+	// 合并同理（在改名之后的那份上做）：源章的节点文本跟到目标章，目标章自己的节点不受影响。
+	var merged = CanvasChapterOperations.Merge(renamed, second.Id, first.Id);
+	Expect(merged.Conflicts.All(item => !item.Blocking), "合并不该被阻断");
+	Expect(merged.Canvas.Nodes.Single(node => node.Id == nodeB.Id).Chapter == "雨夜（重写）", "源章的节点文本跟到目标章");
+	Expect(merged.Canvas.Nodes.Single(node => node.Id == nodeA.Id).Chapter == "雨夜（重写）", "目标章自己的节点不受影响");
+}
+
+/// <summary>
+/// 「这一版比上一版多了哪一镜」必须按**分镜节点 ID** 比，不按标题：标题是给人看的，
+/// 在画布上改一个分镜标题很常见，不该被读成「少了一镜、多了一镜」。
+/// 只记了标题的老版本（这之前拼的）仍按标题比，但要**如实说明**这条限制——不假装准确。
+/// </summary>
+static void ProductVersionComparesShotsByIdentityNotTitle()
+{
+	var directory = NewTempDirectory("product-versions-identity");
+	uint[] threeFrames = [512, 512, 512];
+	uint[] sixFrames = [512, 512, 512, 512, 512, 512];
+	uint[] audio = [1024, 1000, 1000, 1000, 1000];
+	File.WriteAllBytes(Path.Combine(directory, "v1.mp4"), TinyMp4(threeFrames, 1024, audio, 1024));
+	File.WriteAllBytes(Path.Combine(directory, "v2.mp4"), TinyMp4(sixFrames, 1024, audio, 1024));
+	File.WriteAllBytes(Path.Combine(directory, "v3.mp4"), TinyMp4(sixFrames, 1024, audio, 1024));
+	var locate = (string reference) => reference.StartsWith("asset://", StringComparison.Ordinal)
+		? Path.Combine(directory, reference["asset://".Length..])
+		: null;
+	var shotA = Guid.NewGuid();
+	var shotB = Guid.NewGuid();
+
+	var product = new WorkflowNode
+	{
+		Title = "成片", Category = NodeCategory.Product,
+		Attachments =
+		{
+			// 改名前：两镜
+			new WorkflowAttachment
+			{
+				Kind = AttachmentKind.Video, Reference = "asset://v1.mp4", Source = WorkflowAttachment.SourceFilmJoin,
+				ShotList = "分镜一、分镜二", ShotRefs = $"{shotA:D}、{shotB:D}"
+			},
+			// 改名后：还是那两镜（画布上把分镜标题改了）
+			new WorkflowAttachment
+			{
+				Kind = AttachmentKind.Video, Reference = "asset://v2.mp4", Source = WorkflowAttachment.SourceFilmJoin,
+				ShotList = "开场、对峙", ShotRefs = $"{shotA:D}、{shotB:D}"
+			},
+			// 只记了标题的那种老版本（没有 ID）
+			new WorkflowAttachment
+			{
+				Kind = AttachmentKind.Video, Reference = "asset://v3.mp4", Source = WorkflowAttachment.SourceFilmJoin,
+				ShotList = "开场、对峙、尾声"
+			}
+		}
+	};
+	var canvas = new WorkflowCanvasState();
+	canvas.Nodes.Add(product);
+	var versions = ProductVersions.For(canvas, product, locate).Versions;
+	Expect(versions.Count == 3, "三版都该列出来");
+
+	// 标题全变了、镜是同一批 → 必须说「没变」（照标题比就会误报成「去掉两镜、新增两镜」）
+	var renamed = ProductVersions.Compare(versions[0], versions[1]);
+	Expect(renamed.Any(line => line == "接的镜头没变（2 镜）"),
+		"改了标题也得说镜头没变：" + string.Join(" / ", renamed));
+	// 给人看的那份仍显示当时拼的是哪一镜（记录下来的标题，不跟着改名走）
+	Expect(versions[1].CompositionText == "开场、对峙", "显示的是当时记下的标题：" + versions[1].CompositionText);
+
+	// 老版本没有 ID → 退回按标题比，并如实说明这条限制
+	var legacy = ProductVersions.Compare(versions[1], versions[2]);
+	Expect(legacy.Any(line => line.Contains("新增 尾声")), "按标题比也要报出新增：" + string.Join(" / ", legacy));
+	Expect(legacy.Any(line => line.Contains("只记了标题")), "退回按标题比时要说明限制：" + string.Join(" / ", legacy));
 }
 
 /// <summary>

@@ -2997,7 +2997,10 @@ public partial class MainWindow : Window, IAgentSessionHost
                 Reference = reference,
                 Name = $"{node.Title}-成片.mp4",
                 Source = WorkflowAttachment.SourceFilmJoin,
+                // 清单记两份：标题给人看（改名之后仍显示当时拼的是哪一镜），ID 给机器比
+                // （比对「多了哪一镜」时按标题比的话，改个标题就会被读成增删）。
                 ShotList = string.Join("、", plan.Shots.Select(shot => shot.Title)),
+                ShotRefs = string.Join("、", plan.Shots.Select(shot => shot.NodeId)),
                 Prompt = string.Empty,
                 NegativePrompt = string.Empty
             });
