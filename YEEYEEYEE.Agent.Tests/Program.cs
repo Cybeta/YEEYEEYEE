@@ -125,6 +125,7 @@ var tests = new (string Name, Action Run)[]
     ("生成链自检：四层缺口报数与花费预估、预勾只管挡路的那几件、缺失文件不算已出图", GenerationAuditReportsDependencyChain),
     ("生成链自检：图要在「引用（变体）」上，只在节点上出过也算缺口（道具会换样子就出在这）", GenerationAuditAsksForTheImageOnTheVariantToo),
     ("Agent 建设定节点：没点名实体时按「同类唯一同名」锚上自引用，同名有歧义就不猜", AgentAnchorsSettingNodesToTheirSetting),
+    ("参考图装配：顺序固定 角色→道具→场景、变体只取第一张、超上限要说出丢了谁", ReferenceImagePlanOrdersCapsAndSaysWhatItDropped),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
     ("AI 建实体：内容同时落到核心设定与默认变体，引用卡不再空白", AgentEntityContentReachesVariantAndCard),
@@ -8676,6 +8677,62 @@ static void CiphertextFromAnotherPlatformIsReportedUnreadable()
 	Expect(!SecretProtector.IsEncryptedAtRest("sk-proj:abcdef"), "未知前缀更不算真的加密落盘");
 	Expect(SecretProtector.IsProtected("plain:x"), "plain: 是已知前缀");
 	Expect(!SecretProtector.IsEncryptedAtRest("plain:x"), "plain: 不能被算作加密落盘");
+}
+
+static void ReferenceImagePlanOrdersCapsAndSaysWhatItDropped()
+{
+	// 三条规则各自的理由在 docs/spec-参考图与设定锁定.md：顺序固定（因为它影响出图结果，
+	// 不能取决于用户加引用的先后）、变体带多张图只取第一张（否则一个三视图吃掉三个名额）、
+	// 超上限要在**动手前**说出来（悄悄丢图等于悄悄降一致性）。
+	WorkflowCanvasState canvas = new WorkflowCanvasState();
+	WorkflowEntity chen = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+	WorkflowEntityVariant chenVariant = chen.CreateVariant("默认");
+	WorkflowEntity lamp = new WorkflowEntity { Kind = EntityKind.Prop, Name = "红罩台灯" };
+	WorkflowEntityVariant lampVariant = lamp.CreateVariant("默认");
+	WorkflowEntity room = new WorkflowEntity { Kind = EntityKind.Scene, Name = "老城照相馆" };
+	WorkflowEntityVariant roomVariant = room.CreateVariant("默认");
+	canvas.Entities.Add(chen);
+	canvas.Entities.Add(lamp);
+	canvas.Entities.Add(room);
+	chenVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "chen-1", Name = "正视图" });
+	chenVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "chen-2", Name = "侧视图" });
+	lampVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "lamp-1", Name = "台灯" });
+	roomVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "room-1", Name = "内景" });
+
+	// 引用顺序故意颠倒：先场景、再道具、最后角色——结果顺序仍应是 角色 → 道具 → 场景。
+	WorkflowNode board = new WorkflowNode { Title = "分镜 1", Category = NodeCategory.Storyboard };
+	board.References.Add(new NodeReference { EntityId = room.Id, VariantId = roomVariant.Id });
+	board.References.Add(new NodeReference { EntityId = lamp.Id, VariantId = lampVariant.Id });
+	board.References.Add(new NodeReference { EntityId = chen.Id, VariantId = chenVariant.Id });
+
+	Func<WorkflowAttachment, string?> locate = (WorkflowAttachment attachment) => "C:/assets/" + attachment.Reference + ".png";
+
+	ReferenceImagePlan plan = ReferenceImagePicker.Plan(canvas, board, 3, locate);
+	Expect(plan.Paths.Count == 3, "三张都带上了，实际 " + plan.Paths.Count);
+	Expect(plan.Paths[0].EndsWith("chen-1.png") && plan.Paths[1].EndsWith("lamp-1.png") && plan.Paths[2].EndsWith("room-1.png"),
+		"顺序应是 角色 → 道具 → 场景，且与加引用的先后无关，实际：" + string.Join("、", plan.Paths));
+	Expect(plan.Paths.All((string item) => !item.EndsWith("chen-2.png")), "变体带多张图时只取第一张");
+	Expect(plan.Dropped.Count == 0, "三张都没超上限，不该有被丢掉的");
+
+	ReferenceImagePlan capped = ReferenceImagePicker.Plan(canvas, board, 1, locate);
+	Expect(capped.Paths.Count == 1 && capped.Paths[0].EndsWith("chen-1.png"), "上限 1 时只带角色那张，实际 " + string.Join("、", capped.Paths));
+	Expect(capped.Dropped.Any((string item) => item.Contains("红罩台灯")) && capped.Dropped.Any((string item) => item.Contains("老城照相馆")),
+		"被丢掉的要能列出来（按名字含），实际：" + string.Join("、", capped.Dropped));
+	Expect(capped.Note.Contains("丢掉了"), "要在动手前说清丢了什么，实际：" + capped.Note);
+
+	ReferenceImagePlan zero = ReferenceImagePicker.Plan(canvas, board, 0, locate);
+	Expect(!zero.UsesReferences && zero.Note.Contains("没有喂参考图"), "上限 0 时如实说没喂，而不是静默不用，实际：" + zero.Note);
+
+	// 文件解不出来（或不在磁盘上）的那张当作没有，不拿一张不存在的图去骗模型。
+	WorkflowNode empty = new WorkflowNode { Title = "分镜 2", Category = NodeCategory.Storyboard };
+	empty.References.Add(new NodeReference { EntityId = room.Id, VariantId = roomVariant.Id });
+	Expect(ReferenceImagePicker.Plan(canvas, empty, 3, (WorkflowAttachment _) => null).UsesReferences == false,
+		"解不出文件就当作没有");
+	Expect(ReferenceImagePicker.Plan(canvas, empty, 3, locate).Note.Contains("还没有图") == false,
+		"有图时不该说「还没有图」");
+
+	WorkflowNode bare = new WorkflowNode { Title = "分镜 3", Category = NodeCategory.Storyboard };
+	Expect(ReferenceImagePicker.Plan(canvas, bare, 3, locate).Note.Contains("还没有图"), "没引用任何设定时如实说按文生图出");
 }
 
 static void AgentAnchorsSettingNodesToTheirSetting()

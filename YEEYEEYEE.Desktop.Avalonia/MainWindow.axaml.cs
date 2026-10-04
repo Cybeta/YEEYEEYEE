@@ -3969,6 +3969,37 @@ public partial class MainWindow : Window, IAgentSessionHost
                 Reason = "原来要用的底图在项目里找不到了，退回文生图。"
             };
         }
+
+        // 文生图时把**引用的设定图**带上：角色 / 道具 / 场景的图是跨镜一致性的来源，
+        // 不带就只能靠提示词描述——「第一集主角手里是剑、第二集变成刀」就是这么来的
+        //（`docs/spec-参考图与设定锁定.md`）。图生图那条路不带：那时底图已经占住参考位，
+        // 混进去会改变它的语义。
+        var referenceNote = string.Empty;
+        if (!decision.UsesBaseImage && node.References.Count > 0)
+        {
+            if (source?.PoolItem is { SupportsReference: false } refusing)
+            {
+                referenceNote = $"这一镜引用了设定，但「{refusing.Label}」声明不支持参考图，所以没带设定图："
+                    + "角色 / 道具 / 场景只能靠提示词描述。换一个支持参考图的池子就能带上。";
+            }
+            else
+            {
+                // 上限读设置；读不到就当 0（不声称带了参考图）——那份配置读不出来时，图像链路本来也建不起来。
+                var referenceCap = 0;
+                try { referenceCap = AiProviderSettings.Load().ImageMaxReferenceImages; }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException
+                    or System.Text.Json.JsonException or InvalidOperationException or NotSupportedException) { referenceCap = 0; }
+
+                var plan = ReferenceImagePicker.Plan(
+                    currentCanvas?.Canvas ?? new WorkflowCanvasState(),
+                    node,
+                    referenceCap,
+                    attachment => AssetStore.Resolve(attachment.Reference) is { } candidate && File.Exists(candidate) ? candidate : null);
+                referenceNote = plan.Note;
+                if (plan.Paths.Count > 0) references = plan.Paths.ToArray();
+            }
+        }
+
         // 「图生图 + 一个**明确声明**不支持参考图的池子」是唯一一个不成立的组合。
         // 这时候如实拒绝并说明，**不偷偷改成文生图**：用户明确要的是图生图，给他一张文生图，
         // 钱花了、要的东西也还没拿到。其余组合都成立——文生图 / 图生图决定发不发参考图，
@@ -3982,6 +4013,9 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         if (!approved && references.Length == 0)
             StatusText.Text = "没有可用底图：这个节点和它的引用里都没有现成的图，这一张按文生图出。";
+        // 带了什么、丢了什么，都要写在看得见的地方：悄悄丢图等于悄悄降一致性。
+        if (referenceNote.Length > 0)
+            StatusText.Text = referenceNote + (StatusText.Text is { Length: > 0 } previous ? " " + previous : string.Empty);
 
         // 这一张是怎么来的要记在附件上：过一阵想知道它是不是从某张图改出来的，只有这里写着。
         var modeNote = decision.UsesBaseImage

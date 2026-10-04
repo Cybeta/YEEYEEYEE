@@ -242,7 +242,7 @@ dotnet run --project YEEYEEYEE.Web
 
 ## 构建与验证
 
-2026-10-04 基线：解决方案构建 0 错误；Agent **240** 项（本轮新增 3 项「抽卡判档」）、Core 29 项、Migration `8/8`、G6V1 `checks=40`、前端 TS 138 项（15 个文件）、Web 回归十二段全部通过。
+2026-10-04 基线：解决方案构建 **0 错误**；Agent **242** 项、Core 29 项、Migration `8/8`、G6V1 `checks=40`、前端 TS 138 项（15 个文件）、Web 回归十二段全部通过。构建期另有 **18 条 CS 警告**（可空性 11 / 换行前 Avalonia 过时 API 5 / 成员隐藏 1 / null 字面量 1），与依赖无关；传递依赖的 `NU1903` 见「工程债」#6，它以干净还原（CI）时的计数为准——**本机 restore 复现不出来**，所以本机看到的警告数会少于 CI。
 
 2026-10-03 基线：解决方案构建 0 错误（12 条 `NU1903` 警告，全部来自传递依赖，见「工程债」）；Agent 215 项、Core 29 项、Migration `8/8`、G6V1 `checks=40`、前端 TS 138 项（15 个文件）、Web 回归**十二段**（HTTP / 认证 / 编辑锁 / 整理布局 / 变更推送 / 桌面客户端 / 桌面画布写入 / 桌面订阅 / 结构 / 连线 / 节点位置 / 节点类别）全部通过；容器镜像在 GitHub 的干净机器上构建通过。
 
@@ -313,7 +313,7 @@ docker compose up -d --build   # 起容器，浏览器开 http://localhost:8080
 3. **前端 `dist` 要手工构建**，不参与解决方案。这是有意的（不该把 Node 工具链拖进 `dotnet build`），写在这里是免得被当成漏做。
 4. **`ProviderAvatarStudio` 的提示词表与 `provider-art/_generation.json` 是两份**：前者给应用内生成形象用，后者记批量生成时的原话。两边要一起改，否则同一家会画出两种角色。
 5. **`YEEYEEYEE.Web` 的目标框架是 `net10.0`（不是 `net10.0-windows`）**，这是为了让 Linux 容器能跑。**以后往这条链上加代码时要留意别引入 Windows-only 的 API**（DPAPI 那一类只能留在桌面端的 `SecretProtector` 里），否则容器会在运行时报错、而本机构建照样通过。
-6. **依赖里有高危漏洞提示**：`SQLitePCLRaw.lib.e_sqlite3 2.1.10`（由 `Microsoft.Data.Sqlite` 带进来的传递依赖）报 `NU1903`；桌面端另有 `Tmds.DBus.Protocol 0.21.2` 报 `NU1903`。当前基线 12 条警告全部来自它们。升级这两条链时要连迁移与任务库的测试一起跑。
+6. **依赖里有高危漏洞提示**：`SQLitePCLRaw.lib.e_sqlite3 2.1.10`（由 `Microsoft.Data.Sqlite` 带进来的传递依赖）报 `NU1903`；桌面端另有 `Tmds.DBus.Protocol 0.21.2` 报 `NU1903`。**这类警告只在干净还原时出现**（要取 NuGet 的漏洞库；本机取不到时不报，所以本机的警告数比 CI 少），计数以 CI 为准。注意构建期另有 **18 条 CS 警告**（可空性、Avalonia 过时 API、成员隐藏），它们与依赖无关，别混为一谈。升级这两条链时要连迁移与任务库的测试一起跑。
 7. **配色与控件定义曾有两份** —— 第 171 / 172 轮已销：唯一的一份是 `YEEYEEYEE.Canvas/src/shared/designTokens.json`，网页端那两块由 `scripts/design-tokens.mjs` **生成**（`npm run tokens`）；桌面端的纯色块同样生成，几何与圆角散在 `MainWindow.axaml` / `App.axaml` 的 `Style` 里，那一侧靠**测试对数**（`tests/designTokens.test.ts` 直接读那两个文件比）。只收纯色与尺寸——渐变与投影两端表达方式本就不同，仍在各自那一侧手写。
 8. **`Dockerfile` 里逐个列了要拷进去的项目**。这是为利用层缓存换来的速度，代价是**加项目引用时必须同步改它**，否则本机构建通过、镜像在还原或发布阶段才炸。CI 的 `image` job 会拦住这种坏法，但拦住的时间点偏晚。
 
