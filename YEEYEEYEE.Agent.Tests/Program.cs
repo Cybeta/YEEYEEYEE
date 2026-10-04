@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Drawing;
 using System.Net;
 using System.Security.Cryptography;
@@ -157,6 +158,10 @@ var tests = new (string Name, Action Run)[]
     ("导入：变体 ID 被占用时不合并实体", ImportMergeRejectsVariantIdClash),
     ("真实入口冒烟：打开→保存重开→复制→重复导入", RealEntrySmokeOpenSaveCopyImport),
     ("返工 R5：空 ID 旧来源的导入身份稳定", ReworkEmptyIdSourceImportIdentityIsStable),
+    ("成片拼接：视频一帧不丢、音频每段丢一个预听样本，样本字节原样搬", Mp4ConcatAlignsAudioHeadAndKeepsVideoIntact),
+    ("成片拼接：只差码率提示（btrt / esds）也要拼得上，别把提示值当参数不一致", Mp4ConcatIgnoresBitrateHints),
+    ("成片拼接：轨道/时基/编码参数不一致就拒绝，并说清哪一段哪一项", Mp4ConcatRefusesMismatch),
+    ("成片拼接：认不出的形状（分片 / co64 / 只有一段 / 文件不在）如实拒绝", Mp4ConcatRefusesUnsupportedShapes),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -11680,6 +11685,362 @@ static byte[] WebmBytes()
 	var bytes = new byte[32];
 	bytes[0] = 0x1A; bytes[1] = 0x45; bytes[2] = 0xDF; bytes[3] = 0xA3;
 	return bytes;
+}
+
+// ── 成片无损拼接：造样本的小工具 + 判读（测试只用公开接口，所以这里自带一份最小解析）──────
+
+/// <summary>拼一个盒子（含 8 字节头）。</summary>
+static byte[] TinyBox(string type, byte[] payload)
+{
+	var bytes = new byte[payload.Length + 8];
+	BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(0, 4), bytes.Length);
+	Encoding.ASCII.GetBytes(type, bytes.AsSpan(4, 4));
+	payload.CopyTo(bytes, 8);
+	return bytes;
+}
+
+static byte[] TinyJoin(params byte[][] parts)
+{
+	var all = new byte[parts.Sum(part => part.Length)];
+	var cursor = 0;
+	foreach (var part in parts) { part.CopyTo(all, cursor); cursor += part.Length; }
+	return all;
+}
+
+static byte[] BigEndian32(int value)
+{
+	var bytes = new byte[4];
+	BinaryPrimitives.WriteInt32BigEndian(bytes, value);
+	return bytes;
+}
+
+/// <summary>码率提示盒。实测同一轮出的两段，只有这里（和 esds 里同样一份）的字节不同。</summary>
+static byte[] TinyBtrt(int maxBitrate, int avgBitrate)
+{
+	var payload = new byte[12];
+	BinaryPrimitives.WriteInt32BigEndian(payload.AsSpan(4, 4), maxBitrate);
+	BinaryPrimitives.WriteInt32BigEndian(payload.AsSpan(8, 4), avgBitrate);
+	return TinyBox("btrt", payload);
+}
+
+/// <summary>造一个 esds，形状照实测那份（长度用展开式 80 80 80 xx），码率可传。</summary>
+static byte[] TinyEsds(int maxBitrate, int avgBitrate)
+{
+	var config = new List<byte> { 0x40, 0x15, 0x00, 0x00, 0x00 };
+	config.AddRange(BigEndian32(maxBitrate));
+	config.AddRange(BigEndian32(avgBitrate));
+	config.AddRange([0x05, 0x80, 0x80, 0x80, 0x02, 0x12, 0x10]);
+	var es = new List<byte> { 0x00, 0x02, 0x00, 0x04, 0x80, 0x80, 0x80, (byte)config.Count };
+	es.AddRange(config);
+	var payload = new List<byte> { 0, 0, 0, 0, 0x03, 0x80, 0x80, 0x80, (byte)es.Count };
+	payload.AddRange(es);
+	return TinyBox("esds", payload.ToArray());
+}
+
+/// <summary>采样条目：盒头 + 保留(6) + data_reference_index(2) + 传进来的子盒。</summary>
+static byte[] TinySampleEntry(string type, params byte[][] children)
+{
+	var payload = new List<byte> { 0, 0, 0, 0, 0, 0, 1, 0 };
+	foreach (var child in children) payload.AddRange(child);
+	return TinyBox(type, payload.ToArray());
+}
+
+static byte[] TinyTrack(
+	string handler, uint timescale, uint[] deltas, int cttsOffset, bool hasCtts,
+	byte[] entry, long elstMediaTime, int sampleSize, int fillBase, long mdatStart, bool useCo64)
+{
+	var duration = (ulong)deltas.Sum(delta => (long)delta);
+
+	var tkhd = new byte[84];
+	BinaryPrimitives.WriteUInt32BigEndian(tkhd.AsSpan(20, 4), (uint)Math.Min(duration, uint.MaxValue));
+
+	var mdhd = new byte[24];
+	BinaryPrimitives.WriteUInt32BigEndian(mdhd.AsSpan(12, 4), timescale);
+	BinaryPrimitives.WriteUInt32BigEndian(mdhd.AsSpan(16, 4), (uint)Math.Min(duration, uint.MaxValue));
+
+	var hdlr = new byte[24];
+	Encoding.ASCII.GetBytes(handler, hdlr.AsSpan(8, 4));
+
+	// elst：media_time 就是这里要验的东西（视频那条是合成偏移、音频那条是预听样本）
+	var elst = new byte[20];
+	BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(4, 4), 1);
+	BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(8, 4), (uint)Math.Min(duration, uint.MaxValue));
+	BinaryPrimitives.WriteInt32BigEndian(elst.AsSpan(12, 4), (int)elstMediaTime);
+	BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(16, 4), 0x00010000);
+
+	var stts = new List<byte> { 0, 0, 0, 0 };              // full box：version/flags
+	stts.AddRange(BigEndian32(deltas.Length));
+	foreach (var delta in deltas) { stts.AddRange(BigEndian32(1)); stts.AddRange(BigEndian32((int)delta)); }
+
+	var children = new List<byte[]>
+	{
+		TinyBox("stsd", TinyJoin(BigEndian32(0), BigEndian32(1), entry)),
+		TinyBox("stts", stts.ToArray())
+	};
+	if (hasCtts)
+	{
+		var ctts = new List<byte> { 0, 0, 0, 0 };
+		ctts.AddRange(BigEndian32(deltas.Length));
+		foreach (var _ in deltas) { ctts.AddRange(BigEndian32(1)); ctts.AddRange(BigEndian32(cttsOffset)); }
+		children.Add(TinyBox("ctts", ctts.ToArray()));
+	}
+	children.Add(TinyBox("stsc", TinyJoin(BigEndian32(0), BigEndian32(1), BigEndian32(1), BigEndian32(deltas.Length), BigEndian32(1))));
+	var stsz = new List<byte> { 0, 0, 0, 0 };              // full box
+	stsz.AddRange(BigEndian32(0));                          // sample_size = 0：逐样本给
+	stsz.AddRange(BigEndian32(deltas.Length));
+	for (var index = 0; index < deltas.Length; index++) stsz.AddRange(BigEndian32(sampleSize));
+	children.Add(TinyBox("stsz", stsz.ToArray()));
+	children.Add(useCo64
+		? TinyBox("co64", TinyJoin(BigEndian32(1), BitConverter.GetBytes((ulong)mdatStart).Reverse().ToArray()))
+		: TinyBox("stco", TinyJoin(BigEndian32(1), BigEndian32((int)mdatStart))));
+
+	var minf = TinyJoin(
+		handler == "vide"
+			? TinyBox("vmhd", new byte[12])
+			: TinyBox("smhd", new byte[8]),
+		TinyBox("dinf", []),
+		TinyBox("stbl", TinyJoin(children.ToArray())));
+	var mdia = TinyJoin(TinyBox("mdhd", mdhd), TinyBox("hdlr", hdlr), TinyBox("minf", minf));
+	return TinyBox("trak", TinyJoin(
+		TinyBox("tkhd", tkhd), TinyBox("edts", TinyBox("elst", elst)), TinyBox("mdia", mdia)));
+}
+
+/// <summary>
+/// 造一份最小但合法的两轨 mp4：vide（带 ctts）+ soun（不带），样本字节用递增的填充值。
+/// 两段的差别只在传进来的参数上——视频/音频的时长序列、elst 的 media_time、编码配置、码率提示。
+/// </summary>
+static byte[] TinyMp4(
+	uint[] videoDeltas, int videoCtts, uint[] audioDeltas, long elstMediaTime,
+	byte[]? videoConfig = null, byte[]? videoBitrate = null, byte[]? audioBitrate = null,
+	uint videoTimescale = 12288, uint audioTimescale = 32000, uint movieTimescale = 1000,
+	string videoHandler = "vide", string audioHandler = "soun", bool useCo64 = false, bool fragmented = false)
+{
+	var videoSamples = TinyJoin(Enumerable.Range(0, videoDeltas.Length).Select(index => Enumerable.Repeat((byte)(0x10 + index), 10).ToArray()).ToArray());
+	var audioSamples = TinyJoin(Enumerable.Range(0, audioDeltas.Length).Select(index => Enumerable.Repeat((byte)(0x20 + index), 20).ToArray()).ToArray());
+	var payload = TinyJoin(videoSamples, audioSamples);
+
+	var videoEntry = TinySampleEntry("avc1",
+		TinyBox("avcC", videoConfig ?? [0x01, 0x64, 0x00, 0x1E, 0xFF, 0xE1]),
+		videoBitrate ?? TinyBtrt(1114372, 0));
+	var audioEntry = TinySampleEntry("mp4a", audioBitrate ?? TinyEsds(128000, 127924));
+
+	var ftyp = TinyBox("ftyp", Encoding.ASCII.GetBytes("isom0000isom"));
+
+	// moov 的长度决定 mdat 的起点，而 stco 里的偏移要指向 mdat 里**各轨自己的**样本 ——
+	// 先写一遍量长度，再写第二遍。（第一版两条轨写了同一个偏移，源文件自己就不自洽：
+	// 音频轨指向了视频的字节区，产品只是忠实照搬容器说的话。）
+	byte[] Build(long mdatStart)
+	{
+		var mvhd = new byte[100];
+		BinaryPrimitives.WriteUInt32BigEndian(mvhd.AsSpan(12, 4), movieTimescale);
+		BinaryPrimitives.WriteUInt32BigEndian(mvhd.AsSpan(96, 4), 3);
+		return TinyBox("moov", TinyJoin(
+			TinyBox("mvhd", mvhd),
+			TinyTrack(videoHandler, videoTimescale, videoDeltas, videoCtts, hasCtts: true, videoEntry, elstMediaTime, 10, 0x10, mdatStart, useCo64),
+			TinyTrack(audioHandler, audioTimescale, audioDeltas, 0, hasCtts: false, audioEntry, elstMediaTime, 20, 0x20, mdatStart + videoDeltas.Length * 10, useCo64)));
+	}
+
+	var moov = Build(0);
+	moov = Build(ftyp.Length + moov.Length + 8);
+	var parts = new List<byte[]> { ftyp, moov, TinyBox("mdat", payload) };
+	if (fragmented) parts.Add(TinyBox("moof", new byte[16]));
+	return TinyJoin(parts.ToArray());
+}
+
+/// <summary>每份成品里各轨的样本数（按 stsz 出现的先后，也就是轨道顺序）。
+/// stsz 是 full box：类型字段之后是 version/flags(4) + sample_size(4) + 样本数(4)。</summary>
+static List<int> Mp4StszCounts(byte[] data)
+{
+	var counts = new List<int>();
+	for (var index = 0; index + 16 <= data.Length; index++)
+		if (data[index] == (byte)'s' && data[index + 1] == (byte)'t' && data[index + 2] == (byte)'s' && data[index + 3] == (byte)'z')
+			counts.Add(BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(index + 12, 4)));
+	return counts;
+}
+
+static int Mp4BoxCount(byte[] data, string type)
+{
+	var count = 0;
+	for (var index = 0; index + 4 <= data.Length; index++)
+		if (data[index] == (byte)type[0] && data[index + 1] == (byte)type[1]
+			&& data[index + 2] == (byte)type[2] && data[index + 3] == (byte)type[3]) count++;
+	return count;
+}
+
+static ulong Mp4MvhdDuration(byte[] data)
+{
+	for (var index = 0; index + 20 <= data.Length; index++)
+		if (data[index] == (byte)'m' && data[index + 1] == (byte)'v' && data[index + 2] == (byte)'h' && data[index + 3] == (byte)'d')
+			return BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(index + 20, 4));
+	return 0;
+}
+
+static long Mp4FirstElstMediaTime(byte[] data)
+{
+	for (var index = 0; index + 16 <= data.Length; index++)
+		if (data[index] == (byte)'e' && data[index + 1] == (byte)'l' && data[index + 2] == (byte)'s' && data[index + 3] == (byte)'t')
+			return BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(index + 16, 4));
+	return -1;
+}
+
+static byte[] Mp4MdatPayload(byte[] data)
+{
+	for (var index = 4; index + 4 <= data.Length; index++)
+		if (data[index] == (byte)'m' && data[index + 1] == (byte)'d' && data[index + 2] == (byte)'a' && data[index + 3] == (byte)'t')
+		{
+			var size = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(index - 4, 4));
+			return data[(index + 4)..(index - 4 + size)];
+		}
+	return [];
+}
+
+/// <summary>
+/// 无损拼接：两段拼成一段，**视频一帧不丢、音频每段丢一个预听样本**。
+///
+/// 这两条是接缝对齐的全部内容，也是最容易做错的地方：实测两轨都带 elst.media_time=1024，
+/// 但视频那条的 ctts 首条正好也是 1024（合成偏移，丢了就是把开头两帧真画面扔掉），
+/// 音频那条 1024 正好是一帧 AAC（编码器预听样本，不丢音轨就逐段迟到）。
+/// 所以这里用「样本字节的填充值」直接盯住搬运结果：视频应有 0x10/0x11/0x12，
+/// 音频只应有 0x21 起的那些——第一帧 0x20 必须不见。
+/// </summary>
+static void Mp4ConcatAlignsAudioHeadAndKeepsVideoIntact()
+{
+	var directory = NewTempDirectory("mp4-concat");
+	uint[] video = [512, 512, 512];              // 3 帧 × 512/12288 = 125ms
+	uint[] audio = [1024, 1000, 1000, 1000, 1000]; // 开头 1024 是预听样本；剩下 4000/32000 = 125ms
+
+	for (var index = 1; index <= 2; index++)
+		File.WriteAllBytes(Path.Combine(directory, $"seg{index}.mp4"),
+			TinyMp4(video, videoCtts: 1024, audio, elstMediaTime: 1024));
+
+	var output = Path.Combine(directory, "joined.mp4");
+	var result = Mp4Concatenator.Concat(
+		[Path.Combine(directory, "seg1.mp4"), Path.Combine(directory, "seg2.mp4")], output);
+
+	Expect(result.Ok, "两段同规格的应该拼得上，实际：" + result.Error);
+	var data = File.ReadAllBytes(output);
+
+	Expect(Mp4BoxCount(data, "trak") == 2, "成品要有两条轨道");
+	var counts = Mp4StszCounts(data);
+	Expect(counts.Count == 2, "两条轨道各要有一份样本表，实际 " + counts.Count);
+	Expect(counts[0] == 6, "视频 3+3 帧一帧都不能丢，实际 " + counts[0]);
+	Expect(counts[1] == 8, "音频每段丢一个预听样本，5+5 应剩 8，实际 " + counts[1]);
+
+	var expected = new List<byte>();
+	for (var segment = 0; segment < 2; segment++)
+	{
+		for (var frame = 0; frame < 3; frame++) expected.AddRange(Enumerable.Repeat((byte)(0x10 + frame), 10));
+		for (var index = 1; index < 5; index++) expected.AddRange(Enumerable.Repeat((byte)(0x20 + index), 20));
+	}
+	var payload = Mp4MdatPayload(data);
+	var firstDiff = -1;
+	for (var index = 0; index < Math.Min(payload.Length, expected.Count); index++)
+		if (payload[index] != expected[index]) { firstDiff = index; break; }
+	Expect(firstDiff < 0 && payload.Length == expected.Count,
+		"搬运的样本字节与顺序不对：应" + expected.Count + "字节，实际" + payload.Length
+		+ (firstDiff >= 0 ? $"；第 {firstDiff} 字节应为 0x{expected[firstDiff]:X2}、实际 0x{payload[firstDiff]:X2}" : "")
+		+ "；实际前40字节 " + string.Join(" ", payload.Take(40).Select(value => value.ToString("X2")))
+		+ "；期望前40字节 " + string.Join(" ", expected.Take(40).Select(value => value.ToString("X2"))));
+
+	Expect(Mp4FirstElstMediaTime(data) == 0, "预听样本已经在并表时丢掉了，成品的 elst 不能再剪一次");
+	// 每段 125ms（视频与音频剪完之后相等），两段 250ms
+	Expect(Mp4MvhdDuration(data) == 250, "成品总时长应是 250ms，实际 " + Mp4MvhdDuration(data));
+	Expect(result.Note.Contains("预听样本"), "说明里要写清接缝是怎么对齐的");
+}
+
+/// <summary>
+/// 只差码率提示（btrt 与 esds 里的 maxBitrate/avgBitrate）也要能拼。
+///
+/// 这条是用例里最值钱的一条：实测同一轮出的两段，采样条目 182 字节里就差 3 个字节，
+/// 差的正是各自的实际码率；音频 esds 里同样差 11 个字节（而且 btrt 里还重复一份）。
+/// 这些字段一个都不参与解码，但如果拿整段字节比，就会把正常的段判成「参数不一致」——
+/// 那等于这个功能永远用不了。第一版就是这么错的。
+/// </summary>
+static void Mp4ConcatIgnoresBitrateHints()
+{
+	var directory = NewTempDirectory("mp4-concat-btrt");
+	uint[] video = [512, 512, 512];
+	uint[] audio = [1024, 1000, 1000, 1000, 1000];
+	byte[] codec = [0x01, 0x64, 0x00, 0x1E, 0xFF, 0xE1];
+
+	File.WriteAllBytes(Path.Combine(directory, "seg1.mp4"),
+		TinyMp4(video, 1024, audio, 1024, codec, TinyBtrt(1114372, 0), TinyEsds(128000, 127924)));
+	File.WriteAllBytes(Path.Combine(directory, "seg2.mp4"),
+		TinyMp4(video, 1024, audio, 1024, codec, TinyBtrt(1295406, 0), TinyEsds(131072, 131072)));
+
+	var output = Path.Combine(directory, "joined.mp4");
+	var result = Mp4Concatenator.Concat(
+		[Path.Combine(directory, "seg1.mp4"), Path.Combine(directory, "seg2.mp4")], output);
+
+	Expect(result.Ok, "只差码率提示不算参数不一致，应该拼得上，实际：" + result.Error);
+	Expect(Mp4StszCounts(File.ReadAllBytes(output))[0] == 6, "拼完视频样本数应是 6");
+}
+
+/// <summary>轨道、时基、编码配置不一样就得拒绝，并且说清是哪一段的哪一项。</summary>
+static void Mp4ConcatRefusesMismatch()
+{
+	var directory = NewTempDirectory("mp4-concat-mismatch");
+	uint[] video = [512, 512, 512];
+	uint[] audio = [1024, 1000, 1000, 1000, 1000];
+
+	// 第 2 段的时基不同：接起来时长会算错
+	File.WriteAllBytes(Path.Combine(directory, "a1.mp4"), TinyMp4(video, 1024, audio, 1024));
+	File.WriteAllBytes(Path.Combine(directory, "a2.mp4"), TinyMp4(video, 1024, audio, 1024, videoTimescale: 24000));
+	var first = Mp4Concatenator.Concat([Path.Combine(directory, "a1.mp4"), Path.Combine(directory, "a2.mp4")], Path.Combine(directory, "out1.mp4"));
+	Expect(!first.Ok, "时基不同必须拒绝");
+	Expect(first.Error.Contains("第 2 段") && first.Error.Contains("时间刻度"), "要说清是哪一段的哪一项，实际：" + first.Error);
+
+	// 第 2 段的编码配置不同（SPS/PPS 换一个字节）：解码器只会用第 1 段的配置，出来就是花屏
+	File.WriteAllBytes(Path.Combine(directory, "b2.mp4"),
+		TinyMp4(video, 1024, audio, 1024, videoConfig: [0x01, 0x64, 0x00, 0x1F, 0xFF, 0xE1]));
+	var second = Mp4Concatenator.Concat([Path.Combine(directory, "a1.mp4"), Path.Combine(directory, "b2.mp4")], Path.Combine(directory, "out2.mp4"));
+	Expect(!second.Ok, "编码配置不同必须拒绝");
+	Expect(second.Error.Contains("编码参数"), "要说清是编码参数不一致，实际：" + second.Error);
+
+	// 轨道种类不同：第 2 段的视频轨变成了 soun
+	File.WriteAllBytes(Path.Combine(directory, "c2.mp4"), TinyMp4(video, 1024, audio, 1024, videoHandler: "soun"));
+	var third = Mp4Concatenator.Concat([Path.Combine(directory, "a1.mp4"), Path.Combine(directory, "c2.mp4")], Path.Combine(directory, "out3.mp4"));
+	Expect(!third.Ok, "轨道种类不同必须拒绝");
+	Expect(third.Error.Contains("soun"), "要报出实际是什么轨道，实际：" + third.Error);
+}
+
+/// <summary>认不出的形状一律如实拒绝，绝不猜着拼。</summary>
+static void Mp4ConcatRefusesUnsupportedShapes()
+{
+	var directory = NewTempDirectory("mp4-concat-shape");
+	uint[] video = [512, 512, 512];
+	uint[] audio = [1024, 1000, 1000, 1000, 1000];
+	File.WriteAllBytes(Path.Combine(directory, "ok.mp4"), TinyMp4(video, 1024, audio, 1024));
+	File.WriteAllBytes(Path.Combine(directory, "co64.mp4"), TinyMp4(video, 1024, audio, 1024, useCo64: true));
+	File.WriteAllBytes(Path.Combine(directory, "frag.mp4"), TinyMp4(video, 1024, audio, 1024, fragmented: true));
+
+	var single = Mp4Concatenator.Concat([Path.Combine(directory, "ok.mp4")], Path.Combine(directory, "s.mp4"));
+	Expect(!single.Ok && single.Error.Contains("只有一段"), "只有一段不该硬拼，实际：" + single.Error);
+
+	var missing = Mp4Concatenator.Concat(
+		[Path.Combine(directory, "ok.mp4"), Path.Combine(directory, "nope.mp4")], Path.Combine(directory, "m.mp4"));
+	Expect(!missing.Ok && missing.Error.Contains("找不到文件"), "文件不在要说清，实际：" + missing.Error);
+
+	var co64 = Mp4Concatenator.Concat(
+		[Path.Combine(directory, "ok.mp4"), Path.Combine(directory, "co64.mp4")], Path.Combine(directory, "c.mp4"));
+	Expect(!co64.Ok && co64.Error.Contains("co64"), "64 位偏移要明说不认，实际：" + co64.Error);
+
+	var fragmented = Mp4Concatenator.Concat(
+		[Path.Combine(directory, "ok.mp4"), Path.Combine(directory, "frag.mp4")], Path.Combine(directory, "f.mp4"));
+	Expect(!fragmented.Ok && fragmented.Error.Contains("分片"), "分片 mp4 要明说不认，实际：" + fragmented.Error);
+
+	// 一条轨道都没有的文件：不拦住就会「成功」地拼出一个空成品（写这条用例时先撞上了这个）
+	var emptyMvhd = new byte[100];
+	BinaryPrimitives.WriteUInt32BigEndian(emptyMvhd.AsSpan(12, 4), 1000);
+	File.WriteAllBytes(Path.Combine(directory, "notracks.mp4"), TinyJoin(
+		TinyBox("ftyp", Encoding.ASCII.GetBytes("isom0000isom")),
+		TinyBox("moov", TinyBox("mvhd", emptyMvhd)),
+		TinyBox("mdat", new byte[8])));
+	var empty = Mp4Concatenator.Concat(
+		[Path.Combine(directory, "ok.mp4"), Path.Combine(directory, "notracks.mp4")], Path.Combine(directory, "e.mp4"));
+	Expect(!empty.Ok && empty.Error.Contains("一条轨道都没有"), "没有轨道的文件要明说，实际：" + empty.Error);
+
+	Expect(!File.Exists(Path.Combine(directory, "f.mp4")), "拒绝的时候不该留下半个成品");
 }
 
 static class Sample

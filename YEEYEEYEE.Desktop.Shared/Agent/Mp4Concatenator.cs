@@ -71,6 +71,11 @@ public static class Mp4Concatenator
         }
 
         var first = files[0];
+        for (var index = 0; index < files.Count; index++)
+        {
+            if (files[index].Tracks.Count == 0)
+                return Fail($"第 {index + 1} 段（{Path.GetFileName(inputs[index])}）里一条轨道都没有，拼不了。");
+        }
         for (var index = 1; index < files.Count; index++)
         {
             var mismatch = Compare(first, files[index], index);
