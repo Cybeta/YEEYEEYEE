@@ -118,6 +118,7 @@ var tests = new (string Name, Action Run)[]
     ("只贴一个 ComfyUI 地址：分类器认不出，靠问一句地址 + 人来定兜底", ComfyUiBareAddressFallback),
     ("解不开的密钥不许被任何一次保存清掉（改个别的东西也不行）", UnreadableKeySurvivesAnySave),
     ("空密钥是「没填」而不是「解不开」，也不该被说成「已密文落盘」", EmptyKeyMeansMissingNotUnreadable),
+    ("设置页保存：刚敲的密钥存好后，回显与再保存一次都不能把它擦掉", SaveKeepsWhatTheFormJustTyped),
     ("生成链自检：四层缺口报数与花费预估、预勾只管挡路的那几件、缺失文件不算已出图", GenerationAuditReportsDependencyChain),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
@@ -9374,6 +9375,76 @@ static void UnreadableKeySurvivesAnySave()
         Expect(retyped.Profiles.All(profile => !profile.ApiKeyUnreadable),
             "每一份配置上的「解不开」标记也要清掉");
         Expect(!AiProviderSettings.Load().ApiKeyUnreadable, "重新加载之后也不该再是「解不开」");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG", previous);
+        try
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+        catch (IOException) { }
+    }
+}
+
+/// <summary>
+/// 设置页保存的那条**真实时序**：用户刚敲的密钥只进**顶层字段**，各份配置是保存时才同步进去的。
+///
+/// 这条链原先会**把刚存好的密钥擦掉**：Save 在方法入口就记下各份配置的明文（那时它们还是空的），
+/// 写完盘后 finally 又把它们还原成空 → 界面保存后的回显按「当前那一份」把顶层也盖成空、密钥栏清空
+/// → 用户再点一次保存（或关窗口时的自动保存）就把空值写进文件。
+/// 用户看到的是「我填了、也保存了，可它就是不生效」——第一次保存其实写对了，第二次把它擦掉。
+/// </summary>
+static void SaveKeepsWhatTheFormJustTyped()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "df-form-save-" + Guid.NewGuid().ToString("N")[..8]);
+    var previous = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG");
+    try
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "ai-config.json");
+        Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG", path);
+        File.WriteAllText(path, """
+        {
+          "Endpoint": "https://api.deepseek.com/v1",
+          "Model": "deepseek-flash",
+          "ApiKey": "",
+          "Profiles": [
+            { "Id": "p1", "Endpoint": "https://api.deepseek.com/v1", "Model": "deepseek-flash",
+              "ApiKey": "", "Enabled": true }
+          ],
+          "SelectedProfileId": "p1"
+        }
+        """, new UTF8Encoding(false));
+
+        var config = AiProviderSettings.Load();
+        Expect(config.Profiles.Count == 1, "先要有一份配置，实际 " + config.Profiles.Count);
+
+        // 设置页里用户只在**顶层那一栏**敲了密钥（这就是 CommitForm 干的事）。
+        config.ApiKey = "sk-设置页刚敲的";
+        Expect(AiProviderSettings.Save(config), "保存该成功");
+
+        // ① 写盘成功。
+        Expect(AiProviderSettings.Load().ApiKey == "sk-设置页刚敲的",
+            "密钥该能读回来，实际「" + AiProviderSettings.Load().ApiKey + "」");
+
+        // ② 内存里的**那一份**也必须拿到新值。这一条是关键：它要是空的，
+        //    紧接着的回显就会把顶层盖回空、密钥栏跟着清空，用户再保存一次就写进空值。
+        Expect(config.Profiles[0].ApiKey == "sk-设置页刚敲的",
+            "保存后各份配置里也该是新密钥，实际「" + config.Profiles[0].ApiKey + "」");
+        Expect(config.ApiKey == "sk-设置页刚敲的",
+            "顶层也该还是新密钥，实际「" + config.ApiKey + "」");
+
+        // ③ 界面的保存后回显（按「当前那一份」把顶层对齐）：顶层必须仍是新密钥。
+        if (AiProviderSettings.ResolveSelected(config) is { } effective)
+            AiProviderSettings.ApplyProfile(config, effective);
+        Expect(config.ApiKey == "sk-设置页刚敲的",
+            "回显之后顶层仍是新密钥，密钥栏才不会被清空，实际「" + config.ApiKey + "」");
+
+        // ④ 再保存一次（关窗口时的自动保存也是这条）：绝不能把密钥擦掉。
+        Expect(AiProviderSettings.Save(config), "第二次保存该成功");
+        Expect(AiProviderSettings.Load().ApiKey == "sk-设置页刚敲的",
+            "再保存一次不该把密钥擦掉，实际「" + AiProviderSettings.Load().ApiKey + "」");
     }
     finally
     {

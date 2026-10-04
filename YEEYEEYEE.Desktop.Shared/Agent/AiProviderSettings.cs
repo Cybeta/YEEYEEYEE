@@ -606,11 +606,12 @@ public static class AiProviderSettings
     /// </summary>
     public static bool Save(AiProviderConfig config)
     {
-        var plaintext = config.ApiKey;
+        // 同步之后会**再记一次**（见下面那段说明）。这里先取一份，是为了万一同步自己抛异常，
+        // finally 也有明文可还原、不至于把密文留在内存里被后续请求带走。
+        var topLevelPlaintext = config.ApiKey;
         var imagePlaintext = config.ImageApiKey;
         var videoPlaintext = config.VideoApiKey;
-        var profileSecrets = (config.Profiles ?? new List<AiProviderProfile>())
-            .ToDictionary(profile => profile, profile => profile.ApiKey);
+        var profileSecrets = new Dictionary<AiProviderProfile, string>();
         try
         {
             // 顶层与「当前选中」的同步，顺序**不能反**：
@@ -625,6 +626,17 @@ public static class AiProviderSettings
             if (owner is not null) UpdateProfileFromConfig(config, owner);
             if (ResolveSelected(config) is { } effective) ApplyProfile(config, effective);
 
+            // **同步之后**才记「这次真正要落盘的明文」。
+            //
+            // 原先是在方法入口就记的，那是错的：设置页保存时，用户刚敲的密钥只进了**顶层字段**，
+            // 各份配置要等上面那句 UpdateProfileFromConfig 才拿到新值——入口时它们还是**空**。
+            // 于是 finally 会把刚写好的那一份**还原成空**；紧接着界面 Reload 又按「那一份」把顶层
+            // 也盖成空、密钥栏跟着清空，用户再点一次保存（或关窗口时的自动保存）就把空值写进文件。
+            // 密钥就是这么丢的：**第一次保存其实写对了，第二次把它擦掉**——用户看到的是
+            // 「我填了、也保存了，可它就是不生效」。
+            topLevelPlaintext = config.ApiKey;
+            foreach (var profile in config.Profiles) profileSecrets[profile] = profile.ApiKey;
+
             // 解不开的密钥**不许被清掉**——这是这条链上唯一会造成永久损失的一步。
             //
             // 为什么非挡不可：Load() 解不开密文时会把内存里的密钥置空、只标一个 ApiKeyUnreadable，
@@ -635,7 +647,7 @@ public static class AiProviderSettings
             //
             // 判据要**两个条件同时成立**才算「该保留盘上那份」：解不开、**而且这次也没给新值**。
             // 只看前者的话，用户重填一把新密钥会被这条守卫挡在门外——那等于把人锁死。
-            var keepTopLevelCipher = config.ApiKeyUnreadable && string.IsNullOrEmpty(plaintext);
+            var keepTopLevelCipher = config.ApiKeyUnreadable && string.IsNullOrEmpty(topLevelPlaintext);
             var profilesToKeep = (config.Profiles ?? new List<AiProviderProfile>())
                 .Where(profile => profile.ApiKeyUnreadable && string.IsNullOrEmpty(profile.ApiKey))
                 .Select(profile => profile.Id)
@@ -644,7 +656,7 @@ public static class AiProviderSettings
 
             config.ApiKey = keepTopLevelCipher && onDisk?.ApiKey is { Length: > 0 } keptKey
                 ? keptKey
-                : SecretProtector.Protect(plaintext);
+                : SecretProtector.Protect(topLevelPlaintext);
             config.ImageApiKey = ProtectOptional(imagePlaintext);
             config.VideoApiKey = ProtectOptional(videoPlaintext);
             foreach (var profile in config.Profiles)
@@ -678,7 +690,8 @@ public static class AiProviderSettings
         finally
         {
             // 无论成功失败都还原内存里的明文，避免后续请求拿到密文。
-            config.ApiKey = plaintext;
+            // 还原的是**同步之后**记下的那一份（见上面的说明）——用入口时的那份会把用户刚填的值擦掉。
+            config.ApiKey = topLevelPlaintext;
             config.ImageApiKey = imagePlaintext;
             config.VideoApiKey = videoPlaintext;
             foreach (var pair in profileSecrets) pair.Key.ApiKey = pair.Value;
