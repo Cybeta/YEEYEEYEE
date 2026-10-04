@@ -337,12 +337,26 @@ internal static class SettingsModelPage
                 return;
             }
 
+            // 框里没有、已存的也没有 —— **这就是「没有密钥」**，必须单独说清。
+            //
+            // 原先这里会落到最后那句「密钥以密文落盘（Windows DPAPI…）」上：那话听起来像"配好了"，
+            // 而实际上一个字都没存。用户看到它就不会再填，只点一下「保存」，然后奇怪为什么对话一直 401
+            // ——真发生过。加解密那侧其实早就防着这件事了（ProtectOptional 的注释：空值加密会让界面
+            // 误报已配置），漏的是这句文案。
+            if (typed.Length == 0 && config.ApiKey.Length == 0)
+            {
+                keyNote.Text = "还没有填密钥：Agent 对话、以及所有需要大模型的技能都会以 401（鉴权失败）报错。"
+                    + "把密钥填进上面这一栏，再点「保存」。";
+                keyNote.Foreground = Brush("DfWarning");
+                return;
+            }
+
             keyNote.Foreground = Brush("DfInk3");
             keyNote.Text = typed.Length > 0
                 ? $"将保存 {SecretProtector.Describe(typed)}；保存后按 {SecretProtector.StorageDescription} 加密落盘。"
                 : config.ApiKeyWasPlaintext
                     ? "检测到旧版明文密钥，已按当前平台的方案自动加密写回配置文件。"
-                    : $"密钥以密文落盘（{SecretProtector.StorageDescription}），界面只显示首尾各 4 个字符。";
+                    : $"已配置密钥 {SecretProtector.Describe(config.ApiKey)}（按 {SecretProtector.StorageDescription} 加密落盘）。";
         }
         apiKey.TextChanged += (_, _) => RefreshKeyNote();
 
@@ -696,7 +710,10 @@ internal static class SettingsModelPage
                 if (AiProviderSettings.ResolveSelected(config) is { } effective)
                 {
                     AiProviderSettings.ApplyProfile(config, effective);
-                    keyUnreadable = effective.ApiKeyUnreadable;
+                    // 「解不开」要按「**现在有没有可用密钥**」算，而不是照抄标记：
+                    // 用户刚重新填过并保存成功时，那个标记描述的是盘上那份**旧密文**，已经不是现在这个值了。
+                    // 照抄的话，保存成功之后密钥栏反而会被清空、警告一直挂着——用户以为没存上。
+                    keyUnreadable = effective.ApiKeyUnreadable && effective.ApiKey.Length == 0;
                 }
                 LoadForm();
                 RefreshList();

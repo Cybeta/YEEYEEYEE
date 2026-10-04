@@ -658,6 +658,17 @@ public static class AiProviderSettings
             var directory = Path.GetDirectoryName(ConfigPath);
             if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
             File.WriteAllText(ConfigPath, JsonSerializer.Serialize(config, SaveOptions));
+
+            // 这一份的密钥已经是新写进去的值了，「解不开」这个标记描述的就不再是它——清掉。
+            // 不清的话，界面在**保存成功之后**仍会挂着「密钥解不开」的警告、密钥栏还会被清空
+            // （ReloadForm 按这个标记决定回不回显），用户看到的是「我填了、保存了，可它还是说解不开」
+            // ——于是又填一遍，或者干脆以为存上了。这一步必须和写盘同时发生。
+            if (!keepTopLevelCipher) config.ApiKeyUnreadable = false;
+            foreach (var profile in config.Profiles)
+            {
+                if (!profilesToKeep.Contains(profile.Id)) profile.ApiKeyUnreadable = false;
+            }
+
             return true;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or CryptographicException)

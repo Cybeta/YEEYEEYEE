@@ -117,6 +117,7 @@ var tests = new (string Name, Action Run)[]
     ("智能导入认得出 ComfyUI（且不把普通画图接口误认成它）", ProviderImportRecognizesComfyUi),
     ("只贴一个 ComfyUI 地址：分类器认不出，靠问一句地址 + 人来定兜底", ComfyUiBareAddressFallback),
     ("解不开的密钥不许被任何一次保存清掉（改个别的东西也不行）", UnreadableKeySurvivesAnySave),
+    ("空密钥是「没填」而不是「解不开」，也不该被说成「已密文落盘」", EmptyKeyMeansMissingNotUnreadable),
     ("生成链自检：四层缺口报数与花费预估、预勾只管挡路的那几件、缺失文件不算已出图", GenerationAuditReportsDependencyChain),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
@@ -9365,6 +9366,64 @@ static void UnreadableKeySurvivesAnySave()
             "重填之后盘上不该还留着那把解不开的旧密文");
         Expect(AiProviderSettings.Load().ApiKey == "sk-重新填的密钥-1234",
             "重填的密钥要能读回来：" + AiProviderSettings.Load().ApiKey);
+
+        // 重填之后「解不开」这个标记必须清掉：它描述的是盘上那份**旧密文**，已经不是现在这个值了。
+        // 不清的话，界面在保存成功之后还会挂着「密钥解不开」的警告、密钥栏还会被清空——
+        // 用户看到的是「我填了、也保存了，可它还说解不开」，于是又填一遍，或者干脆以为存上了。
+        Expect(!retyped.ApiKeyUnreadable, "重填并保存成功后，顶层的「解不开」标记必须清掉");
+        Expect(retyped.Profiles.All(profile => !profile.ApiKeyUnreadable),
+            "每一份配置上的「解不开」标记也要清掉");
+        Expect(!AiProviderSettings.Load().ApiKeyUnreadable, "重新加载之后也不该再是「解不开」");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG", previous);
+        try
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+        catch (IOException) { }
+    }
+}
+
+/// <summary>
+/// 空密钥是「**没填**」，不是「**解不开**」。
+///
+/// 这两件事在界面上表现完全不同，而原先那句文案把它们混成了一句：
+/// 密钥为空时会显示「密钥以密文落盘（Windows DPAPI（当前 Windows 账户））」——听起来像"配好了"，
+/// 实际一个字都没存。用户看到它就不会再填，只点一下保存，然后奇怪为什么对话一直 401。
+/// （加解密那侧其实早就防着这件事：ProtectOptional 的注释写着"空值加密会让界面误报已配置"。）
+/// </summary>
+static void EmptyKeyMeansMissingNotUnreadable()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "df-empty-key-" + Guid.NewGuid().ToString("N")[..8]);
+    var previous = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG");
+    try
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "ai-config.json");
+        Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG", path);
+        File.WriteAllText(path, """
+        {
+          "Endpoint": "https://api.deepseek.com/v1",
+          "Model": "deepseek-flash",
+          "ApiKey": "",
+          "Profiles": [
+            { "Id": "p1", "Endpoint": "https://api.deepseek.com/v1", "Model": "deepseek-flash",
+              "ApiKey": "", "Enabled": true }
+          ],
+          "SelectedProfileId": "p1"
+        }
+        """, new UTF8Encoding(false));
+
+        var config = AiProviderSettings.Load();
+        Expect(!config.ApiKeyUnreadable,
+            "空密钥必须报成「没填」，不能报成「解不开」——后者会让界面提示用户去换账户/机器");
+        Expect(config.ApiKey.Length == 0, "空密钥读出来就是空的");
+        Expect(config.Profiles.All(profile => !profile.ApiKeyUnreadable), "每一份同理");
+        // 空密钥不该被加密成一段"看起来配了密钥"的密文（那正会让界面误报已配置）。
+        Expect(!config.ApiKeyWasPlaintext && !config.ApiKeyStoredUnencrypted,
+            "空值既不是明文密钥，也不是已加密落盘");
     }
     finally
     {
