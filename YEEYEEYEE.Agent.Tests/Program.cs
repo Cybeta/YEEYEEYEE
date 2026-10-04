@@ -127,6 +127,7 @@ var tests = new (string Name, Action Run)[]
     ("Agent 建设定节点：没点名实体时按「同类唯一同名」锚上自引用，同名有歧义就不猜", AgentAnchorsSettingNodesToTheirSetting),
     ("参考图装配：顺序固定 角色→道具→场景、变体只取第一张、超上限要说出丢了谁", ReferenceImagePlanOrdersCapsAndSaysWhatItDropped),
     ("参考图上限：设置 / 池子 / 工作流三处取小，「0」与「没声明」不能混，note 要说对是谁定的", ReferenceCapResolverPicksTheTightestLimit),
+    ("参考图手动指定：按实体+变体点名、先筛再裁、一张不勾要说成「你没勾」", ReferenceImagePlanHonoursHandPickedKeys),
     ("ComfyUI 绑定：每个底图入口按顺序各收一张参考图，给不满不拿同一张凑数", BinderFillsEveryImageSlotInOrder),
     ("ComfyUI 绑定：合集型工作流（几组各自带输出）要按组填，不能把图平铺到前几个入口", BinderFillsImageGroupsInsteadOfFlattening),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
@@ -8825,6 +8826,64 @@ static void ReferenceImagePlanOrdersCapsAndSaysWhatItDropped()
 
 	WorkflowNode bare = new WorkflowNode { Title = "分镜 3", Category = NodeCategory.Storyboard };
 	Expect(ReferenceImagePicker.Plan(canvas, bare, 3, locate).Note.Contains("还没有图"), "没引用任何设定时如实说按文生图出");
+}
+
+static void ReferenceImagePlanHonoursHandPickedKeys()
+{
+	// 规格第 3 步：用户能手动指定「这一次用哪几张」，覆盖默认顺序。两条最要紧的规矩：
+	// ① 按**稳定标识**（实体 + 变体）点名，而不是按下标——下标会随「引用的先后」「某个变体带了几张图」
+	//    而变，点在错的图上不会有任何报错；
+	// ② **先筛再裁**：先按勾选筛掉，再用上限裁。反过来（先裁再筛）的话，被排除掉的那张会白占一个
+	//    上限名额，本该留下的那张反而被丢掉。
+	WorkflowCanvasState canvas = new WorkflowCanvasState();
+	WorkflowEntity chen = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+	WorkflowEntityVariant chenVariant = chen.CreateVariant("默认");
+	WorkflowEntity lamp = new WorkflowEntity { Kind = EntityKind.Prop, Name = "红罩台灯" };
+	WorkflowEntityVariant lampVariant = lamp.CreateVariant("默认");
+	WorkflowEntity room = new WorkflowEntity { Kind = EntityKind.Scene, Name = "老城照相馆" };
+	WorkflowEntityVariant roomVariant = room.CreateVariant("默认");
+	canvas.Entities.Add(chen);
+	canvas.Entities.Add(lamp);
+	canvas.Entities.Add(room);
+	chenVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "chen-1", Name = "正视图" });
+	lampVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "lamp-1", Name = "台灯" });
+	roomVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "room-1", Name = "内景" });
+
+	WorkflowNode board = new WorkflowNode { Title = "分镜", Category = NodeCategory.Storyboard };
+	NodeReference roomRef = new NodeReference { EntityId = room.Id, VariantId = roomVariant.Id };
+	NodeReference lampRef = new NodeReference { EntityId = lamp.Id, VariantId = lampVariant.Id };
+	NodeReference chenRef = new NodeReference { EntityId = chen.Id, VariantId = chenVariant.Id };
+	board.References.Add(roomRef);
+	board.References.Add(lampRef);
+	board.References.Add(chenRef);
+
+	Func<WorkflowAttachment, string?> locate = (WorkflowAttachment attachment) => "C:/assets/" + attachment.Reference + ".png";
+
+	IReadOnlyList<ReferenceCandidate> candidates = ReferenceImagePicker.Candidates(canvas, board, locate);
+	Expect(candidates.Count == 3, "三张都能当候选，实际 " + candidates.Count);
+	Expect(candidates[0].Label.Contains("沈砚") && candidates[1].Label.Contains("红罩台灯")
+		&& candidates[2].Label.Contains("老城照相馆"),
+		"候选要按 角色 → 道具 → 场景 排，实际：" + string.Join("、", candidates.Select((ReferenceCandidate item) => item.Label)));
+	Expect(candidates.Select((ReferenceCandidate item) => item.Key).Distinct().Count() == 3, "每张的标识要互不相同");
+	Expect(ReferenceCandidate.KeyOf(chenRef) == candidates[0].Key, "标识要能由引用本身算出来（实体 + 变体）");
+
+	// 只勾角色：就带这一张，而且说明里要写明这是「按你勾的」，不是自动排的。
+	ReferenceImagePlan one = ReferenceImagePicker.Plan(canvas, board, 3, locate, string.Empty,
+		new[] { ReferenceCandidate.KeyOf(chenRef) });
+	Expect(one.Paths.Count == 1 && one.Paths[0].EndsWith("chen-1.png"), "只勾角色就只带角色那张");
+	Expect(one.Note.Contains("按你勾选的那几张"), "手动指定过就说清是手动指定的，实际：" + one.Note);
+
+	// 勾了道具与场景、上限只有 1：留下来的该是**排在前面的道具**——先筛再裁才对。
+	ReferenceImagePlan tight = ReferenceImagePicker.Plan(canvas, board, 1, locate, "池子",
+		new[] { ReferenceCandidate.KeyOf(lampRef), ReferenceCandidate.KeyOf(roomRef) });
+	Expect(tight.Paths.Count == 1 && tight.Paths[0].EndsWith("lamp-1.png"),
+		"先筛再裁：勾了道具与场景、上限 1 时该留道具，实际 " + string.Join("、", tight.Paths));
+	Expect(tight.Dropped.Any((string item) => item.Contains("老城照相馆")), "被裁掉的场景要列出来");
+
+	// 一张都不勾 = 这一次按文生图出；而且要说清是「你没勾」，不是「你没有图」。
+	ReferenceImagePlan none = ReferenceImagePicker.Plan(canvas, board, 3, locate, string.Empty, Array.Empty<string>());
+	Expect(!none.UsesReferences && none.Note.Contains("一张参考图都没勾"),
+		"一张不勾要说清是你没勾，实际：" + none.Note);
 }
 
 static void BinderFillsImageGroupsInsteadOfFlattening()

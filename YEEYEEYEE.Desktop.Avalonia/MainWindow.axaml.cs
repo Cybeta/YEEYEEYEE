@@ -2676,7 +2676,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                 currentCanvas?.Canvas ?? new WorkflowCanvasState(),
                 node,
                 int.MaxValue,
-                attachment => AssetStore.Resolve(attachment.Reference) is { } candidate && File.Exists(candidate) ? candidate : null);
+                LocateAttachment);
             frames.AddRange(settings.Paths);
         }
 
@@ -2813,6 +2813,79 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 否则用**上一次用过的那个**：多数人的出图是同一家、同一个模型反复用，
         // 每次重挑一遍纯属浪费。它只是「预选」——价格与档位都摆在上面，改动也随时可以。
         var chosenSource = source ?? (RememberedPool() is { } remembered ? ImageSourceChoice.OfPool(remembered) : null);
+
+        // ── 参考图：这一镜会喂哪几张（规格第 3 步）──────────────────────────────
+        // 默认按固定顺序（角色 → 道具 → 场景）自动决定；这里把那个决定**摊开**，并允许临时改掉
+        // 这一次的取舍。**只影响这一次，不动画布上的引用**——「这一镜先不要它」与「以后都不要它」
+        // 是两件事，后者该去取消引用，不该在这里顺手改掉。
+        var referenceCandidates = currentCanvas is null
+            ? new List<ReferenceCandidate>()
+            : ReferenceImagePicker.Candidates(currentCanvas.Canvas, node, LocateAttachment).ToList();
+        var referenceBoxes = new List<CheckBox>();
+        var referenceListNote = AgentDialogUi.Note(string.Empty);
+        referenceListNote.TextWrapping = TextWrapping.Wrap;
+        StackPanel? referencePanel = null;
+
+        if (referenceCandidates.Count > 0)
+        {
+            var list = new StackPanel { Spacing = 2 };
+            foreach (var candidate in referenceCandidates)
+            {
+                var box = new CheckBox
+                {
+                    Content = candidate.Label,
+                    IsChecked = true,
+                    FontSize = 12,
+                    Tag = candidate.Key
+                };
+                // 与「数量」那一行同一个写法：订阅 PropertyChanged 而不是猜控件自己的事件名。
+                box.PropertyChanged += (_, args) =>
+                {
+                    if (args.Property == CheckBox.IsCheckedProperty) SyncReferenceNote();
+                };
+                referenceBoxes.Add(box);
+                list.Children.Add(box);
+            }
+            referencePanel = new StackPanel
+            {
+                Spacing = 6,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = "参考图（这一镜会喂哪几张）",
+                        Foreground = AgentDialogUi.Brush("DfInk2"),
+                        FontSize = 11,
+                        FontWeight = FontWeight.SemiBold
+                    },
+                    list,
+                    referenceListNote
+                }
+            };
+        }
+
+        // 全勾着 = 没改过默认取舍，交回 null 让装配走默认那条路（说明也就不必说「按你勾的」）。
+        IReadOnlyCollection<string>? CheckedReferenceKeys()
+        {
+            if (referenceBoxes.Count == 0) return null;
+            var keys = referenceBoxes.Where(box => box.IsChecked == true).Select(box => (string)box.Tag!).ToList();
+            return keys.Count == referenceBoxes.Count ? null : keys;
+        }
+
+        void SyncReferenceNote()
+        {
+            if (referencePanel is null) return;
+            var cap = ResolveReferenceCap(chosenSource);
+            referenceListNote.Text = ReferenceImagePicker.Plan(
+                currentCanvas?.Canvas ?? new WorkflowCanvasState(),
+                node,
+                cap.Cap,
+                LocateAttachment,
+                cap.BindingLabel,
+                CheckedReferenceKeys()).Note;
+        }
+
+        SyncReferenceNote();
         var poolButton = AgentDialogUi.Secondary("选接口…");
         var poolNote = AgentDialogUi.Note(string.Empty);
         poolNote.TextWrapping = TextWrapping.Wrap;
@@ -2899,6 +2972,9 @@ public partial class MainWindow : Window, IAgentSessionHost
                           ? $"（{chosenSource.PoolItem.Price}）"
                           : "（清单没写单价）");
             SyncCost();
+            // 换了接口就是换了上限（池子声明的张数 / 工作流的槽位数都会变），参考图那一行要跟着重算，
+            // 否则它会一直写着上一个接口的额度。
+            SyncReferenceNote();
         }
 
         var modeNote = AgentDialogUi.Note(string.Empty);
@@ -2984,6 +3060,9 @@ public partial class MainWindow : Window, IAgentSessionHost
                 FontWeight = FontWeight.SemiBold
             });
             body.Children.Add(countRow);
+            // 参考图那一块只在「这一镜真的引用了设定」时才出现：没引用就没有可勾的东西，
+            // 摆一行空标题只会让人以为哪里坏了。
+            if (referencePanel is not null) body.Children.Add(referencePanel);
         }
         body.Children.Add(AgentDialogUi.Note("提示词（可改，改完再决定下一步）"));
         body.Children.Add(prompt);
@@ -3028,7 +3107,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (generateRequested)
             await GenerateNodeImageAsync(node, suggestion, prompt.Text?.Trim() ?? string.Empty,
                 negative.Text?.Trim() ?? string.Empty, forcedApproach, chosenSource,
-                (int)(countBox.Value ?? 1));
+                (int)(countBox.Value ?? 1), CheckedReferenceKeys());
     }
 
     private void ShowUpstreamDialog(WorkflowNode node, NodeAssistPlan plan)
@@ -3921,6 +4000,46 @@ public partial class MainWindow : Window, IAgentSessionHost
         return moved;
     }
 
+    /// <summary>把附件解成磁盘上的文件；解不出、或文件已经不在，就当作没有（不拿一张不存在的图去骗模型）。</summary>
+    private static string? LocateAttachment(WorkflowAttachment attachment) =>
+        AssetStore.Resolve(attachment.Reference) is { } resolved && File.Exists(resolved) ? resolved : null;
+
+    /// <summary>
+    /// 这一镜的参考图上限（规格规则二：用户设置 / 池子清单声明的张数 / 这份工作流的底图槽位数，
+    /// 三处取小）。**对话框与装配共用这一份**——两处各算一遍的话，界面上写的「会喂 N 张」与实际
+    /// 喂出去的迟早会对不上，而那句话正是用户在点下去之前唯一的依据。
+    /// </summary>
+    private static ReferenceCapResult ResolveReferenceCap(ImageSourceChoice? source)
+    {
+        // 上限读设置；读不到就当 0（不声称带了参考图）——那份配置读不出来时，图像链路本来也建不起来。
+        var settingCap = 0;
+        try { settingCap = AiProviderSettings.Load().ImageMaxReferenceImages; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.Text.Json.JsonException or InvalidOperationException or NotSupportedException) { settingCap = 0; }
+
+        var declarations = new List<ReferenceCapDeclaration>
+        {
+            new("设置里的「图像参考图上限」", settingCap)
+        };
+
+        // 池子没写张数（MaxReferenceImages 为 0）是「不知道」，不是「0 张」——那不该反过来压用户的上限。
+        if (source?.PoolItem is { MaxReferenceImages: > 0 } limitedPool)
+            declarations.Add(new($"池子「{limitedPool.Label}」", limitedPool.MaxReferenceImages));
+
+        if (source?.Workflow is { } chosenWorkflow)
+        {
+            // 走工作流时它自己能收几张由**槽位数**决定——用 ImageCapacity（最大一组的槽数），
+            // 不能用入口总数：合集型的工作流那个数是各组之和（B03 是 6），没有一组收得下 6 张。
+            // 读不懂正文或没有底图入口的按 0 处理——塞给一个没有底图入口的工作流只会白跑一次。
+            var (workflowSlots, _) = ComfyUiWorkflowInspector.Inspect(chosenWorkflow.Site, chosenWorkflow.Workflow);
+            declarations.Add(workflowSlots is { ImageCapacity: > 0 } slots
+                ? new($"这份工作流的 {slots.ImageCapacity} 个底图槽位", slots.ImageCapacity)
+                : new("这份工作流（没有底图入口，或正文读不懂）", 0));
+        }
+
+        return ReferenceCapResolver.Resolve(declarations);
+    }
+
     /// <summary>
     /// 真出图：走已经配好的图像链路（ComfyUI 或 OpenAI 兼容图像接口），成功后把文件收进项目资产目录并挂到节点上。
     /// 没配链路就说清去哪儿配，**不假装出图**；出完图立刻给一个预览窗口，不然用户只看到一句状态栏文字。
@@ -3928,10 +4047,14 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// <paramref name="forcedApproach"/> 是界面上手动指定的出图方式（null = 按剧情自动判断）。
     /// 图生图会**真的把底图当参考图发出去**——这条链路里传参考图就等于切图生图，
     /// 所以「用不用底图」必须是个明确决定，不能顺手全传（理由见 <see cref="NodeImageModePlanner"/>）。
+    ///
+    /// <paramref name="handPickedReferences"/> 是用户在对话框里手动勾的那几张（规格第 3 步）：
+    /// 非 null 表示**只喂点过名的这几张**（空集合 = 这一次一张都不带），null 表示按默认顺序自动决定。
     /// </summary>
     private async Task GenerateNodeImageAsync(
         WorkflowNode node, NodeAssistSuggestion suggestion, string prompt, string negative,
-        NodeImageApproach? forcedApproach = null, ImageSourceChoice? source = null, int count = 1)
+        NodeImageApproach? forcedApproach = null, ImageSourceChoice? source = null, int count = 1,
+        IReadOnlyCollection<string>? handPickedReferences = null)
     {
         if (currentCanvas is null || string.IsNullOrWhiteSpace(prompt)) return;
         if (!canEdit)
@@ -4007,43 +4130,15 @@ public partial class MainWindow : Window, IAgentSessionHost
             }
             else
             {
-                // 上限读设置；读不到就当 0（不声称带了参考图）——那份配置读不出来时，图像链路本来也建不起来。
-                var settingCap = 0;
-                try { settingCap = AiProviderSettings.Load().ImageMaxReferenceImages; }
-                catch (Exception error) when (error is IOException or UnauthorizedAccessException
-                    or System.Text.Json.JsonException or InvalidOperationException or NotSupportedException) { settingCap = 0; }
-
-                // 上限 = **三处取小**（规格规则二）：用户设置、池子清单里声明的张数、这份工作流的底图入口数。
-                // 只看设置会犯两种相反的错：设置 3 而这一家只吃 1（多出来的两张被服务端悄悄忽略，
-                // 用户以为带了设定其实没带）；设置 1 而这份工作流有 4 个底图入口（白白浪费工作流的能力）。
-                var declarations = new List<ReferenceCapDeclaration>
-                {
-                    new("设置里的「图像参考图上限」", settingCap)
-                };
-
-                // 池子没写张数（MaxReferenceImages 为 0）是「不知道」，不是「0 张」——那不该反过来压用户的上限。
-                if (source?.PoolItem is { MaxReferenceImages: > 0 } limitedPool)
-                    declarations.Add(new($"池子「{limitedPool.Label}」", limitedPool.MaxReferenceImages));
-
-                if (source?.Workflow is { } chosenWorkflow)
-                {
-                    // 走工作流时它自己能收几张由**入口数**决定——注意用 ImageCapacity（最大一组的槽数），
-                    // 不能用入口总数：合集型的工作流那个数是各组之和（B03 是 6），没有一组收得下 6 张。
-                    // 读不懂正文或没有底图入口的按 0 处理——塞给一个没有底图入口的工作流只会白跑一次。
-                    var (workflowSlots, _) = ComfyUiWorkflowInspector.Inspect(chosenWorkflow.Site, chosenWorkflow.Workflow);
-                    declarations.Add(workflowSlots is { ImageCapacity: > 0 } slots
-                        ? new($"这份工作流的 {slots.ImageCapacity} 个底图入口", slots.ImageCapacity)
-                        : new("这份工作流（没有底图入口，或正文读不懂）", 0));
-                }
-
-                var referenceCap = ReferenceCapResolver.Resolve(declarations);
+                var referenceCap = ResolveReferenceCap(source);
 
                 var plan = ReferenceImagePicker.Plan(
                     currentCanvas?.Canvas ?? new WorkflowCanvasState(),
                     node,
                     referenceCap.Cap,
-                    attachment => AssetStore.Resolve(attachment.Reference) is { } candidate && File.Exists(candidate) ? candidate : null,
-                    referenceCap.BindingLabel);
+                    LocateAttachment,
+                    referenceCap.BindingLabel,
+                    handPickedReferences);
                 referenceNote = plan.Note;
                 if (plan.Paths.Count > 0) references = plan.Paths.ToArray();
             }

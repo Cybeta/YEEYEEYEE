@@ -59,6 +59,23 @@ public static class ReferenceCapResolver
     }
 }
 
+/// <summary>
+/// 一镜**能**喂的一张候选参考图（还没做上限裁剪）。给界面用：手动指定「这一次用哪几张」之前，
+/// 得先让人看得见有哪些候选、按什么顺序。
+/// </summary>
+public sealed record ReferenceCandidate(string Key, string Label, string Path)
+{
+    /// <summary>
+    /// 引用的稳定标识（实体 + 变体）。手动指定按它点名，而不是按下标——
+    /// 下标会随「引用的先后」「某个变体带了几张图」变，点在错的图上不会有任何报错。
+    /// </summary>
+    public static string KeyOf(NodeReference reference)
+    {
+        ArgumentNullException.ThrowIfNull(reference);
+        return reference.EntityId.ToString("N") + ":" + reference.VariantId.ToString("N");
+    }
+}
+
 /// <summary>把「这一镜引用了哪些设定」翻成「该喂哪几张图」。</summary>
 public static class ReferenceImagePicker
 {
@@ -84,15 +101,53 @@ public static class ReferenceImagePicker
         WorkflowNode node,
         int cap,
         Func<WorkflowAttachment, string?> locatePath,
-        string capSource = "")
+        string capSource = "",
+        IReadOnlyCollection<string>? onlyKeys = null)
     {
         ArgumentNullException.ThrowIfNull(canvas);
         ArgumentNullException.ThrowIfNull(node);
         ArgumentNullException.ThrowIfNull(locatePath);
 
         var limit = Math.Max(0, cap);
-        var ranked = new List<(int Rank, string Label, string Path)>();
+        var ranked = Rank(canvas, node, locatePath);
 
+        // 手动指定：只留点过名的那几张。**先筛再裁**——反过来（先裁再筛）的话，
+        // 用户排除掉的那张会白占一个上限名额，本该留下的那张反而被丢掉。
+        var handPicked = onlyKeys is not null;
+        if (onlyKeys is not null) ranked = ranked.Where(item => onlyKeys.Contains(item.Key)).ToList();
+
+        var kept = ranked.Take(limit).ToList();
+        var dropped = ranked.Skip(limit).Select(item => item.Label).ToList();
+        return new ReferenceImagePlan(
+            kept.Select(item => item.Path).ToList(),
+            dropped,
+            limit,
+            Describe(limit, capSource, kept.Select(item => item.Label).ToList(), dropped, handPicked));
+    }
+
+    /// <summary>
+    /// 这一镜**能**喂哪几张（按固定顺序排好，不做上限裁剪）。给界面用：手动指定之前先让人看得见候选。
+    /// </summary>
+    public static IReadOnlyList<ReferenceCandidate> Candidates(
+        WorkflowCanvasState canvas,
+        WorkflowNode node,
+        Func<WorkflowAttachment, string?> locatePath)
+    {
+        ArgumentNullException.ThrowIfNull(canvas);
+        ArgumentNullException.ThrowIfNull(node);
+        ArgumentNullException.ThrowIfNull(locatePath);
+        return Rank(canvas, node, locatePath)
+            .Select(item => new ReferenceCandidate(item.Key, item.Label, item.Path))
+            .ToList();
+    }
+
+    /// <summary>把引用翻成「排好序的候选」：顺序固定 角色 → 道具 → 场景，同类内按引用顺序。</summary>
+    private static List<RankedCandidate> Rank(
+        WorkflowCanvasState canvas,
+        WorkflowNode node,
+        Func<WorkflowAttachment, string?> locatePath)
+    {
+        var ranked = new List<RankedCandidate>();
         foreach (var reference in node.References)
         {
             if (canvas.ResolveReferenceContent(reference) is not { } content) continue;
@@ -106,31 +161,30 @@ public static class ReferenceImagePicker
                 .FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(candidate));
             if (path is null) continue;
 
-            ranked.Add((rank, content.Label, path));
+            ranked.Add(new RankedCandidate(rank, ReferenceCandidate.KeyOf(reference), content.Label, path));
         }
-
-        var kept = ranked.OrderBy(item => item.Rank).Take(limit).ToList();
-        var dropped = ranked.OrderBy(item => item.Rank).Skip(limit).Select(item => item.Label).ToList();
-        return new ReferenceImagePlan(
-            kept.Select(item => item.Path).ToList(),
-            dropped,
-            limit,
-            Describe(limit, capSource, kept.Select(item => item.Label).ToList(), dropped));
+        return ranked.OrderBy(item => item.Rank).ToList();
     }
 
-    private static string Describe(int limit, string capSource, IReadOnlyList<string> kept, IReadOnlyList<string> dropped)
+    private sealed record RankedCandidate(int Rank, string Key, string Label, string Path);
+
+    private static string Describe(
+        int limit, string capSource, IReadOnlyList<string> kept, IReadOnlyList<string> dropped, bool handPicked)
     {
         // 「卡在谁身上」只在**上限真的起了作用**时才说：三张都带上了还说「来自设置」是废话。
         var because = capSource.Length > 0 ? "（来自" + capSource + "）" : string.Empty;
+        var byHand = handPicked ? "按你勾选的那几张：" : string.Empty;
 
         if (limit == 0)
             return "这一镜的参考图上限是 0" + because + "，所以没有喂参考图："
                 + "角色 / 道具 / 场景都只能靠提示词描述，跨镜一致性会掉。";
 
         if (kept.Count == 0)
-            return "这一镜引用的设定里还没有图，按文生图出——给引用的变体补一张设定图，下一张就能带上。";
+            return handPicked
+                ? "这一次一张参考图都没勾，按文生图出——想把设定带上就回上一步把需要的勾回来。"
+                : "这一镜引用的设定里还没有图，按文生图出——给引用的变体补一张设定图，下一张就能带上。";
 
-        var text = $"带了 {kept.Count} 张参考图：{string.Join("、", kept)}。";
+        var text = byHand + $"带了 {kept.Count} 张参考图：{string.Join("、", kept)}。";
         if (dropped.Count > 0)
             text += $"上限是 {limit} 张" + because + $"，丢掉了：{string.Join("、", dropped)}——它们这一镜只能靠提示词描述。";
         return text;
