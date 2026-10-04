@@ -80,9 +80,14 @@ public sealed record GenerationAuditReport(
     string RootKind,
     GenerationIntent Intent,
     IReadOnlyList<GenerationAuditLayer> Layers,
+    IReadOnlyList<GenerationAuditItem> Stale,
+    int UnrecordedBaselineNodes,
     string Note)
 {
     public int MissingCount => Layers.Sum(layer => layer.Missing.Count);
+
+    /// <summary>有几处产物**照着的设定后来变了**（不是缺，是旧）。</summary>
+    public int StaleCount => Stale.Count;
 
     public bool IsClean => MissingCount == 0;
 
@@ -110,15 +115,21 @@ public sealed record GenerationAuditReport(
     /// </summary>
     public GenerationAuditReport WithIntent(GenerationIntent intent) => this with { Intent = intent };
 
-    /// <summary>一句话摘要，给状态栏与对话框标题用。</summary>
+    /// <summary>
+    /// 一句话摘要，给状态栏与对话框标题用。
+    ///
+    /// **过期与缺失分开说**：缺是「还没有」，过期是「有，但照着的设定已经变了」。合成一个数字
+    /// 会让用户以为「补齐那几件就没事了」，而实际上旧的那些还得重出一次。
+    /// 「判断不了」那一类（老产物没记过依据）不放进这一行——对老画布它会长期存在，放进来只会变成噪音，
+    /// 它写在 <see cref="ToText"/> 与自检窗口的过期那一段里。
+    /// </summary>
     public string Describe()
     {
         if (Note.Length > 0) return Note;
-        if (IsClean) return $"「{RootTitle}」的依赖链是齐的：{string.Join(" → ", Layers.Select(layer => $"{layer.Title} {layer.TargetCount}/{layer.TargetCount}"))}";
-
-        var parts = Layers.Where(layer => !layer.IsClean)
-            .Select(layer => $"{layer.Title} 缺 {layer.MissingCount}/{layer.TargetCount}");
-        return $"「{RootTitle}」缺：{string.Join(" · ", parts)}";
+        var head = IsClean
+            ? $"「{RootTitle}」的依赖链是齐的：{string.Join(" → ", Layers.Select(layer => $"{layer.Title} {layer.TargetCount}/{layer.TargetCount}"))}"
+            : $"「{RootTitle}」缺：{string.Join(" · ", Layers.Where(layer => !layer.IsClean).Select(layer => $"{layer.Title} 缺 {layer.MissingCount}/{layer.TargetCount}"))}";
+        return StaleCount == 0 ? head : $"{head}；另有 {StaleCount} 处产物照着的设定已更新，建议重出";
     }
 
     /// <summary>
@@ -136,7 +147,8 @@ public sealed record GenerationAuditReport(
             .Where(layer => layer.Stage is GenerationStage.StoryboardVideo or GenerationStage.ProductVideo)
             .Sum(layer => layer.MissingCount);
 
-        if (imageCount == 0 && videoCount == 0) return "没有要补的产物。";
+        if (imageCount == 0 && videoCount == 0)
+            return StaleNote.Length == 0 ? "没有要补的产物。" : $"没有要补的产物；{StaleNote}。";
 
         var image = imageCount == 0
             ? string.Empty
@@ -148,8 +160,16 @@ public sealed record GenerationAuditReport(
             ? string.Empty
             : $"另有 {videoCount} 段视频要出；视频的钱在「一键」那一栏里报（它知道你选的是哪个池子）";
 
-        return string.Join("；", new[] { image, video }.Where(part => part.Length > 0)) + "。";
+        return string.Join("；", new[] { image, video, StaleNote }.Where(part => part.Length > 0)) + "。";
     }
+
+    /// <summary>
+    /// 过期那一笔**不计进「要补几张」**——它不是缺，重出多少件由用户在自检窗口里自己决定。
+    /// 但必须提一句：不说的话，用户会以为「补完这几张就没别的花销了」。
+    /// </summary>
+    private string StaleNote => StaleCount == 0
+        ? string.Empty
+        : $"另有 {StaleCount} 处产物照着的设定已更新、建议重出（重出会再走一次出图 / 出视频，钱按同样的单价算）";
 
     /// <summary>报告的纯文本版（复制到剪贴板、贴进笔记都直接可用）。</summary>
     public string ToText(double? unitPrice)
@@ -168,6 +188,18 @@ public sealed record GenerationAuditReport(
             if (!layer.Executable) lines.Add($"  （{layer.ExecutableNote}）");
             foreach (var item in layer.Missing)
                 lines.Add($"  - {(item.Actionable ? string.Empty : "（不可直接生成）")}{item.Display}：{item.Reason}");
+            lines.Add(string.Empty);
+        }
+
+        // 过期单独一节：它不是缺，混进上面几层会让人以为「这一层有东西、但也有毛病」。
+        if (StaleCount > 0 || UnrecordedBaselineNodes > 0)
+        {
+            lines.Add($"[产物过期] 照着的设定后来变了 —— {StaleCount} 处，建议重出");
+            foreach (var item in Stale)
+                lines.Add($"  - {item.Display}：{item.Reason}");
+            if (UnrecordedBaselineNodes > 0)
+                lines.Add($"  - 另有 {UnrecordedBaselineNodes} 个节点的产物没记过依据（本次更新之前出的），"
+                    + "过期与否判断不了：重出一次就会带上依据。");
             lines.Add(string.Empty);
         }
 
@@ -229,8 +261,53 @@ public static class GenerationAudit
             NodeAssistPlanner.KindLabelOf(root.Category),
             resolvedIntent,
             layers,
+            StaleItems(canvas, scope),
+            UnrecordedBaselines(scope),
             scopeNote);
     }
+
+    /// <summary>
+    /// 范围内那些「照着的设定后来变了」的产物：改一个角色的外观、换一版场景，引用它的分镜与成片
+    /// 就已经对不上了。画布卡片上有这行提示，但那要你正好看着那个节点才会看到——自检这个
+    /// 「下一步该干什么」的窗口里原先没有它，这条线索就断在半路。
+    ///
+    /// 与「缺」严格分开：缺是还没有，过期是有了但旧了。两者的下一步不一样（一个是补、一个是重出）。
+    /// 判定（含「哪些不报」）全在 <see cref="ReferenceStaleness.Of"/> 里，不在这里另立一套口径。
+    /// </summary>
+    private static List<GenerationAuditItem> StaleItems(WorkflowCanvasState canvas, IReadOnlyList<WorkflowNode> scope)
+    {
+        var items = new List<GenerationAuditItem>();
+        foreach (var node in scope)
+        {
+            var stale = ReferenceStaleness.Of(canvas, node);
+            if (stale.Count == 0) continue;
+            items.Add(new GenerationAuditItem(
+                StageOf(node.Category),
+                node.Id,
+                node.Title,
+                "照着的设定已更新",
+                $"{ReferenceStaleness.Describe(stale)}。在「{node.Title}」上按现在的设定重出一次，"
+                + "新产物就会带上这一版的凭据，这里也就不再报它。",
+                // 能在节点上重出（所以是 true），但**不预勾**——它不是缺，重出多少件由用户自己决定。
+                Actionable: true));
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// 范围内有几个节点的产物**一条依据都没记过**（本次更新之前出的，或手放的素材）。
+    /// 这些判断不了过期与否，要说清——不说的话，用户看到「0 处过期」会以为功能没生效。
+    /// </summary>
+    private static int UnrecordedBaselines(IReadOnlyList<WorkflowNode> scope) =>
+        scope.Count(ReferenceStaleness.LacksBaseline);
+
+    /// <summary>一处过期归到哪一层：按节点的类别定，与四层的依赖顺序对应。</summary>
+    private static GenerationStage StageOf(NodeCategory category) => category switch
+    {
+        NodeCategory.Character or NodeCategory.Scene or NodeCategory.Prop => GenerationStage.SettingImage,
+        NodeCategory.Product => GenerationStage.ProductVideo,
+        _ => GenerationStage.StoryboardImage
+    };
 
     /// <summary>默认意图：章节 / 成品这两类节点，用户点自检多半是在准备出视频；其余是要图。</summary>
     private static GenerationIntent DefaultIntentFor(NodeCategory category) =>

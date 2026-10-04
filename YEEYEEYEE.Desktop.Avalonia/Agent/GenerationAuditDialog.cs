@@ -42,7 +42,9 @@ internal static class GenerationAuditDialog
 
         var body = new StackPanel { Margin = new Thickness(20), Spacing = 10 };
         body.Children.Add(Header($"{report.RootKind}「{report.RootTitle}」"));
-        body.Children.Add(Note(report.Describe(), report.IsClean ? AgentNoteLevel.Success : AgentNoteLevel.Warning));
+        // 过期也算「有事要办」，所以它不该显示成一句绿色的「一切都好」。
+        body.Children.Add(Note(report.Describe(),
+            report.IsClean && report.StaleCount == 0 ? AgentNoteLevel.Success : AgentNoteLevel.Warning));
 
         if (report.Note.Length > 0)
         {
@@ -85,6 +87,11 @@ internal static class GenerationAuditDialog
 
         var layersHost = new StackPanel { Spacing = 10 };
         body.Children.Add(layersHost);
+
+        // 过期那一段**不跟着意图变**（它就是一批旧产物，与「这次要补什么」无关），
+        // 所以只建一次，不进 RefreshLayers。
+        if (report.StaleCount > 0 || report.UnrecordedBaselineNodes > 0)
+            body.Children.Add(BuildStaleCard(report, nodeId => locate = nodeId));
 
         // ---------- 补齐 / 池子 / 时长 ----------
         var fillImages = new CheckBox
@@ -322,16 +329,62 @@ internal static class GenerationAuditDialog
                 content.Children.Add(BuildItem(item, checkedItems.Contains(item), locate, checkedItems, onChanged));
         }
 
-        return new Border
-        {
-            Background = Brush("DfSurface2"),
-            BorderBrush = Brush("DfLine"),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(8),
-            Padding = new Thickness(12, 10),
-            Child = content
-        };
+        return Card(content);
     }
+
+    /// <summary>
+    /// 「产物过期」那张卡：**没有勾选框**。
+    ///
+    /// 为什么不给勾：重出是另一件事、另一笔钱，与「把缺的补齐」不是同一个问题。把它混进一键清单，
+    /// 用户会以为自己点的是「补上没出的那几张」，结果连旧的也一起重出了一遍。所以这里只把
+    /// 「哪几个节点、照着的哪条设定变了」摆清楚、给一个「定位」，要不要重出由他自己在那个节点上定。
+    /// </summary>
+    private static Border BuildStaleCard(GenerationAuditReport report, Action<Guid> locate)
+    {
+        var content = new StackPanel { Spacing = 6 };
+
+        var titleRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        titleRow.Children.Add(new TextBlock
+        {
+            Text = "产物过期　照着的设定后来变了",
+            FontSize = 12,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = Brush("DfInk")
+        });
+        var counter = new TextBlock
+        {
+            Text = $"{report.StaleCount} 处建议重出",
+            FontSize = 11,
+            Foreground = Brush("DfWarning")
+        };
+        Grid.SetColumn(counter, 1);
+        titleRow.Children.Add(counter);
+        content.Children.Add(titleRow);
+
+        content.Children.Add(Note("过期**不是缺**：这些产物都在，只是照着的那一版设定已经变了（换了图或改了描述）。"
+            + "所以它们不进上面的清单、也不算进「要补几张」——要重出哪几件由你定。", AgentNoteLevel.Warning));
+
+        foreach (var item in report.Stale)
+            content.Children.Add(BuildStaleItem(item, locate));
+
+        if (report.UnrecordedBaselineNodes > 0)
+            content.Children.Add(Note($"另有 {report.UnrecordedBaselineNodes} 个节点的产物没记过依据"
+                + "（这是本次更新之前出的，判不出它当时照的是哪一版设定），过期与否判断不了；"
+                + "重出一次就会带上依据。"));
+
+        return Card(content);
+    }
+
+    /// <summary>卡片外观只有一份：四层各一张、过期一张，长得不一样会让人以为是两类东西。</summary>
+    private static Border Card(Control content) => new()
+    {
+        Background = Brush("DfSurface2"),
+        BorderBrush = Brush("DfLine"),
+        BorderThickness = new Thickness(1),
+        CornerRadius = new CornerRadius(8),
+        Padding = new Thickness(12, 10),
+        Child = content
+    };
 
     /// <summary>一个缺口：勾选框（预勾 = 这次会生成它）+ 说明 + 定位按钮。取消勾选就不会花这份钱。</summary>
     private static Control BuildItem(
@@ -341,8 +394,6 @@ internal static class GenerationAuditDialog
         HashSet<GenerationAuditItem> checkedItems,
         Action onChanged)
     {
-        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
-
         var check = new CheckBox
         {
             IsChecked = preset && item.Actionable,
@@ -359,7 +410,33 @@ internal static class GenerationAuditDialog
             else checkedItems.Remove(item);
             onChanged();
         };
-        row.Children.Add(check);
+        return BuildRow(item, check, locate);
+    }
+
+    /// <summary>过期那一项：同一副面孔，但**没有勾选框**（理由见 <see cref="BuildStaleCard"/>）。</summary>
+    private static Control BuildStaleItem(GenerationAuditItem item, Action<Guid> locate) =>
+        BuildRow(item, check: null, locate);
+
+    /// <summary>一项的正文：可选的勾选框 + 标题与理由 + 定位按钮。缺口与过期共用，免得两处措辞走样。</summary>
+    private static Control BuildRow(GenerationAuditItem item, CheckBox? check, Action<Guid> locate)
+    {
+        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
+
+        if (check is not null)
+        {
+            row.Children.Add(check);
+        }
+        else
+        {
+            row.Children.Add(new TextBlock
+            {
+                Text = "·",
+                FontSize = 12,
+                Foreground = Brush("DfWarning"),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(2, 0, 6, 0)
+            });
+        }
 
         var text = new StackPanel { Spacing = 2 };
         text.Children.Add(new TextBlock

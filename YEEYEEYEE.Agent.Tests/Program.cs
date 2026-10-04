@@ -125,6 +125,7 @@ var tests = new (string Name, Action Run)[]
     ("设置页保存：刚敲的密钥存好后，回显与再保存一次都不能把它擦掉", SaveKeepsWhatTheFormJustTyped),
     ("生成链自检：四层缺口报数与花费预估、预勾只管挡路的那几件、缺失文件不算已出图", GenerationAuditReportsDependencyChain),
     ("生成链自检：图要在「引用（变体）」上，只在节点上出过也算缺口（道具会换样子就出在这）", GenerationAuditAsksForTheImageOnTheVariantToo),
+    ("生成链自检：引用已更新要报「建议重出」，过期不是缺、不预勾；判断不了的要说清", GenerationAuditListsStaleProducts),
     ("Agent 建设定节点：没点名实体时按「同类唯一同名」锚上自引用，同名有歧义就不猜", AgentAnchorsSettingNodesToTheirSetting),
     ("参考图装配：顺序固定 角色→道具→场景、变体只取第一张、超上限要说出丢了谁", ReferenceImagePlanOrdersCapsAndSaysWhatItDropped),
     ("参考图上限：设置 / 池子 / 工作流三处取小，「0」与「没声明」不能混，note 要说对是谁定的", ReferenceCapResolverPicksTheTightestLimit),
@@ -9274,6 +9275,73 @@ static void AgentAnchorsSettingNodesToTheirSetting()
 		"名字对不上就不锚");
 	Expect(canvas4.Nodes.Single((WorkflowNode item) => item.Category == NodeCategory.Storyboard).References.Count == 0,
 		"这条兜底只管设定类节点：分镜的引用只来自 entityTargets，不靠名字");
+}
+
+/// <summary>
+/// 自检要顺带报「引用已更新、建议重出」。
+///
+/// 改了一个角色的外观之后，画布卡片上有那行提示，但那要你正好看着那个节点才会看到；
+/// 自检是「下一步该干什么」的那个窗口，原先这里没有它，线索就断在半路。
+///
+/// 两条口径要一起钉住：
+/// · **过期不是缺**：它不进「缺 N」的计数、也不进一键的预勾清单（重出是另一件事、另一笔钱）；
+/// · **判断不了的要说清**：老产物没记过依据时判不出过期与否，不能让用户以为「0 处过期 = 没问题」。
+/// </summary>
+static void GenerationAuditListsStaleProducts()
+{
+	WorkflowCanvasState canvas = new WorkflowCanvasState();
+	WorkflowEntity entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "林晚" };
+	WorkflowEntityVariant variant = entity.CreateVariant("默认", "短发，藏青风衣");
+	canvas.Entities.Add(entity);
+	// 变体自己带一张设定图：不然自检会另外报一条「这个设定只能在引用画廊里补图」，
+	// 那条与本用例要验的东西无关。
+	variant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://hero.png" });
+
+	WorkflowNode shot = new WorkflowNode { Title = "分镜 1", Category = NodeCategory.Storyboard };
+	shot.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+	canvas.Nodes.Add(shot);
+	// 图带依据（出图时记的），视频不带——过期判定只看记过依据的那些产物。
+	shot.Attachments.Add(new WorkflowAttachment
+	{
+		Kind = AttachmentKind.Image,
+		Reference = "asset://shot1.png",
+		SourceFingerprints = ReferenceStaleness.Snapshot(canvas, shot)
+	});
+	shot.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Video, Reference = "asset://shot1.mp4" });
+
+	// mediaExists 一律 true：本用例要的是「什么都不缺」，免得依赖本机资产目录里有没有文件。
+	GenerationAuditReport before = GenerationAudit.Build(canvas, shot, mediaExists: _ => true);
+	Expect(before.IsClean, "设定没改之前整条链是齐的：" + before.Describe());
+	Expect(before.StaleCount == 0, "没改之前不该报过期");
+	Expect(before.UnrecordedBaselineNodes == 0, "这一节点的产物记过依据，不算「判断不了」");
+
+	variant.Description = "短发，藏青风衣（加了围巾）";
+	GenerationAuditReport after = GenerationAudit.Build(canvas, shot, mediaExists: _ => true);
+	Expect(after.StaleCount == 1, "设定更新后要报一处过期，实际 " + after.StaleCount);
+	Expect(after.MissingCount == before.MissingCount && after.MissingCount == 0,
+		"过期不是缺：缺的计数一件都不该多，实际 " + after.MissingCount);
+	Expect(after.Stale[0].ActionNodeId == shot.Id, "过期那一项要定位得到节点");
+	Expect(after.Stale[0].Actionable, "能在节点上重出，所以要标成可动手（只是不预勾）");
+	Expect(after.Stale[0].Reason.Contains("建议重出"), "理由要给出下一步：" + after.Stale[0].Reason);
+	Expect(after.Stale[0].Reason.Contains("林晚"), "要说清哪条设定变了：" + after.Stale[0].Reason);
+	Expect(after.Describe().Contains("建议重出"), "摘要里也要带上一句：" + after.Describe());
+	Expect(after.Describe().Contains("依赖链是齐的"), "过期不该把「齐了」改说成「缺」：" + after.Describe());
+	Expect(after.DefaultChecked.Count == 0, "过期**不预勾**：重出多少件由用户自己定");
+	Expect(after.ToText(null).Contains("[产物过期]"), "文本版要有这一节");
+	Expect(after.ToText(null).Contains("分镜 1"), "文本版要点名是哪个节点");
+	Expect(after.EstimateCost(null).Contains("重出"), "花钱那句要提一句重出这笔账：" + after.EstimateCost(null));
+
+	// 老产物（一条依据都没记过）：判不出过期与否，但必须说清「判断不了」，
+	// 否则用户看到「0 处过期」会以为这个功能没生效。
+	WorkflowNode legacy = new WorkflowNode { Title = "老分镜", Category = NodeCategory.Storyboard };
+	legacy.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+	legacy.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://old.png" });
+	canvas.Nodes.Add(legacy);
+	GenerationAuditReport old = GenerationAudit.Build(canvas, legacy, mediaExists: _ => true);
+	Expect(old.StaleCount == 0, "没记过依据的老产物不报过期（宁可漏报也不误报）");
+	Expect(old.UnrecordedBaselineNodes == 1, "但要能说清有几个节点判断不了，实际 " + old.UnrecordedBaselineNodes);
+	Expect(old.Stale.Count == 0 && old.ToText(null).Contains("判断不了"),
+		"文本版要把「判断不了」写出来：" + old.ToText(null));
 }
 
 static void GenerationAuditAsksForTheImageOnTheVariantToo()
