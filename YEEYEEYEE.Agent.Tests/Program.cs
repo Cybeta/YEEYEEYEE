@@ -124,6 +124,7 @@ var tests = new (string Name, Action Run)[]
     ("设置页保存：刚敲的密钥存好后，回显与再保存一次都不能把它擦掉", SaveKeepsWhatTheFormJustTyped),
     ("生成链自检：四层缺口报数与花费预估、预勾只管挡路的那几件、缺失文件不算已出图", GenerationAuditReportsDependencyChain),
     ("生成链自检：图要在「引用（变体）」上，只在节点上出过也算缺口（道具会换样子就出在这）", GenerationAuditAsksForTheImageOnTheVariantToo),
+    ("Agent 建设定节点：没点名实体时按「同类唯一同名」锚上自引用，同名有歧义就不猜", AgentAnchorsSettingNodesToTheirSetting),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
     ("AI 建实体：内容同时落到核心设定与默认变体，引用卡不再空白", AgentEntityContentReachesVariantAndCard),
@@ -8675,6 +8676,56 @@ static void CiphertextFromAnotherPlatformIsReportedUnreadable()
 	Expect(!SecretProtector.IsEncryptedAtRest("sk-proj:abcdef"), "未知前缀更不算真的加密落盘");
 	Expect(SecretProtector.IsProtected("plain:x"), "plain: 是已知前缀");
 	Expect(!SecretProtector.IsEncryptedAtRest("plain:x"), "plain: 不能被算作加密落盘");
+}
+
+static void AgentAnchorsSettingNodesToTheirSetting()
+{
+	// `create_entity` 与 `create_node` 本来是分开的两步：模型没点名实体时，
+	// 设定卡就是一张**没锚的卡**——画布上看着正常，自检却说这件设定「没有承载它的节点」，
+	// 而且那一项不可动作、连预勾都进不去。所以没点名时按「同一种类、名字唯一相同」兜底。
+	WorkflowCanvasState canvas = new WorkflowCanvasState();
+	AgentActionExecutor.Apply(new[]
+	{
+		new AgentAction { Kind = "create_entity", EntityKind = "角色", Title = "林澈", Content = "十九岁" },
+		new AgentAction { Kind = "create_node", NodeCategory = "角色", Title = "角色 · 林澈" }
+	}, canvas, null);
+
+	WorkflowEntity linche = canvas.Entities.Single((WorkflowEntity item) => item.Name == "林澈");
+	WorkflowNode characterNode = canvas.Nodes.Single((WorkflowNode item) => item.Category == NodeCategory.Character);
+	Expect(characterNode.References.Count == 1, "设定节点要带上自引用，实际 " + characterNode.References.Count);
+	Expect(characterNode.References[0].EntityId == linche.Id && characterNode.References[0].VariantId == linche.Variants[0].Id,
+		"要锚到那件设定与它的默认变体上");
+
+	// 标题只写名字（「听雨铃」）也要认——两种写法都常见。
+	WorkflowCanvasState canvas2 = new WorkflowCanvasState();
+	AgentActionExecutor.Apply(new[]
+	{
+		new AgentAction { Kind = "create_entity", EntityKind = "道具", Title = "听雨铃", Content = "铜铃" },
+		new AgentAction { Kind = "create_node", NodeCategory = "道具", Title = "听雨铃" }
+	}, canvas2, null);
+	Expect(canvas2.Nodes.Single((WorkflowNode item) => item.Category == NodeCategory.Prop).References.Count == 1,
+		"标题只写名字时也要锚上");
+
+	// 同名有多个：不猜。锚错比不锚更坏——自检会以为这件设定有图，而节点画的其实是另一个。
+	WorkflowCanvasState canvas3 = new WorkflowCanvasState();
+	canvas3.Entities.Add(new WorkflowEntity { Kind = EntityKind.Scene, Name = "雨巷" });
+	canvas3.Entities.Add(new WorkflowEntity { Kind = EntityKind.Scene, Name = "雨巷" });
+	AgentActionExecutor.Apply(new[] { new AgentAction { Kind = "create_node", NodeCategory = "场景", Title = "场景 · 雨巷" } }, canvas3, null);
+	Expect(canvas3.Nodes.Single((WorkflowNode item) => item.Category == NodeCategory.Scene).References.Count == 0,
+		"同名有歧义时不猜，宁可留在「认不出」的状态");
+
+	// 名字对不上、以及非设定类节点：都不锚。分镜的引用只来自 entityTargets，不靠名字。
+	WorkflowCanvasState canvas4 = new WorkflowCanvasState();
+	canvas4.Entities.Add(new WorkflowEntity { Kind = EntityKind.Character, Name = "林澈" });
+	AgentActionExecutor.Apply(new[]
+	{
+		new AgentAction { Kind = "create_node", NodeCategory = "角色", Title = "角色 · 沈砚" },
+		new AgentAction { Kind = "create_node", NodeCategory = "分镜", Title = "分镜 · 林澈" }
+	}, canvas4, null);
+	Expect(canvas4.Nodes.Single((WorkflowNode item) => item.Category == NodeCategory.Character).References.Count == 0,
+		"名字对不上就不锚");
+	Expect(canvas4.Nodes.Single((WorkflowNode item) => item.Category == NodeCategory.Storyboard).References.Count == 0,
+		"这条兜底只管设定类节点：分镜的引用只来自 entityTargets，不靠名字");
 }
 
 static void GenerationAuditAsksForTheImageOnTheVariantToo()

@@ -545,6 +545,10 @@ public static class AgentActionExecutor
                 if (node.Category == NodeCategory.StoryPlan && string.IsNullOrWhiteSpace(action.Title))
                     node.Title = "剧情概括";
                 if (ApplyReferences(canvas, action, node, replace: false) is { } referenceError) return referenceError;
+                // 设定类节点必须说清「我画的是哪个设定」：自检靠这条引用认出**承载它的节点**
+                // （`GenerationAudit.CarriersOfReferences`），认不出的会被判成「只能到引用画廊补图」，
+                // 而且因为不可动作、连预勾都进不去——一件道具有没有图，报告就说不到点子上。
+                if (node.References.Count == 0 && IsSettingCategory(node.Category)) AnchorSettingNode(canvas, node);
                 if (string.IsNullOrWhiteSpace(node.Chapter))
                     node.Chapter = FindInheritedChapter(canvas, action.ParentTarget);
                 if (AttachWorkTreeAnchor(canvas, action.WorkTreeTarget, node) is { } anchorError) return anchorError;
@@ -1268,6 +1272,46 @@ public static class AgentActionExecutor
     /// <c>entityTargets</c> 是一组名称，各自跟随实体的第一个变体与当前版本——
     /// 用来表达「这一镜出现谁、在哪、用什么」，角色/场景/道具因此不必再各占一个画布节点。
     /// </summary>
+    private static bool IsSettingCategory(NodeCategory category) =>
+        category is NodeCategory.Character or NodeCategory.Scene or NodeCategory.Prop;
+
+    /// <summary>
+    /// 把设定类节点锚到它画的那件设定上（模型没点名实体时的那条兜底）。
+    ///
+    /// 为什么需要：`create_entity` 建实体、`create_node` 建节点，两者本来是分开的两步。
+    /// 模型照规矩给了 `entityTarget` 时没问题，**没给就是一张没锚的设定卡**——画布上看着
+    /// 一切正常，自检却说这件设定「没有承载它的节点」。
+    ///
+    /// 只认**同一种类下名字唯一相同**的那种：节点标题既试整条，也试「·」后面那截
+    /// （「角色 · 林澈」与「林澈」两种写法都常见）。同名有多个时**不猜**——
+    /// 锚错比不锚更坏：自检会以为这件设定有图，而节点画的其实是另一个人。
+    /// </summary>
+    private static void AnchorSettingNode(WorkflowCanvasState canvas, WorkflowNode node)
+    {
+        var kind = node.Category switch
+        {
+            NodeCategory.Character => EntityKind.Character,
+            NodeCategory.Scene => EntityKind.Scene,
+            _ => EntityKind.Prop
+        };
+
+        var candidates = new List<string> { node.Title.Trim() };
+        var separator = node.Title.LastIndexOf('·');
+        if (separator >= 0 && separator < node.Title.Length - 1) candidates.Add(node.Title[(separator + 1)..].Trim());
+
+        var matches = canvas.Entities
+            .Where(entity => entity.Kind == kind)
+            .Where(entity => candidates.Any(candidate =>
+                candidate.Length > 0 && string.Equals(entity.Name, candidate, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        if (matches.Count != 1) return;
+
+        var variant = matches[0].Variants.FirstOrDefault();
+        if (variant is null) return;
+
+        node.References.Add(new NodeReference { EntityId = matches[0].Id, VariantId = variant.Id });
+    }
+
     private static string? ApplyReferences(WorkflowCanvasState canvas, AgentAction action, WorkflowNode node, bool replace)
     {
         var many = action.EntityTargets.Where(name => !string.IsNullOrWhiteSpace(name)).ToList();
