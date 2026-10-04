@@ -8,10 +8,15 @@
 # 数据都在 yeeeyee-data 这个卷里（账号、任务、资产、场景）。要清空重来：
 #   docker compose down -v
 #
+# 起完之后先看一眼启动日志里的那串**初始化令牌**（没设 YEEYEEYEE_SETUP_TOKEN 时由程序自己生成）：
+#   docker compose logs web | Select-String 初始化令牌
+# 建第一个管理员时要填它。建完就作废。
+#
 # 两个要留意的地方，写在下面各段旁边：
-# ① 暴露到公网之前，请设 YEEYEEYEE_SETUP_TOKEN，否则谁先打开页面谁就是管理员。
+# ① 这串令牌是「谁先建号谁就是管理员」那道门的钥匙。**准备暴露到公网时，请自己设
+#    YEEYEEYEE_SETUP_TOKEN**（放在同目录的 .env 里），别用自动生成的那串。
 # ② 默认用的是「独立场景」模式（一个 scene.json），方便先跑起来看；
-#    要编辑桌面项目里的真画布，把 PROJECT_DIR 指向项目目录并按注释改环境变量。
+#    要编辑桌面项目里的真画布，按下面 ② 那段的说明换过来。
 
 services:
   web:
@@ -22,16 +27,25 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # ① 首次建号的闸门。设了它之后，/api/auth/setup 必须带 X-Setup-Token 才能建管理员。
-      #    不设也能用，但那样任何能访问到这个端口的人都能抢先把管理员建走。
+      # ① 首次建号的闸门。设了它之后，/api/auth/setup 必须带 X-Setup-Token 才能建管理员；
+      #    不设的话，程序在**首次启动时自己生成**一串随机令牌（打在启动日志里，也写在账号库旁边），
+      #    建出第一个管理员就作废——所以「谁先打开页面谁就是管理员」这条抢注路已经堵上了。
+      #    要长期部署、尤其要暴露到公网的话，还是自己设一个：这样重启、换卷都还是那把钥匙。
       YEEYEEYEE__SetupToken: "${YEEYEEYEE_SETUP_TOKEN:-}"
 
       # ② 默认：独立场景模式。容器起来就有一个可编辑的画布，文件在卷里。
+      #    这条路**不需要**宿主上的任何准备，适合先跑起来看看；代价是它编辑的不是桌面项目里的画布。
       YEEYEEYEE__AllowStandaloneWebScene: "true"
       YEEYEEYEE__WebScenePath: "/data/scene.json"
 
-      # 若要改成编辑桌面项目的画布：注释掉上面两行，把下面的打开，并在 volumes 里挂载项目目录。
-      # 注意服务端是**以非 root 用户**读写的，挂进来的目录要对它可写。
+      # 若要改成**编辑桌面项目里的真画布**（浏览器与桌面端编辑同一份），做三件事：
+      #   1) 注释掉上面那两行；
+      #   2) 打开下面两个变量，路径按你挂进容器的位置写；
+      #   3) 打开 volumes 里那行挂载，并**去掉末尾的 :ro**——
+      #      服务端要能写画布（保存、落位、连线都写这个文件），挂成只读会让保存以「被拒」的形式失败，
+      #      而那个报错不会告诉你「是挂载权限的问题」。同一个卷上的 project/entities.json 是共享资源库，
+      #      也必须可写。
+      # 另外：容器里的服务以**非 root 用户**跑，挂进来的目录要对它可写。
       # YEEYEEYEE__ProjectCanvasPath: "/project/canvases/main.json"
       # YEEYEEYEE__ProjectEntitiesPath: "/project/project/entities.json"
 
@@ -40,7 +54,8 @@ services:
       YEEYEEYEE__WebToken: ""
     volumes:
       - yeeeyee-data:/data
-      # - ${PROJECT_DIR:-./}:/project:ro   # 用项目画布模式时打开它
+      # 用「读桌面项目」那条路时打开它，**记得去掉 :ro**（见上面 ② 的说明）。
+      # - ${PROJECT_DIR:-./}:/project
 
 volumes:
   yeeeyee-data:

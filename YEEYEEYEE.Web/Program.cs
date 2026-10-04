@@ -61,7 +61,7 @@ var canvasDistPath = string.IsNullOrWhiteSpace(configuredCanvasDist)
 // 守卫必须在场景/技能接口之前注册：它把身份解析成 <see cref="WebAccessGuard.PermissionsItem"/>，
 // 后面的写入判断靠它。
 WebAccessGuard.Map(app, users);
-AuthApi.Map(app, users);
+AuthApi.Map(app, users, userDatabasePath);
 WebSceneApi.Map(app);
 // 编辑锁紧挨着场景接口注册：它按 WebCanvasMode 解出同一张画布，把锁文件放到画布旁边。
 EditLeaseApi.Map(app);

@@ -72,7 +72,9 @@ export function SessionPanel({ state, onChanged }: { state: AuthState; onChanged
         <label>显示名（可留空）<input value={displayName} autoComplete="off" onChange={(event) => setDisplayName(event.target.value)} placeholder="留空就用用户名" /></label>
         <label>口令<input type="password" value={password} autoComplete="new-password" onChange={(event) => setPassword(event.target.value)} placeholder={`至少 ${state.passwordMinLength} 位`} /></label>
         <label>再输一次<input type="password" value={confirm} autoComplete="new-password" onChange={(event) => setConfirm(event.target.value)} /></label>
-        {state.setupTokenRequired && <label>初始化令牌<input value={setupToken} autoComplete="off" onChange={(event) => setSetupToken(event.target.value)} placeholder="部署时配置的 X-Setup-Token" /></label>}
+        {/* 没配部署令牌时，这串是服务**首次启动自己生成**的：要么看启动日志（容器里是
+            `docker compose logs web`），要么看账号库旁边那个 .setup-token 文件。建完就作废。 */}
+        {state.setupTokenRequired && <label>初始化令牌<input value={setupToken} autoComplete="off" onChange={(event) => setSetupToken(event.target.value)} placeholder="首次启动日志里的那串，或部署时配置的令牌" /></label>}
         <button type="submit" disabled={busy}>{busy ? '正在建立…' : '建号并登录'}</button>
       </form>
       <p className={`web-notice ${notice.kind}`} role="status">{notice.message}</p>

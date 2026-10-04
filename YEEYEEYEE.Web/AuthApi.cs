@@ -31,8 +31,15 @@ internal static class AuthApi
 
     private sealed record Attempt(int Failures, DateTimeOffset Until);
 
-    public static void Map(WebApplication app, UserStore users)
+    public static void Map(WebApplication app, UserStore users, string? userDatabasePath = null)
     {
+        // 首次启动的钥匙（见 BootstrapToken）：**没配部署令牌时**由程序生成一把，
+        // 打在这里、同时写在账号库旁边，建出第一个管理员就作废。
+        // 放在 Map 里做是因为这里是「服务起来」那一步，且它同时知道账号库路径与已有账号数。
+        var configuredToken = LegacyConfig.Text(app.Configuration, "SetupToken");
+        var banner = BootstrapToken.Ensure(userDatabasePath, users.CountUsers(), !string.IsNullOrWhiteSpace(configuredToken));
+        if (banner.Length > 0) Console.WriteLine(banner);
+
         app.MapGet("/api/auth/state", (HttpContext context) =>
         {
             var current = WebAccessGuard.CurrentUser(context);
@@ -53,12 +60,15 @@ internal static class AuthApi
                 return Task.FromResult(Results.Json(new
                 {
                     code = "SETUP_TOKEN_REQUIRED",
-                    message = "首次建号需要部署时配置的初始化令牌（请求头 X-Setup-Token）"
+                    message = "首次建号需要初始化令牌：部署时设的 YEEYEEYEE_SETUP_TOKEN，"
+                        + "或首次启动日志里那串（请求头 X-Setup-Token）"
                 }, statusCode: StatusCodes.Status403Forbidden));
 
             var result = users.CreateFirstAdmin(body.Username ?? "", body.Password ?? "", body.DisplayName);
             if (result.Status != UserWriteStatus.Ok || result.User is null)
                 return Task.FromResult(FromUserStatus(result.Status, result.Error));
+            // 管理员建出来了：这把一次性钥匙就此作废（文件与内存一起清）。
+            BootstrapToken.Consume();
             return Task.FromResult(SignedIn(users, context, result.User));
         });
 
@@ -240,15 +250,18 @@ internal static class AuthApi
         (username ?? "").Trim().ToLowerInvariant() + "|" + (context.Connection.RemoteIpAddress?.ToString() ?? "unknown");
 
     /// <summary>
-    /// 部署时配置的初始化令牌；**空字符串按「没配」算**。
-    /// 这条不是洁癖：`docker compose` 里习惯写 <c>${YEEYEEYEE_SETUP_TOKEN:-}</c>，
-    /// 没设变量时传进来就是一个空串。若把它当成「配了令牌」，
-    /// 界面会多出一个谁也填不出的初始化令牌输入框，首次建号直接卡死。
+    /// 首次建号要的那把令牌：**部署时配的优先**，没配就用首次启动生成的那把一次性钥匙。
+    /// 两处都空按「没要求」算。
+    ///
+    /// 空字符串按「没配」算这条不是洁癖：`docker compose` 里习惯写 <c>${YEEYEEYEE_SETUP_TOKEN:-}</c>，
+    /// 没设变量时传进来就是一个空串。若把它当成「配了令牌」，界面会多出一个谁也填不出的初始化令牌输入框，
+    /// 首次建号直接卡死。
     /// </summary>
     private static string? SetupToken(WebApplication app)
     {
         var token = LegacyConfig.Text(app.Configuration, "SetupToken");
-        return string.IsNullOrWhiteSpace(token) ? null : token;
+        if (!string.IsNullOrWhiteSpace(token)) return token;
+        return BootstrapToken.Current;
     }
 
     private static object Describe(WebUser user) => new

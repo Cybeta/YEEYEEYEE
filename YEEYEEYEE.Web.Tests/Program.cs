@@ -93,6 +93,20 @@ async Task<JsonElement> Check(HttpClient client, HttpMethod method, string path,
     return result;
 }
 void Assert(bool condition, string message) { if (!condition) throw new Exception(message); }
+// 首次建号要带初始化令牌：没配部署令牌时，那串是服务**首次启动时自己生成**的，
+// 就写在账号库旁边（见 BootstrapToken）；真机上是人从 `docker compose logs` 里抄下来。
+// 这个助手把它读出来带上——不然所有「先在空库上建个管理员」的用例都会撞在 403 上。
+async Task<JsonElement> Setup(HttpClient client, string json, int status = 200)
+{
+    var tokenFile = Path.Combine(root, ".setup-token");
+    using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/setup")
+        { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+    if (File.Exists(tokenFile)) request.Headers.Add("X-Setup-Token", File.ReadAllText(tokenFile).Trim());
+    using var response = await client.SendAsync(request);
+    var text = await response.Content.ReadAsStringAsync();
+    if ((int)response.StatusCode != status) throw new Exception($"POST /api/auth/setup: {(int)response.StatusCode} expected {status}: {text}");
+    return JsonDocument.Parse(text).RootElement.Clone();
+}
 async Task WaitForEditClaim(HttpClient client, string recordId, bool allowed)
 {
     for (var i = 0; i < 100; i++)
@@ -411,14 +425,14 @@ try
     // 建号前打场景接口：应当是「未登录」，不是「令牌无效」。
     Assert((await Check(admin, HttpMethod.Get, "/api/web/scene", 401)).GetProperty("code").GetString() == "UNAUTHORIZED", "未登录的读应当回 401");
 
-    await Check(admin, HttpMethod.Post, "/api/auth/setup", 400, "{\"username\":\"lin\",\"password\":\"short\"}");
-    Assert((await Check(admin, HttpMethod.Post, "/api/auth/setup", 400, "{\"username\":\"林晚\",\"password\":\"longenough\"}")).GetProperty("code").GetString() == "INVALID_USERNAME", "非法用户名要挡住");
-    var created = await Check(admin, HttpMethod.Post, "/api/auth/setup", 200, "{\"username\":\"lin\",\"password\":\"longenough\",\"displayName\":\"林晚\"}");
+    await Setup(admin, "{\"username\":\"lin\",\"password\":\"short\"}", 400);
+    Assert((await Setup(admin, "{\"username\":\"林晚\",\"password\":\"longenough\"}", 400)).GetProperty("code").GetString() == "INVALID_USERNAME", "非法用户名要挡住");
+    var created = await Setup(admin, "{\"username\":\"lin\",\"password\":\"longenough\",\"displayName\":\"林晚\"}");
     Assert(created.GetProperty("user").GetProperty("role").GetString() == "Admin", "第一个用户必须是管理员");
     var adminId = created.GetProperty("user").GetProperty("id").GetGuid();
 
     // 再建一次：必须 409，不能靠「先到先得」被第二个人抢成管理员。
-    await Check(admin, HttpMethod.Post, "/api/auth/setup", 409, "{\"username\":\"other\",\"password\":\"longenough\"}");
+    await Setup(admin, "{\"username\":\"other\",\"password\":\"longenough\"}", 409);
 
     // 会话 cookie 本身就是身份：不带 Bearer 也能读、也能改。
     var sceneBySession = await Check(admin, HttpMethod.Get, "/api/web/scene", 200);
@@ -498,18 +512,76 @@ try
         Assert((int)response.StatusCode == 200, "带了正确的初始化令牌应当能建号：" + await response.Content.ReadAsStringAsync());
     }
 
-    // 但**空字符串的初始化令牌必须按「没配」算**：docker compose 里写 ${VAR:-} 时，
-    // 变量没设传进来的就是一个空串。若当成「配了令牌」，界面会多出一个谁也填不出的
-    // 初始化令牌输入框，首次建号直接卡死——这条是真机上跑容器时踩到的。
+    // 但**空字符串的初始化令牌按「没配」算**：docker compose 里写 ${VAR:-} 时，
+    // 变量没设传进来的就是一个空串。若当成「配了令牌」，界面会多出一个谁也填不出的输入框。
+    // 「没配」现在是这个意思：**程序自己生成一把一次性钥匙**（见 BootstrapToken）——
+    // 钥匙打在启动日志里、也写在账号库旁边，建出第一个管理员就作废。
+    // 这样「谁先打开页面谁就是管理员」这条抢注路被堵上，而 docker compose up 仍然零准备可用。
     Stop();
     var blankTokenDatabase = Path.Combine(root, "users-blank-token.db");
     if (File.Exists(blankTokenDatabase)) File.Delete(blankTokenDatabase);
+    // 文件名照 BootstrapToken.FileName 写（测试工程看不到那个 internal 类型）：
+    // 放账号库旁边一个点开头的文件。
+    var tokenFile = Path.Combine(root, ".setup-token");
+    if (File.Exists(tokenFile)) File.Delete(tokenFile);
     await Start(userDatabase: blankTokenDatabase, setupToken: "");
     using var blank = CookieClient();
-    Assert(!(await Check(blank, HttpMethod.Get, "/api/auth/state", 200)).GetProperty("setupTokenRequired").GetBoolean(),
-        "空令牌不该被当成已配置");
-    Assert((await Check(blank, HttpMethod.Post, "/api/auth/setup", 200, "{\"username\":\"lin\",\"password\":\"longenough\"}"))
-        .GetProperty("user").GetProperty("role").GetString() == "Admin", "空令牌下首次建号应当直接成功");
+    Assert((await Check(blank, HttpMethod.Get, "/api/auth/state", 200)).GetProperty("setupTokenRequired").GetBoolean(),
+        "没配部署令牌时要让界面要求填初始化令牌（那串由程序生成）");
+    Assert(File.Exists(tokenFile), "一次性钥匙要写在账号库旁边，日志滚掉了还能从文件里捞");
+    var bootstrap = File.ReadAllText(tokenFile).Trim();
+    Assert(bootstrap.Length >= 16, "生成的令牌不能太短：" + bootstrap);
+    Assert((await Check(blank, HttpMethod.Post, "/api/auth/setup", 403, "{\"username\":\"lin\",\"password\":\"longenough\"}"))
+        .GetProperty("code").GetString() == "SETUP_TOKEN_REQUIRED", "不带令牌建号必须被拒（这条挡的就是抢注）");
+    Assert((await Check(blank, HttpMethod.Post, "/api/auth/setup", 403,
+        "{\"username\":\"lin\",\"password\":\"longenough\"}")).GetProperty("message").GetString()!.Contains("初始化令牌"),
+        "拒绝理由要说清去哪儿找令牌");
+    using (var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/setup"))
+    {
+        request.Content = new StringContent("{\"username\":\"lin\",\"password\":\"longenough\"}", Encoding.UTF8, "application/json");
+        request.Headers.Add("X-Setup-Token", bootstrap);
+        using var response = await blank.SendAsync(request);
+        Assert((int)response.StatusCode == 200, "带着那把一次性钥匙应当能建号：" + await response.Content.ReadAsStringAsync());
+    }
+    // 用过了就作废：文件删掉，界面也不再要求填它。
+    Assert(!File.Exists(tokenFile), "建出管理员之后这把钥匙必须作废（文件要删掉）");
+    using var afterSetup = CookieClient();
+    Assert(!(await Check(afterSetup, HttpMethod.Get, "/api/auth/state", 200)).GetProperty("setupTokenRequired").GetBoolean(),
+        "作废之后界面不该再要求填初始化令牌");
+    Assert((await Check(afterSetup, HttpMethod.Post, "/api/auth/setup", 409, "{\"username\":\"lin2\",\"password\":\"longenough\"}"))
+        .GetProperty("code").GetString() == "SETUP_ALREADY_DONE", "已经有管理员了就不该再建第二个");
+
+    // 重启之后不该换钥匙：用户手上只有上一次日志里那串。
+    Stop();
+    var reusedDatabase = Path.Combine(root, "users-bootstrap-reuse.db");
+    if (File.Exists(reusedDatabase)) File.Delete(reusedDatabase);
+    if (File.Exists(tokenFile)) File.Delete(tokenFile);
+    await Start(userDatabase: reusedDatabase, setupToken: "");
+    var firstKey = File.ReadAllText(tokenFile).Trim();
+    Stop();
+    await Start(userDatabase: reusedDatabase, setupToken: "");
+    Assert(File.ReadAllText(tokenFile).Trim() == firstKey, "重启不该换钥匙，否则刚抄下来的那串立刻作废");
+    using (var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/setup"))
+    {
+        request.Content = new StringContent("{\"username\":\"lin\",\"password\":\"longenough\"}", Encoding.UTF8, "application/json");
+        request.Headers.Add("X-Setup-Token", firstKey);
+        using var response = await CookieClient().SendAsync(request);
+        Assert((int)response.StatusCode == 200, "重启后那把钥匙仍应能用：" + await response.Content.ReadAsStringAsync());
+    }
+
+    // 部署者自己配了令牌时，这套一次性钥匙完全不参与：用配的那把，而且**不生成文件**。
+    Stop();
+    var ownedDatabase = Path.Combine(root, "users-owned-token.db");
+    if (File.Exists(ownedDatabase)) File.Delete(ownedDatabase);
+    await Start(userDatabase: ownedDatabase, setupToken: "deploy-secret");
+    Assert(!File.Exists(tokenFile), "配了部署令牌时不该再生成一次性钥匙");
+    using (var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/setup"))
+    {
+        request.Content = new StringContent("{\"username\":\"lin\",\"password\":\"longenough\"}", Encoding.UTF8, "application/json");
+        request.Headers.Add("X-Setup-Token", "deploy-secret");
+        using var response = await CookieClient().SendAsync(request);
+        Assert((int)response.StatusCode == 200, "部署令牌仍应能用：" + await response.Content.ReadAsStringAsync());
+    }
     // ---------- 编辑锁：谁在编辑、粒度、冲突、心跳、过期、强制接管 ----------
     // 锁是**会话状态**，不是文档内容：挨着画布放在 <画布>.edits.json，不写进画布文件。
     // 所以这里也断言它**不碰画布字节**。
@@ -522,7 +594,7 @@ try
     await Start(userDatabase: leaseDatabase);
 
     using var boss = CookieClient();
-    await Check(boss, HttpMethod.Post, "/api/auth/setup", 200, "{\"username\":\"lin\",\"password\":\"longenough\",\"displayName\":\"林晚\"}");
+    await Setup(boss, "{\"username\":\"lin\",\"password\":\"longenough\",\"displayName\":\"林晚\"}");
     await Check(boss, HttpMethod.Post, "/api/auth/users", 200, "{\"username\":\"chenmo\",\"password\":\"longenough\",\"displayName\":\"陈默\",\"role\":\"Editor\"}");
     await Check(boss, HttpMethod.Post, "/api/auth/users", 200, "{\"username\":\"suli\",\"password\":\"longenough\",\"displayName\":\"苏黎\",\"role\":\"Viewer\"}");
     using var mate = CookieClient();
@@ -701,7 +773,7 @@ try
     await Start(projectCanvas: layoutCanvas, userDatabase: layoutDatabase);
 
     using var arranger = CookieClient();
-    await Check(arranger, HttpMethod.Post, "/api/auth/setup", 200, "{\"username\":\"lin\",\"password\":\"longenough\",\"displayName\":\"林晚\"}");
+    await Setup(arranger, "{\"username\":\"lin\",\"password\":\"longenough\",\"displayName\":\"林晚\"}");
     await Check(arranger, HttpMethod.Post, "/api/auth/users", 200, "{\"username\":\"suli\",\"password\":\"longenough\",\"role\":\"Viewer\"}");
     await Check(arranger, HttpMethod.Post, "/api/auth/users", 200, "{\"username\":\"chenmo\",\"password\":\"longenough\",\"displayName\":\"陈默\",\"role\":\"Editor\"}");
     using var viewerOnly = CookieClient();
