@@ -14,8 +14,42 @@ public static class UpdateService
     /// <summary>下载更新包：给足时间，真正的取消交给令牌。</summary>
     private static readonly HttpClient DownloadClient = new() { Timeout = TimeSpan.FromMinutes(30) };
 
-    public static Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default) =>
-        UpdateChecker.CheckAsync(CheckClient, AppVersion.Current, UpdateChecker.DefaultRepository, cancellationToken);
+    public static async Task<UpdateCheckResult> CheckAsync(
+        bool force = false,
+        CancellationToken cancellationToken = default,
+        string? cacheDirectory = null)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var cache = UpdateCheckStore.Load(cacheDirectory);
+        var decision = UpdateCheckPolicy.Decide(cache, force, now);
+
+        // 已知还在限流窗口里：连问都不问，直接如实说等到什么时候（不去撞那一下下线）。
+        if (decision.Kind == UpdateCheckDecisionKind.WaitForRateLimit)
+            return new UpdateCheckResult(
+                UpdateCheckState.Failed, AppVersion.Current, null, null, decision.Note, cache?.RateLimitedUntil);
+
+        // 六小时内查过：拿上次读到的事实重算一遍结论，并把「这是缓存」说清楚——
+        // 不说的话，用户会以为这就是刚刚的结果。
+        if (decision.Kind == UpdateCheckDecisionKind.UseCache && cache is { } remembered)
+        {
+            var reused = UpdateChecker.Evaluate(AppVersion.Current, remembered.Release);
+            return reused with { Message = $"{reused.Message}（{decision.Note}）" };
+        }
+
+        var result = await UpdateChecker.CheckAsync(
+            CheckClient, AppVersion.Current, UpdateChecker.DefaultRepository, cancellationToken);
+
+        // 只把「问到过」与「被限流」记下来：
+        // · 问到过（含「还没有发行版」）→ 事实留着，六小时内不再问；
+        // · 被限流 → 记住重置时间，这段时间连问都不问；**上一次的事实继续留着**（它只是旧了几小时）；
+        // · 网络不通那种**不缓存**：那是本机或线路的一时问题，下次启动该再试一次。
+        if (result.RateLimitedUntil is { } until)
+            UpdateCheckStore.Save(new UpdateCheckCache(cache?.CheckedAt ?? default, cache?.Release, until), cacheDirectory);
+        else if (result.State != UpdateCheckState.Failed)
+            UpdateCheckStore.Save(new UpdateCheckCache(now, result.Release, null), cacheDirectory);
+
+        return result;
+    }
 
     public static Task<UpdatePackage> DownloadAsync(
         ReleaseAsset asset,

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Drawing;
 using System.Net;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -60,6 +61,10 @@ var tests = new (string Name, Action Run)[]
     ("项目根不随构建配置变：跑 Debug 也落在 bin 的 Release 输出下", ProjectsRootDoesNotFollowBuildConfiguration),
     ("更新：版本标签解析（带 v / 两段式 / 预发布后缀 / 看不懂要报错）", VersionTagParsing),
     ("更新：发行版比对（有新版 / 已最新 / 本地更新 / 看不懂的标签与坏 JSON 都报失败）", UpdateCheckComparesVersionsAndReportsFailures),
+    ("更新：每小时 60 次的额度（六小时内用缓存、限流窗口里连问都不问、手动点不受挡）", UpdateCheckPolicyUsesCacheAndHonoursRateLimit),
+    ("更新：被限流时读 Retry-After / X-RateLimit-Reset 算重置时间，读不到就不编", UpdateCheckerReadsRetryAfterHeader),
+    ("更新：缓存落盘能原样转一圈，坏了当成没有（不拦启动）", UpdateCheckStoreRoundTrips),
+    ("更新：启动路径遇到限流窗口只会说清等到什么时候，不撞那一下", UpdateCheckPolicyKeepsStartupCheap),
     ("更新：重启标记能原样存回（前一版 / 目标版 / 更新内容）", UpdateMarkerRoundTrips),
     ("更新：替换脚本只含 ASCII（PS5 会把无 BOM 的 UTF-8 当 ANSI 读）", UpdateSwapScriptIsAsciiOnly),
     ("更新：替换脚本实测——真换掉一个目录并留下结果文件", UpdateSwapScriptActuallyReplacesDirectory),
@@ -8230,6 +8235,132 @@ static void UpdateCheckComparesVersionsAndReportsFailures()
 	Expect(noPackage.State == UpdateCheckState.UpdateAvailable, "包名不相关时仍然是有新版");
 	Expect(UpdateChecker.FindPackage(noPackage.Release) is null, "没有 zip 也没有 exe 时挑不出更新包");
 	Expect(UpdateChecker.FindPackage(null) is null, "没有发行版信息时挑不出更新包");
+
+	// 用缓存复用事实时，结论必须与现场解析**一模一样**：结论只有一处算法（Evaluate），
+	// 两处各算一次的话，缓存那条路迟早说出一句不一样的话。
+	Expect(UpdateChecker.Evaluate(new Version(0, 1, 0), available.Release).State == UpdateCheckState.UpdateAvailable,
+		"拿同一份发行版信息重算，结论要一样");
+	Expect(UpdateChecker.Evaluate(new Version(0, 1, 0), null).Message.Contains("还没有发布任何发行版"),
+		"没有发行版信息时说的是「还没有发布」，不是「已经是最新」");
+}
+
+/// <summary>
+/// 更新检查的次数额度：`/releases/latest` 是未认证接口，每 IP 每小时 60 次。
+/// 反复启动的程序很容易烧光，之后每次启动只剩一句「次数用完了」——像是「这软件不更新了」。
+/// 所以：六小时内查过就用缓存；已知还在限流窗口里就连问都不问。
+/// </summary>
+static void UpdateCheckPolicyUsesCacheAndHonoursRateLimit()
+{
+	var now = DateTimeOffset.UtcNow;
+
+	// 什么都没查过 → 去问
+	Expect(UpdateCheckPolicy.Decide(null, force: false, now).Kind == UpdateCheckDecisionKind.AskGitHub, "没有缓存就去问");
+	Expect(UpdateCheckPolicy.Decide(null, force: true, now).Kind == UpdateCheckDecisionKind.AskGitHub, "手动点也去问");
+
+	var fresh = new UpdateCheckCache(now - TimeSpan.FromHours(1), new ReleaseInfo("v0.9.0", "n", "b", "u", now, new List<ReleaseAsset>()), null);
+	var decision = UpdateCheckPolicy.Decide(fresh, force: false, now);
+	Expect(decision.Kind == UpdateCheckDecisionKind.UseCache, "一小时前查过就用缓存");
+	Expect(decision.Note.Contains("六小时内不重复问"), "要说明为什么不是刚刚查的：" + decision.Note);
+	Expect(UpdateCheckPolicy.Decide(fresh, force: true, now).Kind == UpdateCheckDecisionKind.AskGitHub,
+		"手动点不被缓存挡住");
+
+	var stale = new UpdateCheckCache(now - TimeSpan.FromHours(7), fresh.Release, null);
+	Expect(UpdateCheckPolicy.Decide(stale, force: false, now).Kind == UpdateCheckDecisionKind.AskGitHub, "超过六小时要重新问");
+
+	// 限流窗口：连问都不问，而且**优先级高于缓存新鲜度**——不能拿一份旧缓存去假装「刚查过」
+	var limited = new UpdateCheckCache(now - TimeSpan.FromMinutes(5), fresh.Release, now.AddMinutes(30));
+	var wait = UpdateCheckPolicy.Decide(limited, force: false, now);
+	Expect(wait.Kind == UpdateCheckDecisionKind.WaitForRateLimit, "还在限流窗口里就别去撞那一下：" + wait.Kind);
+	Expect(wait.Note.Contains("限流") && wait.Note.Contains("手动点"), "要说清等到什么时候、以及可以手动不等：" + wait.Note);
+	Expect(UpdateCheckPolicy.Decide(limited, force: true, now).Kind == UpdateCheckDecisionKind.AskGitHub,
+		"用户坚持要查就查（重置时间也可能是服务端随口给的）");
+
+	Expect(UpdateCheckPolicy.Decide(new UpdateCheckCache(default, null, now.AddMinutes(-1)), force: false, now).Kind
+		== UpdateCheckDecisionKind.AskGitHub, "窗口过去了就该再问");
+
+	// 从没成功问过（只有限流记录）：不能拿它当「有答案的缓存」
+	var neverAnswered = new UpdateCheckCache(default, null, null);
+	Expect(!neverAnswered.HasAnswer && !neverAnswered.IsFresh(now), "CheckedAt 是默认值 = 从没问到过");
+	Expect(UpdateCheckPolicy.Decide(neverAnswered, force: false, now).Kind == UpdateCheckDecisionKind.AskGitHub,
+		"没问到过就不能拿它出结论");
+}
+
+/// <summary>
+/// 被限流时 GitHub 会给出重置时间：优先 `Retry-After`，其次 `X-RateLimit-Reset`（Unix 秒）。
+/// 两个都没有就**不编一个时间**——编出来的时刻会让用户白等。
+/// </summary>
+static void UpdateCheckerReadsRetryAfterHeader()
+{
+	using (var response = new HttpResponseMessage(System.Net.HttpStatusCode.Forbidden))
+	{
+		Expect(UpdateChecker.RetryAfterFrom(response.Headers) is null, "没有任何头时不编时间");
+	}
+
+	using (var response = new HttpResponseMessage(System.Net.HttpStatusCode.Forbidden))
+	{
+		response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(120));
+		var until = UpdateChecker.RetryAfterFrom(response.Headers);
+		Expect(until is not null && Math.Abs((until.Value - DateTimeOffset.UtcNow).TotalSeconds - 120) < 5,
+			"Retry-After（秒）要认，实际 " + until);
+	}
+
+	using (var response = new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests))
+	{
+		var reset = DateTimeOffset.UtcNow.AddMinutes(20);
+		response.Headers.TryAddWithoutValidation("X-RateLimit-Reset", reset.ToUnixTimeSeconds().ToString());
+		var until = UpdateChecker.RetryAfterFrom(response.Headers);
+		Expect(until is not null && Math.Abs((until.Value - reset).TotalSeconds) < 2,
+			"没有 Retry-After 时看 X-RateLimit-Reset，实际 " + until);
+	}
+
+	using (var response = new HttpResponseMessage(System.Net.HttpStatusCode.Forbidden))
+	{
+		response.Headers.TryAddWithoutValidation("X-RateLimit-Reset", "不是数字");
+		Expect(UpdateChecker.RetryAfterFrom(response.Headers) is null, "看不懂的值当作没有");
+	}
+}
+
+/// <summary>
+/// 缓存落在用户配置目录里，读写都要稳：坏了、不存在、写不进去都不能拦住启动。
+/// 这里顺便钉住「事实能原样转一圈」——缓存的是事实（发行版信息），不是结论。
+/// </summary>
+static void UpdateCheckStoreRoundTrips()
+{
+	var directory = NewTempDirectory("update-cache");
+	Expect(UpdateCheckStore.Load(directory) is null, "还没有缓存文件时读回 null");
+
+	var release = new ReleaseInfo(
+		"v0.9.0", "YEEYEEYEE 0.9.0", "改了什么", "https://example.com/r",
+		DateTimeOffset.FromUnixTimeSeconds(1790000000),
+		new List<ReleaseAsset> { new("yeeeyee-win-x64.zip", "https://example.com/a.zip", 123) });
+	var checkedAt = DateTimeOffset.UtcNow.AddMinutes(-3);
+	UpdateCheckStore.Save(new UpdateCheckCache(checkedAt, release, null), directory);
+
+	var loaded = UpdateCheckStore.Load(directory);
+	Expect(loaded is not null, "存进去要能读回来");
+	Expect(loaded!.HasAnswer && Math.Abs((loaded.CheckedAt - checkedAt).TotalSeconds) < 2, "查的时间要原样回来");
+	Expect(loaded.Release?.TagName == "v0.9.0" && loaded.Release?.Assets.Count == 1
+		&& loaded.Release?.Assets[0].Size == 123 && loaded.Release?.HtmlUrl == "https://example.com/r",
+		"发行版信息（含资产）要原样回来，实际 " + loaded.Release);
+
+	// 读回来的事实能直接算出与现场一样的结论
+	Expect(UpdateChecker.Evaluate(new Version(0, 1, 0), loaded.Release).State == UpdateCheckState.UpdateAvailable,
+		"缓存复用的结论要和现场一致");
+
+	File.WriteAllText(UpdateCheckStore.FileIn(directory), "{ 这不是 JSON");
+	Expect(UpdateCheckStore.Load(directory) is null, "缓存文件坏了当作没有缓存，不能让启动读崩");
+}
+
+/// <summary>
+/// 桌面端的「检查更新」入口默认走缓存、手动点才强制——这条口径写在这里是提醒：
+/// 谁改成 `force: true`，就是在替用户烧那个每小时 60 次的额度。
+/// </summary>
+static void UpdateCheckPolicyKeepsStartupCheap()
+{
+	var now = DateTimeOffset.UtcNow;
+	var cache = new UpdateCheckCache(now, null, now.AddMinutes(40));
+	Expect(UpdateCheckPolicy.Decide(cache, force: false, now).Kind == UpdateCheckDecisionKind.WaitForRateLimit,
+		"启动路径遇到限流窗口要说清等到什么时候，而不是去撞一次换一句「失败」");
 }
 
 // 重启后靠这个标记知道「这次更新到底换成了什么」，所以它必须能原样存回来。

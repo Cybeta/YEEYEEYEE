@@ -85,6 +85,8 @@ internal static class UpdateFlow
         {
             // 让启动页先落位：动效还没跑完就弹窗，观感上是「刚打开就被打断」。
             await Task.Delay(TimeSpan.FromMilliseconds(1500));
+            // 启动这一次**不强制**：六小时内查过就用缓存。这个接口是每 IP 每小时 60 次的未认证接口，
+            // 反复启动的程序很容易把额度烧光，之后就只剩「次数用完了」可看。
             var check = await UpdateService.CheckAsync();
             if (!check.HasUpdate) return;
             await PromptAndMaybeInstallAsync(owner, check);
@@ -102,7 +104,8 @@ internal static class UpdateFlow
             owner,
             "检查更新",
             "正在查询最新发行版",
-            (_, token) => UpdateService.CheckAsync(token));
+            // 手动点是明确要求，不受「六小时内查过」的缓存挡：用户要的就是现在这次结果。
+            (_, token) => UpdateService.CheckAsync(force: true, cancellationToken: token));
 
         if (error is not null)
         {

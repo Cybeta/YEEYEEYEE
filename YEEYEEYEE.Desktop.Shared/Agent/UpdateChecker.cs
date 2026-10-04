@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text.Json;
 
 namespace YEEYEEYEE.Desktop;
@@ -33,7 +34,8 @@ public sealed record UpdateCheckResult(
     Version Current,
     Version? Latest,
     ReleaseInfo? Release,
-    string Message)
+    string Message,
+    DateTimeOffset? RateLimitedUntil = null)
 {
     public bool HasUpdate => State == UpdateCheckState.UpdateAvailable;
 }
@@ -41,12 +43,14 @@ public sealed record UpdateCheckResult(
 /// <summary>
 /// 检查有没有新版本：读 GitHub 上这个仓库的**最新发行版**，与当前程序版本比大小。
 ///
-/// 三条刻意的取舍：
+/// 四条刻意的取舍：
 /// 1. **只读 <c>/releases/latest</c>**。这个接口本身就不返回草稿与预发布版，所以不必自己再过滤一遍；
 ///    预发布版不该推给普通用户。
 /// 2. **失败就是失败**。超时、被限流、JSON 变了、标签看不懂——一律返回 Failed 并带上原因，
 ///    绝不降级成「已是最新」。把查不到当成没有新版，是最容易让人以为「这软件不更新了」的写法。
 /// 3. **网络异常不抛出**。调用方是启动流程，检查更新失败不该拦住程序启动。
+/// 4. **被限流时把「什么时候能再问」带回去**（<see cref="UpdateCheckResult.RateLimitedUntil"/>）：
+///    这个额度是每 IP 每小时 60 次，攒着不用才是对的（见 <see cref="UpdateCheckPolicy"/>）。
 /// </summary>
 public static class UpdateChecker
 {
@@ -75,8 +79,14 @@ public static class UpdateChecker
                 return new UpdateCheckResult(UpdateCheckState.UpToDate, current, null, null, "这个仓库还没有发布任何发行版。");
 
             if (response.StatusCode is HttpStatusCode.Forbidden or (HttpStatusCode)429)
+            {
+                var until = RetryAfterFrom(response.Headers);
                 return new UpdateCheckResult(UpdateCheckState.Failed, current, null, null,
-                    "GitHub 拒绝了这个请求（多半是接口调用次数用完了）。过一会儿再试。");
+                    until is { } reset
+                        ? $"GitHub 拒绝了这次请求（多半是接口调用次数用完了）。到 {reset.ToLocalTime():MM-dd HH:mm} 之后会自动再试。"
+                        : "GitHub 拒绝了这个请求（多半是接口调用次数用完了）。过一会儿再试。",
+                    until);
+            }
 
             if (!response.IsSuccessStatusCode)
                 return new UpdateCheckResult(UpdateCheckState.Failed, current, null, null,
@@ -91,6 +101,29 @@ public static class UpdateChecker
         }
     }
 
+    /// <summary>
+    /// 被限流时 GitHub 会告诉我们什么时候可以再问：优先 `Retry-After`（秒或日期），
+    /// 没有就看 `X-RateLimit-Reset`（Unix 秒）。两个都没有就返回 null——**不编一个时间**：
+    /// 编出来的时间会让用户白等，而真正能再问的时刻只有服务端知道。
+    /// </summary>
+    public static DateTimeOffset? RetryAfterFrom(HttpResponseHeaders headers)
+    {
+        ArgumentNullException.ThrowIfNull(headers);
+
+        if (headers.RetryAfter is { } retryAfter)
+        {
+            if (retryAfter.Delta is { } delta && delta > TimeSpan.Zero) return DateTimeOffset.UtcNow + delta;
+            if (retryAfter.Date is { } date && date > DateTimeOffset.UtcNow) return date;
+        }
+
+        if (headers.TryGetValues("X-RateLimit-Reset", out var values)
+            && long.TryParse(values.FirstOrDefault(), out var unix)
+            && unix > 0)
+            return DateTimeOffset.FromUnixTimeSeconds(unix);
+
+        return null;
+    }
+
     /// <summary>把发行版 JSON 与当前版本比一比。单独拆出来是为了能离线喂样本测。</summary>
     public static UpdateCheckResult Compare(Version current, string? json)
     {
@@ -103,6 +136,18 @@ public static class UpdateChecker
         {
             return new UpdateCheckResult(UpdateCheckState.Failed, current, null, null, "发行版接口返回的内容看不懂：" + error.Message);
         }
+
+        return Evaluate(current, release);
+    }
+
+    /// <summary>
+    /// 从「已经读到手的发行版信息」算出结论。与 <see cref="Compare"/> 只差一层解析，
+    /// 所以**用缓存复用时也走这一条**——结论只有这一处算法，缓存那条路不会说出一句不一样的话。
+    /// </summary>
+    public static UpdateCheckResult Evaluate(Version current, ReleaseInfo? release)
+    {
+        if (release is null)
+            return new UpdateCheckResult(UpdateCheckState.UpToDate, current, null, null, "这个仓库还没有发布任何发行版。");
 
         if (!AppVersion.TryParse(release.TagName, out var latest))
             return new UpdateCheckResult(UpdateCheckState.Failed, current, null, release, $"最新发行版的标签是「{release.TagName}」，这不是一个能比较的版本号。");
