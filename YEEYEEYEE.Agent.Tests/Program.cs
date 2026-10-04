@@ -313,6 +313,9 @@ static string SampleReply() => """
 ```
 """;
 
+/// <summary>
+/// 钉住提议解析会从回复正文里剥离末尾的操作块，同时保留正文并读出 source。剥离不干净会把协议 JSON 漏进对话区，source 错了下游就找不到来源。
+/// </summary>
 static void ParseReplyAndSource()
 {
     var reply = AgentActionParser.Parse(SampleReply());
@@ -324,6 +327,9 @@ static void ParseReplyAndSource()
         "create_edge 的 source/target 没有被正确读出");
 }
 
+/// <summary>
+/// 钉住版本采纳只认 JSON 布尔 true，并原样传给执行器。把字符串或其它真值当成采纳，会让用户没有确认的版本被误锁。
+/// </summary>
 static void ParseVersionAdopted()
 {
     foreach (var value in new[] { "true", "false", "null", "\"true\"", "1", "{}", "[]", "" })
@@ -342,6 +348,9 @@ static void ParseVersionAdopted()
     }
 }
 
+/// <summary>
+/// 钉住同一批操作里先建节点、再用标题建立连线也能全部落地。否则模型把建节点和连线混写在一批时会丢连线。
+/// </summary>
 static void CreateNodesThenConnectInOneBatch()
 {
     // 这是连线可用性的关键：执行器按顺序作用在同一份画布上，
@@ -355,6 +364,9 @@ static void CreateNodesThenConnectInOneBatch()
         "连线方向与 source/target 不一致");
 }
 
+/// <summary>
+/// 钉住重复连线与自环被拒绝。否则画布会留下重复边或自己连自己的脏边。
+/// </summary>
 static void RejectDuplicateAndSelfLoop()
 {
     var canvas = new WorkflowCanvasState();
@@ -371,6 +383,9 @@ static void RejectDuplicateAndSelfLoop()
 
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住预检会提示连线端点找不到，而不是拖到执行时才失败。提前告知能让模型一轮改对，避免半落地。
+/// </summary>
 static void PrecheckMissingEndpoint()
 {
 	WorkflowCanvasState canvas = new WorkflowCanvasState
@@ -394,6 +409,9 @@ static void PrecheckMissingEndpoint()
 
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住整批预检能看见同批前面刚建出的节点，不把它们当成缺失端点。否则同批建节点再连线会被误报。
+/// </summary>
 static void BatchPrecheckSeesEarlierNodes()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState
@@ -447,6 +465,9 @@ static void BatchPrecheckSeesEarlierNodes()
 	Expect(readOnlyList2[0] == "节点已锁定，应用会被拒绝", "整批预检漏掉了真实警告：" + readOnlyList2[0]);
 }
 
+/// <summary>
+/// 钉住 delete_edge 只删指定方向的那条边，不顺带把反向边也删掉。边是有方向的，误删会悄悄改坏流程。
+/// </summary>
 static void DeleteEdgeTargetsDirection()
 {
     var canvas = new WorkflowCanvasState();
@@ -466,6 +487,9 @@ static void DeleteEdgeTargetsDirection()
         "删错了方向：应该保留 剧情→分镜");
 }
 
+/// <summary>
+/// 钉住删除不存在的连线会如实失败，而不是静默成功。静默成功会让调用方以为改动已经完成。
+/// </summary>
 static void DeleteMissingEdgeFails()
 {
     var canvas = new WorkflowCanvasState();
@@ -477,6 +501,9 @@ static void DeleteMissingEdgeFails()
     Expect(result.Applied == 0 && result.Errors.Count == 1, "删除不存在的连线应报错");
 }
 
+/// <summary>
+/// 钉住删除节点会连带清掉与它相连的边，不留悬空端点。否则后续校验和连线都会撞上悬空引用。
+/// </summary>
 static void DeleteNodeRemovesEdges()
 {
     var canvas = new WorkflowCanvasState();
@@ -987,6 +1014,9 @@ static void SharedEdgeRuleIsOneCopy()
         "自环要拒绝（画布校验也会拦，但那时只能回一句「校验失败」）");
 }
 
+/// <summary>
+/// 钉住锁定节点拒绝修改与删除，且预检会提前说明原因。锁定是用户的显式意图，绕过它等于让改动无处可查。
+/// </summary>
 static void LockedNodeIsProtected()
 {
     var canvas = new WorkflowCanvasState();
@@ -1005,6 +1035,9 @@ static void LockedNodeIsProtected()
         "预检没有提前告知锁定会被拒绝");
 }
 
+/// <summary>
+/// 钉住创建版本会同步建出工作树条目并锁定节点引用。少了任一步，版本与画布引用就会对不上。
+/// </summary>
 static void EntityVersionCreatesWorkTreeAndNodeReference()
 {
     var canvas = new WorkflowCanvasState();
@@ -1063,6 +1096,9 @@ static void EntityVersionCreatesWorkTreeAndNodeReference()
         "节点没有锁定到新建的 v2 快照");
 }
 
+/// <summary>
+/// 钉住更新节点既能切到历史版本，也能切回跟随当前版本。两种意图必须分清，不能把「跟随」误存成某个固定版本。
+/// </summary>
 static void UpdateNodeChangesVersionReference()
 {
     var canvas = new WorkflowCanvasState();
@@ -1123,6 +1159,9 @@ static void UpdateNodeChangesVersionReference()
         "明确指定历史版本后节点应锁定到 v1 快照");
 }
 
+/// <summary>
+/// 钉住版本决策序列化后原样保留。落盘再读回丢字段，会让用户的选择在重启后失效。
+/// </summary>
 static void VersionDecisionRoundTrips()
 {
     var state = new WorkflowCanvasState();
@@ -1138,6 +1177,9 @@ static void VersionDecisionRoundTrips()
         "版本决策经过 JSON 保存和加载后没有保留");
 }
 
+/// <summary>
+/// 钉住画布预览只作用于副本，不改动真实画布。预览一旦动了真身，用户还没确认就已经改了数据。
+/// </summary>
 static void PreviewDoesNotMutateCanvas()
 {
     var canvas = new WorkflowCanvasState();
@@ -1148,6 +1190,9 @@ static void PreviewDoesNotMutateCanvas()
         $"预览改动了真实画布：{canvas.Nodes.Count} 个节点 / {canvas.Edges.Count} 条边");
 }
 
+/// <summary>
+/// 钉住预览会投影出新增节点与新增连线，让用户先看到将要发生什么。漏报会让审批失去意义。
+/// </summary>
 static void PreviewReportsAdditions()
 {
     var canvas = new WorkflowCanvasState();
@@ -1161,6 +1206,9 @@ static void PreviewReportsAdditions()
         $"预览应报 1 个新节点 + 1 条新连线，实际 {preview.AddedNodes.Count} / {preview.AddedEdges.Count}");
 }
 
+/// <summary>
+/// 钉住预览对没有差异的操作不报假差异。假阳性会让用户以为有变更而误点确认。
+/// </summary>
 static void PreviewIgnoresNoOp()
 {
     var canvas = new WorkflowCanvasState();
@@ -1172,6 +1220,9 @@ static void PreviewIgnoresNoOp()
     Expect(preview.IsEmpty, "无效果的操作不应产生预览差异");
 }
 
+/// <summary>
+/// 钉住预览会报告将被删除的连线。删除类改动更要提前可见，否则用户不知道哪条边会没。
+/// </summary>
 static void PreviewReportsRemovedEdge()
 {
     var canvas = new WorkflowCanvasState();
@@ -1188,6 +1239,9 @@ static void PreviewReportsRemovedEdge()
     Expect(canvas.Edges.Count == 1, "预览不应真的删掉连线");
 }
 
+/// <summary>
+/// 钉住预览模式不写文件，只有提交时才落盘。预览就写盘等于用户还没点头就动了磁盘。
+/// </summary>
 static void FileWritePreviewVersusCommit()
 {
     var workspace = NewWorkspace();
@@ -1209,6 +1263,9 @@ static void FileWritePreviewVersusCommit()
     finally { Directory.Delete(workspace, true); }
 }
 
+/// <summary>
+/// 钉住写文件的路径越界被拒绝。否则提示词里带上跳级路径就能写到工作区之外。
+/// </summary>
 static void FileWriteEscapeRejected()
 {
     var workspace = NewWorkspace();
@@ -1224,6 +1281,9 @@ static void FileWriteEscapeRejected()
     finally { Directory.Delete(workspace, true); }
 }
 
+/// <summary>
+/// 钉住图片附件能转成 data URL 并还原出原始字节。编码或解码错一步，模型收到的图就不是用户给的那张。
+/// </summary>
 static void AttachmentImageRoundTrip()
 {
     var workspace = NewWorkspace();
@@ -1247,6 +1307,9 @@ static void AttachmentImageRoundTrip()
     finally { Directory.Delete(workspace, true); }
 }
 
+/// <summary>
+/// 钉住超过上限的图片被明确拒绝，而不是截断或静默丢掉。静默处理会让用户以为图已经带上。
+/// </summary>
 static void AttachmentImageTooLarge()
 {
     var workspace = NewWorkspace();
@@ -1262,6 +1325,9 @@ static void AttachmentImageTooLarge()
     finally { Directory.Delete(workspace, true); }
 }
 
+/// <summary>
+/// 钉住文本附件按上限截断且内容仍可读。不截断会把请求撑爆，乱截断又会破坏正文。
+/// </summary>
 static void AttachmentTextTruncation()
 {
     var workspace = NewWorkspace();
@@ -1286,6 +1352,9 @@ static void AttachmentTextTruncation()
     finally { Directory.Delete(workspace, true); }
 }
 
+/// <summary>
+/// 钉住二进制文件被如实拒绝，不做假解码。把二进制当文本塞进去只会得到乱码。
+/// </summary>
 static void AttachmentBinaryRejected()
 {
     var workspace = NewWorkspace();
@@ -1301,6 +1370,9 @@ static void AttachmentBinaryRejected()
     finally { Directory.Delete(workspace, true); }
 }
 
+/// <summary>
+/// 钉住文本附件拼进正文、图片附件单独收集成图片块。两类附件走错通道，多模态请求就发不出去。
+/// </summary>
 static void ComposeContentAndCollectImages()
 {
     var image = new AgentAttachment { Name = "角色.png", Kind = AgentAttachmentKind.Image, Payload = "data:image/png;base64,AAAA" };
@@ -1316,6 +1388,9 @@ static void ComposeContentAndCollectImages()
     Expect(images.Count == 1 && images[0] == image.Payload, "只应收集图片附件");
 }
 
+/// <summary>
+/// 钉住 OpenAI 格式的报文真的带上图片块。只带文字会退化成纯文本对话。
+/// </summary>
 static void OpenAiPayloadCarriesImage()
 {
     var handler = SendOneTurn(AiApiFormat.OpenAiChat, vision: true, content: "这张图怎样", images: new[] { Sample.DataUrl });
@@ -1332,6 +1407,9 @@ static void OpenAiPayloadCarriesImage()
         "第二个块应是 image_url，且 url 就是 data URL");
 }
 
+/// <summary>
+/// 钉住 Anthropic 格式带图片块且 system 与消息分离。格式细节错了会被服务端拒收。
+/// </summary>
 static void AnthropicPayloadCarriesImage()
 {
     var handler = SendOneTurn(AiApiFormat.AnthropicMessages, vision: true, content: "这张图怎样", images: new[] { Sample.DataUrl });
@@ -1353,6 +1431,9 @@ static void AnthropicPayloadCarriesImage()
     Expect(source.GetProperty("data").GetString() == Sample.DataUrl.Split(',')[1], "base64 数据应原样传递");
 }
 
+/// <summary>
+/// 钉住 system 消息绝不携带图片，图片只走用户消息。system 塞图片不符合协议，容易被拒。
+/// </summary>
 static void SystemMessageStaysTextOnly()
 {
     // DeepSeek 对 system 消息里的图片直接返回 400，所以系统提示必须始终是纯文本。
@@ -1362,6 +1443,9 @@ static void SystemMessageStaysTextOnly()
     Expect(openai.GetProperty("content").ValueKind == JsonValueKind.String, "OpenAI 格式的 system 内容应是纯文本");
 }
 
+/// <summary>
+/// 钉住未开启图片输入时给出可读报错，而不是把图静默丢掉。静默丢图会让用户以为模型看过图。
+/// </summary>
 static void ImageWithoutVisionFails()
 {
     string? message = null;
@@ -1385,6 +1469,9 @@ static CapturingHandler SendOneTurn(AiApiFormat format, bool vision, string cont
     return handler;
 }
 
+/// <summary>
+/// 钉住密钥加密往返后仍是原值，且脱敏描述不泄漏明文。加密只做一半等于没做。
+/// </summary>
 static void SecretProtectorRoundTrip()
 {
     const string key = "sk-test-placeholder-0123456789abcdef";
@@ -1405,6 +1492,9 @@ static void SecretProtectorRoundTrip()
     Expect(SecretProtector.Describe(string.Empty) == "（未填写）", "空密钥的描述不符");
 }
 
+/// <summary>
+/// 钉住密钥落盘是密文、读回是明文。落盘留明文是最常见的凭据泄漏。
+/// </summary>
 static void ConfigFileStoresCiphertext()
 {
     const string key = "sk-roundtrip-check-0123456789";
@@ -1430,6 +1520,9 @@ static void ConfigFileStoresCiphertext()
     finally { environment.Restore(); }
 }
 
+/// <summary>
+/// 钉住损坏的密文降级为空密钥并标记原因，而不是硬当成明文去解。硬解会得到乱码或异常。
+/// </summary>
 static void BrokenCiphertextIsReported()
 {
     using var environment = new ConfigEnvironment();
@@ -1448,6 +1541,9 @@ static void BrokenCiphertextIsReported()
     finally { environment.Restore(); }
 }
 
+/// <summary>
+/// 钉住旧配置里的明文密钥在读取时就地加密。老数据不迁移，明文会一直留在磁盘上。
+/// </summary>
 static void PlaintextSecretMigratesOnLoad()
 {
     const string key = "sk-legacy-plaintext-9876543210";
@@ -1472,6 +1568,9 @@ static void PlaintextSecretMigratesOnLoad()
     finally { environment.Restore(); }
 }
 
+/// <summary>
+/// 钉住 OpenAI 流式逐段增量回调，且思考不混入正文。混入会让对话区出现模型内部草稿。
+/// </summary>
 static void OpenAiStreamParsesDeltas()
 {
     // 思考型模型的 SSE：先来 reasoning_content，再来正文。思考绝不能混进正文。
@@ -1498,6 +1597,9 @@ static void OpenAiStreamParsesDeltas()
     Expect(handler.Body!.Contains("\"stream\":true", StringComparison.Ordinal), "请求体没有带 stream:true");
 }
 
+/// <summary>
+/// 钉住 Anthropic 流式逐个增量回调。两种格式的处理口径必须各自正确。
+/// </summary>
 static void AnthropicStreamParsesDeltas()
 {
     // Anthropic 的事件流：增量在 content_block_delta，文本是 text_delta，思考是 thinking_delta。
@@ -1525,6 +1627,9 @@ static void AnthropicStreamParsesDeltas()
     Expect(handler.Body!.Contains("max_tokens", StringComparison.Ordinal), "Anthropic 报文仍应带必填的 max_tokens");
 }
 
+/// <summary>
+/// 钉住一行正文都没有时报错，而不是当成空回复。空回复会被静默接受，用户不知道发生了什么。
+/// </summary>
 static void EmptyStreamIsReportedAsError()
 {
     // 网关返回 200 但一行正文都没有（例如不支持 stream）——必须报错，不能静默返回空回复。
@@ -1537,6 +1642,9 @@ static void EmptyStreamIsReportedAsError()
         $"应明确报错，实际：{message ?? "（没有抛异常）"}");
 }
 
+/// <summary>
+/// 钉住只收到思考、没有正文也算失败。把思考当正文会让用户看到一段并非答案的内容。
+/// </summary>
 static void ThinkingOnlyIsStillAnError()
 {
     // 只收到思考、没有正文：这是不完整的一轮，不能当作成功（否则界面会显示一个空回答）。
@@ -1554,6 +1662,9 @@ static void ThinkingOnlyIsStillAnError()
     Expect(message is not null, "只有思考没有正文时应报错");
 }
 
+/// <summary>
+/// 钉住穿过 Reroute 的连线要跟到源头。否则整条连线会被丢掉，下游节点的必填输入凭空消失。
+/// </summary>
 static void ComfyUiConversionFollowsReroute()
 {
     // Reroute 在 object_info 里查不到，会被当成「不是后端节点」跳过——但它的作用是**转发**。
@@ -1581,6 +1692,9 @@ static void ComfyUiConversionFollowsReroute()
         $"穿过 Reroute 的连线应跟到源头 VAELoader(1)，实际指到了 {vae[0]}");
 }
 
+/// <summary>
+/// 钉住被绕过的节点要按类型顶上去，不能只删节点。只删会让下游的必填项整项消失。
+/// </summary>
 static void ComfyUiConversionFollowsBypassedNodes()
 {
     // 被绕过（mode=4）的节点不进 API，和 Reroute 一样是**转发**，不是丢弃。只删节点不接线，
@@ -1621,6 +1735,9 @@ static void ComfyUiConversionFollowsBypassedNodes()
     Expect(mutedApi["130"]!["inputs"]!["images"] is null, "静音节点不产出，下游该项应被删掉");
 }
 
+/// <summary>
+/// 钉住被转成连线的控件仍按定义顺序对齐 widgets_values。顺序错位会把值写到错误的控件上。
+/// </summary>
 static void ComfyUiConversionAlignsConvertedWidgetsByDefinition()
 {
     // 控件被「转成连线」之后**仍然占着它在定义里的位置**：这份的 values 是 [提示词, 宽, 高, 长]，
@@ -1645,6 +1762,9 @@ static void ComfyUiConversionAlignsConvertedWidgetsByDefinition()
         $"宽高应各就各位，实际 {inputs["width"]}x{inputs["height"]}");
 }
 
+/// <summary>
+/// 钉住动态下拉（如 SaveVideo.format）不被当成连线槽位丢掉。丢掉会让工作流缺必填参数。
+/// </summary>
 static void ComfyUiConversionKeepsDynamicComboWidgets()
 {
     // 新前端（0.3x）的动态下拉：取值仍是字符串。不认这个类型就会把整项当成连线槽位跳过，
@@ -1668,6 +1788,9 @@ static void ComfyUiConversionKeepsDynamicComboWidgets()
     Expect(inputs["filename_prefix"]!.GetValue<string>() == "video/MiniMax_H3", "filename_prefix 被挤掉了");
 }
 
+/// <summary>
+/// 钉住流式末尾的 usage 被读出来（含缓存命中与未命中）。读不出就会让用量报表失真。
+/// </summary>
 static void AiStreamReportsUsage()
 {
     // DeepSeek 的流式末尾块：choices 为空、只带 usage（命中 / 未命中都在这里）。
@@ -1697,6 +1820,9 @@ static void AiStreamReportsUsage()
     Expect(handler.Body!.Contains("include_usage", StringComparison.Ordinal), "请求体没有要求服务端回传 usage");
 }
 
+/// <summary>
+/// 钉住用量报表的口径（命中率分母、没有就不给速率、缺失说成「不是 0」）。口径含糊会让用户误读花费。
+/// </summary>
 static void UsageReportFormatsWithoutLying()
 {
     // 满编：DeepSeek 的典型一条。命中 1024 + 未命中 176 → 计费输入 1200。
@@ -1731,6 +1857,9 @@ static void UsageReportFormatsWithoutLying()
     Expect(AiUsageReport.MissingNote.Contains('—'), "缺失说明里要有「—」");
 }
 
+/// <summary>
+/// 钉住脱敏显示不是密钥，存回去就是 401；新敲的、清空的、解不开的三条路各自分明。把显示值当密钥存回去会直接覆盖掉真密钥。
+/// </summary>
 static void RedactedKeyDisplayIsNotAKey()
 {
     const string stored = "sk-4f2c8a1d9e7b3c5f0a2e6d8b1c3f5a7e";
@@ -1751,6 +1880,9 @@ static void RedactedKeyDisplayIsNotAKey()
         "短密钥的脱敏显示没被认出来");
 }
 
+/// <summary>
+/// 钉住操作块与围栏不进对话显示区。协议 JSON 漏进对话区既难看又容易误导。
+/// </summary>
 static void ActionsBlockIsHiddenFromDisplay()
 {
     // 流式显示要在协议块之前截断，而且不能把```json 围栏留在对话区。
@@ -1766,6 +1898,9 @@ static void ActionsBlockIsHiddenFromDisplay()
     Expect(AgentActionParser.FindProtocolBlockStart(string.Empty) < 0, "空文本不应截断");
 }
 
+/// <summary>
+/// 钉住反问能解析出问题文本与候选选项。解析不出来反问就退化成普通句子。
+/// </summary>
 static void AskIsParsedWithOptions()
 {
     // 模型信息不足时应当「问」，界面据此弹窗——而不是把问题写成一大段正文让用户自己组织语言。
@@ -1787,6 +1922,9 @@ static void AskIsParsedWithOptions()
     Expect(parsed.Text.Contains("我需要确认", StringComparison.Ordinal), "自然语言部分应保留");
 }
 
+/// <summary>
+/// 钉住反问与 actions 共存时互不干扰。二者混在一起不能让任何一方被吞掉。
+/// </summary>
 static void AskCoexistsWithActions()
 {
     // 允许「先问清、再改」同批出现；两者必须互不干扰。
@@ -1802,6 +1940,9 @@ static void AskCoexistsWithActions()
     Expect(parsed.Actions.Count == 1 && parsed.Actions[0].Title == "新角色", "操作应被解析");
 }
 
+/// <summary>
+/// 钉住只有 ask、没有 actions 的回复也算有效。否则纯反问会被判成无效回复。
+/// </summary>
 static void AskAloneIsValid()
 {
     // 只有 ask、没有 actions：过去这种回复会因为找不到 "actions" 标记而被当成纯文本，
@@ -1815,6 +1956,9 @@ static void AskAloneIsValid()
     Expect(parsed.Text.Trim() == "先确认一下。", $"展示文本不符：{parsed.Text}");
 }
 
+/// <summary>
+/// 钉住 ask 块同样不进对话区。反问的协议块泄漏进正文同样会误导用户。
+/// </summary>
 static void AskBlockIsHiddenFromDisplay()
 {
     // 流式显示时 ask 块也要被挡住（它和 actions 走同一套定位）。
@@ -1847,6 +1991,9 @@ static void BrokenProtocolIsHiddenFromDisplay()
     Expect(!parsed.Text.Contains("update_node", StringComparison.Ordinal), "损坏的操作协议不应出现在展示文本");
 }
 
+/// <summary>
+/// 钉住未闭合的 fenced JSON 不泄漏，流式时也隐藏。半截块最容易漏进对话区。
+/// </summary>
 static void IncompleteAskProtocolIsHidden()
 {
     const string reply = """
@@ -1880,6 +2027,9 @@ static void IncompleteAskProtocolIsHidden()
     Expect(cuts.All(cut => cut == "正文。\n\n".Length), $"各流式分片都应从起始围栏处隐藏，实际：{string.Join(",", cuts)}");
 }
 
+/// <summary>
+/// 钉住真实样本里内容带裸引号时协议块仍能解析。解析一失败，整条回复的操作就丢了。
+/// </summary>
 static void BrokenQuotesSampleStillParses()
 {
     const string reply = """
@@ -1911,6 +2061,9 @@ static string StreamOnce(AiApiFormat format, CapturingHandler handler, List<stri
         new AiStreamSink(deltas.Add, onThinking)).GetAwaiter().GetResult();
 }
 
+/// <summary>
+/// 造一份测试用的模型配置（固定地址、模型、密钥与能力开关），供报文与流式用例共用。
+/// </summary>
 static AiProviderConfig ConfigFor(AiApiFormat format) => new()
 {
     Endpoint = "https://example.invalid/v1",
@@ -1921,6 +2074,9 @@ static AiProviderConfig ConfigFor(AiApiFormat format) => new()
     SendSamplingParameters = true
 };
 
+/// <summary>
+/// 断言为真，否则抛出带消息的异常；测试里统一走它，省去各处手写判断。
+/// </summary>
 static void Expect(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
 
 /// <summary>这段调用该抛 ArgumentOutOfRangeException 吗。用来钉「越界必须报错，不能静默夹到边界」。</summary>
@@ -1956,6 +2112,9 @@ static JsonObject ComfyUiNodeDefs()
     return defs!;
 }
 
+/// <summary>
+/// 钉住转换结果与四份真机导出逐字一致（除两处登记过的已知差异）。转换规则不是自造的，必须照官方前端行为对拍。
+/// </summary>
 static void ComfyUiConversionMatchesRealExports()
 {
     var dir = ComfyUiFixtureDir();
@@ -2022,12 +2181,21 @@ static bool IgnoreKnownGaps(string path)
        || path == "T04.107.inputs.text_0"
        || path == "G01.150.inputs.filename_prefix";
 
+/// <summary>
+/// 从节点元数据里读出标题，读不到返回 null。
+/// </summary>
 static string? ReadTitle(JsonNode? meta)
     => meta?["title"] is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
+/// <summary>
+/// 从节点定义里读出展示名，读不到返回 null。
+/// </summary>
 static string? DefDisplayName(JsonObject defs, string type)
     => defs[type]?["display_name"] is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
+/// <summary>
+/// 钉住被绕过、静音与纯界面节点如实跳过并报出来。默默丢掉会让用户不知道少了什么。
+/// </summary>
 static void ComfyUiConversionReportsSkippedNodes()
 {
     var dir = ComfyUiFixtureDir();
@@ -2045,6 +2213,9 @@ static void ComfyUiConversionReportsSkippedNodes()
         "T04 应说明跳过了被静音/绕过的节点：" + t04.SkippedSummary);
 }
 
+/// <summary>
+/// 钉住控件按位置对齐（含「生成后固定」占位），且指向被跳过节点的连线整条删掉。否则值会错位或留下悬空连线。
+/// </summary>
 static void ComfyUiConversionAlignsWidgetsAndPrunesDangling()
 {
     var defs = JsonNode.Parse("""
@@ -2091,6 +2262,9 @@ static string ComfyUiObjectInfoFixture()
     return subset!["defs"]!.ToJsonString();
 }
 
+/// <summary>
+/// 读入指定标签的网页格式样本正文，供转换用例当输入。
+/// </summary>
 static string ComfyUiUiFixture(string tag) =>
     File.ReadAllText(Path.Combine(ComfyUiFixtureDir(), tag + ".ui.json"), Encoding.UTF8);
 
@@ -2115,6 +2289,9 @@ static void WithSiteDirectory(string directory, Action body)
     }
 }
 
+/// <summary>
+/// 建一个带随机后缀的临时目录并返回路径，供落盘类用例隔离使用。
+/// </summary>
 static string NewTempDirectory(string tag)
 {
     var directory = Path.Combine(Path.GetTempPath(), $"df-{tag}-{Guid.NewGuid().ToString("N")[..8]}");
@@ -2122,6 +2299,9 @@ static string NewTempDirectory(string tag)
     return directory;
 }
 
+/// <summary>
+/// 钉住拉取链路从清单到正文到转换整条打通，按文件夹分种类、每类每家族各推一份。接线错一处整批都拿不到。
+/// </summary>
 static void ComfyUiLibraryFetchesAndClassifies()
 {
     var server = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
@@ -2188,6 +2368,9 @@ static void ComfyUiLibraryFetchesAndClassifies()
     Expect(result.Notes.Any(note => note.Contains("节点定义")), "报告里要说清节点定义有多大：" + string.Join("；", result.Notes));
 }
 
+/// <summary>
+/// 钉住正文地址整条转义（含斜杠变 %2F），老版服务器没有 /api 前缀也要能读。地址拼错就只会在个别服务器上失败。
+/// </summary>
 static void ComfyUiLibraryEndpointShapes()
 {
     var server = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
@@ -2223,6 +2406,9 @@ static void ComfyUiLibraryEndpointShapes()
         + (legacyResult.Workflows.Count == 0 ? "空清单" : legacyResult.Workflows[0].Error));
 }
 
+/// <summary>
+/// 钉住单份读不到或转不了只让那一份失败，其余照常，原因逐份记着。一份坏掉连坐整批是拉取最恼人的失败。
+/// </summary>
 static void ComfyUiLibraryIsolatesFailures()
 {
     var fake = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
@@ -2269,6 +2455,9 @@ static void ComfyUiLibraryIsolatesFailures()
     Expect(!broken.Recommended && !html.Recommended, "没转成的不得被推荐");
 }
 
+/// <summary>
+/// 钉住正文按份落文件、站点文件里不带正文，重新导入保住用户的停用与推荐。覆盖导入会把用户取舍冲掉。
+/// </summary>
 static void ComfyUiLibraryInstallKeepsUserChoices()
 {
     var directory = NewTempDirectory("comfyui-install");
@@ -2352,6 +2541,9 @@ static void ComfyUiLibraryInstallKeepsUserChoices()
     });
 }
 
+/// <summary>
+/// 钉住孤儿正文被清掉，删站点连正文目录一起删。不留垃圾文件在技能目录里。
+/// </summary>
 static void ComfyUiLibraryPrunesAndDeletesPayloads()
 {
     var directory = NewTempDirectory("comfyui-prune");
@@ -2397,15 +2589,24 @@ static void ComfyUiLibraryPrunesAndDeletesPayloads()
 // 所以「选一份工作流」要真能用，得先知道哪个节点的哪个输入收什么。
 // 四份真机样本覆盖四种形态，它们的识别结论就是这里的验收标准。
 
+/// <summary>
+/// 读入指定标签的真机导出工作流并跑一遍槽位识别，供多个用例复用。
+/// </summary>
 static ComfyUiWorkflowSlots DetectFixture(string tag)
 {
     var api = File.ReadAllText(Path.Combine(ComfyUiFixtureDir(), tag + ".api.json"), Encoding.UTF8);
     return ComfyUiWorkflowBinder.Detect(api);
 }
 
+/// <summary>
+/// 把槽位识别的结果与说明拼成一行，用于断言失败时输出可读原因。
+/// </summary>
 static string Explain(ComfyUiWorkflowSlots slots) =>
     slots.Describe() + "｜" + string.Join("；", slots.Notes);
 
+/// <summary>
+/// 钉住从四份真机样本里认出参数该放哪，认不出的如实说。识别错会让提示词写到错误入口。
+/// </summary>
 static void ComfyUiBinderDetectsOnRealSamples()
 {
     // T01：最正路的文生图。提示词、负面词、画幅、种子四样都该认出来。
@@ -2471,6 +2672,9 @@ static void ComfyUiBinderDetectsOnRealSamples()
     }
 }
 
+/// <summary>
+/// 钉住按一次调用绑值，不改模板本身，连线槽位不硬写。改坏模板会污染后续所有调用。
+/// </summary>
 static void ComfyUiBinderBindsWithoutDamagingTemplate()
 {
     // 用一张**合成图**来测绑值，因为真机样本里 T01 的尺寸是上游算出来的（改不了），
@@ -2678,6 +2882,9 @@ static string? FirstJsonDifference(JsonNode? expected, JsonNode? actual, string 
     return left == right ? null : $"{path}：期望 {left}，实际 {right}";
 }
 
+/// <summary>
+/// 判断 JSON 节点是否为数值并带出数值；对拍时让 1 与 1.0 按同一个值比较。
+/// </summary>
 static bool IsNumeric(JsonNode node, out double value)
 {
     value = 0;
@@ -2730,6 +2937,9 @@ static WorkflowCanvasState ValidCanvas()
     return canvas;
 }
 
+/// <summary>
+/// 钉住一份各项引用都成立的画布校验零问题。基准不干净，后面所有应当报错的用例都失去参照。
+/// </summary>
 static void IdentityValidatorCleanCanvas()
 {
     var canvas = ValidCanvas();
@@ -2738,6 +2948,9 @@ static void IdentityValidatorCleanCanvas()
     Expect(report.ErrorCount == 0 && report.WarningCount == 0, "合法画布的错误与警告都应为 0");
 }
 
+/// <summary>
+/// 钉住 ID 校验逐项报告空 ID 与重复 ID。漏报会让后续引用随机解析到错误对象。
+/// </summary>
 static void IdentityValidatorEmptyAndDuplicateIds()
 {
     var canvas = new WorkflowCanvasState();
@@ -2762,6 +2975,9 @@ static void IdentityValidatorEmptyAndDuplicateIds()
     Expect(canvas.Nodes.Count == 2 && canvas.Nodes[1].Title == "B", "校验不得删除或改写重复 ID 的对象");
 }
 
+/// <summary>
+/// 钉住 ID 校验报出悬空边端点、父节点、工作树锚点与布局可选引用。悬空引用是画布损坏最常见的形态。
+/// </summary>
 static void IdentityValidatorDanglingReferences()
 {
     var canvas = new WorkflowCanvasState();
@@ -2791,6 +3007,9 @@ static void IdentityValidatorDanglingReferences()
     Expect(layout[0].FieldPath == "Entities[0].Variants[0].Layout.Items[1].EntityId", $"布局问题路径不符：{layout[0].FieldPath}");
 }
 
+/// <summary>
+/// 钉住 ID 校验报出缺失的实体、变体与锁定版本。目标缺失会让解析拖到运行时才炸。
+/// </summary>
 static void IdentityValidatorMissingTargets()
 {
     var canvas = new WorkflowCanvasState();
@@ -2823,6 +3042,9 @@ static void IdentityValidatorMissingTargets()
     Expect(node.References.Count == 2 && node.References[0].EntityId != Guid.Empty, "校验不得清空悬空引用");
 }
 
+/// <summary>
+/// 钉住 ID 校验报出版本错绑到其他变体。错绑会让引用的图与设定对不上号。
+/// </summary>
 static void IdentityValidatorVersionMisbinding()
 {
     var canvas = new WorkflowCanvasState();
@@ -2854,6 +3076,9 @@ static void IdentityValidatorVersionMisbinding()
     Expect(node.References[0].VariantVersionId == variantB.Versions[0].Id, "校验不得改写错绑的版本 ID");
 }
 
+/// <summary>
+/// 钉住 null 版本表示跟随当前，且同名实体不合并。合并同名会让两份独立设定互相污染。
+/// </summary>
 static void IdentityValidatorNullVersionAndSameName()
 {
     var canvas = new WorkflowCanvasState();
@@ -2876,6 +3101,9 @@ static void IdentityValidatorNullVersionAndSameName()
     Expect(node.References[0].VariantVersionId is null, "校验不得把 null 版本改成具体版本");
 }
 
+/// <summary>
+/// 钉住 ID 校验报出自引用与父链循环。环路会让遍历与展开无法终止。
+/// </summary>
 static void IdentityValidatorCycles()
 {
     var canvas = new WorkflowCanvasState();
@@ -2911,6 +3139,9 @@ static void IdentityValidatorCycles()
         && cycle.Message.Contains(loopB.Id.ToString(), StringComparison.Ordinal), "循环报告应列出循环内的全部节点");
 }
 
+/// <summary>
+/// 钉住 ID 校验一次收集全部问题，而不是遇到第一个就返回。只报一条会让用户来回修很多轮。
+/// </summary>
 static void IdentityValidatorCollectsAllProblems()
 {
     var canvas = new WorkflowCanvasState();
@@ -2930,6 +3161,9 @@ static void IdentityValidatorCollectsAllProblems()
         && text.Contains(CanvasIdentityCodes.AssetReferenceEmpty, StringComparison.Ordinal), "报告文本应逐项列出代码");
 }
 
+/// <summary>
+/// 钉住 ID 校验把资产标识无效与不可访问分开报告。两类原因混在一起，用户不知道该改写法还是补文件。
+/// </summary>
 static void IdentityValidatorAssetReferences()
 {
     var canvas = new WorkflowCanvasState();
@@ -2962,6 +3196,9 @@ static void IdentityValidatorAssetReferences()
         && shapeOnly.WithCode(CanvasIdentityCodes.AssetReferenceNonCanonical).Count == 1, "形状检查仍应照常报告");
 }
 
+/// <summary>
+/// 钉住 ID 校验只读，不改对象也不动文件。校验顺手改数据会让「打开即修」变得不可预期。
+/// </summary>
 static void IdentityValidatorIsReadOnly()
 {
     var workspace = NewWorkspace();
@@ -3549,6 +3786,9 @@ static RecentCanvasState LegacyCanvasFile()
     return new RecentCanvasState("冒烟样例", 1, string.Empty, string.Empty, 512, 512, 20, 7, string.Empty, canvas);
 }
 
+/// <summary>
+/// 往画布工作树里加一个章节条目并返回它的 ID，供章节类用例起步。
+/// </summary>
 static Guid AddChapter(WorkflowCanvasState canvas)
 {
     var chapter = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第一章" };
@@ -3589,6 +3829,9 @@ static bool SameIdsAndRelations(WorkflowCanvasState left, WorkflowCanvasState ri
     return true;
 }
 
+/// <summary>
+/// 断言这段调用会抛出指定异常，并可选地核对协议或引用类异常的错误码。
+/// </summary>
 static T ExpectThrows<T>(Action action, string message) where T : Exception
 {
     try { action(); }
@@ -3731,6 +3974,9 @@ static void ReworkDuplicateCanvasKeepsVersionScope()
 /// <summary>R7：目标已存在而备份失败时必须中止保存，不得覆盖源文件；恢复同样受保护。</summary>
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住目标已存在而备份失败时必须中止保存，不得覆盖源文件，恢复也受同样保护。备份失败仍写入等于把退路也堵死。
+/// </summary>
 static void ReworkBackupFailureAbortsSave()
 {
 	using IsolatedStores isolatedStores = new IsolatedStores();
@@ -3914,6 +4160,9 @@ static void ReworkDuplicateIdsAreNotGuessed()
 /// <summary>R11：高于当前支持的格式版本不得被降级标注或覆盖保存。</summary>
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住高于当前支持的格式版本不得被降级标注或覆盖保存。降级会把新格式里读不懂的字段悄悄抹掉。
+/// </summary>
 static void ReworkFutureFormatIsNotDowngraded()
 {
 	using IsolatedStores isolatedStores = new IsolatedStores();
@@ -4003,6 +4252,9 @@ static RecentCanvasState LegacySameNameSource()
 /// <summary>R12：画布库保存入口必须走完整保存链（深拷贝 + 迁移 + 校验 + 备份 + 原子写），不能只做备份+写入。</summary>
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住画布库保存入口必须走完整保存链（深拷贝、迁移、校验、备份、原子写），不能只做备份加写入。少一环的入口就是数据损坏的缺口。
+/// </summary>
 static void ReworkLibrarySaveUsesFullChain()
 {
 	using IsolatedStores isolatedStores = new IsolatedStores();
@@ -4105,6 +4357,9 @@ static void ReworkRenameEntryIsBackedUpAndAtomic()
 /// </summary>
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住所有真实保存入口共用同一套策略。某个入口另走一套，迟早会在它这里丢数据。
+/// </summary>
 static void AllSaveEntryPointsShareOnePolicy()
 {
 	using IsolatedStores isolatedStores = new IsolatedStores();
@@ -4375,6 +4630,9 @@ static void ChapterMoveRejectsCycles()
 /// <summary>画布 → 工作树：为章节节点建章节条目与锚点；文本节点按父链上下文建锚点。</summary>
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住画布到工作树按上下文为章节建条目与锚点，文本节点按父链上下文建锚点。只按名称建锚点必然错挂。
+/// </summary>
 static void SyncCanvasToWorkTreeCreatesAnchorsByContext()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -4978,6 +5236,9 @@ static void ReferenceExpansionAndMissingVersions()
 /// <summary>批次 C / C-4：桌面投影给 Web 带稳定 chapterId 与显式顺序；同名不同 ID 的章节不合并。</summary>
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住桌面投影给 Web 带稳定 chapterId 与显式顺序，同名不同 ID 的章节不合并。用标题当身份会让同名章节互相串。
+/// </summary>
 static void ChapterProjectionCarriesStableIds()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -6528,6 +6789,9 @@ static void AgentBatchLedgerNeedsRecovery()
 /// </summary>
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住接口关联：跨段落的档位要待确认，目录先出现后声明方法也要对上。关联错会把档位挂到别的接口上。
+/// </summary>
 static void ApiDocRepairRespectsInterfaceAssociation()
 {
 	ApiDocRepairResult apiDocRepairResult = ApiDocRepair.FromModelJson("{\"ops\":[\n  {\"capability\":\"TextToImage\",\"method\":\"POST\",\"path\":\"/v1/images/generations\",\"models\":[\"flux-1-dev\",\"flux-pro\"],\"sizes\":[\"1k\",\"4k\"]},\n  {\"capability\":\"TextToImage\",\"method\":\"POST\",\"path\":\"/v1/hd/generations\",\"models\":[\"flux-pro\"],\"sizes\":[\"4k\"]}],\n \"models\":[]}", "https://api.example.com/docs", "POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k\n\nPOST /v1/hd/generations\nmodel: flux-pro\n尺寸：4k");
@@ -6852,6 +7116,9 @@ static void ApiSkillWriteRespectsFullOwnership()
 /// </summary>
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住模型表里的档位要与模型同处，且不得超出接口已核实限制。档位乱配会让请求超过真实能力。
+/// </summary>
 static void ApiDocModelTableSizesNeedAssociation()
 {
 	ApiDocRepairResult apiDocRepairResult = ApiDocRepair.FromModelJson("{\"ops\":[\n  {\"capability\":\"TextToImage\",\"method\":\"POST\",\"path\":\"/v1/images/generations\",\"models\":[\"flux-1-dev\"],\"sizes\":[\"1k\"]},\n  {\"capability\":\"TextToImage\",\"method\":\"POST\",\"path\":\"/v1/hd/generations\",\"models\":[\"flux-pro\"],\"sizes\":[\"4k\"]}],\n \"models\":[\n  {\"name\":\"flux-1-dev\",\"kind\":\"Image\",\"sizes\":[\"1k\",\"4k\"]},\n  {\"name\":\"flux-pro\",\"kind\":\"Image\",\"sizes\":[\"4k\"]}]}", "https://v6.example.com/docs", "POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k\n\nPOST /v1/hd/generations\nmodel: flux-pro\n尺寸：4k");
@@ -7364,6 +7631,9 @@ static void ProjectEntityMigrationRollsBackOnFailure()
     Expect(!ProjectLibrary.Contains(pending.Id), "回滚后待迁移资源不得留在项目库里");
 }
 
+/// <summary>
+/// 把画布包成一份当前格式的最近画布状态，供项目库与迁移类用例使用。
+/// </summary>
 static RecentCanvasState ProjectCanvas(WorkflowCanvasState canvas, string title) =>
     new(title, 1, string.Empty, string.Empty, 1024, 1024, 28, 7, "随机", canvas) { FormatVersion = CanvasFormat.Current };
 
@@ -8026,6 +8296,9 @@ static void ReferenceVersionPolicy()
     Expect(!CanvasReferenceVersions.TrySetVersion(canvas, other, entity.Id, variant.Id, null, out _), "没有该引用的节点应被拒绝");
 }
 
+/// <summary>
+/// 建一个带随机后缀的临时工作区目录并返回路径。
+/// </summary>
 static string NewWorkspace()
 {
     var path = Path.Combine(Path.GetTempPath(), "df-agent-tests-" + Guid.NewGuid().ToString("N")[..8]);
@@ -8048,6 +8321,9 @@ static string NewWorkspace()
 // WARNING: the decompiler dropped the original Chinese comments - assertions and behaviour are
 // complete, comments still have to be restored. Lesson recorded in PROGRESS round 127.
 
+/// <summary>
+/// 钉住本机密钥文件档（AES-GCM）往返可用，密钥文件丢失时报「解不开」。把丢失当成空密钥会悄悄覆盖用户配置。
+/// </summary>
 static void AesGcmKeyFileRoundTrip()
 {
 	string text = Path.Combine(Path.GetTempPath(), "df-secret-aesgcm-" + Guid.NewGuid().ToString("N").Substring(0, 8));
@@ -8079,6 +8355,9 @@ static void AesGcmKeyFileRoundTrip()
 	}
 }
 
+/// <summary>
+/// 钉住模型把连线写在建节点前面时整批仍能全部落地（含工作树条目端点与归一化标题）。执行顺序不该由模型的书写顺序决定。
+/// </summary>
 static void AgentEdgeBatchSurvivesModelOrdering()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -8267,6 +8546,9 @@ static void AgentEdgeBatchSurvivesModelOrdering()
 	Expect(workflowCanvasState3.Nodes.Count == 1 && workflowCanvasState3.Edges.Count == 0, $"应只剩一个节点且没有连线，实际 {workflowCanvasState3.Nodes.Count} / {workflowCanvasState3.Edges.Count}");
 }
 
+/// <summary>
+/// 钉住 AI 建实体时内容同时落到核心设定与默认变体，引用卡不再空白。只落一处会让引用卡显示为空。
+/// </summary>
 static void AgentEntityContentReachesVariantAndCard()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -8312,6 +8594,9 @@ static void AgentEntityContentReachesVariantAndCard()
 	Expect(text.Split("午后斜光").Length == 2, "同一段文字不该在提示词里写两遍，实际：\n" + text);
 }
 
+/// <summary>
+/// 钉住中文说明里的光杆家族词（如 runway）不被当成模型名。误当模型名会凭空多出不存在的条目。
+/// </summary>
 static void ApiDocFamilyWordInProseIsNotAModel()
 {
 	string content = "# 接口文档\nBase URL https://video.example.com/v1\n\n### 常用端点\n- POST/v1/images/generations 文生图\n- POST/v1/videos 建视频任务\n\n## 视频参数 /v1/videos · 异步\n| 参数 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n| model | string | 必填 | 模型名(别名优先),见上表 |\n| input_reference | file | 可选 | 参考图,runway 图生视频必填 1 张 |\n\n## 确认可用模型\n| model | 类型 | 能力 |\n|---|---|---|\n| seedance-2.0(池7) | 视频 | 720p 参考图 |";
@@ -8327,6 +8612,9 @@ static void ApiDocFamilyWordInProseIsNotAModel()
 	Expect(apiDocReport2.VideoOps.Count == 0 || apiDocReport2.VideoOps.Any((ApiOpCandidate op) => op.Models.Any((string model) => model.Contains("kling", StringComparison.OrdinalIgnoreCase))), "带版本号的模型名仍要认出来：" + string.Join("、", apiDocReport2.VideoOps.SelectMany((ApiOpCandidate op) => op.Models)));
 }
 
+/// <summary>
+/// 钉住前端渲染站点从空壳里找回正文的挑选规则（同源、按路由名、只认够像文档的）。挑错会把导航或广告当成接口文档。
+/// </summary>
 static void ApiDocShellMiningPicksSafely()
 {
 	Uri uri = new Uri("https://docs.example.com/about");
@@ -8353,6 +8641,9 @@ static void ApiDocShellMiningPicksSafely()
 	Expect(ApiDocAnalyzer.Analyze(content2, uri.ToString()).Ops.Count >= 2, "真文档那种形态必须够得上：" + ApiDocAnalyzer.Analyze(content2, uri.ToString()).Ops.Count);
 }
 
+/// <summary>
+/// 钉住智能导入的最小测试挑面积最小的一档，报告文本由共享层一份生成。自己另拼文本会与界面不一致。
+/// </summary>
 static void ApiImportSummaryAndSmallestSize()
 {
 	ApiOpCandidate apiOpCandidate = new ApiOpCandidate(Capability.TextToImage, "POST", "/v1/images/generations", new string[1] { "flux-1-dev" }, new string[3] { "2k", "1k", "4k" }, IsAsync: false, "bearer", Array.Empty<string>());
@@ -8381,6 +8672,9 @@ static void ApiImportSummaryAndSmallestSize()
 	Expect(ApiImportSummary.FormatName(ApiDocFormat.OpenApiJson).Contains("OpenAPI", StringComparison.Ordinal), "识别形态要说人话，不能直接印枚举名");
 }
 
+/// <summary>
+/// 钉住应用级配置落在用户配置目录，而不是程序安装目录旁边。写在程序旁边，遇到只读安装目录会直接失败。
+/// </summary>
 static void AppFilesLiveInUserConfigDirectory()
 {
 	string userConfigDirectory = AppPaths.UserConfigDirectory;
@@ -8404,6 +8698,9 @@ static void AppFilesLiveInUserConfigDirectory()
 // 改名后目录名的选择规则：**谁真的装着东西就用谁**。
 // 容易踩的坑是「新目录存在」不等于「新目录有东西」——程序自己会顺手把新目录建出来，
 // 于是空壳会把用户已有配置的旧目录顶掉，用户看到的是「密钥要我重填」。
+/// <summary>
+/// 钉住改名过渡期按「谁真的装着配置」选目录，新目录只是空壳时退回旧目录。只看目录是否存在会把用户已有配置顶掉。
+/// </summary>
 static void RenamedDirectoryPrefersTheOneWithData()
 {
 	string root = Path.Combine(Path.GetTempPath(), "yeeeyee-prefer-" + Guid.NewGuid().ToString("N"));
@@ -8435,6 +8732,9 @@ static void RenamedDirectoryPrefersTheOneWithData()
 // 原来是「哪个 exe 在跑就用它旁边」，于是 F5（Debug）建的项目落在 bin\Debug、跑 Release 建的在
 // bin\Release；换个构建新建的项目就落到另一处，看起来像项目不见了（最近项目列表是全局的，
 // 更放大这种错觉）。现在跑 Debug 时也统一到同一棵构建树下的 Release 输出目录。
+/// <summary>
+/// 钉住项目根固定在 Release 输出下的同一处，不随 Debug 与 Release 变。否则切换构建后最近项目会像凭空消失。
+/// </summary>
 static void ProjectsRootDoesNotFollowBuildConfiguration()
 {
 	const string debug = @"C:\repo\App\bin\Debug\net10.0";
@@ -8487,6 +8787,9 @@ static void ProjectsRootDoesNotFollowBuildConfiguration()
 // ===== 更新：版本号解析 / 发行版比对 / 更新包挑选 / 重启标记 / 替换脚本 =====
 
 // 版本号只有一处来源（程序集），但「怎么把 v0.2.0 这种标签读成可比较的版本」是纯逻辑，能离线钉住。
+/// <summary>
+/// 钉住版本标签的解析口径：带 v、两段式、预发布后缀与两侧空白都容忍，看不懂则如实返回失败。把看不懂当成 0.0.0 会误判更新。
+/// </summary>
 static void VersionTagParsing()
 {
 	Expect(AppVersion.TryParse("v0.2.0", out var withV) && withV == new Version(0, 2, 0), "带 v 前缀的标签要能解析");
@@ -8505,6 +8808,9 @@ static void VersionTagParsing()
 }
 
 // 「没有新版」与「查不到」必须分开：把查不到降级成已是最新，是最容易让人以为软件不再更新的写法。
+/// <summary>
+/// 钉住发行版比对区分有新版、已最新、本地更新与查不到，查不到必须报失败。把查不到降级成已是最新，是最容易让人以为软件不再更新的写法。
+/// </summary>
 static void UpdateCheckComparesVersionsAndReportsFailures()
 {
 	const string newer = "{\"tag_name\":\"v0.9.0\",\"name\":\"YEEYEEYEE 0.9.0\",\"body\":\"改了什么\",\"html_url\":\"https://example.com/r\",\"published_at\":\"2026-10-02T02:20:02Z\",\"assets\":[{\"name\":\"yeeeyee-win-x64.zip\",\"browser_download_url\":\"https://example.com/a.zip\",\"size\":123}]}";
@@ -8659,6 +8965,9 @@ static void UpdateCheckPolicyKeepsStartupCheap()
 }
 
 // 重启后靠这个标记知道「这次更新到底换成了什么」，所以它必须能原样存回来。
+/// <summary>
+/// 钉住重启标记（前一版、目标版、更新内容）能原样存回。重启后靠它判断这次更新到底换成了什么。
+/// </summary>
 static void UpdateMarkerRoundTrips()
 {
 	string home = Path.Combine(Path.GetTempPath(), "yeeeyee-marker-" + Guid.NewGuid().ToString("N")[..8]);
@@ -8688,6 +8997,9 @@ static void UpdateMarkerRoundTrips()
 
 // 替换脚本由 PowerShell 5 执行，而 PS5 会把**无 BOM 的 UTF-8 当 ANSI 读**——写成中文就成了乱码甚至语法错。
 // 这个坑本轮踩过两次（一个脚本解析失败、一次把中文全读成问号），所以这里钉死「只含 ASCII」。
+/// <summary>
+/// 钉住替换脚本只含 ASCII。PS5 会把无 BOM 的 UTF-8 当 ANSI 读，中文会变乱码甚至语法错。
+/// </summary>
 static void UpdateSwapScriptIsAsciiOnly()
 {
 	var nonAscii = UpdateInstaller.SwapScript.Where(ch => ch > 127).Select(ch => ((int)ch).ToString("X4")).Distinct().ToArray();
@@ -8701,6 +9013,9 @@ static void UpdateSwapScriptIsAsciiOnly()
 
 // 真跑一遍替换脚本。整个升级链路里**只有这一步会动用户磁盘**，所以不能只测「脚本文本对不对」。
 // 用 hostname.exe 冒充主程序（跑完就退，不弹界面），用一个大到不存在的 PID 跳过等待。
+/// <summary>
+/// 钉住替换脚本真能换掉一个目录并留下结果文件，而不只是文本长得对。升级链路里只有这一步会动用户磁盘。
+/// </summary>
 static void UpdateSwapScriptActuallyReplacesDirectory()
 {
 	string root = Path.Combine(Path.GetTempPath(), "yeeeyee-swap-" + Guid.NewGuid().ToString("N")[..8]);
@@ -8778,6 +9093,9 @@ static void UpdateSwapScriptActuallyReplacesDirectory()
 // 于是「单张已出好、其余还在跑」时菜单直接给「用这一张」。点下去会把整批丢掉、却不取消还在跑的请求，
 // 那些请求跑完后仍会把图写进资产目录，可那时批次已经不在表里了——没人引用（漏文件）。
 // 这条测试钉住规则本身：它现在是模型里的唯一出处，菜单和动作都问它。
+/// <summary>
+/// 钉住开奖卡按张数排布（一行最多 3 张、4 张 2×2、卡片固定 2:3、末行按自己的张数居中）。布局规则是菜单与动作的唯一出处，错了整片都会歪。
+/// </summary>
 static void GachaCardLayoutIsPinnedByCount()
 {
 	// 一行最多 3 张：6 张 = 上下两排、每排 3 张；4 张走 2×2（3+1 会显得上面挤、下面空）。
@@ -8839,6 +9157,9 @@ static void GachaCardLayoutIsPinnedByCount()
 	Expect(!Throws(() => GachaCardLayout.Slot(6, 5)), "最后一张是合法序号");
 }
 
+/// <summary>
+/// 钉住分数到档位的映射与光点递减。口径只改一处，会让界面与判定各说各话。
+/// </summary>
 static void QualityTierFollowsScore()
 {
 	// 档位的高低顺序是用户定的：红 > 金 > 紫 > 蓝 > 白。**这条要单独钉住**——
@@ -8905,6 +9226,9 @@ static void QualityTierFollowsScore()
 	Expect(new SlotQuality().ScoreLabel.Length == 0, "没有分数时是空串，不是 -1/10");
 }
 
+/// <summary>
+/// 钉住模型打分必须完整且合法才认，漏项、重复、越界、超范围与坏 JSON 一律作废。残缺的分数会被错落成档位。
+/// </summary>
 static void QualityScoresMustBeComplete()
 {
 	// 正常一份：编号是「第几张」，score 是 0–10，hits 是踩中的负面词。
@@ -8964,6 +9288,9 @@ static void QualityScoresMustBeComplete()
 	Expect(QualityJudgement.ParseScores("{\"scores\":[]}", 0).Scores is null, "零张不判");
 }
 
+/// <summary>
+/// 钉住本地筛查只判客观坏图（读不出、纯色、尺寸不对），不碰「好不好」。混淆客观与主观会把可用图提前筛掉。
+/// </summary>
 static void TechnicalScreeningOnlyFlagsBrokenImages()
 {
 	// 读不出来 → 白档，理由说清是哪一条。
@@ -8990,6 +9317,9 @@ static void TechnicalScreeningOnlyFlagsBrokenImages()
 	Expect(TechnicalScreening.Screen(new ImageFacts(true, 256, 256, 576, 40, 0)) is null, "没给要求尺寸就不检查尺寸");
 }
 
+/// <summary>
+/// 钉住分数落回对应槽位，踩中负面提示词的判为裂纹卡且裂纹卡不参与预兆。落错格子会让用户看到的档位与实际图不符。
+/// </summary>
 static void QualityGradesMapBackToSlots()
 {
 	// 4 个槽位，只有 4 张发给模型（序号 0 / 2 / 3 / 5），编号是发送顺序。
@@ -9049,6 +9379,9 @@ static void QualityGradesMapBackToSlots()
 	Expect(batch.BestTier == QualityTier.White, "已删掉的不参与，剩下的那张裂纹卡仍按白档");
 }
 
+/// <summary>
+/// 钉住评审提示词带上出图要求、负面提示词、节点上下文与四类缺陷。缺项会让评审按错标准打分。
+/// </summary>
 static void JudgePromptCarriesContextAndChecks()
 {
 	const string context = "节点：角色设定·林晚（角色）\n所属章节：第一话\n这一步引用的设定（画面里应当与这些设定一致）：林晚 · 常服";
@@ -9082,6 +9415,9 @@ static void JudgePromptCarriesContextAndChecks()
 	Expect(bare.Contains("没有写负面提示词", StringComparison.Ordinal), "没有负面词要如实说明");
 }
 
+/// <summary>
+/// 钉住本地先筛坏图、其余才送模型，判回的编号落回正确格子。顺序或编号错一步，档位就张冠李戴。
+/// </summary>
 static void GachaJudgingScreenDecidesWhoGoesToTheModel()
 {
     // 中段这一条链以前完全没有测试：它埋在界面层、写死依赖静态方法。
@@ -9127,6 +9463,9 @@ static void GachaJudgingScreenDecidesWhoGoesToTheModel()
     Expect(batch.BestTier == QualityTier.Red, "最好的一档该是模型给的红档（白档那张是本地判的，不参与比较）");
 }
 
+/// <summary>
+/// 钉住全坏、没有可读图、分数用不了三种情况都如实说不成且不落档位。硬给一个假档位比报失败更糟。
+/// </summary>
 static void GachaJudgingIsHonestWhenItCannotJudge()
 {
     using var temp = new TempFolder();
@@ -9163,6 +9502,9 @@ static void GachaJudgingIsHonestWhenItCannotJudge()
     Expect(badReply.Slots[0].Quality is null, "分数用不了时不许落档位");
 }
 
+/// <summary>
+/// 钉住补判只判指定那几格，没重出的格子档位保持原样。全量重判会覆盖用户已经认可的结果。
+/// </summary>
 static void GachaJudgingOnlyRejudgesTheGivenSlots()
 {
     // 自动重出只换了裂纹的那几张，补判只该判那几张——把整批再判一遍等于为没变的图白花一次模型调用。
@@ -9189,6 +9531,9 @@ static void GachaJudgingOnlyRejudgesTheGivenSlots()
     Expect(note.Contains("判好", StringComparison.Ordinal), "补判成功也要说判好了，实际：" + note);
 }
 
+/// <summary>
+/// 钉住整批还在跑时单张一律不可操作。否则漏文件那条路会在批次未收敛时就动手。
+/// </summary>
 static void BatchSlotsAreNotActionableWhileRunning()
 {
 	NodeImageBatch running = new NodeImageBatch { NodeId = Guid.NewGuid(), NodeTitle = "雨夜追车", IsRunning = true };
@@ -9223,6 +9568,9 @@ static void BatchSlotsAreNotActionableWhileRunning()
 	Expect(!waiting.CanActOnSlot(0), "还没出好的格子不能操作");
 }
 
+/// <summary>
+/// 钉住出图提示词随画布存住，老画布缺字段也能读。存不住等于每次都要重填。
+/// </summary>
 static void AttachmentPromptIsStoredAndReadable()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -9256,6 +9604,9 @@ static void AttachmentPromptIsStoredAndReadable()
 	Expect(workflowCanvasState3 != null && workflowCanvasState3.Entities[0].Variants[0].Attachments[0].Prompt.Length == 0, "老画布里没有提示词字段，读进来应当是空字符串而不是报错");
 }
 
+/// <summary>
+/// 钉住内置技能停用后不被命中、也不进给 Agent 的清单，全停时明说原因。停用仍被引用等于没停。
+/// </summary>
 static void BuiltInSkillsRespectDisabledList()
 {
 	BuiltInSkill builtInSkill = BuiltInSkills.Resolve("帮我生成角色设定");
@@ -9271,6 +9622,9 @@ static void BuiltInSkillsRespectDisabledList()
 	Expect(text2.Contains("全部处于停用状态", StringComparison.Ordinal), "全停时应明说原因，而不是留一段空白让模型以为“没有技能”：\n" + text2);
 }
 
+/// <summary>
+/// 钉住节点、工作树条目、设定库三类来源都能被搜到并可定位。漏一路等于该来源搜不到。
+/// </summary>
 static void CanvasSearchFindsNodeWorkTreeAndEntity()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -9337,6 +9691,9 @@ static void CanvasSearchFindsNodeWorkTreeAndEntity()
 	Expect(CanvasSearch.Find(workflowCanvasState, "根本没写过的词").Count == 0, "搜不到就返回空，不做联想");
 }
 
+/// <summary>
+/// 钉住画布标签改名查重挡住空名、超长与重名。前端不挡的错误只能等到落盘才暴露。
+/// </summary>
 static void CanvasTabRenameGuardsNames()
 {
 	string[] takenTitles = new string[3] { "画布1", "画布2", "第一章" };
@@ -9351,6 +9708,9 @@ static void CanvasTabRenameGuardsNames()
 	Expect(CanvasTabRules.DescribeNameConflict(new string('长', 80), takenTitles) == null, "80 个字符正好可以");
 }
 
+/// <summary>
+/// 钉住画布标签编号不与会话已有画布撞名。标题即文件名，撞名会互相覆盖。
+/// </summary>
 static void CanvasTabRulesAreCollisionProof()
 {
 	Expect(CanvasTabRules.NextTitle(Array.Empty<string>()) == "画布1", "没有任何画布时应从画布1开始");
@@ -9368,6 +9728,9 @@ static void CanvasTabRulesAreCollisionProof()
 	Expect(recentCanvasState.Canvas.Edges.Count == 0, "新画布不该有连线");
 }
 
+/// <summary>
+/// 钉住章节拆分按标题或长度拆文本，并按设定名匹配出场。拆分规则错了会把内容切到错误章节。
+/// </summary>
 static void ChapterSplitByHeadingAndLength()
 {
 	string text = "第1章 初到小城\n雨下得很大。\n\n第2章 旧书店\n林晚推开门。\n\n【夜谈】\n两个人聊到很晚。";
@@ -9428,6 +9791,9 @@ static void ChapterSplitByHeadingAndLength()
 	Expect(ChapterSplitPlanner.MatchEntities(workflowCanvasState, string.Empty).Count == 0, "空文本没有出场项");
 }
 
+/// <summary>
+/// 钉住角色参考图认三、四视图为标准、九视图不是，并钉住视图粘连的负面词与逐字复用纪律。标准不统一会让角色在不同镜头里变样。
+/// </summary>
 static void CharacterSheetFollowsTurnaroundStandard()
 {
 	string turnaroundSpec = PromptBaseline.TurnaroundSpec;
@@ -9467,6 +9833,9 @@ static void CharacterSheetFollowsTurnaroundStandard()
 	Expect(builtInSkill3.OutputFormat.Contains("逐字复制", StringComparison.Ordinal), "分镜技能要写明逐字复用纪律");
 }
 
+/// <summary>
+/// 钉住别的平台的密文如实报解不开，带冒号的密钥不被误判。误判会诱导用户以为密钥坏了而重填。
+/// </summary>
 static void CiphertextFromAnotherPlatformIsReportedUnreadable()
 {
 	Expect(SecretProtector.Unprotect("keychain:AAAA") == null, "本机没有对应密钥库时，keychain 密文应报解不开");
@@ -9479,6 +9848,9 @@ static void CiphertextFromAnotherPlatformIsReportedUnreadable()
 	Expect(!SecretProtector.IsEncryptedAtRest("plain:x"), "plain: 不能被算作加密落盘");
 }
 
+/// <summary>
+/// 钉住每个底图入口按顺序各收一张参考图，给不满不拿同一张凑数。凑数会让两张底图变成同一个人。
+/// </summary>
 static void BinderFillsEveryImageSlotInOrder()
 {
 	// 一份工作流有多个底图入口时，参考图按顺序各写一张：顺序由装配那一侧定死（角色 → 道具 → 场景），
@@ -9526,6 +9898,9 @@ static void BinderFillsEveryImageSlotInOrder()
 	Expect(only["2"]!["inputs"]!["image"]!.GetValue<string>() == "example2.png", "第 2 个入口保持示例图，不拿同一张凑数");
 }
 
+/// <summary>
+/// 钉住参考图装配顺序固定为角色、道具、场景，变体只取第一张，超上限要说出丢了谁。顺序或裁剪不透明会让用户以为图都带上了。
+/// </summary>
 static void ReferenceImagePlanOrdersCapsAndSaysWhatItDropped()
 {
 	// 三条规则各自的理由在 docs/spec-参考图与设定锁定.md：顺序固定（因为它影响出图结果，
@@ -9582,6 +9957,9 @@ static void ReferenceImagePlanOrdersCapsAndSaysWhatItDropped()
 	Expect(ReferenceImagePicker.Plan(canvas, bare, 3, locate).Note.Contains("还没有图"), "没引用任何设定时如实说按文生图出");
 }
 
+/// <summary>
+/// 钉住参考图手动指定按实体加变体点名、先筛再裁、一张不勾要说成「你没勾」。把「没勾」说成「没有」会误导用户。
+/// </summary>
 static void ReferenceImagePlanHonoursHandPickedKeys()
 {
 	// 规格第 3 步：用户能手动指定「这一次用哪几张」，覆盖默认顺序。两条最要紧的规矩：
@@ -9640,6 +10018,9 @@ static void ReferenceImagePlanHonoursHandPickedKeys()
 		"一张不勾要说清是你没勾，实际：" + none.Note);
 }
 
+/// <summary>
+/// 钉住合集型工作流（多组各自带输出）按组填图，不把图平铺到前几个入口。平铺会让每组的角色错位。
+/// </summary>
 static void BinderFillsImageGroupsInsteadOfFlattening()
 {
 	// 合集型的工作流：几组各自独立的管线并排放在一个文件里，每组各带一个输出（B03 就是
@@ -9717,6 +10098,9 @@ static void BinderFillsImageGroupsInsteadOfFlattening()
 		"有入口走不到输出时应退回一整组（等于原先的平铺），而不是硬分组");
 }
 
+/// <summary>
+/// 钉住参考图上限从设置、池子、工作流三处取小，「0」与「没声明」不能混，note 要说对是谁定的。取错会让请求超限或被无故砍图。
+/// </summary>
 static void ReferenceCapResolverPicksTheTightestLimit()
 {
 	// 规格规则二：一镜的参考图上限**三处取小**（用户设置、池子清单声明的张数、这份工作流的底图入口数）。
@@ -9774,6 +10158,9 @@ static void ReferenceCapResolverPicksTheTightestLimit()
 		"上限 0 要说清是设置定的，实际：" + zero.Note);
 }
 
+/// <summary>
+/// 钉住 Agent 建设定节点时，没点名实体就按「同类唯一同名」锚上自引用，同名有歧义就不猜。乱锚会把设定挂到别的实体上。
+/// </summary>
 static void AgentAnchorsSettingNodesToTheirSetting()
 {
 	// `create_entity` 与 `create_node` 本来是分开的两步：模型没点名实体时，
@@ -9891,6 +10278,9 @@ static void GenerationAuditListsStaleProducts()
 		"文本版要把「判断不了」写出来：" + old.ToText(null));
 }
 
+/// <summary>
+/// 钉住图要出在引用（变体）上，只在节点上出过也算缺口。道具会换样子就出在这里，只看节点会让换装产物被误判为已完成。
+/// </summary>
 static void GenerationAuditAsksForTheImageOnTheVariantToo()
 {
 	// 参考图取自**变体**（`TargetReferenceImages` 读变体附件），而设定节点出图的产物挂在**节点**上。
@@ -9931,6 +10321,9 @@ static void GenerationAuditAsksForTheImageOnTheVariantToo()
 		"节点也没图时只报一条「还没有图」，不重复报，实际：" + layer2.Missing[0].Reason);
 }
 
+/// <summary>
+/// 钉住生成链自检报出四层缺口与花费预估、预勾只挡路的那几件、缺失文件不算已出图。口径错了要么漏检要么乱预勾。
+/// </summary>
 static void GenerationAuditReportsDependencyChain()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -10075,6 +10468,9 @@ static void GenerationAuditReportsDependencyChain()
 	Expect(workflowNode2.Attachments.Count == 0 && workflowNode4.Attachments.Count == 0, "自检不往节点上挂任何产物");
 }
 
+/// <summary>
+/// 钉住角色、场景、道具、分镜四类生成技能的字段顺序与负面词都取自同一份基线。各写一份会各自漂移。
+/// </summary>
 static void GenerationSkillsSharePromptBaseline()
 {
 	BuiltInSkill builtInSkill = BuiltInSkills.All.Single((BuiltInSkill skill) => skill.Id == "character-generation");
@@ -10101,6 +10497,9 @@ static void GenerationSkillsSharePromptBaseline()
 	Expect(!PromptBaseline.HasBaseline(NodeCategory.Chapter) && !PromptBaseline.HasBaseline(NodeCategory.General) && !PromptBaseline.HasBaseline(NodeCategory.StoryPlan), "只有角色 / 场景 / 道具 / 分镜有自己的基线");
 }
 
+/// <summary>
+/// 钉住程序旁的旧配置文件被搬到用户配置目录，而且是搬不是拷。留在程序旁边下次还会被读到旧值。
+/// </summary>
 static void LegacyProgramRootConfigIsMigrated()
 {
 	string text = Path.Combine(Path.GetTempPath(), "df-confighome-" + Guid.NewGuid().ToString("N").Substring(0, 8));
@@ -10131,6 +10530,9 @@ static void LegacyProgramRootConfigIsMigrated()
 	}
 }
 
+/// <summary>
+/// 钉住模型清单按基础地址、完整 URL、Anthropic 三种方式推导地址，且两种响应形状都能解析。推导错就打不到模型列表。
+/// </summary>
 static void ModelCatalogResolvesUrlAndParsesList()
 {
 	AiProviderConfig config = new AiProviderConfig
@@ -10161,6 +10563,9 @@ static void ModelCatalogResolvesUrlAndParsesList()
 	Expect(ModelCatalog.Parse("{\"error\":\"nope\"}").Count == 0, "没有 data 数组时应给出空清单");
 }
 
+/// <summary>
+/// 钉住节点协助沿连线收集上游设定并按类型给建议。收集方向错了，建议就基于无关节点。
+/// </summary>
 static void NodeAssistCollectsUpstream()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -10260,6 +10665,9 @@ static void NodeAssistCollectsUpstream()
 	Expect(nodeAssistPlan4.Suggestions.All((NodeAssistSuggestion item) => item.Blocked.Length > 0), "被挡住的建议必须写明原因");
 }
 
+/// <summary>
+/// 钉住素材按本体设定、上游、同镜、所属章节四路合并，叶子节点不再被判成没素材。少一路都会让可用的设定看不见。
+/// </summary>
 static void NodeAssistMaterialsMergeFourSources()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -10378,6 +10786,9 @@ static void NodeAssistMaterialsMergeFourSources()
 	Expect(nodeAssistPlan.Sources.Count == 1, "「查看上游设定」窗口仍只报连线上游（1 条），不把引用混进去");
 }
 
+/// <summary>
+/// 钉住候选图批次只留选中那张、其余进回收站，没出好的不计入。多留或误删都会让用户的取舍落空。
+/// </summary>
 static void NodeImageBatchKeepsOnlyPicked()
 {
 	NodeImageBatch nodeImageBatch = new NodeImageBatch
@@ -10502,6 +10913,9 @@ static void NodeImageBatchKeepsOnlyPicked()
 	Expect(new NodeImageBatch().ProgressLine().Length == 0, "空批不报进度，也不是除零崩溃");
 }
 
+/// <summary>
+/// 钉住出图方式按剧情判文生图或图生图（合成底图、改稿、同场景连续性）。判错会让需要连续性的镜头另起炉灶。
+/// </summary>
 static void NodeImageModeFollowsStoryContinuity()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -10618,6 +11032,9 @@ static void NodeImageModeFollowsStoryContinuity()
 	Expect(NodeImageModePlanner.BaseCandidates(workflowCanvasState, workflowNode3).Count == 0, "角色图不进手动候选——它不是底图材料");
 }
 
+/// <summary>
+/// 钉住九类节点九种颜色，章节与通用保持品牌色。颜色撞车会让用户分不清节点类型。
+/// </summary>
 static void NodeKindPaletteGivesEveryCategoryItsOwnColor()
 {
 	NodeCategory[] array3 = new NodeCategory[9]
@@ -10649,6 +11066,9 @@ static void NodeKindPaletteGivesEveryCategoryItsOwnColor()
 	Expect(NodeKindPalette.HexOf((NodeCategory)999) == "#8FA6BD", "未知种类落到兜底色，不留空");
 }
 
+/// <summary>
+/// 钉住明文档如实带 plain: 前缀并被标记出来。不标记就分不清「没加密」和「加密了」。
+/// </summary>
 static void PlaintextTierIsReportedHonestly()
 {
 	using ConfigEnvironment configEnvironment = new ConfigEnvironment();
@@ -10671,6 +11091,9 @@ static void PlaintextTierIsReportedHonestly()
 	}
 }
 
+/// <summary>
+/// 钉住制作阶段能按阶段筛节点并统计真实数量。数量虚报会让进度看板失真。
+/// </summary>
 static void ProductionStagesFilterAndCount()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -10743,6 +11166,9 @@ static void ProductionStagesFilterAndCount()
 	Expect(ProductionStageRules.EmptyHintOf(ProductionStage.ChapterSplit).Contains("生成章节工作树"), "章节拆分的空态要指向那个按钮");
 }
 
+/// <summary>
+/// 钉住复制一份配置时逐字段一致（含密钥与启用状态）。漏字段会让复制出来的配置缺行为能力。
+/// </summary>
 static void ProfileDuplicateCopiesEveryField()
 {
 	AiProviderProfile aiProviderProfile = new AiProviderProfile
@@ -10765,6 +11191,9 @@ static void ProfileDuplicateCopiesEveryField()
 	Expect(aiProviderProfile2.DisplayName == aiProviderProfile.DisplayName && aiProviderProfile2.Endpoint == aiProviderProfile.Endpoint && aiProviderProfile2.UseFullUrl == aiProviderProfile.UseFullUrl && aiProviderProfile2.ApiFormat == aiProviderProfile.ApiFormat && aiProviderProfile2.Model == aiProviderProfile.Model && aiProviderProfile2.ApiKey == aiProviderProfile.ApiKey && Math.Abs(aiProviderProfile2.Temperature - aiProviderProfile.Temperature) < 0.0001 && aiProviderProfile2.ContextWindow == aiProviderProfile.ContextWindow && aiProviderProfile2.MaxOutputTokens == aiProviderProfile.MaxOutputTokens && aiProviderProfile2.SendSamplingParameters == aiProviderProfile.SendSamplingParameters && aiProviderProfile2.SupportsImageInput == aiProviderProfile.SupportsImageInput && aiProviderProfile2.Enabled == aiProviderProfile.Enabled, "复制必须逐字段一致（含密钥与启用状态）");
 }
 
+/// <summary>
+/// 钉住预设表里每一家都有徽标、区分色两两不同，表外 id 落回中性徽标。缺徽标或撞色会让用户认错厂家。
+/// </summary>
 static void ProviderBadgesCoverEveryPreset()
 {
 	foreach (ProviderPreset item16 in ProviderPreset.All)
@@ -10787,6 +11216,9 @@ static void ProviderBadgesCoverEveryPreset()
 	Expect(ProviderBadges.Describe("some-new-vendor", "某家").Contains("没有配"), "不认识的那家要如实说明");
 }
 
+/// <summary>
+/// 钉住能力说明写清「自动开了什么」，自定义或无预置的型号归用户填。含糊说明会让用户误以为某项已自动配好。
+/// </summary>
 static void ProviderCapabilityRuleIsSharedAndHonest()
 {
 	Expect(ProviderPresetValues.NeedsManualCapabilities(ProviderPreset.Custom), "自定义接口的能力值归用户填");
@@ -10814,6 +11246,9 @@ static void ProviderCapabilityRuleIsSharedAndHonest()
 	Expect(providerPresetValues2.DescribeCapabilities().Contains("1M"), "1048576 应写成 1M");
 }
 
+/// <summary>
+/// 钉住接入引导的「已选过服务商」标记能存回，之后不再重复弹。标记丢失会反复打扰用户。
+/// </summary>
 static void ProviderChoiceFlagRoundTrips()
 {
 	using ConfigEnvironment configEnvironment = new ConfigEnvironment();
@@ -11104,6 +11539,9 @@ static void ComfyUiBareAddressFallback()
         "连地址都没有时不该硬定成 ComfyUI");
 }
 
+/// <summary>
+/// 钉住智能导入认得出 ComfyUI，且不把普通画图接口误认成它。误认会让后续绑定走错执行方。
+/// </summary>
 static void ProviderImportRecognizesComfyUi()
 {
 	ProviderImportDraft providerImportDraft = ProviderImporter.Inspect("ComfyUI 地址：http://127.0.0.1:8188\n提交工作流：POST /prompt\n取结果：GET /history/{prompt_id}   看显存：GET /system_stats   取节点定义：GET /object_info\n实时进度：ws://127.0.0.1:8188/ws?clientid=abc123\ncheckpoint: sd_xl_base_1.0.safetensors");
@@ -11115,6 +11553,9 @@ static void ProviderImportRecognizesComfyUi()
 	Expect(providerImportDraft2.Kind != ProviderKind.ComfyUi, "普通画图接口不该被认成 ComfyUI：" + ProviderImporter.KindName(providerImportDraft2.Kind));
 }
 
+/// <summary>
+/// 钉住预设表里地址能反推回同一家、预置模型元数据自洽。表一旦自相矛盾，选择与执行方就会对不上。
+/// </summary>
 static void ProviderPresetCatalogIsConsistent()
 {
 	Expect(ProviderPreset.All.Count >= 8, "预设数量不对");
@@ -11145,6 +11586,9 @@ static void ProviderPresetCatalogIsConsistent()
 	Expect(!ProviderPreset.Moonshot.SendsSamplingParameters, "Kimi 的采样参数由服务端固定，不应发送");
 }
 
+/// <summary>
+/// 钉住预设换算在两端共用一份（采样开关与型号覆盖一致）。各写一份必然先对不上。
+/// </summary>
 static void ProviderPresetValuesResolveIsConsistent()
 {
 	foreach (ProviderPreset item20 in ProviderPreset.All)
@@ -11185,6 +11629,9 @@ static void ProviderPresetValuesResolveIsConsistent()
 	Expect(providerPresetValues2.SupportsVision == providerModel.SupportsVision, "指定型号的图像能力应对上");
 }
 
+/// <summary>
+/// 钉住不同引用各自解析出不同正文，源头卡不算引用。串味会让引用卡显示别处的设定。
+/// </summary>
 static void ReferenceCardsResolveDistinctContent()
 {
 	WorkflowCanvasState canvas = new WorkflowCanvasState();
@@ -11230,6 +11677,9 @@ static void ReferenceCardsResolveDistinctContent()
 	Expect(referenceCard.EntityId == Guid.Empty && referenceCard.Depth == 0, "源头卡不该被当成一条引用");
 }
 
+/// <summary>
+/// 钉住设定换了图或描述后下游产物报「建议重出」，没记录的、新加的、锁版本的不报。漏报会让用户拿着过期产物继续用。
+/// </summary>
 static void ReferenceStalenessDetectsUpdatedSettings()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -11387,6 +11837,9 @@ static void ReferenceStalenessDetectsUpdatedSettings()
 	Expect(ReferenceStaleness.Of(workflowCanvasState, workflowNode5).Count == 0, "刚记下的依据与现状一致，不该报过期");
 }
 
+/// <summary>
+/// 钉住引用树的直接引用分组排序、子引用递归展开、环被挡住，且只算不改画布。环路展开会栈溢出。
+/// </summary>
 static void ReferenceTreeExpandsDirectAndNested()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -11511,6 +11964,9 @@ static void ReferenceTreeExpandsDirectAndNested()
 	Expect(CanvasReferenceLayout.KeyOf(reference) != CanvasReferenceLayout.KeyOf(reference2), "跟随最新与锁版本必须是不同的键");
 }
 
+/// <summary>
+/// 钉住子引用（角色挂的道具）挂在角色下面，深度优先前序。挂错层级会让嵌套关系看不出来。
+/// </summary>
 static void ReferenceTreeListsNestedReferences()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -11560,6 +12016,9 @@ static void ReferenceTreeListsNestedReferences()
 	Expect(list2.IndexOf("黄铜钥匙") == list2.IndexOf("林晚") + 1, "子引用必须紧跟在父卡后面，实际顺序：" + string.Join(" → ", list2));
 }
 
+/// <summary>
+/// 钉住新旧 dpapi 密文双向互通。升级后读不回旧密钥，用户就得全部重填。
+/// </summary>
 static void SecretProtectorInteroperatesWithLegacyDpapi()
 {
 	if (OperatingSystem.IsWindows())
@@ -11574,6 +12033,9 @@ static void SecretProtectorInteroperatesWithLegacyDpapi()
 	}
 }
 
+/// <summary>
+/// 钉住描述里写了「出图提示词」就用它，没写才按基线段落拼。优先级反了会覆盖用户手写的内容。
+/// </summary>
 static void SettingPromptPrefersWrittenPrompt()
 {
 	WorkflowEntity workflowEntity = new WorkflowEntity
@@ -11611,6 +12073,9 @@ static void SettingPromptPrefersWrittenPrompt()
 
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住模型配置可同时启用多份、停用当前选中时自动切换、密钥不落明文、旧配置自动迁移。任一条漏掉都会让用户在配置间丢状态或泄漏密钥。
+/// </summary>
 static void SettingsProfilesMultiEnableAndSelection()
 {
 	Environment.SetEnvironmentVariable("YEEYEEYEE_AI_ENDPOINT", null);
@@ -11679,6 +12144,9 @@ static void SettingsProfilesMultiEnableAndSelection()
 
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
+/// <summary>
+/// 钉住站点标识与落盘、清单的宽容解析（模型乘档位、价格、参考图能力）。解析过严会把可用站点判废。
+/// </summary>
 static void SiteCatalogAndPoolProbe()
 {
 	Expect(SiteCatalog.IdFor("https://video.example.com/v1") == "example", "应认出 example：" + SiteCatalog.IdFor("https://video.example.com/v1"));
@@ -11806,6 +12274,9 @@ static void SiteCatalogAndPoolProbe()
 	}
 }
 
+/// <summary>
+/// 钉住技能启停只改一个键（未知字段保留），删除只删自己那个文件。整体覆盖会丢掉用户的其它设置。
+/// </summary>
 static void SkillFileToggleAndDelete()
 {
 	string text = Path.Combine(Path.GetTempPath(), "df-skill-toggle-" + Guid.NewGuid().ToString("N").Substring(0, 8));
@@ -11850,6 +12321,9 @@ static void SkillFileToggleAndDelete()
 	}
 }
 
+/// <summary>
+/// 钉住故事画布的层级：章节、分镜、场景与人物、道具，变体版本挂在人物行，引用是引用点不是副本。层级错了整棵树都会错位。
+/// </summary>
 static void StoryTreeNestsChaptersShotsAndReferences()
 {
 	WorkflowCanvasState workflowCanvasState = new WorkflowCanvasState();
@@ -12020,6 +12494,9 @@ static void StoryTreeNestsChaptersShotsAndReferences()
 }
 
 // Restored in round 127 from the last successful build (ILSpy); original comments lost.
+/// <summary>
+/// 递归查找故事树里是否存在对应节点的独立行，用于钉住引用点与副本的区分。
+/// </summary>
 static bool HasOwnRow(IEnumerable<StoryRow> roots, Guid nodeId)
 {
 	foreach (StoryRow root2 in roots)
@@ -12586,6 +13063,9 @@ static byte[] TinyBox(string type, byte[] payload)
 	return bytes;
 }
 
+/// <summary>
+/// 把若干部字节数组顺序拼成一个。
+/// </summary>
 static byte[] TinyJoin(params byte[][] parts)
 {
 	var all = new byte[parts.Sum(part => part.Length)];
@@ -12594,6 +13074,9 @@ static byte[] TinyJoin(params byte[][] parts)
 	return all;
 }
 
+/// <summary>
+/// 把一个整数写成 4 字节大端，供构造 mp4 盒子用。
+/// </summary>
 static byte[] BigEndian32(int value)
 {
 	var bytes = new byte[4];
@@ -12654,6 +13137,9 @@ static byte[] TinyVisualEntry(ushort width, ushort height, string type, params b
 	return TinyBox(type, payload.ToArray());
 }
 
+/// <summary>
+/// 造一条最小轨道盒（含 tkhd、elst、stbl 与 stco 或 co64），参数覆盖时长、时基、样本与偏移等要验的字段。
+/// </summary>
 static byte[] TinyTrack(
 	string handler, uint timescale, uint[] deltas, int cttsOffset, bool hasCtts,
 	byte[] entry, long elstMediaTime, int sampleSize, int fillBase, long mdatStart, bool useCo64)
@@ -12770,6 +13256,9 @@ static List<int> Mp4StszCounts(byte[] data)
 	return counts;
 }
 
+/// <summary>
+/// 数出成品里某个类型盒子出现的次数。
+/// </summary>
 static int Mp4BoxCount(byte[] data, string type)
 {
 	var count = 0;
@@ -12779,6 +13268,9 @@ static int Mp4BoxCount(byte[] data, string type)
 	return count;
 }
 
+/// <summary>
+/// 读出 mvhd 盒子里记录的时长字段。
+/// </summary>
 static ulong Mp4MvhdDuration(byte[] data)
 {
 	for (var index = 0; index + 20 <= data.Length; index++)
@@ -12798,6 +13290,9 @@ static List<long> Mp4ElstMediaTimes(byte[] data)
 	return values;
 }
 
+/// <summary>
+/// 取出 mdat 盒子的负载字节，用于核对样本搬运结果。
+/// </summary>
 static byte[] Mp4MdatPayload(byte[] data)
 {
 	for (var index = 4; index + 4 <= data.Length; index++)

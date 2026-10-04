@@ -49,6 +49,9 @@ foreach (var test in tests)
 if (failures.Count > 0) Environment.ExitCode = 1;
 else Console.WriteLine($"全部 {tests.Length} 项 Core 测试通过。");
 
+/// <summary>
+/// 钉住统一出场的跨章隔离、双向编辑、锁定版本与保存重开：本章编辑不泄漏到他章，节点改动能回写树，锁版与跟随最新语义不丢。
+/// </summary>
 static void UnifiedAppearances()
 {
     var state = new WorkflowCanvasState();
@@ -87,6 +90,9 @@ static void UnifiedAppearances()
     Expect(result.Errors.Count == 0 && ai.Nodes.Single().Content == "雨中", "AI 未先建资源与树再投影");
 }
 
+/// <summary>
+/// 钉住协议版本与方向校验：方向反了或版本对不上都要按对应错误码拒绝。
+/// </summary>
 static void ProtocolValidation()
 {
     var valid = "{\"v\":1,\"id\":\"11111111-1111-4111-8111-111111111111\",\"type\":\"canvas/hello\",\"ts\":1,\"payload\":{\"canvasVersion\":\"0.1.0\",\"protocolVersion\":1,\"minHostProtocol\":1,\"features\":[]}}";
@@ -97,6 +103,9 @@ static void ProtocolValidation()
     ExpectThrows<ProtocolViolationException>(() => YEEYEEYEEProtocol.Decode(badVersion, "canvasToHost"), "PROTOCOL_VERSION_MISMATCH");
 }
 
+/// <summary>
+/// 钉住能力位不能超出服务端声明：解析越权报文要拒绝，没有声明的会话一律不可编辑。
+/// </summary>
 static void CapabilityFailClosed()
 {
     var json = "{\"v\":1,\"id\":\"11111111-1111-4111-8111-111111111111\",\"type\":\"host/capabilities\",\"ts\":1,\"payload\":{\"serverClaims\":[],\"canEditCanvas\":true,\"canInvokeSkill\":false,\"canCancelJob\":false,\"canUndo\":false}}";
@@ -105,6 +114,9 @@ static void CapabilityFailClosed()
     Expect(!AccessPolicy.CanEditCanvas(session), "无声明会话不应可编辑");
 }
 
+/// <summary>
+/// 钉住 TypedReference 的循环引用被拒绝，避免解析时无限递归。
+/// </summary>
 static void ReferenceCycle()
 {
     var a = Guid.NewGuid(); var b = Guid.NewGuid();
@@ -116,12 +128,18 @@ static void ReferenceCycle()
     ExpectThrows<SkillReferenceException>(() => ReferenceGraph.Judge(skills[a], new Dictionary<Guid, Channel>(), new Dictionary<Guid, Tool>(), skills), "REFERENCE_CYCLE");
 }
 
+/// <summary>
+/// 钉住 TypedReference 指向不存在的目标时报未解析错误，而不是静默跳过。
+/// </summary>
 static void MissingReference()
 {
     var skill = new Skill { References = [new YEEYEEYEE.Core.TypedReference { Kind = ReferenceKind.Tool, TargetId = Guid.NewGuid() }] };
     ExpectThrows<SkillReferenceException>(() => ReferenceGraph.Judge(skill, new Dictionary<Guid, Channel>(), new Dictionary<Guid, Tool>(), new Dictionary<Guid, Skill>()), "REFERENCE_UNRESOLVED");
 }
 
+/// <summary>
+/// 钉住 Job 状态与进度的基本流转：完成后进度归 100，终态不能再被改。
+/// </summary>
 static void JobLifecycle()
 {
     var job = new Job(Guid.NewGuid(), Guid.NewGuid(), "idem-1");
@@ -130,6 +148,9 @@ static void JobLifecycle()
     ExpectThrows<JobStateException>(() => job.Transition(JobState.Cancelled));
 }
 
+/// <summary>
+/// 钉住幂等结果可复用，以及本地撤销栈的后进先出与清空。
+/// </summary>
 static void IdempotencyAndUndo()
 {
     var registry = new IdempotencyRegistry(); var user = Guid.NewGuid(); var result = new ExecutionResult { JobId = Guid.NewGuid(), IdempotencyKey = "k", State = JobState.Succeeded };
@@ -163,6 +184,9 @@ static void RespectOthersLease()
     Expect(YEEYEEYEE.Desktop.CollaborationSession.HeldByOthersOf([mine, theirs], me, node) == theirs, "两条锁同时在时没认出别人的那条");
 }
 
+/// <summary>
+/// 钉住取消与失败都能落到终态：取消进 Cancelled，执行异常进 Failed 并带错误码。
+/// </summary>
 static void JobCancellationAndFailure()
 {
     var session = new SessionContext { SessionId = Guid.NewGuid(), UserId = Guid.NewGuid(), ServerClaims = new HashSet<string>(["skill.invoke", "job.cancel"]) };
@@ -400,6 +424,9 @@ static void JobRetryCapCannotBeBypassed()
     }
 }
 
+/// <summary>
+/// 钉住协议字段严格校验：非法 ID 与非整数时间戳都要按格式错误拒绝。
+/// </summary>
 static void StrictProtocolFields()
 {
     var valid = "{\"v\":1,\"id\":\"11111111-1111-4111-8111-111111111111\",\"type\":\"canvas/hello\",\"ts\":1,\"payload\":{\"canvasVersion\":\"0.1.0\",\"protocolVersion\":1,\"minHostProtocol\":1,\"features\":[]}}";
@@ -491,6 +518,9 @@ static void ProtocolTableIsSharedWithCanvas()
     Expect(YEEYEEYEEProtocol.RequiredFieldsOf("不存在的类型").Count == 0, "表里没有的类型没有必填字段");
 }
 
+/// <summary>
+/// 钉住资源版本替换的状态集：可解除锁定、非法版本拒绝、锁定节点不可替换。
+/// </summary>
 static void ResourceReplaceState()
 {
     var entity = new YEEYEEYEE.Desktop.WorkflowEntity { Name = "主角" };
@@ -518,6 +548,9 @@ static void ResourceReplaceState()
         && lockError.Contains("锁定", StringComparison.Ordinal), "锁定节点仍可替换");
 }
 
+/// <summary>
+/// 钉住媒体版本回滚只作用于草稿：草稿恢复到所选快照，源变体不被改动。
+/// </summary>
 static void MediaVersionRollbackDraftOnly()
 {
     var variant = new WorkflowEntityVariant { Description = "当前", Attachments = [new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://current.png", Name = "current.png" }] };
@@ -532,6 +565,9 @@ static void MediaVersionRollbackDraftOnly()
     Expect(draft.HasUncommittedChanges, "回滚草稿应保留未提交状态");
 }
 
+/// <summary>
+/// 钉住媒体提交的范围语义：仅当前镜头只改这一条引用，全部引用则覆盖该实体变体的所有引用且不误伤非本实体的引用。
+/// </summary>
 static void MediaCommitReferenceScopes()
 {
     var entity = new WorkflowEntity { Name = "主角" };
@@ -557,6 +593,9 @@ static void MediaCommitReferenceScopes()
     Expect(unrelated.References[0].VariantVersionId is null, "全部引用模式依赖名称或错误匹配非同 ID 引用");
 }
 
+/// <summary>
+/// 钉住引用媒体的草稿隔离与定向提交：编辑草稿不污染正式变体与已锁版本，定向提交生成独立变体且不共享附件对象。
+/// </summary>
 static void ReferenceMediaDraftIsolation()
 {
     var entity = new WorkflowEntity { Name = "主角", Core = "核心设定" };
@@ -592,6 +631,9 @@ static void ReferenceMediaDraftIsolation()
     Expect(isolated.Attachments[0].Name == "draft.png", "提交后的变体不应与草稿共享附件对象");
 }
 
+/// <summary>
+/// 钉住子引用的版本快照与隔离复制：初始版本保存子引用，新版本不继承已移除的，回滚能恢复且快照与克隆不共享对象。
+/// </summary>
 static void NestedReferenceSnapshots()
 {
     var costume = new WorkflowEntity { Name = "战斗服", Kind = EntityKind.Prop };
@@ -625,6 +667,9 @@ static void NestedReferenceSnapshots()
     Expect(isolated.References.Count == 1, "隔离变体未复制子引用");
 }
 
+/// <summary>
+/// 钉住 AI 导入时自动建立角色到技能与道具的子引用，缺来源实体的条目不生成无效引用。
+/// </summary>
 static void AgentCharacterNestedReferences()
 {
     var canvas = new WorkflowCanvasState();
@@ -685,6 +730,9 @@ static void AgentCharacterNestedReferences()
     Expect(characterVariant.References.Count == 2, "缺少来源实体的工作树项不应生成无效引用");
 }
 
+/// <summary>
+/// 钉住 Job 能落盘并在重启后恢复，未完成的 Job 在宿主重启后标记为失败。
+/// </summary>
 static void SqliteJobPersistence()
 {
     var path = Path.Combine(Path.GetTempPath(), $"yeeeyee-{Guid.NewGuid():N}.db");
@@ -717,6 +765,9 @@ static void SqliteJobPersistence()
     finally { if (File.Exists(path)) File.Delete(path); }
 }
 
+/// <summary>
+/// 钉住任务快照里的工具、能力、通道与输入参数都能持久化并读回。
+/// </summary>
 static void JobSnapshotPersistence()
 {
     var path = Path.Combine(Path.GetTempPath(), $"yeeeyee-{Guid.NewGuid():N}.db");
@@ -757,6 +808,9 @@ static void JobSnapshotPersistence()
     finally { if (File.Exists(path)) File.Delete(path); }
 }
 
+/// <summary>
+/// 钉住外部任务 ID 能落盘恢复，且一个任务只能挂一次外部 ID。
+/// </summary>
 static void ExternalTaskIdPersistence()
 {
     var path = Path.Combine(Path.GetTempPath(), $"yeeeyee-external-{Guid.NewGuid():N}.db");
@@ -784,6 +838,9 @@ static void ExternalTaskIdPersistence()
     finally { if (File.Exists(path)) File.Delete(path); }
 }
 
+/// <summary>
+/// 钉住外部回调的状态映射：进度单调、成功落终态、重复回调不报错、别的用户匹配不上。
+/// </summary>
 static void ExternalTaskCallbackLifecycle()
 {
     var session = new SessionContext { UserId = Guid.NewGuid(), ServerClaims = new HashSet<string>(["skill.invoke"]) };
@@ -798,6 +855,9 @@ static void ExternalTaskCallbackLifecycle()
     Expect(!receiver.Receive(Guid.NewGuid(), new ExternalTaskUpdate { ExternalTaskId = result.ExternalTaskId!, State = ExternalTaskState.Failed, ProgressPercent = 100 }), "其他用户不应匹配外部任务");
 }
 
+/// <summary>
+/// 钉住轮询器能把外部任务推进到成功终态，并在结束后不泄漏资源。
+/// </summary>
 static void ExternalTaskPolling()
 {
     var session = new SessionContext { UserId = Guid.NewGuid(), ServerClaims = new HashSet<string>(["skill.invoke"]) };
@@ -811,6 +871,9 @@ static void ExternalTaskPolling()
     poller.DisposeAsync().AsTask().GetAwaiter().GetResult();
 }
 
+/// <summary>
+/// 钉住 WebSocket 进度能写进 Job，且轮询器停止时监听任务被释放。
+/// </summary>
 static void ExternalTaskProgressListening()
 {
     var session = new SessionContext { UserId = Guid.NewGuid(), ServerClaims = new HashSet<string>(["skill.invoke"]) };
@@ -824,6 +887,9 @@ static void ExternalTaskProgressListening()
     Expect(provider.Stopped.Task.Wait(TimeSpan.FromSeconds(1)), "WebSocket 监听任务未在轮询器停止时释放");
 }
 
+/// <summary>
+/// 钉住 ComfyUI 的工作流映射、队列状态、取消与文件下载整条链路。
+/// </summary>
 static void ComfyUiWorkflowAndDownloadFlow()
 {
     var workflow = new ComfyUiWorkflowFactory("model.safetensors").Create(new Invocation
@@ -877,6 +943,9 @@ static void ComfyUiWorkflowAndDownloadFlow()
     }
 }
 
+/// <summary>
+/// 钉住 HTTP 回调的签名校验与防重放：重放、坏签名与过期时间戳都被拒绝，合法签名能完成 Job。
+/// </summary>
 static void SignedCallbackSecurity()
 {
     var secret = Encoding.UTF8.GetBytes("0123456789abcdef-secret");
@@ -904,7 +973,13 @@ static void SignedCallbackSecurity()
     Expect(service.TryGet(result.JobId, out var completed) && completed!.State == JobState.Succeeded, "签名回调未完成 Job");
 }
 
+/// <summary>
+/// 断言为真，否则抛出带消息的异常；测试里统一走它，省去各处手写判断。
+/// </summary>
 static void Expect(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
+/// <summary>
+/// 断言这段调用会抛出指定异常，并可选地核对协议或引用类异常的错误码。
+/// </summary>
 static void ExpectThrows<T>(Action action, string? code = null) where T : Exception
 {
     try { action(); throw new InvalidOperationException($"预期抛出 {typeof(T).Name}"); }
