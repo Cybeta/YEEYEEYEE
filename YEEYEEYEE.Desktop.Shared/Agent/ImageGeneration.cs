@@ -260,6 +260,16 @@ public static class ImageProviderFactory
         return sharedHost.Execution;
     }
 
+    /// <summary>
+    /// 给别处（出视频那条 ComfyUI 链）复用**同一个**执行宿主。
+    ///
+    /// 为什么不让出视频自己建一份：ComfyUI 只需要一份宿主——每建一份都会多一个 jobs.db 连接
+    /// 与一个轮询定时器，两份还会各自记一半任务历史。出图与出视频走的是同一台服务器、同一个
+    /// 资产目录，所以共用一份是唯一说得通的做法。
+    /// </summary>
+    internal static SingleMachineExecutionService? SharedExecutionHost(AiProviderConfig config) =>
+        ResolveSharedHost(config);
+
     /// <summary>退出时释放共享宿主：任务轮询与数据库连接都要收干净。</summary>
     public static async ValueTask DisposeSharedHostAsync()
     {

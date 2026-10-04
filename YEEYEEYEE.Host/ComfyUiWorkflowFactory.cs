@@ -25,6 +25,13 @@ public sealed class ComfyUiWorkflowFactory
         if (GetString(invocation, "workflowTemplate") is { Length: > 0 } template)
             return BindTemplate(template, invocation);
 
+        // 内置模板**只出图**（KSampler → VAEDecode → SaveImage），一个视频节点都没有。
+        // 出视频时不带工作流模板走到这里，就等于拿一张静图去冒充视频——所以如实拒绝。
+        // 这一句是给「挑了池子却走成工作流」这类接线错误兜底的，正常情况下上面那一支已经接住了。
+        if (invocation.Capability is Capability.TextToVideo or Capability.ImageToVideo)
+            throw new InvalidOperationException(
+                "出视频必须带一份选定的 ComfyUI 工作流：内置模板只出图，里面没有任何视频节点。");
+
         var prompt = GetString(invocation, "prompt")
             ?? GetString(invocation, "text")
             ?? throw new InvalidOperationException("Invocation 缺少 prompt 输入");

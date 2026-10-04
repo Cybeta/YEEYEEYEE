@@ -28,6 +28,11 @@ internal static class GenerationAuditDialog
     /// <summary>
     /// 展示报告并收集这次要怎么跑。
     /// 返回用户点「定位」时要跳过去的节点 ID，以及点「开始」时那份跑法。
+    ///
+    /// <paramref name="resolveVideoRoute"/> 是给「自动抉择 / 记住一条」用的：出视频的来源有三种口径，
+    /// 而自动抉择要读这一章的情况（有没有首帧、想要几秒、这一章是讲什么的），那些东西在这个窗口里没有——
+    /// 所以由宿主（见 <c>MainWindow.ResolveVideoRouteAsync</c>）去算，算完把结论与那句人话交回来。
+    /// 传 null 时这一档就退化成「只能手动选」（例如将来的网页端）。
     /// </summary>
     public static async Task<GenerationAuditOutcome> ShowAsync(
         Window owner,
@@ -35,7 +40,8 @@ internal static class GenerationAuditDialog
         bool videoAvailable,
         ImageSourceChoice? initialImageSource,
         ImageSourceChoice? initialVideoSource,
-        int initialSeconds)
+        int initialSeconds,
+        Func<VideoRouteMode, Task<(ImageSourceChoice? Source, string Note)>>? resolveVideoRoute = null)
     {
         Guid? locate = null;
         OneClickRunRequest? run = null;
@@ -109,7 +115,9 @@ internal static class GenerationAuditDialog
 
         var poolNote = Note(string.Empty);
         var pickImagePool = Secondary("选生图池子…");
-        var pickVideoPool = Secondary("选视频池子…");
+        // 出视频这一路现在**也列 ComfyUI 的工作流**，所以按钮不再写「池子」——
+        // 写「池子」会让想用工作流的人以为这里没得选。
+        var pickVideoPool = Secondary("选视频来源…");
         var imagePoolRow = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -117,11 +125,14 @@ internal static class GenerationAuditDialog
             Children = { new TextBlock { Text = "生图池子", FontSize = 11, Foreground = Brush("DfInk2"), VerticalAlignment = VerticalAlignment.Center }, pickImagePool, poolNote }
         };
         var videoPoolNote = Note(string.Empty);
+        // 自动抉择 / 记住一条那两条路的结果写在这儿：SyncCost 每次都会重写 videoPoolNote，
+        // 所以那句人话要单独存着再拼进去，不能被清掉。
+        var routeNote = string.Empty;
         var videoPoolRow = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             Spacing = 8,
-            Children = { new TextBlock { Text = "视频池子", FontSize = 11, Foreground = Brush("DfInk2"), VerticalAlignment = VerticalAlignment.Center }, pickVideoPool, videoPoolNote }
+            Children = { new TextBlock { Text = "视频来源", FontSize = 11, Foreground = Brush("DfInk2"), VerticalAlignment = VerticalAlignment.Center }, pickVideoPool, videoPoolNote }
         };
         body.Children.Add(imagePoolRow);
         body.Children.Add(videoPoolRow);
@@ -193,7 +204,8 @@ internal static class GenerationAuditDialog
             poolNote.Text = SourceNote(imagePool,
                 "没选：补图会用设置里的默认图像模型（价格看设置，这里算不出来）。");
             videoPoolNote.Text = SourceNote(videoPool,
-                videoAvailable ? "没选：会用设置里的视频接口。" : "还没配视频链路：出视频这一档现在跑不了。");
+                videoAvailable ? "没选：会用设置里的视频接口。" : "还没配视频链路：出视频这一档现在跑不了。")
+                + (routeNote.Length > 0 ? "　" + routeNote : string.Empty);
 
             var check = VideoDurationPolicy.Check(videoPool, seconds);
             durationNote.Text = check.Note;
@@ -247,10 +259,51 @@ internal static class GenerationAuditDialog
         };
         pickVideoPool.Click += async (_, _) =>
         {
-            var picked = await SitePoolPicker.ShowAsync(owner, SiteCatalog.Load().Sites, report.RootTitle, video: true);
-            if (picked is null) return;
-            videoPool = picked;
-            // 换了池子就把时长对齐到它登记的档位：用户多半是「照这家的档位来」，
+            var sites = SiteCatalog.Load().Sites;
+            var pick = await SitePoolPicker.ShowVideoAsync(
+                owner,
+                sites,
+                report.RootTitle,
+                preset: videoPool?.Pool,
+                presetWorkflow: videoPool?.Workflow,
+                presetMode: VideoRoutePreferenceStore.Load().ModeKind);
+            if (pick is null) return;   // 取消：什么都不改
+
+            // 先把「以后这事儿怎么定」存下来。它与「这一次选了哪条」是两件事：
+            // 选了「记住」就该记住，选了「自动」就该每次自动，选了「每次都问」也该能退回去。
+            VideoRoutePreferenceStore.Save(new VideoRoutePreference
+            {
+                Mode = VideoRoutePreference.ModeValue(pick.Mode),
+                Key = pick.Choice is null ? string.Empty : VideoRoute.FromChoice(pick.Choice)?.Key ?? string.Empty,
+                Label = pick.Choice?.Label ?? string.Empty
+            });
+
+            if (pick.Mode == VideoRouteMode.Auto)
+            {
+                // 「交给 AI 自动抉择」：现在就挑一次（由宿主算，它知道这一章的情况），
+                // 并把「是谁挑的、为什么」写在窗口上——不说的话，用户只知道「系统选的」。
+                // **只挑一次**：这个回调里可能有一次模型调用，调两次就是花两次钱。
+                if (resolveVideoRoute is null)
+                {
+                    routeNote = "自动抉择这一档需要宿主支持，这里只能手动选。";
+                }
+                else
+                {
+                    var resolved = await resolveVideoRoute(VideoRouteMode.Auto);
+                    videoPool = resolved.Source;
+                    routeNote = resolved.Note;
+                }
+                SyncTiers();
+                SyncCost();
+                return;
+            }
+
+            if (pick.Choice is null) return;
+            routeNote = pick.Mode == VideoRouteMode.Remember
+                ? "以后不再问，直接用这一条（要改回「每次都问」就再点一次这个按钮）。"
+                : string.Empty;
+            videoPool = pick.Choice;
+            // 换了来源就把时长对齐到它登记的档位：用户多半是「照这家的档位来」，
             // 而不是「我非要 15 秒」——真非要的话他自己改回去，那时会看到一句提醒。
             // 走 ComfyUI 工作流时没有可对齐的档位（时长由工作流自己的帧数决定），所以不动它。
             if (videoPool.PoolItem?.Seconds is > 0 and var tierSeconds)

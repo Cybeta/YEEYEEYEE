@@ -2483,13 +2483,22 @@ public partial class MainWindow : Window, IAgentSessionHost
         var report = GenerationAudit.Build(currentCanvas.Canvas, node);
         StatusText.Text = authority.Length == 0 ? report.Describe() : authority + report.Describe();
 
+        // 出视频走哪条路：按用户立下的口径定（每次都问 / 记住一条 / 每次自动抉择），
+        // 并把结论如实说出来——「自动抉择」这五个字本身不说明任何事，得说清是谁挑的、为什么。
+        var secondsWanted = Math.Max(0, AiProviderSettings.Load().VideoDefaultSeconds);
+        var (videoSource, videoRouteNote) = await ResolveVideoRouteAsync(
+            node, LatestImageAttachmentPath(node).Length > 0, secondsWanted);
+        if (videoRouteNote.Length > 0) StatusText.Text += "　" + videoRouteNote;
+
         var outcome = await GenerationAuditDialog.ShowAsync(
             this,
             report,
             videoAvailable: VideoReady,
             initialImageSource: RememberedPool() is { } rememberedPool ? ImageSourceChoice.OfPool(rememberedPool) : null,
-            initialVideoSource: SuggestedVideoSource(),
-            initialSeconds: Math.Max(0, AiProviderSettings.Load().VideoDefaultSeconds));
+            initialVideoSource: videoSource,
+            initialSeconds: secondsWanted,
+            resolveVideoRoute: mode => ResolveVideoRouteAsync(
+                node, LatestImageAttachmentPath(node).Length > 0, secondsWanted, mode));
 
         if (outcome.Run is { } request)
         {
@@ -2666,27 +2675,77 @@ public partial class MainWindow : Window, IAgentSessionHost
     }
 
     /// <summary>
-    /// 一键出视频时预选的视频来源：站点清单里的第一个视频池子（遍历顺序稳定，所以每次预选的都一样）。
+    /// 「每次都问」时的预选：站点清单里的第一个视频池子（遍历顺序稳定，所以每次预选的都一样）。
     /// **只是预选**——来源的名字与单价都摆在窗口上，随时能换；一个视频池子都没有时返回 null，
     /// 那时走设置里的视频接口，窗口上会如实写「没选」。
     ///
-    /// 这里**不去猜哪份 ComfyUI 工作流适合出视频**：一台服务器上往往有几十份出视频的工作流
-    /// （图生、动作迁移、对口型…），它们出的东西完全不同，按文件夹名挑一个等于替用户押注。
-    /// 池子那一侧可以预选，是因为清单排序本身就只有一个「第一个」；工作流这一侧则由用户自己挑。
+    /// 这里**不预选 ComfyUI 的视频工作流**：一台服务器上实测有近两百份出视频的工作流
+    /// （图生、动作迁移、对口音、放大…），出的东西完全不同，替用户押一份等于替他决定画面长什么样。
+    /// 但**选择器里列得出来**——想用工作流的人在那里面按「家族 → 工作流」两级挑，不是看不到。
     /// </summary>
-    private static ImageSourceChoice? SuggestedVideoSource()
+    private static ImageSourceChoice? SuggestedVideoSource(IReadOnlyList<SiteProfile> sites)
     {
+        foreach (var site in sites)
+            foreach (var pool in site.UsablePools.Where(pool => pool.IsVideo))
+                return ImageSourceChoice.OfPool(new SitePoolChoice(site, pool));
+        return null;
+    }
+
+    /// <summary>
+    /// 按用户立下的口径决定这次出视频走哪条路（三种口径见 <see cref="VideoRoutePreferenceStore"/>）。
+    ///
+    /// <paramref name="forcedMode"/> 是给「用户在自检窗口里刚改了口径」用的：那一刻盘上的口径还没生效
+    /// （或者用户选的就是「自动」这一类当下就要算的），所以由调用方指定用哪一档，别再回头读盘。
+    ///
+    /// 返回的那句话是**要如实说给用户听的**：为什么是这条、这次是谁挑的。
+    /// 三种口径都要能落到一条路上，落不到就回退到「问一句」——花钱的事，
+    /// 宁可多问，也不能默默换一条跑出去。
+    /// </summary>
+    private async Task<(ImageSourceChoice? Source, string Note)> ResolveVideoRouteAsync(
+        WorkflowNode root, bool hasFirstFrame, int seconds, VideoRouteMode? forcedMode = null)
+    {
+        IReadOnlyList<SiteProfile> sites;
         try
         {
-            foreach (var site in SiteCatalog.Load().Sites)
-                foreach (var pool in site.UsablePools.Where(pool => pool.IsVideo))
-                    return ImageSourceChoice.OfPool(new SitePoolChoice(site, pool));
+            sites = SiteCatalog.Load().Sites;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
         {
-            return null;
+            return (null, string.Empty);
         }
-        return null;
+
+        var preference = VideoRoutePreferenceStore.Load();
+        var mode = forcedMode ?? preference.ModeKind;
+        if (mode == VideoRouteMode.Ask) return (SuggestedVideoSource(sites), string.Empty);
+
+        if (mode == VideoRouteMode.Remember)
+        {
+            var remembered = VideoRoutePreferenceStore.Resolve(preference, sites);
+            // 记住的那条没了（站点被删、工作流被清）：**不默默换一条**，回到问一句并说明。
+            return remembered is not null
+                ? (remembered.ToChoice(), $"出视频用记住的那一条（不用再问）：{remembered.FullLabel}。")
+                : (SuggestedVideoSource(sites),
+                    $"记住的出视频来源已经找不到了（{preference.Label}）：这次改回让你选。");
+        }
+
+        // 自动抉择：先让对话模型挑，它挑不出来（没接模型 / 调用失败 / 挑了个不在清单里的项）就按规则挑。
+        var routes = VideoRouteOptions.Build(sites);
+        var context = new VideoRouteContext
+        {
+            HasFirstFrame = hasFirstFrame,
+            Seconds = seconds,
+            Prompt = root.Content ?? string.Empty,
+            ShotTitle = root.Title
+        };
+        var decision = await VideoRouteAutoPick.ChooseByModelAsync(
+                           AiProviderFactory.Create() as IAiChatProvider, routes, context)
+                       ?? VideoRouteAutoPick.Choose(routes, context);
+
+        return decision.Route is null
+            ? (SuggestedVideoSource(sites), "自动抉择没能挑出能用的路：" + decision.Reason)
+            : (decision.Route.ToChoice(),
+                (decision.ByModel ? "出视频这条路由 AI 挑的（不用再问）：" : "出视频这条路由规则挑的（不用再问）：")
+                + decision.Route.FullLabel + "。" + decision.Reason);
     }
 
     /// <summary>跑一条协助建议：三类动作分别走提示词窗口 / Agent 面板 / 图像链路。</summary>
@@ -2741,18 +2800,10 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         if (currentCanvas is null) return;
 
-        // 出视频这条路只认接口站的视频池子（提交 → 轮询 → 下载）。选择器已经不会给出工作流那一项，
-        // 但这里再挡一道：万一以后接上了别的入口，也不该**静默**按池子的逻辑去跑一份工作流。
-        if (source?.IsWorkflow == true)
-        {
-            StatusText.Text = $"「{source.Label}」是一份 ComfyUI 工作流：出视频那条链现在只认接口站的视频池子，"
-                + "还提交不了 ComfyUI 的工作流。这一镜没有发出去。";
-            return;
-        }
-
         var config = AiProviderSettings.Load();
         // 走站点池子时，地址 / 模型 / 密钥由**池子**说了算（它自带这三样）：
         // 在配置的一份临时副本上覆盖，出视频那条链就按这一家去打——设置里那份只是兜底。
+        // 走 ComfyUI 工作流时这三样都不参与：底模与地址由那台服务器与那份工作流决定。
         if (source?.Pool is { } pool)
         {
             config.VideoEndpoint = pool.Site.BaseUrl;
@@ -2761,7 +2812,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
 
         IVideoProvider provider;
-        try { provider = VideoProviderFactory.Create(config); }
+        try { provider = VideoProviderFactory.Create(config, source?.Workflow); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             StatusText.Text = $"出视频链路创建不出来：{error.Message}";
@@ -2770,14 +2821,20 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (!provider.IsConfigured)
         {
             StatusText.Text = source is null
-                ? "出视频链路没配好：请在「设置 → 生图与生视频 → 视频接口」里填上地址与模型。"
-                : $"「{source.Label}」这个池子缺地址或模型名，出不了视频。";
+                ? "出视频链路没配好：请在「设置 → 生图与生视频」里填上视频接口（地址与模型），"
+                  + "或者把 ComfyUI 配齐（地址与 checkpoint）。"
+                : source.IsWorkflow
+                    ? $"「{source.Label}」这条链跑不了：ComfyUI 的地址或 checkpoint 还没配好。"
+                    : $"「{source.Label}」这个池子缺地址或模型名，出不了视频。";
             return;
         }
 
         var frame = LatestImageAttachmentPath(node);
         var seconds = config.VideoDefaultSeconds;
-        var model = source?.PoolItem?.Model ?? string.Empty;
+        // 走工作流时报那份工作流的名字（报 checkpoint 会让人以为跑的是设置里那个底模）。
+        var model = source?.Workflow is { } workflow
+            ? workflow.Workflow.Title
+            : source?.PoolItem?.Model ?? string.Empty;
 
         var prompt = new TextBox
         {
@@ -2799,16 +2856,28 @@ public partial class MainWindow : Window, IAgentSessionHost
             FontWeight = FontWeight.SemiBold
         });
         body.Children.Add(prompt);
-        body.Children.Add(AgentDialogUi.Note(frame.Length > 0
-            ? $"首帧：节点上最新那张图（{Path.GetFileName(frame)}）——走图生视频，出来的是这一镜动起来的样子。"
-            : "这个节点上还没有图：这次走文生视频，画面由模型照着提示词自己编——先出一张这一镜的画面再来，会稳得多。",
-            frame.Length > 0 ? AgentNoteLevel.Info : AgentNoteLevel.Warning));
+        // 首帧这一句要**按这一条链的实际情况**说：一份 ComfyUI 工作流有没有底图入口是问得出来的，
+        // 所以「首帧用不上」这种情况必须在点下去之前写在窗口上，而不是等出完了才发现画面跟这一镜无关。
+        var workflowTakesFrame = (provider as ComfyUiVideoProvider)?.TakesFirstFrame;
+        body.Children.Add(AgentDialogUi.Note(
+            frame.Length == 0
+                ? "这个节点上还没有图：这次走文生视频，画面由模型照着提示词自己编——先出一张这一镜的画面再来，会稳得多。"
+                : workflowTakesFrame == false
+                    ? $"首帧：节点上最新那张图（{Path.GetFileName(frame)}）——但这份工作流没有底图入口，"
+                      + "首帧不会被用上（它只能文生视频）。"
+                    : $"首帧：节点上最新那张图（{Path.GetFileName(frame)}）——走图生视频，出来的是这一镜动起来的样子。",
+            frame.Length > 0 && workflowTakesFrame != false ? AgentNoteLevel.Info : AgentNoteLevel.Warning));
         body.Children.Add(AgentDialogUi.Note(
             $"模型：{(model.Length > 0 ? model : config.VideoModel.Length > 0 ? config.VideoModel : "（设置里没填）")}"
-            + (source?.Pool is null ? string.Empty : $" · {source.Label}")
-            + $" · 时长：{(seconds > 0 ? seconds + " 秒" : "由服务端决定")}"
-            + "\n说明：视频是**异步任务**（提交 → 轮询 → 下载），可能等几分钟；"
-            + "这一条链一次只出一版、不会自动重试——按次计费，多出就是多花钱。"));
+            + (source?.Label is { Length: > 0 } label ? $" · {label}" : string.Empty)
+            + (source?.IsWorkflow == true
+                ? " · 时长：由那份工作流自己的帧数与帧率决定（我们只往里写提示词、负面词与首帧）"
+                : $" · 时长：{(seconds > 0 ? seconds + " 秒" : "由服务端决定")}")
+            + (source?.IsWorkflow == true
+                ? "\n说明：这是在 ComfyUI 上跑一张节点图，跑多久取决于那张图与那台机器的显卡，可能十几分钟；"
+                  + "出好之前请别关窗口，进度会写在状态栏里。"
+                : "\n说明：视频是**异步任务**（提交 → 轮询 → 下载），可能等几分钟；"
+                  + "这一条链一次只出一版、不会自动重试——按次计费，多出就是多花钱。")));
 
         var go = AgentDialogUi.Primary("出这一镜的视频");
         var cancel = AgentDialogUi.Secondary("取消");
@@ -2880,8 +2949,18 @@ public partial class MainWindow : Window, IAgentSessionHost
             EndpointPath = pool?.Site.VideoPath ?? string.Empty,
             ApiKey = pool?.Site.ApiKey ?? string.Empty,
             Seconds = seconds,
-            ReferenceImages = frames
+            ReferenceImages = frames,
+            // 走 ComfyUI 工作流时带这三个：站点 id + 正文文件名 + 工作流键（与出图那条路同一套口径）。
+            // 三个都空 = 走接口站的视频池子。
+            WorkflowSiteId = source?.Workflow?.Site.Id ?? string.Empty,
+            WorkflowPayloadFile = source?.Workflow?.Workflow.PayloadFile ?? string.Empty,
+            WorkflowKey = source?.Workflow?.Workflow.Key ?? string.Empty
         };
+
+        // ComfyUI 那条链要等十几分钟，所以把「已提交」这类进度接到状态栏上——
+        // 没有这句话，用户在十几分钟里看到的是一个不动的窗口。
+        if (provider is ComfyUiVideoProvider comfyVideo)
+            comfyVideo.Status = message => StatusText.Text = message;
 
         VideoGenerationResult result;
         try

@@ -173,6 +173,13 @@ var tests = new (string Name, Action Run)[]
     ("成品版本对比：镜头按稳定 ID 比（改名不算增删），只记了标题的老版本如实说明", ProductVersionComparesShotsByIdentityNotTitle),
     ("成品版本对比：读不出来就点名，其余照比；镜头清单没记就说没记", ProductVersionComparisonNamesTheVersionItCannotRead),
     ("章节 → 成品：一章下每个成品都列出来、顺序跟工作树、没拼过的也写清楚", ProductVersionsForChapterGroupsByProductInReadingOrder),
+    ("出视频 · ComfyUI：产物认 gifs / videos / audio 三个桶，落盘字节原样、扩展名跟着走", ComfyUiVideoOutputsAreDownloadedFromTheirOwnBucket),
+    ("出视频 · ComfyUI：认全了视频桶之后图片那一路没被改坏（角色仍是 image）", ComfyUiImageOutputsStillLandInTheirOwnRole),
+    ("出视频 · 自动抉择：按这一镜有没有首帧挑路，同分时池子优先；一条都没有就说挑不出来", VideoRouteAutoPickPrefersTheRouteThatFitsTheShot),
+    ("出视频 · 自动抉择：模型挑的必须是清单里那一条，越界/没字段一律算没挑出来", VideoRouteModelPickMustBeInsideTheList),
+    ("出视频 · 候选清单：每个家族只出一条（推荐优先）并说清「能不能吃首帧」的依据", VideoRouteOptionsListOneWorkflowPerFamilyAndSayWhereTheAbilityCameFrom),
+    ("出视频 · 记住一条：记的是稳定键（改名不失效），那条没了就回到问一句", VideoRoutePreferenceRemembersAStableKey),
+    ("出视频 · 选了工作流却没配 ComfyUI：要点名那份工作流并说清缺什么", VideoProviderFactoryNamesWhatIsMissingForAChosenWorkflow),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -13491,6 +13498,252 @@ static void Mp4ConcatRefusesUnsupportedShapes()
 	Expect(!File.Exists(Path.Combine(directory, "f.mp4")), "拒绝的时候不该留下半个成品");
 }
 
+// ── 出视频那两条新链：ComfyUI 工作流出视频 / 全列出来让用户选 / 自动抉择 / 记住一条 ──────────────
+
+/// <summary>
+/// 钉住「出视频时 ComfyUI 的产物要认得出来」：视频工作流的产物落在 <c>gifs</c> 桶里
+/// （SaveWEBM / SaveAnimatedWEBP 的历史叫法），SaveVideo 落在 <c>videos</c>，SaveAudio 落在 <c>audio</c>。
+///
+/// 早先只认 <c>images</c>，后果不是「少收一个文件」而是**整条视频链走不通**：
+/// 一份出视频的工作流跑完了，产物就在 gifs 里，而下载那一步什么都没找到，
+/// 任务于是永远停在「运行中」，最后以超时收场——报出来的是超时，真正的原因却在桶名上。
+/// </summary>
+static void ComfyUiVideoOutputsAreDownloadedFromTheirOwnBucket()
+{
+    var assetDirectory = NewTempDirectory("comfyui-video-output");
+    // EBML 头，看着像 webm，用来证明字节是原样搬过来的。
+    var payload = new byte[] { 0x1A, 0x45, 0xDF, 0xA3, 0x77, 0x65, 0x62, 0x6D, 0x01, 0x02 };
+    var handler = new StubHttpHandler(request =>
+    {
+        var uri = request.RequestUri!;
+        if (uri.AbsolutePath.EndsWith("history/p-1", StringComparison.Ordinal))
+            return JsonResponse(
+                "{\"p-1\":{\"status\":{\"status_str\":\"success\"},\"outputs\":"
+                + "{\"9\":{\"gifs\":[{\"filename\":\"yeeeyee_00001.webm\",\"subfolder\":\"\",\"type\":\"output\"}]}}}}");
+        if (uri.AbsolutePath.Contains("view", StringComparison.Ordinal))
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(payload) };
+        return new HttpResponseMessage(HttpStatusCode.NotFound);
+    });
+    using var http = new HttpClient(handler) { BaseAddress = new Uri("http://comfy.local/") };
+    var provider = new ComfyUiProvider(http, assetDirectory);
+
+    var update = provider.GetStatusAsync("p-1", CancellationToken.None).GetAwaiter().GetResult();
+
+    Expect(update.State == ExternalTaskState.Succeeded, "跑完就该是 Succeeded，实际 " + update.State);
+    Expect(update.Outputs.Count == 1, "gifs 桶里那一个要被收下，实际 " + update.Outputs.Count);
+    Expect(update.Outputs[0].Role == "video",
+        "它得标成 video——挂在节点上、收进成片时都靠这个角色分辨，实际 " + update.Outputs[0].Role);
+
+    var local = Path.Combine(assetDirectory, update.Outputs[0].Ref.Replace("asset://", string.Empty));
+    Expect(File.Exists(local), "文件要真的落到资产目录：" + local);
+    Expect(File.ReadAllBytes(local).SequenceEqual(payload), "落盘内容要与服务器给的一模一样");
+    Expect(Path.GetExtension(local) == ".webm", "扩展名要跟着原文件名走，实际 " + Path.GetExtension(local));
+}
+
+/// <summary>
+/// 钉住「图片那一路没被改坏」：认全了 gifs / videos / audio 之后，
+/// <c>images</c> 桶仍然按老口径收（角色是 image），而且同一条 history 里两种产物同时出现时两个都要收下。
+/// </summary>
+static void ComfyUiImageOutputsStillLandInTheirOwnRole()
+{
+    var assetDirectory = NewTempDirectory("comfyui-image-output");
+    var handler = new StubHttpHandler(request =>
+    {
+        var uri = request.RequestUri!;
+        if (uri.AbsolutePath.EndsWith("history/p-2", StringComparison.Ordinal))
+            return JsonResponse(
+                "{\"p-2\":{\"outputs\":{\"8\":{\"images\":[{\"filename\":\"a.png\",\"subfolder\":\"\",\"type\":\"output\"}]},"
+                + "\"9\":{\"gifs\":[{\"filename\":\"b.webm\",\"subfolder\":\"\",\"type\":\"output\"}]}}}}");
+        if (uri.AbsolutePath.Contains("view", StringComparison.Ordinal))
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(new byte[] { 1, 2, 3 }) };
+        return new HttpResponseMessage(HttpStatusCode.NotFound);
+    });
+    using var http = new HttpClient(handler) { BaseAddress = new Uri("http://comfy.local/") };
+    var provider = new ComfyUiProvider(http, assetDirectory);
+
+    var update = provider.GetStatusAsync("p-2", CancellationToken.None).GetAwaiter().GetResult();
+
+    Expect(update.Outputs.Count == 2, "图与视频各一个，实际 " + update.Outputs.Count);
+    Expect(update.Outputs.Any(asset => asset.Role == "image"), "图片那一个仍是 image 角色");
+    Expect(update.Outputs.Any(asset => asset.Role == "video"), "视频那一个仍是 video 角色");
+}
+
+/// <summary>
+/// 钉住自动抉择的两条基本判断（它决定了「出视频用哪条路」，选错的代价是一段与这一镜无关的画面）：
+/// ① 这一镜有首帧时，**能吃首帧的优先**——图生视频出来的才是这一镜动起来的样子；
+/// ② 这一镜没有首帧时，纯文生视频优先，吃掉「能收首帧但这次没首帧」的那条；
+/// ③ 同分时池子优先于工作流（一次接口调用，不用在服务器上排队跑节点图）。
+/// </summary>
+static void VideoRouteAutoPickPrefersTheRouteThatFitsTheShot()
+{
+    var comfy = new SiteProfile { Id = "comfy-1", DisplayName = "本机 ComfyUI", Backend = "comfyui" };
+    var api = new SiteProfile { Id = "api-1", DisplayName = "接口站" };
+    var takesFrame = VideoRoute.OfWorkflow(comfy, new SiteWorkflow { Key = "i2v.json", Title = "图生视频" })
+        with { CanTakeFrame = true };
+    var textOnly = VideoRoute.OfWorkflow(comfy, new SiteWorkflow { Key = "t2v.json", Title = "文生视频" })
+        with { CanTakeFrame = false };
+    var unknown = VideoRoute.OfPool(api, new SitePool { Model = "某视频模型", Kind = "video" })
+        with { CanTakeFrame = null };
+
+    var withFrame = VideoRouteAutoPick.Choose(
+        new[] { textOnly, unknown, takesFrame },
+        new VideoRouteContext { HasFirstFrame = true, Prompt = "她推开门" });
+    Expect(withFrame.Route == takesFrame, "有首帧就该挑能吃首帧的那条，实际 " + withFrame.Route?.Label);
+    Expect(withFrame.Reason.Contains("首帧"), "理由里要说清是因为首帧，实际「" + withFrame.Reason + "」");
+
+    var withoutFrame = VideoRouteAutoPick.Choose(
+        new[] { takesFrame, unknown, textOnly },
+        new VideoRouteContext { HasFirstFrame = false, Prompt = "她推开门" });
+    Expect(withoutFrame.Route == textOnly, "没有首帧时纯文生的那条优先，实际 " + withoutFrame.Route?.Label);
+
+    // 两条都是「能吃首帧」时，池子那 0.5 分要起作用：一次接口调用比在服务器上排队更可控。
+    var poolWithFrame = VideoRoute.OfPool(api, new SitePool { Model = "某视频模型", Kind = "video" })
+        with { CanTakeFrame = true };
+    var workflowWithFrame = takesFrame with { CanTakeFrame = true };
+    var tie = VideoRouteAutoPick.Choose(
+        new[] { workflowWithFrame, poolWithFrame },
+        new VideoRouteContext { HasFirstFrame = true });
+    Expect(tie.Route == poolWithFrame, "同分时池子优先（不用排队），实际 " + tie.Route?.Label);
+
+    var none = VideoRouteAutoPick.Choose(Array.Empty<VideoRoute>(), new VideoRouteContext());
+    Expect(none.Route is null && none.Reason.Contains("没有"), "一条路都没有时要挑不出来且说清："
+        + none.Reason);
+}
+
+/// <summary>
+/// 钉住「模型挑的那一条必须真的在清单里」：超出范围的序号、不是数字、没有 index 字段，
+/// 一律算「模型没挑出来」（返回 -1），由调用方退回按规则挑。
+/// 替模型猜一个「它大概是想要第 1 条」比直接承认没挑出来坏得多——那等于把一次花的钱押在猜测上。
+/// </summary>
+static void VideoRouteModelPickMustBeInsideTheList()
+{
+    Expect(VideoRouteAutoPick.ParsePick("{\"index\": 2, \"reason\": \"它有首帧入口\"}", 3).Index == 1,
+        "1 基序号要换成 0 基下标");
+    Expect(VideoRouteAutoPick.ParsePick("{\"index\": 3, \"reason\": \"看着行\"}", 3).Index == 2, "最后一条也要收");
+    Expect(VideoRouteAutoPick.ParsePick("{\"index\": 4, \"reason\": \"\"}", 3).Index == -1, "超出范围就不算挑出来");
+    Expect(VideoRouteAutoPick.ParsePick("{\"index\": 0, \"reason\": \"\"}", 3).Index == -1, "0 是越界（序号从 1 起）");
+    Expect(VideoRouteAutoPick.ParsePick("我觉得第二条更合适", 3).Index == -1, "没有 index 字段就不算挑出来");
+    Expect(VideoRouteAutoPick.ParsePick("", 3).Index == -1, "空回答不算挑出来");
+    Expect(VideoRouteAutoPick.ParsePick("{\"index\": 2}", 3).Index == 1, "没有理由也要认（理由只是加分项）");
+
+    // 模型常把 JSON 包在解释或代码块里：找得到、验得过就认。
+    var wrapped = "我挑了下面这条：\n```json\n{\"index\": 1, \"reason\": \"最省事\"}\n```\n";
+    var parsed = VideoRouteAutoPick.ParsePick(wrapped, 2);
+    Expect(parsed.Index == 0 && parsed.Reason == "最省事", "包在代码块里也要认得出，实际 " + parsed.Index + " / " + parsed.Reason);
+}
+
+/// <summary>
+/// 钉住「列出来的是一份名单，不是一堵墙」：同一台 ComfyUI 的同一个家族里可能有几十份工作流，
+/// 名单只出**每个家族的代表**（推荐项优先、其次节点少的），并且**说清「能不能吃首帧」这个结论是从哪儿来的**
+/// ——读不到正文时只能按家族文件夹名推，那是提示不是事实，得让人分得清。
+/// </summary>
+static void VideoRouteOptionsListOneWorkflowPerFamilyAndSayWhereTheAbilityCameFrom()
+{
+    var comfy = new SiteProfile
+    {
+        Id = "comfy-1",
+        DisplayName = "本机 ComfyUI",
+        Backend = "comfyui",
+        Workflows =
+        {
+            new SiteWorkflow { Key = "G视频-Wan图生/A01.json", Title = "A01", Folder = "G视频-Wan图生", Kind = "video", NodeCount = 27, PayloadFile = "a1.json" },
+            new SiteWorkflow { Key = "G视频-Wan图生/A02.json", Title = "A02", Folder = "G视频-Wan图生", Kind = "video", NodeCount = 12, Recommended = true, PayloadFile = "a2.json" },
+            new SiteWorkflow { Key = "H视频-文生/T01.json", Title = "T01", Folder = "H视频-文生", Kind = "video", NodeCount = 9, PayloadFile = "t1.json" },
+            // 图像那一份不能被当成视频候选。
+            new SiteWorkflow { Key = "T-图像-Krea/K01.json", Title = "K01", Folder = "T-图像-Krea", Kind = "image", NodeCount = 8 }
+        }
+    };
+
+    // 不读正文（inspectWorkflowPayloads: false）：这条用例要钉的是「按家族去重 + 说清依据」，
+    // 读盘那半在别的用例里，混在一起会因为环境里有没有落盘而时红时绿。
+    var routes = VideoRouteOptions.Build(new[] { comfy }, inspectWorkflowPayloads: false);
+
+    Expect(routes.Count == 2, "两个视频家族就该只有两条候选，实际 " + routes.Count);
+    Expect(routes.All(route => route.Kind == VideoRouteKind.Workflow), "这台站点没有视频池子，只该出工作流");
+    var wan = routes.Single(route => route.Workflow!.Folder == "G视频-Wan图生");
+    Expect(wan.Workflow!.Recommended, "家族代表要挑推荐的那份，实际挑了 " + wan.Label);
+    Expect(wan.CanTakeFrame == true, "文件夹名写着「图生」，就该按能吃首帧算");
+    Expect(wan.FrameSource.Contains("家族名"), "要说清这个结论是按家族名推的（提示，不是事实），实际「"
+        + wan.FrameSource + "」");
+    var text = routes.Single(route => route.Workflow!.Folder == "H视频-文生");
+    Expect(text.CanTakeFrame == false, "写着「文生」的按不能吃首帧算");
+}
+
+/// <summary>
+/// 钉住「记住一条」记的是**稳定键**（站点 id + 池子/工作流键），不是标题：
+/// 站点改名、工作流改名都不该让记住的那条失效；而它真的没了（站点被删、工作流被清）时，
+/// 要返回 null 让调用方**回到问一句**——不能默默换成清单里的第一条跑出去，那是花钱的事。
+/// </summary>
+static void VideoRoutePreferenceRemembersAStableKey()
+{
+    var directory = NewTempDirectory("video-route-pref");
+    var comfy = new SiteProfile
+    {
+        Id = "comfy-1",
+        DisplayName = "本机 ComfyUI",
+        Backend = "comfyui",
+        Workflows =
+        {
+            new SiteWorkflow { Key = "G视频-Wan图生/A02.json", Title = "A02", Folder = "G视频-Wan图生", Kind = "video", PayloadFile = "a2.json" },
+            new SiteWorkflow { Key = "G视频-Wan图生/A03.json", Title = "A03", Folder = "G视频-Wan图生", Kind = "video", PayloadFile = "a3.json" }
+        }
+    };
+    var route = VideoRoute.OfWorkflow(comfy, comfy.Workflows[0]);
+    var preference = new VideoRoutePreference
+    {
+        Mode = VideoRoutePreference.ModeValue(VideoRouteMode.Remember),
+        Key = route.Key,
+        Label = route.Label
+    };
+
+    VideoRoutePreferenceStore.Save(preference, directory);
+    var loaded = VideoRoutePreferenceStore.Load(directory);
+    Expect(loaded.ModeKind == VideoRouteMode.Remember, "口径要存下来，实际 " + loaded.Mode);
+    Expect(loaded.Key == "flow|comfy-1|G视频-Wan图生/A02.json", "键里只放 id 与键，不放标题，实际 " + loaded.Key);
+
+    var renamed = new SiteProfile
+    {
+        Id = "comfy-1",
+        DisplayName = "改了名的服务器",
+        Backend = "comfyui",
+        Workflows =
+        {
+            new SiteWorkflow { Key = "G视频-Wan图生/A02.json", Title = "改过名的 A02", Folder = "G视频-Wan图生", Kind = "video", PayloadFile = "a2.json" }
+        }
+    };
+    var resolved = VideoRoutePreferenceStore.Resolve(loaded, new[] { renamed });
+    Expect(resolved?.Workflow?.Key == "G视频-Wan图生/A02.json", "站点与工作流改名不该让它失效");
+
+    Expect(VideoRoutePreferenceStore.Resolve(loaded, Array.Empty<SiteProfile>()) is null,
+        "站点被删了就要返回 null（调用方据此回到「问一句」），不能默默换一条");
+    Expect(VideoRoutePreferenceStore.Load(NewTempDirectory("video-route-empty")).ModeKind == VideoRouteMode.Ask,
+        "没有这份文件时默认「每次都问」——花钱的事，宁可多问一句");
+}
+
+/// <summary>
+/// 钉住「选了工作流但 ComfyUI 没配齐」时说的是**够用的话**：不是一句通用的「没配好」，
+/// 而是点名那份工作流 + 说清去哪儿补。用户看着「ComfyUI 工作流 · A02」这个选择被拒，
+/// 需要的正是「缺地址还是缺 checkpoint」这一个信息。
+/// </summary>
+static void VideoProviderFactoryNamesWhatIsMissingForAChosenWorkflow()
+{
+    var comfy = new SiteProfile { Id = "comfy-1", DisplayName = "本机 ComfyUI", Backend = "comfyui" };
+    var choice = new SiteWorkflowChoice(
+        comfy,
+        new SiteWorkflow { Key = "G视频-Wan图生/A02.json", Title = "A02", Folder = "G视频-Wan图生", Kind = "video", PayloadFile = "a2.json" });
+
+    // 地址与 checkpoint 都空 → 不是「能用的链路」。
+    var provider = VideoProviderFactory.Create(new AiProviderConfig(), choice);
+
+    Expect(!provider.IsConfigured, "没配 ComfyUI 时这条路不可用");
+    Expect(provider is UnconfiguredVideoProvider, "应当是「如实说还差什么」的那一个，实际 " + provider.GetType().Name);
+    var result = provider.GenerateAsync(new VideoGenerationRequest { Prompt = "她推开门" }).GetAwaiter().GetResult();
+    Expect(result.Status == VideoGenerationStatus.NotConfigured, "状态要如实是 NotConfigured");
+    Expect(result.Error.Contains("A02") && result.Error.Contains("checkpoint"),
+        "要说清是哪份工作流、缺什么，实际「" + result.Error + "」");
+    Expect(result.FilePath.Length == 0, "一条路都不通时不许产出任何文件");
+}
+
 static class Sample
 {
     /// <summary>1x1 透明 PNG：用真实图片字节，而不是随便凑一段数据。</summary>
@@ -13572,7 +13825,6 @@ sealed class IsolatedStores : IDisposable
         try { if (Directory.Exists(Root)) Directory.Delete(Root, true); } catch (IOException) { }
     }
 }
-
 
 /// <summary>按请求返回响应的桩 HttpClient：账号查询这类要按路径分支的调用用它，不访问网络。</summary>
 sealed class StubHttpHandler : HttpMessageHandler

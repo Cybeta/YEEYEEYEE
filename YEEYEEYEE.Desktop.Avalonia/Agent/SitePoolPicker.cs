@@ -21,6 +21,18 @@ namespace YEEYEEYEE.Desktop.Avalonia;
 /// </summary>
 internal static class SitePoolPicker
 {
+    /// <summary>
+    /// 出视频那次挑选的结果：选中的来源 + **要不要每次都问**。
+    ///
+    /// 为什么连「要不要问」一起返回：出视频这条路现在有「列出来让用户挑 / 记住一条不再问 /
+    /// 每次都交给 AI 自动抉择」三种口径，而这三者在用户心里是**同一个决定**
+    /// （「以后这事儿怎么定」）。做成两个窗口问两次，第二次一定被随手点掉。
+    ///
+    /// <paramref name="Choice"/> 为 null 且 <paramref name="Mode"/> 是 <see cref="VideoRouteMode.Auto"/> 时
+    /// 表示「这次交给自动抉择」——与「用户点了取消」（null + Ask）是两件事，所以必须分开传回来。
+    /// </summary>
+    internal sealed record VideoPick(ImageSourceChoice? Choice, VideoRouteMode Mode);
+
     public static async Task<ImageSourceChoice?> ShowAsync(
         Window owner,
         IReadOnlyList<SiteProfile> sites,
@@ -28,6 +40,36 @@ internal static class SitePoolPicker
         SitePoolChoice? preset = null,
         SiteWorkflowChoice? presetWorkflow = null,
         bool? video = null)
+    {
+        var (choice, _) = await ShowCoreAsync(owner, sites, nodeTitle, preset, presetWorkflow, video, askMode: false);
+        return choice;
+    }
+
+    /// <summary>出视频专用的入口：多问一句「要不要每次都问」，并把答案带回去。</summary>
+    public static async Task<VideoPick?> ShowVideoAsync(
+        Window owner,
+        IReadOnlyList<SiteProfile> sites,
+        string nodeTitle,
+        SitePoolChoice? preset = null,
+        SiteWorkflowChoice? presetWorkflow = null,
+        VideoRouteMode presetMode = VideoRouteMode.Ask)
+    {
+        var (choice, mode) = await ShowCoreAsync(
+            owner, sites, nodeTitle, preset, presetWorkflow, video: true, askMode: true, presetMode);
+        // 取消：两样都没有。选定了：两样都有（Auto 时 Choice 可以有也可以没有）。
+        if (choice is null && mode == VideoRouteMode.Ask) return null;
+        return new VideoPick(choice, mode);
+    }
+
+    private static async Task<(ImageSourceChoice? Choice, VideoRouteMode Mode)> ShowCoreAsync(
+        Window owner,
+        IReadOnlyList<SiteProfile> sites,
+        string nodeTitle,
+        SitePoolChoice? preset,
+        SiteWorkflowChoice? presetWorkflow,
+        bool? video,
+        bool askMode,
+        VideoRouteMode presetMode = VideoRouteMode.Ask)
     {
         // 只要某一类时（一键出图 / 一键出视频那两个入口），候选里就不出现另一类——
         // 「出图选到视频池子、出视频选到图像池子」这种错，选完才发现已经晚了。
@@ -40,12 +82,11 @@ internal static class SitePoolPicker
             : site.UsableWorkflows;
 
         var poolSites = sites.Where(site => PoolsOf(site).Count > 0).ToList();
-        // 出视频这条路**暂时不列 ComfyUI 工作流**：那条链只认接口站的视频池子（提交 → 轮询 → 下载），
-        // 还没接上 ComfyUI 的工作流提交。给一个选了必然失败的选项，比暂时不列更坏——
-        // 用户会以为是自己选错了。所以这里列不出来，并且在下面对话说清。
-        var comfySites = video == true
-            ? new List<SiteProfile>()
-            : sites.Where(site => site.IsComfyUi && WorkflowsOf(site).Count > 0).ToList();
+        // 出视频这条路**也列 ComfyUI 工作流**：提交链已经在（ComfyUiVideoProvider 走的是与出图
+        // 同一套执行宿主），所以这里不再替用户挡掉「选了必然失败」的选项。
+        // 一台服务器上往往有上百份出视频的工作流，所以下面按「家族 → 工作流」两级列，
+        // 并且把每个家族的推荐项排在第一——不是限制选择，是不让人被选项淹掉。
+        var comfySites = sites.Where(site => site.IsComfyUi && WorkflowsOf(site).Count > 0).ToList();
 
         if (poolSites.Count == 0 && comfySites.Count == 0)
         {
@@ -55,10 +96,11 @@ internal static class SitePoolPicker
                 + "到「设置 → 生图与生视频」，用顶端的「智能导入」：给一个接口说明网页会登记成站点并带出池子；"
                 + "给一个 ComfyUI 地址会把那台服务器的工作流整份拉下来。",
                 "知道了");
-            return null;
+            return (null, VideoRouteMode.Ask);
         }
 
         ImageSourceChoice? picked = null;
+        var pickedMode = VideoRouteMode.Ask;
 
         // ---------- 通道 ----------
         var channelBox = Combo();
@@ -282,11 +324,13 @@ internal static class SitePoolPicker
         // ---------- 通道切换 ----------
         var poolSection = new StackPanel { Spacing = 6 };
         var comfySection = new StackPanel { Spacing = 6 };
-        var note = Note("接口站下面每个池子的价格与能力都不一样；一台 ComfyUI 上不同工作流出图的路子也不同。"
-            + "这一次挑哪个就只用哪个——接口站那边的池子会被记住，下次预选你上次用的那一个。");
+        var note = Note("接口站下面每个池子的价格与能力都不一样；一台 ComfyUI 上不同工作流出视频的路子也不同"
+            + "（有的吃首帧、有的只文生，跑的还是本机显卡）。这一次挑哪个就只用哪个——"
+            + "接口站那边的池子会被记住，下次预选你上次用的那一个。");
         if (video == true)
-            note.Text += "\n出视频这一路只列接口站的池子：ComfyUI 的出视频工作流还没接上提交链（那要另做一条链），"
-                + "所以这里不列出来——不给你一个选了也跑不了的选项。";
+            note.Text += "\n出视频这一路两条链都在：接口站的视频池子是「一次 HTTP 调用」（提交 → 轮询 → 下载、按次计费），"
+                + "ComfyUI 的视频工作流是在那台服务器上跑一张节点图（烧本机显卡）。"
+                + "工作流的时长由它自己的帧数与帧率决定，我们只往里写提示词、负面词与首帧。";
 
         void ApplyChannel()
         {
@@ -328,6 +372,29 @@ internal static class SitePoolPicker
         body.Children.Add(poolSection);
         body.Children.Add(comfySection);
 
+        // ---------- 以后这事儿怎么定 ----------
+        // 只在出视频这一路问：出图那边没这个问题（它本来就是「用哪个池子」一件事），
+        // 多摆一组单选只会让人以为出图也要立规矩。
+        var modeAsk = new RadioButton { Content = "每次都问（默认）", GroupName = "pickMode", FontSize = 11, Foreground = Brush("DfInk2") };
+        var modeRemember = new RadioButton { Content = "不用再问：记住这次选的这一条", GroupName = "pickMode", FontSize = 11, Foreground = Brush("DfInk2") };
+        var modeAuto = new RadioButton { Content = "不用再问：每次交给 AI 按这一镜的情况自动抉择", GroupName = "pickMode", FontSize = 11, Foreground = Brush("DfInk2") };
+        modeAsk.IsChecked = presetMode == VideoRouteMode.Ask;
+        modeRemember.IsChecked = presetMode == VideoRouteMode.Remember;
+        modeAuto.IsChecked = presetMode == VideoRouteMode.Auto;
+        var modeSection = new StackPanel { Spacing = 4, IsVisible = askMode };
+        modeSection.Children.Add(Header("以后这事儿怎么定"));
+        modeSection.Children.Add(modeAsk);
+        modeSection.Children.Add(modeRemember);
+        modeSection.Children.Add(modeAuto);
+        modeSection.Children.Add(Note("「自动抉择」会把这一镜有没有首帧、想要几秒与完整候选清单交给当前的对话模型去挑，"
+            + "它挑不出来（没接模型 / 调用失败 / 挑了一个不在清单里的项）就退回按规则挑，"
+            + "并在状态栏里如实说明这次是哪种——不假装是模型挑的。"));
+        body.Children.Add(modeSection);
+
+        VideoRouteMode CurrentMode() => modeAuto.IsChecked == true ? VideoRouteMode.Auto
+            : modeRemember.IsChecked == true ? VideoRouteMode.Remember
+            : VideoRouteMode.Ask;
+
         var cancel = Secondary("取消");
         var confirm = Primary("用这个");
         var buttons = new StackPanel
@@ -343,6 +410,18 @@ internal static class SitePoolPicker
         cancel.Click += (_, _) => dialog.Close();
         confirm.Click += (_, _) =>
         {
+            var mode = CurrentMode();
+            // 「交给 AI 自动抉择」不需要在这里选定某一项——那正是它的意思。
+            // 直接关窗，把「没具体选 + Auto」带回去，由调用方去挑、并把挑的结果如实说出来。
+            if (askMode && mode == VideoRouteMode.Auto)
+            {
+                picked = null;
+                pickedMode = mode;
+                dialog.Close();
+                return;
+            }
+            pickedMode = mode;
+
             var isComfy = channelBox.SelectedIndex == comfyChannelIndex && comfySites.Count > 0;
             if (isComfy)
             {
@@ -411,7 +490,7 @@ internal static class SitePoolPicker
         ApplyChannel();
         ApplyPreset();
         await dialog.ShowDialog(owner);
-        return picked;
+        return (picked, pickedMode);
     }
 
     private static ComboBox Combo() => new()

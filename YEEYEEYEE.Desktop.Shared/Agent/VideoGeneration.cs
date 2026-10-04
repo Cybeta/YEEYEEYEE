@@ -3,6 +3,8 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using YEEYEEYEE.Core;
+using YEEYEEYEE.Host;
 
 namespace YEEYEEYEE.Desktop;
 
@@ -40,6 +42,19 @@ public sealed class VideoGenerationRequest
 
     /// <summary>参考帧的本机绝对路径列表（图生视频用；文生视频为空）。</summary>
     public IReadOnlyList<string> ReferenceImages { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// 选定的 ComfyUI 出视频工作流：站点 id + 正文文件名 + 工作流键，三个一起才认得出来源。
+    ///
+    /// 与出图侧（<see cref="ImageGenerationRequest.WorkflowPayloadFile"/>）同一套口径：
+    /// 带的是**正文文件名**而不是工作流名——正文是导出那一刻的快照，靠名字回查会在重名或改名时指错文件。
+    /// 三个都为空表示这次走接口站的视频池子（提交 → 轮询 → 下载）。
+    /// </summary>
+    public string WorkflowSiteId { get; init; } = string.Empty;
+    public string WorkflowPayloadFile { get; init; } = string.Empty;
+    public string WorkflowKey { get; init; } = string.Empty;
+
+    public bool UsesWorkflow => WorkflowPayloadFile.Length > 0;
 
     public bool HasReferenceImages => ReferenceImages.Count > 0;
 }
@@ -104,25 +119,301 @@ public sealed class UnconfiguredVideoProvider : IVideoProvider
 
 /// <summary>
 /// 出视频链路的唯一入口。与 <see cref="ImageProviderFactory"/> 对称：
-/// 配置齐了就走 <see cref="HttpVideoProvider"/>（异步提交 → 轮询 → 下载），
-/// 没配齐则如实说还差什么。
+/// 选了一份 ComfyUI 工作流就走 <see cref="ComfyUiVideoProvider"/>，
+/// 否则配齐了接口站就走 <see cref="HttpVideoProvider"/>（异步提交 → 轮询 → 下载），
+/// 都没配齐则如实说还差什么。
+///
+/// 为什么这里要**显式把工作流传进来**而不像出图那样只看配置：出视频有两种来源，
+/// 而「接口站的视频池子」与「ComfyUI 的一份视频工作流」是两条完全不同的链
+/// （一次 HTTP 调用 vs 一张节点图），配置里分不出用户这一次选了哪一种。
 /// </summary>
 public static class VideoProviderFactory
 {
     /// <summary>自动化回归用的执行方注入点（生产代码从不设置）。</summary>
     internal static IVideoProvider? Override { get; set; }
 
-    public static IVideoProvider Create(AiProviderConfig? config = null)
+    public static IVideoProvider Create(AiProviderConfig? config = null, SiteWorkflowChoice? workflow = null)
     {
         if (Override is { } injected) return injected;
         var effective = config ?? AiProviderSettings.Load();
+
+        if (workflow is { } chosen)
+        {
+            var execution = ImageProviderFactory.SharedExecutionHost(effective);
+            if (execution is not null)
+                return new ComfyUiVideoProvider(execution, effective, DesktopSession(), chosen);
+            return new UnconfiguredVideoProvider(
+                $"选了 ComfyUI 的「{chosen.Workflow.Title}」，但 ComfyUI 那条链没配好："
+                + "到「设置 → 生图与生视频 → ComfyUI」里填上地址与 checkpoint 再来。");
+        }
+
         return effective.IsVideoConfigured
             ? new HttpVideoProvider(effective)
             : new UnconfiguredVideoProvider(
                 "还没有可用的出视频链路：请在「设置 → 生图与生视频 → 视频接口」里填上地址与模型"
                 + (string.IsNullOrWhiteSpace(effective.VideoModel) ? "（模型名现在是空的）" : string.Empty)
-                + "。填好之后，分镜节点右键的「出这一镜的视频」就能真的跑。");
+                + "，或者在出视频时选一份 ComfyUI 的出视频工作流。填好之后，"
+                + "分镜节点右键的「出这一镜的视频」就能真的跑。");
     }
+
+    /// <summary>桌面端的会话上下文：与出图那条链用的是同一份口径，别各写一套。</summary>
+    private static SessionContext DesktopSession() => new()
+    {
+        SessionId = Guid.NewGuid(),
+        UserId = ImageProviderFactory.DesktopUserId,
+        ClientType = ClientType.Desktop,
+        Role = MemberRole.Member,
+        ServerClaims = new HashSet<string>(["skill.invoke", "job.cancel"])
+    };
+}
+
+/// <summary>
+/// 通过 ComfyUI 的一份**出视频工作流**出视频：复用桌面共享执行服务与 Host 的
+/// ComfyUiExecutor / ComfyUiProvider（提交 prompt_id → 轮询 history → 下载产物），
+/// 与出图那条路完全同源，不再单独实现一套。
+///
+/// 为什么必须带一份工作流：ComfyUI 本身不认识「视频」这件事——出图还是出视频、
+/// 用 SVD 还是 Wan 还是 LTX，全在那张节点图里。我们编不出这份图（每个人装的节点包都不一样），
+/// 所以这里**只绑认出来的那几个槽位**：提示词、负面词、画幅、种子，以及首帧（图生视频那份的 LoadImage）。
+///
+/// **时长刻意不进参数**：15 秒对应多少帧、多少 fps，是那份工作流的私有约定
+/// （SVD 的 video_frames、Wan 的 length、LTX 的 frame_rate 语义各不相同）。硬塞一个数字进去，
+/// 出来的可能是 15 帧而不是 15 秒——所以宁可在挑选那一刻就说清「时长由工作流自己决定」。
+/// </summary>
+public sealed class ComfyUiVideoProvider : IVideoProvider
+{
+    /// <summary>
+    /// 比出图那条宽得多：视频工作流在消费级卡上跑一次常常十几分钟（Wan / LTX 更久）。
+    /// 超时会真的中断任务（<c>execution.Cancel</c>），不是丢下不管。
+    /// </summary>
+    private static readonly TimeSpan CompletionTimeout = TimeSpan.FromMinutes(30);
+
+    private readonly SingleMachineExecutionService execution;
+    private readonly AiProviderConfig config;
+    private readonly SessionContext session;
+    private readonly SiteWorkflowChoice choice;
+    private readonly ComfyUiWorkflowSlots? slots;
+
+    public ComfyUiVideoProvider(
+        SingleMachineExecutionService execution,
+        AiProviderConfig config,
+        SessionContext session,
+        SiteWorkflowChoice choice)
+    {
+        this.execution = execution;
+        this.config = config;
+        this.session = session;
+        this.choice = choice;
+        slots = ReadSlots(choice);
+    }
+
+    public bool IsConfigured => config.IsComfyUiConfigured;
+    public string Name => "ComfyUI";
+
+    /// <summary>
+    /// 这份工作流吃不吃首帧：true / false / null（正文读不到，判断不了）。
+    /// 单列出来是给界面用的——「首帧会不会被用上」必须在点下去之前就写在窗口上，
+    /// 不能等出完才发现画面跟这一镜无关。
+    /// </summary>
+    public bool? TakesFirstFrame => slots?.CanTakeImage;
+
+    /// <summary>
+    /// 这条链一次能用几张参考图：**由那份工作流自己说了算**（有没有 LoadImage 底图入口）。
+    /// 与出图侧同理，认不出来就报 0 并说清，而不是假装能收。
+    /// </summary>
+    public ReferenceCapacity ReferenceCapacity => slots is null
+        ? new ReferenceCapacity(0, $"读不到工作流「{choice.Workflow.Title}」的正文，无从判断它能收几张参考图。")
+        : slots.CanTakeImage
+            ? new ReferenceCapacity(1, "图生视频这份工作流收一张底图（= 这一镜的首帧）。")
+            : new ReferenceCapacity(0, "这份工作流没有底图入口，只能文生视频——首帧不会生效。");
+
+    private static ComfyUiWorkflowSlots? ReadSlots(SiteWorkflowChoice choice)
+    {
+        try
+        {
+            var payload = SiteCatalog.LoadPayload(choice.Site.Id, choice.Workflow.PayloadFile);
+            return string.IsNullOrWhiteSpace(payload) ? null : ComfyUiWorkflowBinder.Detect(payload);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.Text.Json.JsonException or InvalidOperationException or ArgumentException)
+        {
+            // 读不懂正文不等于「没有底图入口」——那是两种情况，所以返回 null，由 ReferenceCapacity 分别说明。
+            return null;
+        }
+    }
+
+    public async Task<VideoGenerationResult> GenerateAsync(
+        VideoGenerationRequest request, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(request.Prompt)) return Failed("视频提示词为空，无法生成。");
+        if (string.IsNullOrWhiteSpace(request.WorkflowPayloadFile))
+            return Failed("这一路要用一份选定的 ComfyUI 工作流出视频，而这次没带上工作流正文。");
+
+        string template;
+        try
+        {
+            template = SiteCatalog.LoadPayload(request.WorkflowSiteId, request.WorkflowPayloadFile) ?? string.Empty;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.Text.Json.JsonException or ArgumentException)
+        {
+            return Failed($"这份工作流的正文读不到（站点 {request.WorkflowSiteId} 的 {request.WorkflowPayloadFile}）："
+                + $"{error.Message}。可能站点被删了或正文被清掉了，到「设置 → 技能管理 → 站点与池子」重新导入一次即可。");
+        }
+
+        if (template.Length == 0)
+            return Failed($"这份工作流的正文读不到（站点 {request.WorkflowSiteId} 的 {request.WorkflowPayloadFile}）："
+                + "可能站点被删了或正文被清掉了，到「设置 → 技能管理 → 站点与池子」重新导入一次即可。");
+
+        ComfyUiWorkflowSlots detected;
+        try
+        {
+            detected = ComfyUiWorkflowBinder.Detect(template);
+        }
+        catch (Exception error) when (error is System.Text.Json.JsonException or InvalidOperationException)
+        {
+            return Failed($"这份工作流的形状读不懂（{error.GetType().Name}）：{error.Message}");
+        }
+
+        // 认不出收提示词的位置就**如实失败**：静默把提示词丢掉、跑出导出时那张图/那段视频，
+        // 是这里最坏的一种失败（界面说成功了，内容却是别人的）。
+        if (!detected.CanTextToImage)
+            return Failed("这份工作流收不到提示词，所以没提交：" + string.Join("；", detected.Notes));
+
+        var references = request.ReferenceImages
+            .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
+            .ToList();
+        var useReference = references.Count > 0 && detected.CanTakeImage;
+
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["prompt"] = JsonSerializer.SerializeToElement(request.Prompt),
+            ["negativePrompt"] = JsonSerializer.SerializeToElement(request.NegativePrompt ?? string.Empty),
+            ["workflowTemplate"] = JsonSerializer.SerializeToElement(template),
+            ["workflowSlots"] = JsonSerializer.SerializeToElement(JsonSerializer.Serialize(detected))
+        };
+        // 画幅只在明确给了值时才写：写 0 会让某些工作流按 0×0 出图，而「不说」是让它用自己的默认值。
+        if (request.Width > 0) inputs["width"] = JsonSerializer.SerializeToElement(request.Width);
+        if (request.Height > 0) inputs["height"] = JsonSerializer.SerializeToElement(request.Height);
+        if (useReference)
+        {
+            inputs["referenceImages"] = JsonSerializer.SerializeToElement(references);
+            inputs["referenceMode"] = JsonSerializer.SerializeToElement("img2vid");
+        }
+
+        var invocation = new Invocation
+        {
+            Tool = useReference ? "image-to-video" : "text-to-video",
+            Capability = useReference ? Capability.ImageToVideo : Capability.TextToVideo,
+            Channel = "comfyui",
+            Inputs = inputs
+        };
+
+        var completion = new TaskCompletionSource<ExecutionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var jobId = Guid.Empty;
+        void OnUpdated(ExecutionResult result)
+        {
+            if (jobId == Guid.Empty || result.JobId != jobId) return;
+            if (result.State is JobState.Succeeded or JobState.Failed or JobState.Cancelled)
+                completion.TrySetResult(result);
+        }
+
+        execution.Updated += OnUpdated;
+        try
+        {
+            var started = await execution.StartAsync(
+                session, invocation, $"node-video-{invocation.InvocationId:N}", cancellationToken);
+            jobId = started.JobId;
+            if (started.State is JobState.Succeeded or JobState.Failed or JobState.Cancelled)
+                completion.TrySetResult(started);
+            else
+                // 提交成功之后才说这句：说在前面，任务还没发出去就报「可能要等十几分钟」是空话。
+                Status?.Invoke($"已提交到 ComfyUI（{Label}），它是异步任务，出好之前请别关窗口…");
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(CompletionTimeout);
+            await using var registration = timeout.Token.Register(() =>
+            {
+                completion.TrySetException(new TimeoutException(
+                    $"等 ComfyUI 出视频超时（超过 {CompletionTimeout.TotalMinutes:0} 分钟）。"));
+                if (jobId != Guid.Empty) execution.Cancel(session, jobId);
+            }).ConfigureAwait(false);
+
+            var result = await completion.Task.ConfigureAwait(false);
+            return MapResult(result, useReference, references.Count, detected);
+        }
+        catch (OperationCanceledException) { return Failed("ComfyUI 出视频任务已取消。"); }
+        catch (TimeoutException error) { return Failed(error.Message); }
+        // 限定名字空间：System.Net 里也有一个同名的 ProtocolViolationException，这里要的是 Core 那个。
+        catch (YEEYEEYEE.Core.ProtocolViolationException error) { return Failed($"提交 ComfyUI 任务失败：{error.Message}"); }
+        catch (InvalidOperationException error) { return Failed($"ComfyUI 任务失败：{error.Message}"); }
+        finally { execution.Updated -= OnUpdated; }
+    }
+
+    /// <summary>
+    /// 进度那几句往哪儿说。设置它的人（界面）负责显示；没设置就什么都不说——
+    /// 出视频要等十几分钟，一句「已提交」是这条路上唯一能让人安心等下去的话。
+    /// </summary>
+    public Action<string>? Status { get; set; }
+
+    /// <summary>报出去的「模型」是那份工作流的名字：报 checkpoint 会让人以为跑的是配置里那个底模。</summary>
+    private string Label => choice.Workflow.Title.Length > 0
+        ? choice.Workflow.Title
+        : (choice.Workflow.Key.Length > 0 ? choice.Workflow.Key : "站点工作流");
+
+    private VideoGenerationResult MapResult(
+        ExecutionResult result, bool usedReference, int referenceCount, ComfyUiWorkflowSlots slots)
+    {
+        if (result.State != JobState.Succeeded)
+            return Failed(result.ErrorMessage ?? $"ComfyUI 任务状态为 {result.State}。");
+
+        const string prefix = "asset://";
+        var assets = result.Outputs
+            .Where(asset => asset.Ref.StartsWith(prefix, StringComparison.Ordinal))
+            .Select(asset => (Asset: asset, Path: Path.Combine(AssetStore.Directory, asset.Ref[prefix.Length..])))
+            .Where(pair => File.Exists(pair.Path))
+            .ToList();
+
+        // 优先收「视频」那一路：一份工作流可能同时存了预览图与视频，收错就等于拿一张静图当视频。
+        var picked = assets.FirstOrDefault(pair => pair.Asset.Role == "video").Path
+                     ?? assets.FirstOrDefault(pair => pair.Asset.Role == "image").Path
+                     ?? string.Empty;
+
+        if (picked.Length == 0)
+            return Failed("ComfyUI 跑完了，但history 里没有任何我们能收下的产物"
+                + "（只认 images / gifs / videos / audio 四种）。可能是这份工作流的末端节点不是存文件的"
+                + "（例如只输出到 Preview），也可能是它把文件存到了别处。");
+
+        return new VideoGenerationResult
+        {
+            Status = VideoGenerationStatus.Succeeded,
+            FilePath = picked,
+            Provider = Name,
+            Model = Label,
+            ReferenceNote = ReferenceNote(usedReference, referenceCount, slots)
+        };
+    }
+
+    /// <summary>参考图的实际用法说明。**用不了就要说出来**：静默丢掉首帧，用户会以为是模型没画好。</summary>
+    private static string ReferenceNote(bool usedReference, int referenceCount, ComfyUiWorkflowSlots slots)
+    {
+        if (referenceCount == 0) return string.Empty;
+        if (!slots.CanTakeImage)
+            return $"这份工作流没有底图入口，所以首帧（以及另外 {referenceCount - 1} 张设定图）没有被使用"
+                + "——它只能文生视频。要按首帧出视频得换一份带 LoadImage 的工作流。";
+        if (referenceCount > slots.ImageCapacity)
+            return $"这份工作流有 {slots.ImageCapacity} 个底图入口，喂进去 {referenceCount} 张，只用了前 {slots.ImageCapacity} 张"
+                + "（多出来的没有去处）。要带上设定图得换一份底图入口更多的工作流。";
+        return string.Empty;
+    }
+
+    private VideoGenerationResult Failed(string error) => new()
+    {
+        Status = VideoGenerationStatus.Failed,
+        Provider = Name,
+        Model = Label,
+        Error = error
+    };
 }
 
 /// <summary>

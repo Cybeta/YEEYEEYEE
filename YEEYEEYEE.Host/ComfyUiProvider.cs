@@ -135,6 +135,25 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
     private readonly int websocketMaxReconnectAttempts;
     private readonly SemaphoreSlim assetDownloadLock = new(1, 1);
 
+    /// <summary>
+    /// 历史记录里认哪些输出数组、它们各是什么东西。
+    ///
+    /// **必须认全**：ComfyUI 按产物种类分桶——`SaveImage` 放 <c>images</c>，
+    /// `SaveWEBM` / `SaveAnimatedWEBP` 放 <c>gifs</c>（历史叫法，里面其实是视频或动图），
+    /// `SaveVideo` 放 <c>videos</c>，`SaveAudio` 放 <c>audio</c>。
+    ///
+    /// 早先只认 <c>images</c>，后果不是「少收一张」而是**整条视频链走不通**：
+    /// 一份出视频的工作流跑完了，产物就在 <c>gifs</c> 里，而下载那一步什么都没找到，
+    /// 任务于是永远停在「运行中」，最后以超时收场——报出来的是超时，真正的原因却在桶名上。
+    /// </summary>
+    private static readonly KeyValuePair<string, string>[] OutputBuckets =
+    {
+        new("images", "image"),
+        new("gifs", "video"),
+        new("videos", "video"),
+        new("audio", "audio")
+    };
+
     public ComfyUiProvider(
         HttpClient http,
         string? assetDirectory = null,
@@ -203,21 +222,35 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
             var assets = new List<AssetRef>();
             foreach (var node in outputs.EnumerateObject())
             {
-                if (!node.Value.TryGetProperty("images", out var images)
-                    || images.ValueKind != JsonValueKind.Array)
-                    continue;
+                if (node.Value.ValueKind != JsonValueKind.Object) continue;
 
-                foreach (var image in images.EnumerateArray())
+                foreach (var bucket in OutputBuckets)
                 {
-                    var filename = GetRequiredString(image, "filename");
-                    var subfolder = GetOptionalString(image, "subfolder") ?? string.Empty;
-                    var type = GetOptionalString(image, "type") ?? "output";
-                    var assetRef = await DownloadAssetAsync(
-                        filename,
-                        subfolder,
-                        type,
-                        cancellationToken).ConfigureAwait(false);
-                    assets.Add(new AssetRef { Role = "image", Ref = assetRef });
+                    if (!node.Value.TryGetProperty(bucket.Key, out var items)
+                        || items.ValueKind != JsonValueKind.Array)
+                        continue;
+
+                    foreach (var item in items.EnumerateArray())
+                    {
+                        if (item.ValueKind != JsonValueKind.Object) continue;
+
+                        // 图片那一路沿用「缺 filename 就报错」的老口径（既有行为，改了会静默少收图）；
+                        // 视频 / 音频这几路是新认的，自定义节点包产出的条目形状不一定一样，
+                        // 缺字段就跳过这一条，不因为一条怪条目把整次任务判死。
+                        var filename = bucket.Key == "images"
+                            ? GetRequiredString(item, "filename")
+                            : GetOptionalString(item, "filename");
+                        if (string.IsNullOrWhiteSpace(filename)) continue;
+
+                        var subfolder = GetOptionalString(item, "subfolder") ?? string.Empty;
+                        var type = GetOptionalString(item, "type") ?? "output";
+                        var assetRef = await DownloadAssetAsync(
+                            filename,
+                            subfolder,
+                            type,
+                            cancellationToken).ConfigureAwait(false);
+                        assets.Add(new AssetRef { Role = bucket.Value, Ref = assetRef });
+                    }
                 }
             }
 
