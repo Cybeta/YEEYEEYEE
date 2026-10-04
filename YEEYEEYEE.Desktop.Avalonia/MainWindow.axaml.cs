@@ -3290,7 +3290,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             CanvasSurfaceControl.Refresh();
             // 先把「正在判」说出去：否则那排卡一动不动，用户会以为卡住了。
             StatusText.Text = $"出好了 {batch.DoneCount} 张：正在判定档位（要花一次模型调用）…";
-            gradeNote = await ImageQualityRunner.RunAsync(batch);
+            gradeNote = await ImageQualityRunner.RunAsync(batch, ImageQualityProbe.Measure);
             // 判的过程中这一批可能已经被丢掉（采用了一张 / 重做）——那时不该再改它的状态。
             if (!IsLiveBatch(node.Id, batch)) return;
             batch.IsGrading = false;
@@ -3422,7 +3422,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         {
             batch.IsGrading = true;
             CanvasSurfaceControl.Refresh();
-            await ImageQualityRunner.RunAsync(batch, redrawn);
+            await ImageQualityRunner.RunAsync(batch, ImageQualityProbe.Measure, null, redrawn);
             if (!IsLiveBatch(node.Id, batch)) return string.Empty;
             batch.IsGrading = false;
             CanvasSurfaceControl.Refresh();

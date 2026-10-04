@@ -69,6 +69,9 @@ var tests = new (string Name, Action Run)[]
     ("出图开奖：评审提示词必须带上出图要求、负面提示词、节点上下文与四类缺陷", JudgePromptCarriesContextAndChecks),
     ("出图开奖：本地筛查只判客观坏图（读不出 / 纯色 / 尺寸不对），不碰「好不好」", TechnicalScreeningOnlyFlagsBrokenImages),
     ("出图开奖：分数落回槽位；踩中负面提示词就是裂纹卡，且裂纹卡不参与预兆", QualityGradesMapBackToSlots),
+    ("抽卡判档：本地先筛坏图、剩下的才送模型，判回来的编号落回正确的格子", GachaJudgingScreenDecidesWhoGoesToTheModel),
+    ("抽卡判档：全坏 / 没有可读图的模型 / 分数用不了，三种情况都如实说不成且不落档位", GachaJudgingIsHonestWhenItCannotJudge),
+    ("抽卡判档：补判只判指定那几格，没重出的格子档位保持原样", GachaJudgingOnlyRejudgesTheGivenSlots),
     ("配置落盘：程序旁的旧文件会被搬到用户配置目录（搬不是拷）", LegacyProgramRootConfigIsMigrated),
     ("模型预设：地址能反推回同一家，预置模型元数据自洽", ProviderPresetCatalogIsConsistent),
     ("模型预设：预设换算两端共用一份（采样开关与型号覆盖都一致）", ProviderPresetValuesResolveIsConsistent),
@@ -8276,6 +8279,113 @@ static void JudgePromptCarriesContextAndChecks()
 	Expect(bare.Contains("没有写负面提示词", StringComparison.Ordinal), "没有负面词要如实说明");
 }
 
+static void GachaJudgingScreenDecidesWhoGoesToTheModel()
+{
+    // 中段这一条链以前完全没有测试：它埋在界面层、写死依赖静态方法。
+    // 出错的表现是**档位挂错格子**或**悄悄少判一张**，两种在界面都很难看出来。
+    using var temp = new TempFolder();
+    var paths = temp.WritePngs(3);
+
+    NodeImageBatch batch = new NodeImageBatch { NodeId = Guid.NewGuid(), NodeTitle = "分镜1", Request = new ImageGenerationRequest { Width = 1280, Height = 720 } };
+    foreach (var path in paths) batch.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done, Path = path });
+
+    // 第 0 张：本地判成坏图（读不出来）；第 1、2 张：送去给模型判。
+    var facts = new Dictionary<string, ImageFacts>
+    {
+        [paths[0]] = new ImageFacts(false, 0, 0, 0, 0, 720),
+        [paths[1]] = new ImageFacts(true, 1280, 720, 576, 140, 720),
+        [paths[2]] = new ImageFacts(true, 1280, 720, 576, 90, 720)
+    };
+    var completer = new StubImageCompleter("""{"scores":[{"index":1,"score":9,"hits":[],"note":"都好"},{"index":2,"score":2,"hits":["水印"],"note":"右下角有字"}]}""");
+    var probed = new List<string>();
+
+    var note = ImageQualityRunner.RunAsync(
+        batch, (path, _) => { probed.Add(path); return facts[path]; }, () => completer).GetAwaiter().GetResult();
+
+    Expect(note.Contains("判好", StringComparison.Ordinal), "判成功该说判好了，实际：" + note);
+    Expect(!note.Contains("裂纹", StringComparison.Ordinal) && !note.Contains("白档", StringComparison.Ordinal),
+        "成功时不该剧透档位分布与裂纹张数（那是开奖那一拍的信息），实际：" + note);
+    Expect(note.Contains("1 张是坏图", StringComparison.Ordinal), "坏图张数要如实带出来，实际：" + note);
+
+    Expect(probed.Count == 3, "三格都要先本地量一遍，实际 " + probed.Count);
+    Expect(completer.Calls == 1 && completer.LastImageCount == 2, "坏图不该送模型：只该送 2 张，实际调用 " + completer.Calls + " 次 / " + completer.LastImageCount + " 张");
+    Expect(completer.LastUserPrompt.Contains("2 张", StringComparison.Ordinal), "提示词里的张数要跟真正送出去的张数一致");
+
+    Expect(batch.Slots[0].Quality is { Source: QualitySource.Technical, Tier: QualityTier.White }, "第 1 格该是本地判的白档");
+    Expect(batch.Slots[0].Quality!.Reason.Contains("读不出来", StringComparison.Ordinal), "白档要带上命中的那条指标");
+    // 模型给的是「第 1 张 / 第 2 张」，要落回**它实际对应的槽位**（1 与 2），而不是从 0 开始。
+    // 9 分是红档（红线就是 9 分以上），2 分是白档。
+    Expect(batch.Slots[1].Quality is { Source: QualitySource.Model, Score: 9, Tier: QualityTier.Red }, "模型第 1 项该落到第 2 格");
+    Expect(batch.Slots[2].Quality is { Source: QualitySource.Model, Score: 2, Tier: QualityTier.White }, "模型第 2 项该落到第 3 格");
+    Expect(batch.Slots[2].Quality!.IsCracked, "踩中负面词的那一格要判成裂纹卡");
+    Expect(QualityJudgement.DescribeHits(batch.Slots[2].Quality!.NegativeHits) == "水印", "命中的原词要一路带回来");
+    Expect(batch.CrackedCount == 1, "批内裂纹张数要算得对");
+    Expect(batch.CrackedIndicesToRedraw().SequenceEqual(new[] { 2 }), "该重出的就是踩词的那一格");
+    Expect(batch.BestTier == QualityTier.Red, "最好的一档该是模型给的红档（白档那张是本地判的，不参与比较）");
+}
+
+static void GachaJudgingIsHonestWhenItCannotJudge()
+{
+    using var temp = new TempFolder();
+
+    // ① 全部本地判成坏图：一张都不该送模型，也不该假装「判过了」。
+    var brokenPaths = temp.WritePngs(2, "broken");
+    NodeImageBatch allBroken = new NodeImageBatch { NodeId = Guid.NewGuid() };
+    foreach (var path in brokenPaths) allBroken.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done, Path = path });
+    var neverCalled = new StubImageCompleter("{}");
+    var brokenNote = ImageQualityRunner.RunAsync(
+        allBroken, (_, _) => new ImageFacts(false, 0, 0, 0, 0, 0), () => neverCalled).GetAwaiter().GetResult();
+    Expect(brokenNote.Contains("没有可判的图", StringComparison.Ordinal), "全坏时该直说没得判，实际：" + brokenNote);
+    Expect(neverCalled.Calls == 0, "全坏时一次模型调用都不该发出去");
+    Expect(allBroken.Slots.All(slot => slot.Quality is { Source: QualitySource.Technical }), "全坏时每一格都要有本地判定，不能留成「没判过」");
+    Expect(allBroken.BestTier == QualityTier.White, "全是坏图时最好的一档是白档");
+
+    // ② 没有可读图的模型：如实说清是缺什么，绝不退回到「都算合格」。
+    var goodPaths = temp.WritePngs(1, "good");
+    NodeImageBatch noModel = new NodeImageBatch { NodeId = Guid.NewGuid() };
+    foreach (var path in goodPaths) noModel.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done, Path = path });
+    var noModelNote = ImageQualityRunner.RunAsync(
+        noModel, (_, _) => new ImageFacts(true, 1280, 720, 576, 100, 0), () => null).GetAwaiter().GetResult();
+    Expect(noModelNote.Contains("支持图片输入", StringComparison.Ordinal), "要指出缺的是「支持图片输入」，实际：" + noModelNote);
+    Expect(noModel.Slots[0].Quality is null, "判不成时**不许**给一个档位（没判过 ≠ 白档）");
+
+    // ③ 模型回的分数不规范：把原因带出来，同样不落档位。
+    var messy = new StubImageCompleter("我看着都挺好");
+    NodeImageBatch badReply = new NodeImageBatch { NodeId = Guid.NewGuid() };
+    foreach (var path in goodPaths) badReply.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done, Path = path });
+    var badNote = ImageQualityRunner.RunAsync(
+        badReply, (_, _) => new ImageFacts(true, 1280, 720, 576, 100, 0), () => messy).GetAwaiter().GetResult();
+    Expect(badNote.Contains("用不了", StringComparison.Ordinal) && badNote.Contains("JSON", StringComparison.Ordinal),
+        "分数用不了时要把原因说出来，实际：" + badNote);
+    Expect(badReply.Slots[0].Quality is null, "分数用不了时不许落档位");
+}
+
+static void GachaJudgingOnlyRejudgesTheGivenSlots()
+{
+    // 自动重出只换了裂纹的那几张，补判只该判那几张——把整批再判一遍等于为没变的图白花一次模型调用。
+    using var temp = new TempFolder();
+    var paths = temp.WritePngs(3, "rejudge");
+    NodeImageBatch batch = new NodeImageBatch { NodeId = Guid.NewGuid() };
+    foreach (var path in paths) batch.Slots.Add(new BatchSlot { Status = BatchSlotStatus.Done, Path = path });
+    batch.Slots[0].Quality = new SlotQuality { Tier = QualityTier.Gold, Source = QualitySource.Model, Score = 8 };
+    batch.Slots[1].Quality = new SlotQuality { Tier = QualityTier.Red, Source = QualitySource.Model, Score = 10 };
+
+    var completer = new StubImageCompleter("""{"scores":[{"index":1,"score":7,"hits":[],"note":"重出的这张还行"}]}""");
+    var probed = new List<string>();
+    var note = ImageQualityRunner.RunAsync(
+        batch,
+        (path, _) => { probed.Add(path); return new ImageFacts(true, 1280, 720, 576, 120, 0); },
+        () => completer,
+        onlyIndices: new[] { 2 }).GetAwaiter().GetResult();
+
+    Expect(probed.Count == 1 && probed[0] == paths[2], "只该量被补判的那一格，实际量了 " + probed.Count + " 格");
+    Expect(completer.Calls == 1 && completer.LastImageCount == 1, "只该把那一张送模型");
+    Expect(batch.Slots[0].Quality is { Score: 8, Tier: QualityTier.Gold }, "没被重出的那些格子，档位要保持原样");
+    Expect(batch.Slots[1].Quality is { Score: 10, Tier: QualityTier.Red }, "没被重出的那些格子，档位要保持原样");
+    Expect(batch.Slots[2].Quality is { Score: 7, Tier: QualityTier.Gold }, "被补判的那一格要拿到新档位");
+    Expect(note.Contains("判好", StringComparison.Ordinal), "补判成功也要说判好了，实际：" + note);
+}
+
 static void BatchSlotsAreNotActionableWhileRunning()
 {
 	NodeImageBatch running = new NodeImageBatch { NodeId = Guid.NewGuid(), NodeTitle = "雨夜追车", IsRunning = true };
@@ -11238,6 +11348,67 @@ sealed class SyncProgress<T> : IProgress<T>
     public IReadOnlyList<T> Seen { get { lock (seen) return seen.ToList(); } }
 
     public void Report(T value) { lock (seen) seen.Add(value); }
+}
+
+/// <summary>一次测试用的临时目录。判档那一段要真的把图片文件读出来，所以这里必须放真图。</summary>
+sealed class TempFolder : IDisposable
+{
+	public TempFolder()
+	{
+		Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "gacha-" + Guid.NewGuid().ToString("N"));
+		Directory.CreateDirectory(Path);
+	}
+
+	public string Path { get; }
+
+	/// <summary>
+	/// 写几张**真能读出来**的 PNG。不能拿空文件糊弄——判档会把文件读成 data URL，
+	/// 读不出来的那张会被本地筛查判成坏图，测试就测不到本来想测的东西了。
+	/// </summary>
+	public List<string> WritePngs(int count, string prefix = "img")
+	{
+		var paths = new List<string>();
+		for (var index = 0; index < count; index++)
+		{
+			var file = System.IO.Path.Combine(Path, $"{prefix}-{index}.png");
+			using var bitmap = new Bitmap(16, 16);
+			using var graphics = Graphics.FromImage(bitmap);
+			graphics.Clear(Color.CornflowerBlue);
+			graphics.FillRectangle(Brushes.White, 0, 0, 8, 8);
+			bitmap.Save(file, System.Drawing.Imaging.ImageFormat.Png);
+			paths.Add(file);
+		}
+		return paths;
+	}
+
+	public void Dispose()
+	{
+		try { Directory.Delete(Path, recursive: true); }
+		catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+	}
+}
+
+/// <summary>假的看图打分器：只把调用记下来，回一段事先写好的 JSON。</summary>
+sealed class StubImageCompleter : IAiImageJsonCompleter
+{
+	private readonly string reply;
+
+	public StubImageCompleter(string reply) { this.reply = reply; }
+
+	public int Calls { get; private set; }
+
+	public int LastImageCount { get; private set; }
+
+	public string LastUserPrompt { get; private set; } = string.Empty;
+
+	public Task<string> CompleteJsonWithImagesAsync(
+		string systemPrompt, string userPrompt, IReadOnlyList<string> images, CancellationToken cancellationToken = default)
+	{
+		Calls++;
+		LastImageCount = images.Count;
+		LastUserPrompt = userPrompt;
+		return Task.FromResult(reply);
+	}
 }
 
 /// <summary>桩 HttpClient：不发真实请求，只把请求体留给我们检查；响应内容可指定（含 SSE）。</summary>
