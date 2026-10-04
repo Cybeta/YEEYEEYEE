@@ -162,6 +162,7 @@ var tests = new (string Name, Action Run)[]
     ("成片拼接：只差码率提示（btrt / esds）也要拼得上，别把提示值当参数不一致", Mp4ConcatIgnoresBitrateHints),
     ("成片拼接：轨道/时基/编码参数不一致就拒绝，并说清哪一段哪一项", Mp4ConcatRefusesMismatch),
     ("成片拼接：认不出的形状（分片 / co64 / 只有一段 / 文件不在）如实拒绝", Mp4ConcatRefusesUnsupportedShapes),
+    ("成片装配：顺序跟画布（工作树显式顺序）、缺哪一镜就拒绝且镜号不往前挪", ProductVideoJoinsShotsInStoryboardOrder),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -11514,14 +11515,85 @@ static void NodeAssistVideoFollowsProviderAvailability()
 	Expect(blankVideo is not null && !blankVideo.CanRun && blankVideo.Blocked.Length > 0,
 		"空节点即使执行方就绪也要写明为什么不能出");
 
-	// 成片那一条**恒不可执行**：出视频接口一次只生成一段画面，串不成成片——
-	// 让它跟着执行方变成可点，等于偷偷换成别的东西。
+	// 成片那一条现在可点了，但**不走出视频那条路**：它不生成画面，只把已经出好的每一镜接起来。
+	// 所以「能不能点」与「配没配视频接口」无关，靠自己的 id 让桌面端分开处理（见 ProductVideoAssembly）。
 	var product = new WorkflowNode { Title = "成片 v1", Category = NodeCategory.Product, Content = "全片" };
 	canvas.Nodes.Add(product);
 	var productVideo = NodeAssistPlanner.BuildPlan(canvas, product, videoAvailable: true).Suggestions
 		.FirstOrDefault(item => item.Kind == NodeAssistKind.Video);
-	Expect(productVideo is not null && !productVideo.CanRun && productVideo.Blocked.Contains("串成成片"),
-		"成片那一条要如实说「串片还没做」，而不是跟着执行方变成可点：" + productVideo?.Blocked);
+	Expect(productVideo is not null && productVideo.Id == "product-video",
+		"成片那一条要用自己的 id，桌面端靠它把这条与「出这一镜的视频」分开处理");
+	Expect(productVideo!.CanRun, "成片不生成画面，不该被「配没配视频接口」挡住：" + productVideo.Blocked);
+
+	var withoutVideoLink = NodeAssistPlanner.BuildPlan(canvas, product).Suggestions
+		.FirstOrDefault(item => item.Kind == NodeAssistKind.Video);
+	Expect(withoutVideoLink!.CanRun, "没配视频接口时成片照样能拼（只接已经出好的段）：" + withoutVideoLink.Blocked);
+}
+
+/// <summary>
+/// 成片装配：**顺序跟画布一致、缺哪一镜就拒绝**。
+///
+/// 顺序这件事只有看片的人能发现错：画布上第 2 镜的那一段，拼进成片里必须还在第 2 位。
+/// 这里故意让「工作树显式顺序」与「画布上的横坐标顺序」相反，用来钉住顺序真的走的是前者
+/// （布局用的也是那条规则，两边共用 <see cref="CanvasSwimlaneLayout.OrderStoryboards"/>）。
+/// </summary>
+static void ProductVideoJoinsShotsInStoryboardOrder()
+{
+	var directory = NewTempDirectory("product-video");
+	uint[] video = [512, 512, 512];
+	uint[] audio = [1024, 1000, 1000, 1000, 1000];
+	var first = Path.Combine(directory, "a.mp4");
+	var second = Path.Combine(directory, "b.mp4");
+	File.WriteAllBytes(first, TinyMp4(video, 1024, audio, 1024));
+	File.WriteAllBytes(second, TinyMp4(video, 1024, audio, 1024));
+
+	var canvas = new WorkflowCanvasState();
+	// 两条分镜：横坐标相反于工作树顺序——工作树说「乙」在前，画面位置说「甲」在前。
+	var alphaItem = new WorkTreeItem { Name = "甲", Order = 20 };
+	var betaItem = new WorkTreeItem { Name = "乙", Order = 10 };
+	canvas.WorkTree.Add(alphaItem);
+	canvas.WorkTree.Add(betaItem);
+	var alpha = new WorkflowNode
+	{
+		Title = "分镜一", Category = NodeCategory.Storyboard, X = 100, Y = 100, WorkTreeItemId = alphaItem.Id,
+		Attachments = { new WorkflowAttachment { Kind = AttachmentKind.Video, Reference = first } }
+	};
+	var beta = new WorkflowNode
+	{
+		Title = "分镜二", Category = NodeCategory.Storyboard, X = 400, Y = 100, WorkTreeItemId = betaItem.Id,
+		Attachments = { new WorkflowAttachment { Kind = AttachmentKind.Video, Reference = second } }
+	};
+	var product = new WorkflowNode { Title = "成片 v1", Category = NodeCategory.Product };
+	canvas.Nodes.Add(alpha);
+	canvas.Nodes.Add(beta);
+	canvas.Nodes.Add(product);
+	canvas.Edges.Add(new WorkflowEdge { SourceNodeId = alpha.Id, TargetNodeId = product.Id });
+	canvas.Edges.Add(new WorkflowEdge { SourceNodeId = beta.Id, TargetNodeId = product.Id });
+
+	var plan = ProductVideoAssembly.Plan(canvas, product);
+	Expect(plan.Shots.Count == 2 && plan.MissingTitles.Count == 0, "两镜都有视频时应当凑齐两段：" + plan.Note);
+	Expect(plan.Shots[0].Title == "分镜二" && plan.Shots[1].Title == "分镜一",
+		"顺序要跟工作树显式顺序（乙在前），不是画布横坐标；实际：" + string.Join("、", plan.Shots.Select(shot => shot.Title)));
+	Expect(plan.Shots[0].Index == 1 && plan.Shots[1].Index == 2, "镜号按分镜顺序数");
+
+	var output = Path.Combine(directory, "joined.mp4");
+	var result = ProductVideoAssembly.Concat(canvas, product, output);
+	Expect(result.Ok, "两镜齐了应当拼得上：" + result.Error);
+	Expect(Mp4StszCounts(File.ReadAllBytes(output))[0] == 6, "两段各 3 帧，拼完应是 6 帧");
+
+	// 缺第 1 镜（工作树顺序里「分镜二」排在前面）：拒绝，并且说清缺的是哪一镜；
+	// 镜号不能因为缺一段就往前挪——剩下的那镜仍是第 2 镜。
+	beta.Attachments.Clear();
+	var missing = ProductVideoAssembly.Plan(canvas, product);
+	Expect(missing.MissingTitles.Count == 1 && missing.MissingTitles[0].Contains("分镜二"),
+		"要报出缺的是哪一镜，实际：" + string.Join("、", missing.MissingTitles));
+	Expect(!missing.CanConcat, "缺一镜就不能拼");
+	Expect(missing.Shots.Count == 1 && missing.Shots[0].Index == 2 && missing.Shots[0].Title == "分镜一",
+		"剩下那镜仍是第 2 镜，不往前挪：" + string.Join("、", missing.Shots.Select(shot => shot.Index + ":" + shot.Title)));
+
+	var refused = ProductVideoAssembly.Concat(canvas, product, Path.Combine(directory, "bad.mp4"));
+	Expect(!refused.Ok && refused.Error.Contains("没出视频"), "缺镜头要如实拒绝：" + refused.Error);
+	Expect(!File.Exists(Path.Combine(directory, "bad.mp4")), "拒绝时不该留下半个成品");
 }
 
 /// <summary>

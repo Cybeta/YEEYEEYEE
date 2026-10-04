@@ -377,13 +377,14 @@ public static class NodeAssistPlanner
                 break;
 
             case NodeCategory.Product:
-                // 成片那一条**恒不可执行**，而且与「有没有配视频接口」无关：
-                // 它的要求是「把每一镜串起来」，而出视频接口只会按提示词生成**一段**画面——
-                // 让它可点，用户拿到的就是一段凭空生成的镜头，而不是他那一版成片。
-                // 与其偷偷换成一个别的东西，不如如实说这一步还没做（与「图生图被改成文生图」同一类的事）。
-                suggestions.Add(Video(node, contextText, blocked, available: false, "product-video", "出这一版的成片视频",
-                    "把这一版做成成片：按分镜顺序串起每一镜的视频，保持人物与场景一致",
-                    alwaysBlocked: "「把每一镜串成成片」这一步还没实现：先到各个分镜节点出视频，成片暂时要自己拼。"));
+                // 成片这条路**不生成画面**：它按分镜顺序，把已经出好的那些镜头**无损接起来**
+                // （见 ProductVideoAssembly / Mp4Concatenator），所以前提既不是「写没写内容」，
+                // 也不是「配没配视频接口」，而是「每一镜有没有视频」。
+                // 那句话点开之后才判得准（要逐镜看附件），所以这里不拦、也不猜：
+                // 点开如实列出会接哪几段、缺哪几镜，缺了就不拼。
+                suggestions.Add(Video(node, contextText, blocked: string.Empty, available: true,
+                    "product-video", "出这一版的成片视频",
+                    "把这一版做成成片：按分镜顺序串起每一镜的视频，保持人物与场景一致"));
                 suggestions.Add(PromptOnly(node, contextText, blocked, "product-note", "生成成品说明提示词", "描述这一版成品与前一版的差别、采纳理由与后续修改点"));
                 break;
 

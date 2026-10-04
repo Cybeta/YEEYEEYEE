@@ -239,8 +239,11 @@ public static class GenerationAudit
     /// <summary>
     /// 自检的范围。「这个节点的依赖链」在四种节点上指的不是同一批东西，
     /// 而范围错一点，报告就变成「漏报」或「把别的章节也算进来」——两种都不能接受。
+    ///
+    /// **公开，是因为成片拼串要看同一批节点**：自检说「这一版齐了」，拼出来就必须刚好是那几段。
+    /// 各写一份迟早会分叉，而那种错是「报告说齐、成片少一段」，只有看片的人能发现。
     /// </summary>
-    private static List<WorkflowNode> Scope(WorkflowCanvasState canvas, WorkflowNode root, out string note)
+    public static List<WorkflowNode> Scope(WorkflowCanvasState canvas, WorkflowNode root, out string note)
     {
         note = string.Empty;
         var result = new List<WorkflowNode>();
@@ -552,17 +555,19 @@ public static class GenerationAudit
             "成品（成片）的视频",
             products.Count,
             missing,
-            Executable: false,
+            Executable: true,
             ExecutableNote: ProductVideoNote);
     }
 
     /// <summary>
-    /// 成片那一层**仍然不可执行**，而这次不是「执行方没接」：出视频接口只会按提示词生成**一段**画面，
-    /// 而这一层要的是「把每一镜串起来」。把它标成可执行，用户拿到的就是一段凭空生成的镜头，
-    /// 而不是他那一版成片——那正是「不偷偷换成别的东西」这条规矩要挡的。串片那一步还没做。
+    /// 成片那一层现在**可执行**了：它做的事是「按分镜顺序把已经出好的镜头无损接起来」
+    /// （<see cref="ProductVideoAssembly"/> + <see cref="Mp4Concatenator"/>），**不重新生成任何画面**。
+    /// 所以它既不需要视频接口、也不会拿一段凭空生成的镜头冒充成片——原先这一层恒不可执行，
+    /// 正是因为当时还没有「接起来」这个能力。
     /// </summary>
     private const string ProductVideoNote =
-        "把每一镜串成成片这一步还没实现：先在各个分镜节点出视频，成片暂时要自己拼。";
+        "现在就能出：节点右键 →「出这一版的成片视频」——把已经出好的每一镜按顺序接成一段，"
+        + "画面与音频原样搬运、不重新编码；缺哪一镜它会如实说缺哪一镜，不会替你生成画面。";
 
     private static bool HasKind(
         IReadOnlyList<WorkflowAttachment> attachments,

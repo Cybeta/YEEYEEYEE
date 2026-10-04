@@ -362,14 +362,7 @@ public static class CanvasSwimlaneLayout
         }
 
         var products = members.Where(node => node.Category == NodeCategory.Product).ToList();
-        var flow = members
-            .Where(node => node.Category != NodeCategory.Product)
-            .OrderBy(node => node.Category == NodeCategory.Chapter ? 0 : node.Category == NodeCategory.Storyboard ? 1 : 2)
-            .ThenBy(node => WorkTreeSortKey(state, node))
-            .ThenBy(node => node.Y)
-            .ThenBy(node => node.X)
-            .ThenBy(node => node.Title, StringComparer.Ordinal)
-            .ToList();
+        var flow = ReadingOrder(state, members.Where(node => node.Category != NodeCategory.Product)).ToList();
 
         foreach (var node in flow)
         {
@@ -441,6 +434,30 @@ public static class CanvasSwimlaneLayout
     {
         if (node.WorkTreeItemId is not { } anchorId) return int.MaxValue;
         return state.WorkTree.FirstOrDefault(item => item.Id == anchorId)?.Order is { } order && order > 0 ? order : int.MaxValue;
+    }
+
+    /// <summary>
+    /// 一条泳道里的阅读顺序：先按类别（章节 → 分镜 → 其余），再按**工作树显式顺序**，
+    /// 再按画布上的位置（上、左），最后按标题——最后两项是为了「顺序没定」时结果也稳定。
+    ///
+    /// **这条规则只有这一份**。布局用它排位置，成片拼串用 <see cref="OrderStoryboards"/> 定「第几镜」——
+    /// 两边必须是同一条，否则画布上看着是第 2 镜的那一段，拼进成片里可能排到第 4 位，
+    /// 而那种错只有看片的人能发现。
+    /// </summary>
+    private static IEnumerable<WorkflowNode> ReadingOrder(WorkflowCanvasState state, IEnumerable<WorkflowNode> nodes) =>
+        nodes
+            .OrderBy(node => node.Category == NodeCategory.Chapter ? 0 : node.Category == NodeCategory.Storyboard ? 1 : 2)
+            .ThenBy(node => WorkTreeSortKey(state, node))
+            .ThenBy(node => node.Y)
+            .ThenBy(node => node.X)
+            .ThenBy(node => node.Title, StringComparer.Ordinal);
+
+    /// <summary>分镜的先后（= 成片里第几镜）。见 <see cref="ReadingOrder"/>：与布局同一条规则。</summary>
+    public static IReadOnlyList<WorkflowNode> OrderStoryboards(WorkflowCanvasState state, IEnumerable<WorkflowNode> storyboards)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(storyboards);
+        return ReadingOrder(state, storyboards).ToList();
     }
 
     private static int ProductSortKey(WorkflowCanvasState state, WorkflowNode product)

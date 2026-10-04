@@ -2527,6 +2527,13 @@ public partial class MainWindow : Window, IAgentSessionHost
                 await ShowPromptDialogAsync(node, suggestion, allowGenerate: false);
                 return;
 
+            case NodeAssistKind.Video when suggestion.Id == "product-video":
+                // 成片这一条**不走出视频那条链**：它不生成画面，只把已经出好的每一镜按顺序接起来。
+                // 混进下面那条路就是「点成片、拿到一段凭空生成的镜头」——与「图生图被偷偷改成文生图」
+                // 同一类的事，所以这里显式分流，和上面那条一样不能让它落进 default。
+                await ShowProductVideoDialogAsync(node);
+                return;
+
             case NodeAssistKind.Video:
                 // **仍然显式分流**，不能让它落进 default：default 那条路是「出图」，
                 // 用户点「出视频」会拿到一张静图——那正是之前「图生图被偷偷改成文生图」同一类的事。
@@ -2741,6 +2748,97 @@ public partial class MainWindow : Window, IAgentSessionHost
         MarkCanvasDirty();
         UpdateCanvasUi(currentCanvasPath ?? string.Empty);
         StatusText.Text = referenceNote + $"已出视频并挂到「{node.Title}」：{Path.GetFileName(result.FilePath)} —— 记得点「保存修订」";
+    }
+
+    /// <summary>
+    /// 成片窗口：先把「会接哪几段、缺哪几镜」逐条摆出来，再决定拼不拼。
+    ///
+    /// 它和出图 / 出视频那两个窗口的分工不同：那两个是「看清会**发出去**什么」（要花钱），
+    /// 这个是「看清会**接进**哪几段」（不花钱、不生成）。少一段的成片照样能播，
+    /// 只有看片的人能发现——所以更要摆在点之前，而不是等状态栏事后补一句。
+    /// </summary>
+    private async Task ShowProductVideoDialogAsync(WorkflowNode node)
+    {
+        if (currentCanvas is null) return;
+
+        var plan = ProductVideoAssembly.Plan(currentCanvas.Canvas, node);
+
+        var body = new StackPanel { Margin = new Thickness(20), Spacing = 8 };
+        body.Children.Add(AgentDialogUi.Header("出这一版的成片视频"));
+        body.Children.Add(AgentDialogUi.Note($"{node.Title} · {NodeAssistPlanner.KindLabelOf(node.Category)}"));
+        body.Children.Add(AgentDialogUi.Note(
+            "这一步不生成画面：按分镜顺序，把已经出好的每一镜**无损接**成一段。", AgentNoteLevel.Info));
+
+        foreach (var shot in plan.Shots)
+            body.Children.Add(AgentDialogUi.Note($"第 {shot.Index} 镜「{shot.Title}」 → {Path.GetFileName(shot.Path)}"));
+        foreach (var missing in plan.MissingTitles)
+            body.Children.Add(AgentDialogUi.Note($"第 {missing} —— 还没出视频，缺这一段就拼不了", AgentNoteLevel.Warning));
+
+        body.Children.Add(AgentDialogUi.Note(plan.Note,
+            plan.CanConcat ? AgentNoteLevel.Info : AgentNoteLevel.Warning));
+
+        var go = AgentDialogUi.Primary("开始拼接");
+        go.IsEnabled = plan.CanConcat;
+        var cancel = AgentDialogUi.Secondary("取消");
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Spacing = 6,
+            Children = { cancel, go }
+        };
+        var dialog = DialogShell.Create($"成片 · {node.Title}", AgentDialogUi.Layout(body, AgentDialogUi.Footer(buttons)), 620, 540);
+        cancel.Click += (_, _) => dialog.Close();
+        go.Click += (_, _) =>
+        {
+            dialog.Close();
+            _ = RunProductVideoAsync(node);
+        };
+        await dialog.ShowDialog(this);
+    }
+
+    /// <summary>
+    /// 真的去拼这一段成片：读盘 → 无损拼接 → 落到资产目录 → 挂到节点上。
+    /// 全程不发任何请求、不重新编码；拼不了就如实说拼不了，不留下半个文件冒充产物。
+    /// </summary>
+    private async Task RunProductVideoAsync(WorkflowNode node)
+    {
+        if (currentCanvas is null) return;
+        var canvas = currentCanvas;
+        var output = Path.Combine(AssetStore.EnsureDirectory(), $"product-{Guid.NewGuid():N}.mp4");
+
+        StatusText.Text = $"正在拼接「{node.Title}」的成片…";
+        var result = await Task.Run(() => ProductVideoAssembly.Concat(canvas.Canvas, node, output));
+
+        // 拼接这几秒里用户可能已经换了画布：那时不该再往旧画布上挂东西。
+        if (currentCanvas != canvas) return;
+
+        if (!result.Ok)
+        {
+            StatusText.Text = "没拼成：" + result.Error;
+            return;
+        }
+
+        var reference = AssetStore.ToReference(result.FilePath);
+        if (!node.Attachments.Any(item => item.Reference == reference))
+            node.Attachments.Add(new WorkflowAttachment
+            {
+                Kind = AttachmentKind.Video,
+                Reference = reference,
+                Name = $"{node.Title}-成片.mp4",
+                Source = "成片 · 无损拼接（不重新编码）",
+                Prompt = string.Empty,
+                NegativePrompt = string.Empty
+            });
+        node.ExecutionStatus = NodeExecutionStatus.Completed;
+
+        CanvasSurfaceControl.Refresh();
+        RefreshResourceList();
+        // 与出视频那条路同一个道理：少任何一步，切一次标签回来这段成片就没了。
+        RefreshOpenCenterView();
+        MarkCanvasDirty();
+        UpdateCanvasUi(currentCanvasPath ?? string.Empty);
+        StatusText.Text = result.Note + $" 已挂到「{node.Title}」——记得点「保存修订」";
     }
 
     /// <summary>
