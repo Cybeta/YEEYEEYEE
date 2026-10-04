@@ -6,6 +6,13 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.9" />
+    <!-- 覆盖传递依赖里那个带漏洞的 SQLite 原生库：Microsoft.Data.Sqlite 9.0.9 会带进
+         SQLitePCLRaw.lib.e_sqlite3 2.1.10，而 GHSA-2m69-gcr7-jv3q（CVE-2025-6965，SQLite < 3.50.2
+         的内存破坏）影响 <= 2.1.11，2.1.12 起才带修好的 SQLite。
+         直接引用比传递引用优先，所以这一行把整条图升到 2.1.12，不必跳 Microsoft.Data.Sqlite 的大版本。
+         改完请对着「dotnet list package /vulnerable /include-transitive」那两条开关看一眼（这条警告只在
+          能取到 NuGet 漏洞库时出现，本机不报不代表没有）。 -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
   </ItemGroup>
 
   <ItemGroup>

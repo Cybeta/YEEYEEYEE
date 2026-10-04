@@ -28,6 +28,12 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.3.9" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.9" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.9" />
+    <!-- 覆盖传递依赖里那个带漏洞的 D-Bus 协议库：Avalonia.Desktop 会带进 Tmds.DBus.Protocol 0.21.2，
+         而 GHSA-xrw6-gwf8-vvr9（CVE-2026-39959）影响 < 0.21.3——同一个总线上怀恶意的对端可以伪造信号、
+         耗尽文件描述符、或发畸形报文把进程打崩。修好的版本是 0.21.3（0.92.0 那一支也修了）。
+         这条洞只在 Linux 桌面上够得着（要有一条 D-Bus 总线），Windows / macOS 上到不了；
+         但它就在依赖图里，所以照样升掉。 -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
   </ItemGroup>
 
   <!-- 每个厂家一张「形象」（开奖许愿那一拍用，见 ProviderAvatar）。放在仓库根目录的 provider-art/ 下，

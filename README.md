@@ -356,7 +356,11 @@ ComfyUI 那边的绑值分两种情况：入口同属一组时按「角色 → �
 3. **前端 `dist` 要手工构建**，不参与解决方案。这是有意的（不该把 Node 工具链拖进 `dotnet build`），写在这里是免得被当成漏做。
 4. **形象提示词只有一份了**（原先 `ProviderAvatarStudio` 的表与 `provider-art/_generation.json` 是两份）。设计说明搬到了共享层 `ProviderAvatarPrompts`：应用内「用当前图像链路重画一张」与仓库里那批离线生成的形象读的是同一张表。记录那边仍是**出图当时的原话**（那是「图上画的是哪一版设计」的凭据），所以 `ProviderAvatarPromptsMatchTheRecordedBatch` 逐条对账——改了表而没重画图，这条用例会红，那正是要它红的地方。只对账设计说明那一句：构图与画风那几段在两处措辞本就不同（记录把负面词并进了正文），而那不会让同一家画出两种角色。
 5. **`YEEYEEYEE.Web` 的目标框架是 `net10.0`（不是 `net10.0-windows`）**，这是为了让 Linux 容器能跑。**以后往这条链上加代码时要留意别引入 Windows-only 的 API**（DPAPI 那一类只能留在桌面端的 `SecretProtector` 里），否则容器会在运行时报错、而本机构建照样通过。
-6. **依赖里有高危漏洞提示**：`SQLitePCLRaw.lib.e_sqlite3 2.1.10`（由 `Microsoft.Data.Sqlite` 带进来的传递依赖）报 `NU1903`；桌面端另有 `Tmds.DBus.Protocol 0.21.2` 报 `NU1903`。**这类警告只在干净还原时出现**（要取 NuGet 的漏洞库；本机取不到时不报，所以本机的警告数比 CI 少），计数以 CI 为准。注意构建期另有 **18 条 CS 警告**（可空性、Avalonia 过时 API、成员隐藏），它们与依赖无关，别混为一谈。升级这两条链时要连迁移与任务库的测试一起跑。
+6. **依赖里的两条高危漏洞 —— 已升掉**。两条都是传递依赖，所以是**直接引用抬高版本**而不是跳大版本：
+   · `SQLitePCLRaw.lib.e_sqlite3 2.1.10`（`Microsoft.Data.Sqlite` 9.0.9 带进来的，`Host` 里加一条 `SQLitePCLRaw.bundle_e_sqlite3 2.1.12` 覆盖）→ GHSA-2m69-gcr7-jv3q / CVE-2025-6965（SQLite < 3.50.2 的内存破坏，CVSS 9.8），影响 `<= 2.1.11`。
+   · `Tmds.DBus.Protocol 0.21.2`（`Avalonia.Desktop` 带进来的）→ GHSA-xrw6-gwf8-vvr9 / CVE-2026-39959（同一条总线上的恶意对端可伪造信号、耗尽 fd、发畸形报文把进程打崩，CVSS 7.1），影响 `< 0.21.3`，升到 **0.21.3**。这条洞只在 Linux 桌面够得着，但它就在依赖图里，所以照样升掉。
+   验证方式换成了一条能重复的：`dotnet list <项目> package /vulnerable /include-transitive`（六个项目逐个跑过，都是「没有易受攻击的包」）。这条命令**要联网取 NuGet 漏洞库**——机器能上网时就查得到，所以别再用「本机不报 = 没有」当结论。升级后 SQLite 那条链的测试（`Core.Tests` 的任务持久化、`Migration.Tests` 的迁移场景）与 `Agent.Tests`、Web 各段回归一起跑过。
+   注意构建期另有 **十几条 CS 警告**（可空性、Avalonia 过时 API、成员隐藏），它们与依赖无关，别混为一谈。
 7. **配色与控件定义曾有两份** —— 第 171 / 172 轮已销：唯一的一份是 `YEEYEEYEE.Canvas/src/shared/designTokens.json`，网页端那两块由 `scripts/design-tokens.mjs` **生成**（`npm run tokens`）；桌面端的纯色块同样生成，几何与圆角散在 `MainWindow.axaml` / `App.axaml` 的 `Style` 里，那一侧靠**测试对数**（`tests/designTokens.test.ts` 直接读那两个文件比）。只收纯色与尺寸——渐变与投影两端表达方式本就不同，仍在各自那一侧手写。
 8. **`Dockerfile` 里逐个列了要拷进去的项目**。这是为利用层缓存换来的速度，代价是**加项目引用时必须同步改它**，否则本机构建通过、镜像在还原或发布阶段才炸。CI 的 `image` job 会拦住这种坏法，但拦住的时间点偏晚。
    第 191 轮把**两端共读的共享文件**（`uiText.json`、`protocol.json`）那一行改成了整目录拷贝（`COPY YEEYEEYEE.Canvas/src/shared/ …`）：再加共享文件不必记得回来补一行。`tests/protocol.test.ts` 会断言「csproj 里嵌了共享 json」与「Dockerfile 拷了那个目录」成对出现——只靠人记得，迟早会漏。
