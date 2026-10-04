@@ -252,6 +252,7 @@ var tests = new (string Name, Action Run)[]
     ("返工 G6-S3：删除变体先落库后动画布，失败时引用与实体原样、库回滚", VariantDeletionKeepsReferencesWhenPublishFails),
     ("返工 G6-T1：打开之后库被删也在执行前核验出来（旧标记不算数）", AuthorityRecheckCatchesLaterDeletedLibrary),
     ("返工 G6-T2：发布结果区分「真落库」与「本地内容」，本地实体不谎报已保存", PublishOutcomeDistinguishesLocalAndShared),
+    ("形象提示词只有一份：表里的设计说明与 provider-art 记录的出图原话逐条对账", ProviderAvatarPromptsMatchTheRecordedBatch),
     ("资源库：开跑前核验只动标记不动内容（不许抹掉未保存的编辑）", AuthorityRecheckOnlyTouchesMarks),
     ("资源库：打开画布时按库对齐（刷新 / 补入引用到的 / 标缺失）", MergeIntoAlignsSharedEntitiesOnOpen),
     ("引用：查不到的变体 ID 要报失效，不悄悄换成第一个变体", ReferenceWithUnknownVariantFailsInsteadOfSwitching),
@@ -570,6 +571,55 @@ static void ProductVersionLedgerListsOnlyFilmsOldestFirst()
 	Expect(changes[5].StartsWith("时间：第 1 版 ", StringComparison.Ordinal), "时间那条要报出来，实际：" + changes[5]);
 	Expect(ledger.Latest!.ShotIds.Count == 2 && ledger.Latest.ShotIds[0] == shotA && ledger.Latest.ShotIds[1] == shotB,
 		"镜头 ID 也要记下来——比「多了哪一镜」靠的是它，不是标题");
+}
+
+/// <summary>
+/// 各厂家形象的提示词**只有一份**（`ProviderAvatarPrompts`）：仓库里那批离线生成的形象
+/// （`provider-art/`）与设置页里「用当前图像链路重画一张」读的是同一张表。
+///
+/// 这份记录（`provider-art/_generation.json`）是出图当时的原话，也就是**图上画的是哪一版设计**的凭据。
+/// 所以这里逐条对账：记录里的设计说明必须与当前表里的一模一样。改了表而没重画图的话，
+/// 记录还写着旧设计、库里的图还是旧长相，而应用里重画的会是新设计——同一家两个长相。
+/// 这条用例会红，那正是要它红的地方：改了设计就得重画那几张图并更新记录。
+///
+/// 只对账设计说明那一句：构图与画风那几段在两处措辞本就不同（记录那边把负面词并进了正文），
+/// 而那不会让同一家画出两种角色。
+/// </summary>
+static void ProviderAvatarPromptsMatchTheRecordedBatch()
+{
+    var directory = new DirectoryInfo(AppContext.BaseDirectory);
+    while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "YEEYEEYEE.slnx")))
+        directory = directory.Parent;
+    Expect(directory is not null, "找不到仓库根目录（YEEYEEYEE.slnx）");
+    var recordPath = Path.Combine(directory!.FullName, "provider-art", "_generation.json");
+    Expect(File.Exists(recordPath), "找不到形象生成记录：" + recordPath);
+
+    using var document = JsonDocument.Parse(File.ReadAllText(recordPath));
+    var checkedEntries = 0;
+    foreach (var entry in document.RootElement.EnumerateArray())
+    {
+        var providerId = entry.GetProperty("providerId").GetString() ?? string.Empty;
+        var prompt = entry.GetProperty("prompt").GetString() ?? string.Empty;
+        checkedEntries++;
+        Expect(ProviderAvatarPrompts.Knows(providerId), "记录里有表里没有的厂家：" + providerId);
+
+        var recorded = ProviderAvatarPrompts.ExtractBrief(prompt);
+        Expect(recorded.Length > 0, $"从记录里抠不出设计说明（{providerId}）——提示词的结构变了？");
+        Expect(recorded == ProviderAvatarPrompts.Brief(providerId),
+            $"「{providerId}」的设计说明两边不一致：记录里是「{recorded}」，表里是「{ProviderAvatarPrompts.Brief(providerId)}」"
+            + "；改了表就要重画那几张图并更新 provider-art/_generation.json");
+    }
+    Expect(checkedEntries >= 9, "记录里至少该有九家，实际 " + checkedEntries);
+
+    // 兜底那一句也得是对的：认不出的厂家落到「自定义」的设计
+    Expect(!ProviderAvatarPrompts.Knows("没这一家"), "表里不该有这一家");
+    Expect(ProviderAvatarPrompts.Brief("没这一家") == ProviderAvatarPrompts.Brief(ProviderAvatarPrompts.FallbackProviderId),
+        "认不出的厂家落到兜底设计");
+    // 拼出来的整段提示词里必须能抠回那一句（ExtractBrief 与 Build 用的是同一对标记）
+    var built = ProviderAvatarPrompts.Build("deepseek", "DeepSeek", "#4D6BFE");
+    Expect(built.Contains("角色设计（自创角色）：") && ProviderAvatarPrompts.ExtractBrief(built) == ProviderAvatarPrompts.Brief("deepseek"),
+        "自己拼的提示词也要能被抠出设计说明：" + built);
+    Expect(built.Contains("#4D6BFE") && built.Contains("DeepSeek"), "点缀色与厂家名都要写进去");
 }
 
 /// <summary>

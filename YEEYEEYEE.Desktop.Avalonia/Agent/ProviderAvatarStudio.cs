@@ -21,48 +21,6 @@ internal static class ProviderAvatarStudio
     public const int Size = 1024;
 
     /// <summary>
-    /// 每个厂家的设计说明：一个意象 + 一句外形，颜色取自这一家的区分色。
-    ///
-    /// 写成一张表而不是一段通用提示词：八家用同一段话会画出八个长得一样的角色，
-    /// 而「每个厂家有自己的形象」的意义就在于一眼能认出是哪一家。
-    /// </summary>
-    private static readonly Dictionary<string, string> Designs = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["deepseek"] = "以深海与鲸为意象：银蓝短发、深蓝外套，衣摆像水波，安静专注的神情",
-        ["moonshot"] = "以月亮与夜航为意象：灰紫长发、带星屑的发饰，披一件短披风，手里拿一卷纸",
-        ["qwen"] = "以水系与青瓷为意象：青色齐肩发、圆领短衫，发间一枚水纹发卡，笑眼清爽",
-        ["zhipu"] = "以书卷与棋盘为意象：琥珀色发、方框眼镜、笔挺的藏青学生制服，神情认真",
-        ["siliconflow"] = "以电路与流水为意象：粉发、束起的马尾、连帽短外套，袖口有发光的细线纹样",
-        ["openai"] = "以白瓷与回声为意象：银白发、素色高领衫、线条极简，气质冷静",
-        ["ollama"] = "以橘色小兽与驼队为意象：橘色短发、毛边连帽衫、脸颊有一道浅色纹路，憨厚可靠",
-        ["local"] = "以台灯与工作台为意象：褐色短发、护目镜挂在颈上、多口袋工装，像个小工匠",
-        ["custom"] = "以空白画布与铅笔为意象：黑色短发、米色衬衫、手里拿一支笔，干净好相处"
-    };
-
-    /// <summary>这一家的形象应该长什么样（写给模型看的一段话）。</summary>
-    public static string BuildPrompt(string providerId, string providerName, string colorHex)
-    {
-        var design = Designs.TryGetValue(providerId, out var brief)
-            ? brief
-            : Designs["custom"];
-
-        return
-            "一张二次元风格的半身角色立绘，正方形构图，人物居中、正面朝向镜头、胸像以上入镜，"
-            + $"背景是纯净的深色渐变（以 {colorHex} 为点缀色），带一圈很淡的同色光晕，没有任何文字、符号或商标。"
-            + $"角色设计（自创角色）：{design}。"
-            + "画风：干净的日式动画赛璐璐上色，线条清晰，五官端正、手指与肢体自然，"
-            + "明暗过渡柔和，适合当一枚圆形头像看。"
-            + $"这位角色的设定与「{providerName}」这个名字的气质相配，但**必须是原创角色，"
-            + "不要模仿任何已存在的作品、角色、吉祥物或商标**。";
-    }
-
-    /// <summary>负面提示词：出图时最常见的那几种坏法，加上「别抄现成的」。</summary>
-    public const string NegativePrompt =
-        "低清，模糊，噪点，多余手指，变形的手，多余肢体，五官不对称，塑料感皮肤，死鱼眼，多张脸，"
-        + "文字，水印，logo，签名，边框，拼图，分屏，全身入镜外的裁切，"
-        + "已知作品的角色，已知品牌吉祥物，商标，模仿现有角色";
-
-    /// <summary>
     /// 出这一家的形象并存进 `provider-art`。返回**给用户看的一句话**（成功与失败都用它，
     /// 失败时说清是哪一步：没配图像链路 / 接口报错 / 存不下来）。
     /// </summary>
@@ -86,8 +44,10 @@ internal static class ProviderAvatarStudio
         {
             result = await provider.GenerateAsync(new ImageGenerationRequest
             {
-                Prompt = BuildPrompt(providerId, providerName, colorHex),
-                NegativePrompt = NegativePrompt,
+                // 提示词住在共享层（ProviderAvatarPrompts）：应用内重画与仓库里那批离线生成的形象
+                // 读的是同一张表——两份各写一遍的话，同一家会有两个长相。
+                Prompt = ProviderAvatarPrompts.Build(providerId, providerName, colorHex),
+                NegativePrompt = ProviderAvatarPrompts.NegativePrompt,
                 Width = Size,
                 Height = Size
             });
