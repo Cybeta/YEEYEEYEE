@@ -56,6 +56,7 @@ var tests = new (string Name, Action Run)[]
     ("密钥保护：明文档如实带 plain: 前缀并被标记出来", PlaintextTierIsReportedHonestly),
     ("配置落盘：应用级文件在用户配置目录，不再写在程序旁边", AppFilesLiveInUserConfigDirectory),
     ("改名过渡：配置目录新名优先，但旧目录里有东西就用旧的", RenamedDirectoryPrefersTheOneWithData),
+    ("项目根不随构建配置变：跑 Debug 也落在 bin 的 Release 输出下", ProjectsRootDoesNotFollowBuildConfiguration),
     ("更新：版本标签解析（带 v / 两段式 / 预发布后缀 / 看不懂要报错）", VersionTagParsing),
     ("更新：发行版比对（有新版 / 已最新 / 本地更新 / 看不懂的标签与坏 JSON 都报失败）", UpdateCheckComparesVersionsAndReportsFailures),
     ("更新：重启标记能原样存回（前一版 / 目标版 / 更新内容）", UpdateMarkerRoundTrips),
@@ -7580,6 +7581,60 @@ static void RenamedDirectoryPrefersTheOneWithData()
 	finally
 	{
 		try { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+		catch (IOException) { }
+	}
+}
+
+// 项目根落在哪：**不该随构建配置变**。
+//
+// 原来是「哪个 exe 在跑就用它旁边」，于是 F5（Debug）建的项目落在 bin\Debug、跑 Release 建的在
+// bin\Release；换个构建新建的项目就落到另一处，看起来像项目不见了（最近项目列表是全局的，
+// 更放大这种错觉）。现在跑 Debug 时也统一到同一棵构建树下的 Release 输出目录。
+static void ProjectsRootDoesNotFollowBuildConfiguration()
+{
+	const string debug = @"C:\repo\App\bin\Debug\net10.0";
+	const string release = @"C:\repo\App\bin\Release\net10.0\win-x64";
+
+	// 跑 Debug：第一候选是 Release 输出下的 Projects（而不是 exe 旁那个 Debug 的）。
+	var candidates = AppPaths.ProjectsRootCandidates(debug, release);
+	Expect(candidates[0] == Path.Combine(release, "Projects"),
+		"跑 Debug 时项目根该指向 Release 输出，实际 " + candidates[0]);
+	Expect(candidates[1] == Path.Combine(debug, "Projects"),
+		"exe 旁那个应当退到第二位（它不是首选，但也不能丢）：" + candidates[1]);
+
+	// 跑 Release / 已发布：就在程序旁边，不做任何特殊处理。
+	const string portable = @"C:\portable\App";
+	var portableCandidates = AppPaths.ProjectsRootCandidates(portable, null);
+	Expect(portableCandidates[0] == Path.Combine(portable, "Projects"),
+		"便携部署（程序旁）应当是首选：" + portableCandidates[0]);
+
+	// 没做过 Release 构建：退回 exe 旁，而不是把候选弄丢。
+	var noRelease = AppPaths.ProjectsRootCandidates(debug, null);
+	Expect(noRelease[0] == Path.Combine(debug, "Projects"),
+		"没有 Release 输出时退回 exe 旁：" + noRelease[0]);
+
+	// 兜底候选必须在（用户文档目录与本地应用数据目录），且不重复。
+	Expect(portableCandidates.Count == 3, "不该有重复候选：" + string.Join(" | ", portableCandidates));
+	Expect(candidates.Count == 4, "有 Release 输出时多一个候选：" + string.Join(" | ", candidates));
+
+	// 找 Release 输出：按「同名 exe 在哪」去找，不按路径拼——Release 常常带 RID 子目录，
+	// 与 Debug 不是同一层，拼路径会拼错。
+	var tree = Path.Combine(Path.GetTempPath(), "yeeeyee-release-" + Guid.NewGuid().ToString("N"));
+	try
+	{
+		var ridOutput = Path.Combine(tree, "bin", "Release", "net10.0", "win-x64");
+		Directory.CreateDirectory(ridOutput);
+		File.WriteAllText(Path.Combine(ridOutput, "SomeApp.exe"), string.Empty);
+		Expect(AppPaths.FindDirectoryContaining(tree, "SomeApp.exe") == ridOutput,
+			"该按 exe 名字找到带 RID 的那层输出目录：" + AppPaths.FindDirectoryContaining(tree, "SomeApp.exe"));
+
+		// 只认同名 exe：别的程序（或没做 Release 构建）不算。
+		Expect(AppPaths.FindDirectoryContaining(tree, "OtherApp.exe") is null,
+			"找不到同名 exe 时必须如实返回 null，不能随便挑一个目录");
+	}
+	finally
+	{
+		try { if (Directory.Exists(tree)) Directory.Delete(tree, recursive: true); }
 		catch (IOException) { }
 	}
 }

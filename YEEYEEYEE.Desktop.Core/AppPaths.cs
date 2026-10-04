@@ -151,19 +151,74 @@ public static class AppPaths
 
     public static string GetWritableProjectsRoot()
     {
-        var candidates = new[]
-        {
-            Path.Combine(ProgramRoot, "Projects"),
-            UserProjectsRoot,
-            ProjectsDirectoryUnder(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))
-        };
-
+        var candidates = ProjectsRootCandidates(ProgramRoot, FindReleaseOutput());
         foreach (var candidate in candidates)
         {
             if (CanWriteDirectory(candidate)) return candidate;
         }
 
         return candidates[0];
+    }
+
+    /// <summary>
+    /// 项目根的候选顺序。**抽成纯函数是为了能测**：真正那一条依赖"正在跑哪个 exe"，
+    /// 环境里换个构建结果就变了，写不出稳定的断言。
+    ///
+    /// 顺序与理由：
+    /// ① <b>同一棵构建树下的 Release 输出目录</b>——跑 Debug 时也去那儿。
+    ///    项目放在哪**不该随构建配置变**。原来是"哪个 exe 在跑就用它旁边"，于是 F5（Debug）建的项目
+    ///    落在 <c>bin\Debug</c>、跑 Release 建的在 <c>bin\Release</c>，换个构建新建的项目就落到另一处，
+    ///    看起来像项目不见了；而最近项目列表是全局的，更放大这种错觉。
+    /// ② <b>程序旁边</b>——便携部署（放 U 盘、绿色版）与已发布版本的正常位置，
+    ///    也涵盖"这棵树里没做过 Release 构建"。
+    /// ③ 文档下的用户目录（带改名兼容）。
+    /// ④ 本地应用数据目录，兜底。
+    /// </summary>
+    internal static IReadOnlyList<string> ProjectsRootCandidates(string programRoot, string? releaseOutputDirectory)
+    {
+        var candidates = new List<string>();
+        if (releaseOutputDirectory is { Length: > 0 })
+            candidates.Add(Path.Combine(releaseOutputDirectory, "Projects"));
+        candidates.Add(Path.Combine(programRoot, "Projects"));
+        candidates.Add(UserProjectsRoot);
+        candidates.Add(ProjectsDirectoryUnder(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)));
+        return candidates;
+    }
+
+    /// <summary>
+    /// 正在跑 Debug 输出时，同一棵构建树下的 **Release 输出目录**；其余情况返回 null。
+    ///
+    /// 为什么按"同名 exe 在哪"去找、不按路径拼：Release 输出常常带 RID 子目录
+    /// （<c>bin\Release\net10.0\win-x64</c>），与 Debug 的 <c>bin\Debug\net10.0</c> 不是同一层，
+    /// 拼路径会拼错。exe 名从当前进程取——要找的就是**这个程序**的 Release 版。
+    /// </summary>
+    private static string? FindReleaseOutput()
+    {
+        var marker = Path.Combine("bin", "Debug") + Path.DirectorySeparatorChar;
+        var index = ProgramRoot.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (index < 0) return null;                 // 不是 Debug 输出：按程序旁边走
+
+        var exeName = Path.GetFileName(Environment.ProcessPath);
+        return exeName is { Length: > 0 } ? FindDirectoryContaining(ProgramRoot[..index], exeName) : null;
+    }
+
+    /// <summary>
+    /// 在 <paramref name="tree"/> 的 <c>bin\Release</c> 下找装同名 exe 的那个目录。找不到返回 null。
+    /// </summary>
+    internal static string? FindDirectoryContaining(string tree, string exeName)
+    {
+        var releaseBin = Path.Combine(tree, "bin", "Release");
+        if (!Directory.Exists(releaseBin)) return null;
+
+        try
+        {
+            var found = Directory.EnumerateFiles(releaseBin, exeName, SearchOption.AllDirectories).FirstOrDefault();
+            return found is null ? null : Path.GetDirectoryName(found);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     public static bool CanWriteDirectory(string directory)
