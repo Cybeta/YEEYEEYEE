@@ -35,6 +35,12 @@ public sealed class ComfyUiWorkflowSlots
     public string ImageInput { get; set; } = string.Empty;
 
     /// <summary>
+    /// **全部**底图入口，按节点 id 稳定排序。有多个时按顺序各收一张参考图——
+    /// 「角色 + 道具 + 场景」一起喂就走这一串。`ImageNodeId` 仍是第 1 个（单图那条路照旧）。
+    /// </summary>
+    public List<string> ImageNodeIds { get; set; } = new();
+
+    /// <summary>
     /// 这份工作流**故意**不要负面词（negative 指向 ConditioningZeroOut 这类显式置空节点）。
     ///
     /// 为什么单独立一项、而不是算作「没认出来」：这是正规写法，不是缺陷。
@@ -288,7 +294,7 @@ public static class ComfyUiWorkflowBinder
                 + "同一张图会往每一段写同一个种子。");
     }
 
-    /// <summary>认底图入口。只认第一个，多的如实说明会被忽略。</summary>
+    /// <summary>认底图入口：全部都认，按节点 id 稳定排序。</summary>
     private static void ResolveImage(JsonObject graph, ComfyUiWorkflowSlots slots)
     {
         var loaders = graph
@@ -307,9 +313,11 @@ public static class ComfyUiWorkflowBinder
 
         slots.ImageNodeId = loaders[0].Key;
         slots.ImageInput = "image";
+        slots.ImageNodeIds.AddRange(loaders.Select(pair => pair.Key));
         if (loaders.Count > 1)
-            slots.Notes.Add($"这份工作流有 {loaders.Count} 个底图入口，只用第 1 个（节点 {loaders[0].Key}）；"
-                + "要合成多张参考图得换一份工作流（例如 IPAdapter）。");
+            slots.Notes.Add($"这份工作流有 {loaders.Count} 个底图入口（节点 {string.Join("、", slots.ImageNodeIds)}）："
+                + "按顺序各收一张参考图——「角色 + 道具 + 场景」一起喂就走这里。"
+                + "给不满时多出来的入口保持它原来的示例图，不拿同一张图去凑数。");
     }
 
     /// <summary>
@@ -404,8 +412,26 @@ public static class ComfyUiWorkflowBinder
 
         // 底图：值为空时**不动**原来的那张（工作流里往往自带一张示例图，
         // 清掉会让它连示例都跑不了）；有值时写上传后的名字。
-        if (slots.ImageNodeId.Length > 0 && values.ImageName.Length > 0)
-            SetInput(graph, slots.ImageNodeId, slots.ImageInput, JsonValue.Create(values.ImageName));
+        //
+        // 有多个底图入口时按顺序各写一张：参考图的顺序由装配那一侧定死（角色 → 道具 → 场景），
+        // 这里只负责照顺序对号入座。给不满就只写前几个入口，多出来的保持它原来的示例图——
+        // **不拿同一张图去凑数**，那样等于谎报输入，出来的东西不像还没法解释。
+        var imageNames = values.ImageNames.Count > 0
+            ? values.ImageNames
+            : values.ImageName.Length > 0
+                ? (IReadOnlyList<string>)new[] { values.ImageName }
+                : Array.Empty<string>();
+        var imageSlots = slots.ImageNodeIds.Count > 0
+            ? (IReadOnlyList<string>)slots.ImageNodeIds
+            : slots.ImageNodeId.Length > 0
+                ? new[] { slots.ImageNodeId }
+                : Array.Empty<string>();
+        for (var index = 0; index < imageSlots.Count && index < imageNames.Count; index++)
+        {
+            if (imageNames[index].Length == 0) continue;
+            var input = slots.ImageInput.Length > 0 ? slots.ImageInput : "image";
+            SetInput(graph, imageSlots[index], input, JsonValue.Create(imageNames[index]));
+        }
 
         return graph;
     }
@@ -481,4 +507,10 @@ public sealed record ComfyUiBindValues
 
     /// <summary>已上传到 ComfyUI 的底图文件名；空表示这次不用底图。</summary>
     public string ImageName { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 这次要喂的底图文件名，按顺序对到每个底图入口（`ImageName` 是它的第 1 个）。
+    /// 参考图的顺序由装配那一侧定死，这里不重排。
+    /// </summary>
+    public IReadOnlyList<string> ImageNames { get; init; } = Array.Empty<string>();
 }

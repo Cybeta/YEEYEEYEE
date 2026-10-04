@@ -126,6 +126,7 @@ var tests = new (string Name, Action Run)[]
     ("生成链自检：图要在「引用（变体）」上，只在节点上出过也算缺口（道具会换样子就出在这）", GenerationAuditAsksForTheImageOnTheVariantToo),
     ("Agent 建设定节点：没点名实体时按「同类唯一同名」锚上自引用，同名有歧义就不猜", AgentAnchorsSettingNodesToTheirSetting),
     ("参考图装配：顺序固定 角色→道具→场景、变体只取第一张、超上限要说出丢了谁", ReferenceImagePlanOrdersCapsAndSaysWhatItDropped),
+    ("ComfyUI 绑定：每个底图入口按顺序各收一张参考图，给不满不拿同一张凑数", BinderFillsEveryImageSlotInOrder),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
     ("AI 建实体：内容同时落到核心设定与默认变体，引用卡不再空白", AgentEntityContentReachesVariantAndCard),
@@ -8677,6 +8678,53 @@ static void CiphertextFromAnotherPlatformIsReportedUnreadable()
 	Expect(!SecretProtector.IsEncryptedAtRest("sk-proj:abcdef"), "未知前缀更不算真的加密落盘");
 	Expect(SecretProtector.IsProtected("plain:x"), "plain: 是已知前缀");
 	Expect(!SecretProtector.IsEncryptedAtRest("plain:x"), "plain: 不能被算作加密落盘");
+}
+
+static void BinderFillsEveryImageSlotInOrder()
+{
+	// 一份工作流有多个底图入口时，参考图按顺序各写一张：顺序由装配那一侧定死（角色 → 道具 → 场景），
+	// 绑定这一侧只对号入座。给不满就只写前几个入口，多出来的保持原来的示例图——
+	// 不拿同一张图去凑数，那样等于谎报输入。
+	const string template = """
+	{
+	  "1": {"class_type": "LoadImage", "inputs": {"image": "example.png"}},
+	  "2": {"class_type": "LoadImage", "inputs": {"image": "example2.png"}},
+	  "3": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 20, "cfg": 7.0, "denoise": 1.0, "sampler_name": "euler", "scheduler": "normal", "model": ["4", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["5", 0]}},
+	  "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "m.safetensors"}},
+	  "5": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+	  "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "old", "clip": ["4", 1]}},
+	  "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "bad", "clip": ["4", 1]}}
+	}
+	""";
+
+	ComfyUiWorkflowSlots slots = ComfyUiWorkflowBinder.Detect(template);
+	Expect(slots.ImageNodeIds.Count == 2, "两个底图入口都要认出来，实际 " + slots.ImageNodeIds.Count);
+	Expect(slots.ImageNodeId == "1", "第 1 个入口仍然单独记着（单图那条路照旧）");
+	Expect(slots.Notes.Any((string item) => item.Contains("2 个底图入口")), "要如实说这份工作流有几个底图入口");
+
+	JsonObject both = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues
+	{
+		Prompt = "两个人在灯下",
+		Negative = "水印",
+		Width = 512,
+		Height = 512,
+		ImageName = "chen.png",
+		ImageNames = new[] { "chen.png", "lamp.png" }
+	});
+	Expect(both["1"]!["inputs"]!["image"]!.GetValue<string>() == "chen.png", "第 1 个入口收第 1 张");
+	Expect(both["2"]!["inputs"]!["image"]!.GetValue<string>() == "lamp.png", "第 2 个入口收第 2 张");
+
+	// 只给一张：第 2 个入口保持它原来的示例图，不许拿第 1 张去顶。
+	JsonObject only = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues
+	{
+		Prompt = "两个人在灯下",
+		Negative = "水印",
+		Width = 512,
+		Height = 512,
+		ImageName = "chen.png"
+	});
+	Expect(only["1"]!["inputs"]!["image"]!.GetValue<string>() == "chen.png", "给一张时写第 1 个入口");
+	Expect(only["2"]!["inputs"]!["image"]!.GetValue<string>() == "example2.png", "第 2 个入口保持示例图，不拿同一张凑数");
 }
 
 static void ReferenceImagePlanOrdersCapsAndSaysWhatItDropped()

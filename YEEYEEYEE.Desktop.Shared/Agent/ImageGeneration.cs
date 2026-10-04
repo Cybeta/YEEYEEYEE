@@ -310,7 +310,10 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
     public ReferenceCapacity ReferenceCapacity => new(
         Math.Max(0, config.ImageMaxReferenceImages),
         config.ImageMaxReferenceImages <= 0
-            ? "未声明上限，按不限制处理。"
+            // 0 的含义只有一种：**不带参考图**。这句原先写的是「未声明上限，按不限制处理」，
+            // 与装配那一侧（`ReferenceImagePicker`：上限 0 就不带，并如实说出来）是两回事，
+            // 两处口径不一样迟早会有人照错的那条理解。
+            ? "上限是 0：这一家不带参考图（设置 → 生图生视频 →「图像参考图上限」填 0 就是这个意思）。"
             : $"接口一次最多使用 {config.ImageMaxReferenceImages} 张参考图（可在设置里调整）。");
 
     public async Task<ImageGenerationResult> GenerateAsync(ImageGenerationRequest request, CancellationToken cancellationToken = default)

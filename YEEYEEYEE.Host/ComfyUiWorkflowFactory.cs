@@ -157,7 +157,10 @@ public sealed class ComfyUiWorkflowFactory
             Height = GetInt(invocation, "height", 0, 0, 8192),
             Seed = TryGetSeed(invocation),
             // 认不出底图入口时 Bind 不会写它，所以这里给不给都安全。
-            ImageName = images.Count > 0 ? images[0] : string.Empty
+            ImageName = images.Count > 0 ? images[0] : string.Empty,
+            // 整份列表一起给：一份工作流有多个底图入口时，按顺序各收一张
+            //（顺序由装配那一侧定死：角色 → 道具 → 场景）。
+            ImageNames = images
         });
 
         return JsonDocument.Parse(bound.ToJsonString()).RootElement.Clone();
