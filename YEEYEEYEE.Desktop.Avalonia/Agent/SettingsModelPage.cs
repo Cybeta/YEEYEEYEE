@@ -71,15 +71,21 @@ internal static class SettingsModelPage
         format.SelectedIndex = config.ApiFormat == AiApiFormat.AnthropicMessages ? 1 : 0;
         var model = Field("模型名（可手填；服务商下线的旧名请按官方文档改）", config.Model);
 
+        // 密钥**不整串盖住**：显示成 sk-c…e7ec 这个样子，一眼能认出填的是哪一把。
+        // 整串打码有个副作用——连"我填的是哪把密钥"都看不出来，只能盲填；脱敏显示两头各留 4 个字符足够辨认，
+        // 又不足以被旁边的人抄走。代价是这串字**长得像密钥**，保存时必须认得出「它只是显示」，
+        // 见 CommitForm 里的 IsRedactedDisplayOf。
         var apiKey = new TextBox
         {
-            Text = config.ApiKey,
-            PasswordChar = '●',
+            // 初值也直接给脱敏形态：LoadForm 马上会覆盖它，但两处口径一致就没机会露出一瞬明文。
+            Text = config.ApiKey.Length > 0 ? SecretProtector.Describe(config.ApiKey) : string.Empty,
             FontSize = 12,
             Background = Brush("DfSurface2"),
             Foreground = Brush("DfInk"),
-            Watermark = "sk-…（加密后写入配置文件，不回显完整值）"
+            Watermark = "sk-…（此处只显示首尾各 4 位；粘贴一整个新密钥会覆盖它）"
         };
+        // 一聚焦就全选：不然在 sk-c…e7ec 后面接着敲，会拼出一个「半截旧值 + 新值」的怪东西。
+        apiKey.GotFocus += (_, _) => apiKey.SelectAll();
         var contextWindow = Field("上下文窗口（token；0 表示不声明，不按窗口截断上下文）",
             config.ContextWindow > 0 ? config.ContextWindow.ToString() : "0");
         var maxOutput = Field("单次最大输出 token（0 表示由服务端默认）",
@@ -322,7 +328,10 @@ internal static class SettingsModelPage
 
         void RefreshKeyNote()
         {
+            // 框里那串字可能只是**脱敏显示**（sk-c…e7ec），不是用户敲的。先把它折成空——
+            // 下面每一句判断的都是「用户这次到底有没有填新值」。
             var typed = apiKey.Text?.Trim() ?? string.Empty;
+            if (SecretProtector.IsRedactedDisplayOf(typed, config.ApiKey)) typed = string.Empty;
             if (keyUnreadable)
             {
                 keyNote.Text = "这一份的密钥在当前账户 / 机器 / 系统上解不开（换过系统账户或机器，或把 Windows 上的配置拷到了 macOS）。请重新填写后保存。";
@@ -379,7 +388,9 @@ internal static class SettingsModelPage
                 useFullUrl.IsChecked = config.UseFullUrl;
                 format.SelectedIndex = config.ApiFormat == AiApiFormat.AnthropicMessages ? 1 : 0;
                 model.Box.Text = config.Model;
-                apiKey.Text = keyUnreadable ? string.Empty : config.ApiKey;
+                apiKey.Text = !keyUnreadable && config.ApiKey.Length > 0
+                    ? SecretProtector.Describe(config.ApiKey)
+                    : string.Empty;
                 contextWindow.Box.Text = config.ContextWindow > 0 ? config.ContextWindow.ToString() : "0";
                 maxOutput.Box.Text = config.MaxOutputTokens > 0 ? config.MaxOutputTokens.ToString() : "0";
                 sendSampling.IsChecked = config.SendSamplingParameters;
@@ -430,9 +441,10 @@ internal static class SettingsModelPage
             // 这一栏空着，**只在密钥解不开时**表示「不改」而不是「清掉」：
             // 解不开时 ReloadForm 故意不回显那一刻的空值，照空写回去等于把盘上那份密文清掉，
             // 而它只是**这个账户**解不开而已。密钥可读时留空仍然表示「清掉」，语义不变。
-            config.ApiKey = apiKey.Text is { Length: > 0 } typedKey
-                ? typedKey
-                : keyUnreadable ? config.ApiKey : string.Empty;
+            //
+            // 第三种情况：框里显示的是脱敏值本身。它不是用户填的新密钥，也**不能被当成新密钥写回去**
+            // ——否则文件里就存下 "sk-c…e7ec"，下一次请求必然 401。这一支按「没改」处理。
+            config.ApiKey = SecretProtector.ResolveTypedKey(apiKey.Text, config.ApiKey, keyUnreadable);
             // 「本地模拟」不是一家真的服务商：它不定义任何能力值，所以这两项保持原样——
             // 否则用户拿本地模拟比一下再切回自己的接口，会发现上下文窗口被悄悄清零了。
             if (!preset.IsLocal)

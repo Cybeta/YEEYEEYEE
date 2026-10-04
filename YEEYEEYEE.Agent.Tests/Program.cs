@@ -247,6 +247,9 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 槽位：从四份真机样本里认出参数该放哪，认不出的如实说", ComfyUiBinderDetectsOnRealSamples),
     ("ComfyUI 槽位：按一次调用绑值，不改模板本身，连线槽位不硬写", ComfyUiBinderBindsWithoutDamagingTemplate),
     ("ComfyUI 当前这一台：切换把地址与底模写成站点那一份，同一台不重复写", ComfyUiActivationProjectsSiteOntoConfig),
+    ("对话用量：流式末尾那条 usage 要读出来（含缓存命中 / 未命中）", AiStreamReportsUsage),
+    ("对话用量：胶囊与明细的口径（命中率分母、没有就不给速率、缺失说成「不是 0」）", UsageReportFormatsWithoutLying),
+    ("密钥框：脱敏显示不是密钥，存回去就是 401；新敲的、清空的、解不开的三条路各自分明", RedactedKeyDisplayIsNotAKey),
 };
 
 var failures = new List<string>();
@@ -1042,6 +1045,89 @@ static void ThinkingOnlyIsStillAnError()
 
     Expect(thinking.Count == 1, "思考增量仍应被回调出来");
     Expect(message is not null, "只有思考没有正文时应报错");
+}
+
+static void AiStreamReportsUsage()
+{
+    // DeepSeek 的流式末尾块：choices 为空、只带 usage（命中 / 未命中都在这里）。
+    // 协议上它是**唯一**一条带真实用量的块，前面每条 usage 都是 null。
+    const string sse = """
+        data: {"choices":[{"delta":{"content":"甲"}}],"usage":null}
+
+        data: {"choices":[{"delta":{"content":"乙"}}],"usage":null}
+
+        data: {"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":80,"total_tokens":1280,"prompt_cache_hit_tokens":1024,"prompt_cache_miss_tokens":176}}
+
+        data: [DONE]
+
+        """;
+    var handler = new CapturingHandler { ResponseBody = sse, ContentType = "text/event-stream" };
+    var seen = new List<AiUsage>();
+    var provider = new OpenAiCompatibleProvider(ConfigFor(AiApiFormat.OpenAiChat), new HttpClient(handler));
+    var reply = provider.ChatStreamAsync(
+        new[] { new AiChatMessage { Role = "user", Content = "hi" } },
+        new AiStreamSink(_ => { }, null, seen.Add)).GetAwaiter().GetResult();
+
+    Expect(reply == "甲乙", $"正文拼接不对：{reply}");
+    Expect(seen.Count > 0, "末尾那条 usage 没有被回调出来");
+    var usage = seen[^1];
+    Expect(usage.PromptTokens == 1200 && usage.CompletionTokens == 80, $"token 数不对：{usage}");
+    Expect(usage.CacheHitTokens == 1024 && usage.CacheMissTokens == 176, $"缓存命中 / 未命中不对：{usage}");
+    Expect(handler.Body!.Contains("include_usage", StringComparison.Ordinal), "请求体没有要求服务端回传 usage");
+}
+
+static void UsageReportFormatsWithoutLying()
+{
+    // 满编：DeepSeek 的典型一条。命中 1024 + 未命中 176 → 计费输入 1200。
+    var usage = new AiUsage(1200, 80, 1024, 176);
+    var report = AiUsageReport.From(usage, contextWindow: 1_000_000, decodeSeconds: 4.0, firstTokenSeconds: 1.5);
+    var hitRate = (1024.0 / 1200).ToString("P0");
+    var hitRateExact = (1024.0 / 1200).ToString("P1");
+
+    Expect(report.Chips.Any(chip => chip == "↑1.2K ↓80"), $"输入 / 输出那枚胶囊不对：{report.Summary}");
+    Expect(report.Chips.Any(chip => chip == $"缓存 {hitRate}"), $"缓存命中率不对：{report.Summary}");
+    Expect(report.Chips.Any(chip => chip == "上下文 1.2K/1M"), $"上下文那枚胶囊不对：{report.Summary}");
+    Expect(report.Chips.Any(chip => chip == "20 tok/s"), $"解码速率不对（80 token ÷ 4.0 秒）：{report.Summary}");
+    Expect(report.Chips.Any(chip => chip == "首字 1.5s"), $"首字延迟不对：{report.Summary}");
+    // 分母必须是「计费输入侧」（命中 + 未命中 = 1200）。拿 total_tokens（含输出）当分母会算成 80% 出头
+    // ——那是算错，不是事实，读起来会像「缓存不爱命中」。
+    Expect(report.Details.Any(line => line.Contains(hitRateExact, StringComparison.Ordinal)),
+        "明细里没写清命中率的分母：" + string.Join(" / ", report.Details));
+
+    // 没测到解码时间就不给速率：宁可少一项，也不要甩一个假数字出来。
+    var noClock = AiUsageReport.From(new AiUsage(1200, 80, 0, 0), 1000, decodeSeconds: null, firstTokenSeconds: null);
+    Expect(!noClock.Chips.Any(chip => chip.EndsWith("tok/s", StringComparison.Ordinal)), "没测到解码时间却给了速率");
+
+    // 服务端一个字都不回传：仍然要把「首字延迟」量出来（那一段是本地测的，不靠服务端）。
+    var noUsage = AiUsageReport.From(AiUsage.Empty, 1_000_000, decodeSeconds: null, firstTokenSeconds: 1.2);
+    Expect(noUsage.Chips.SequenceEqual(new[] { "首字 1.2s" }), $"只该剩首字延迟：{noUsage.Summary}");
+    Expect(noUsage.Details.Any(line => line.Contains("不是 0，是没有", StringComparison.Ordinal)),
+        "取不到用量时必须说清「不是 0，是没有」");
+
+    // 全都没有：界面上显示「—」，不能留空（留空会被当成面板坏了）。
+    var blank = AiUsageReport.From(AiUsage.Empty, 0, null, null);
+    Expect(!blank.HasAnything, "什么都没有时不该有胶囊");
+    Expect(AiUsageReport.MissingNote.Contains('—'), "缺失说明里要有「—」");
+}
+
+static void RedactedKeyDisplayIsNotAKey()
+{
+    const string stored = "sk-4f2c8a1d9e7b3c5f0a2e6d8b1c3f5a7e";
+    var shown = SecretProtector.Describe(stored);
+    Expect(shown == "sk-4…5a7e", $"脱敏显示应露出首尾各 4 位，实际：{shown}");
+
+    // 框里停着脱敏值时保存 → 盘上那份原样保留。照抄会把 "sk-4…5a7e" 当密钥写进配置文件，下一次必然 401。
+    Expect(SecretProtector.ResolveTypedKey(shown, stored, storedUnreadable: false) == stored, "脱敏显示被当成了新密钥");
+    // 真敲了新值才是换密钥。
+    Expect(SecretProtector.ResolveTypedKey("sk-brand-new-key-0001", stored, false) == "sk-brand-new-key-0001", "新填的密钥没被采纳");
+    // 留空：可读 = 清掉；解不开 = 保留（解不开是「这个账户读不出」，不是「用户想删」）。
+    Expect(SecretProtector.ResolveTypedKey("", stored, false).Length == 0, "可读时留空应表示清掉");
+    Expect(SecretProtector.ResolveTypedKey("  ", stored, true) == stored, "解不开时留空不该把密钥清掉");
+    // 盘上那份**恰好**长成脱敏的样子时，它本身就该被当成真密钥，而不是被认成「没改」。
+    Expect(!SecretProtector.IsRedactedDisplayOf("sk-4…5a7e", "sk-4…5a7e"), "真值长得像脱敏串时不该被误判");
+    // 短密钥没有省略号，显示成一串圆点，同样要认得出来（认不出就会把圆点存成密钥）。
+    Expect(SecretProtector.ResolveTypedKey(SecretProtector.Describe("abc12345"), "abc12345", false) == "abc12345",
+        "短密钥的脱敏显示没被认出来");
 }
 
 static void ActionsBlockIsHiddenFromDisplay()

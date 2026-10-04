@@ -94,6 +94,42 @@ public static class SecretProtector
     }
 
     /// <summary>
+    /// 输入框里那串字是不是「已存密钥的脱敏显示」——是的话，保存时必须按**没改过**处理。
+    ///
+    /// 为什么需要它：密钥框不再用密码字符把整串盖住，而是显示成 <c>sk-c…e7ec</c>，
+    /// 让人一眼认得出填的是哪一把。这串字于是**长得像密钥、却不能当密钥用**；
+    /// 不认它，就等于把「sk-c…e7ec」当成新密钥写回配置文件，下一次请求必然 401。
+    ///
+    /// 两边都卡住：必须与 <see cref="Describe"/> 逐字相同，而且**不等于真值本身**——
+    /// 后者是防「有人真的把密钥取成这个形状」，那时它就该被当成真密钥。
+    /// </summary>
+    public static bool IsRedactedDisplayOf(string? text, string? stored) =>
+        !string.IsNullOrEmpty(stored)
+        && text is not null
+        && !string.Equals(text, stored, StringComparison.Ordinal)
+        && string.Equals(text, Describe(stored), StringComparison.Ordinal);
+
+    /// <summary>
+    /// 密钥框提交时到底该用哪个值——「没改」与「改成空」在这里分开。
+    ///
+    /// 四种情形，只有第三种是换新密钥：
+    /// · 框里是**脱敏显示**（<c>sk-c…e7ec</c>）→ 盘上那份原样保留（照抄会把脱敏串当密钥存进去，下一次必然 401）；
+    /// · 框里空着、而盘上那份**解不开** → 保留（解不开是"这个账户读不出"，不是"用户想删"）；
+    /// · 框里是新敲的 → 用它；
+    /// · 框里空着、盘上那份可读 → 清掉（留空就是"我不要了"，这条语义不能悄悄改掉）。
+    ///
+    /// 抽成函数而不是写在设置页里，是因为这一段**出过一次真事故**（刚敲的密钥被后一次保存擦成空），
+    /// 摆在共享层才测得动。
+    /// </summary>
+    public static string ResolveTypedKey(string? typedText, string storedKey, bool storedUnreadable)
+    {
+        var typed = typedText?.Trim() ?? string.Empty;
+        if (IsRedactedDisplayOf(typed, storedKey)) return storedKey;
+        if (typed.Length > 0) return typed;
+        return storedUnreadable ? storedKey : string.Empty;
+    }
+
+    /// <summary>
     /// 当前平台的首选方案。可用 <c>YEEYEEYEE_SECRET_SCHEME</c>（dpapi / keychain / aesgcm / plain）
     /// 显式指定，供自动化测试与「有系统密钥库但用户更想用本机密钥文件」这类选择使用。
     /// 每次现算而不是缓存：环境变量在同一次进程内可能被测试切换。

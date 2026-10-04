@@ -41,6 +41,15 @@ internal static class SettingsMediaPage
         // 直接赋 null 会把 config 里的字符串属性变成 null，后面 IsNullOrWhiteSpace 之外的地方容易炸。
         string TextOf(TextBox box) => box.Text ?? string.Empty;
 
+        // 密钥框里显示的是**脱敏形态**（首尾各 4 位，<c>sk-c…e7ec</c>）；空值就留空——
+        // 「（未填写）」那句是给说明文字用的，摆进输入框会像"这里已经有内容了"。
+        static string SecretDisplay(string value) =>
+            string.IsNullOrEmpty(value) ? string.Empty : SecretProtector.Describe(value);
+
+        // 提交时把「只是显示」的那一串挡回去：照抄会把 sk-c…e7ec 当密钥存进配置文件，下一次请求必然 401。
+        static string CommittedSecret(string typed, string stored) =>
+            SecretProtector.ResolveTypedKey(typed, stored, storedUnreadable: false);
+
         // 分块之间的细分隔线：这些字段彼此独立（图像 / ComfyUI / 视频），
         // 光靠加粗标题在长面板里不够，给一条线让「这一块到此为止」一眼可见。
         void Divider() => root.Children.Add(new Border
@@ -53,11 +62,16 @@ internal static class SettingsMediaPage
         // 字段 = 标题 + 输入框 + 一句说明。
         // 说明紧跟在输入框下面（而不是集中写在页尾）：这些开关什么时候生效，光看字段名猜不出来，
         // 离得越近越不容易被当成「改完立刻对正在跑的出图生效」。
-        TextBox AddField(string label, string value, string note, string? watermark = null, bool password = false)
+        TextBox AddField(string label, string value, string note, string? watermark = null, bool secret = false)
         {
             var field = Field(label, value, watermark);
-            // 复用 Field 拿到统一样式，再补上密码行为；密钥不该明文回显在屏幕上。
-            if (password) field.Box.PasswordChar = '●';
+            // 密钥**不整串盖住**：显示成 sk-c…e7ec，能认出填的是哪一把，又不至于被旁边的人整串抄走。
+            // 一聚焦就全选，免得在脱敏值后面接着敲、拼出「半截旧值 + 新值」的怪东西。
+            if (secret)
+            {
+                field.Box.Text = SecretDisplay(value);
+                field.Box.GotFocus += (_, _) => field.Box.SelectAll();
+            }
             root.Children.Add(field.Label);
             root.Children.Add(field.Box);
             root.Children.Add(Note(note));
@@ -115,7 +129,7 @@ internal static class SettingsMediaPage
             config.ImageApiKey,
             "留空则沿用当前选中模型的密钥；填了只用于出图，聊天那条链路不受影响。",
             "留空则沿用当前选中模型的密钥",
-            password: true);
+            secret: true);
         var imageSize = AddField(
             "图像尺寸（宽x高）",
             config.ImageSize,
@@ -400,7 +414,7 @@ internal static class SettingsMediaPage
             config.VideoApiKey,
             "留空则沿用当前选中模型的密钥；填了只用于出视频，聊天与出图都不受影响。",
             "留空则沿用当前选中模型的密钥",
-            password: true);
+            secret: true);
         var videoMaxRefs = AddField(
             "一次最多参考帧数（0 表示不限制）",
             config.VideoMaxReferenceImages.ToString(),
@@ -553,7 +567,7 @@ internal static class SettingsMediaPage
         {
             config.ImageEndpoint = TextOf(imageEndpoint);
             config.ImageModel = TextOf(imageModel);
-            config.ImageApiKey = TextOf(imageApiKey);
+            config.ImageApiKey = CommittedSecret(TextOf(imageApiKey), config.ImageApiKey);
             config.ImageSize = TextOf(imageSize);
             config.DefaultImageSteps = TextOf(imageSteps);
             config.DefaultImageCfg = TextOf(imageCfg);
@@ -569,7 +583,7 @@ internal static class SettingsMediaPage
 
             config.VideoEndpoint = TextOf(videoEndpoint);
             config.VideoModel = TextOf(videoModel);
-            config.VideoApiKey = TextOf(videoApiKey);
+            config.VideoApiKey = CommittedSecret(TextOf(videoApiKey), config.VideoApiKey);
             if (int.TryParse(TextOf(videoMaxRefs), out var videoMaxReferenceImages))
                 config.VideoMaxReferenceImages = videoMaxReferenceImages;
             if (int.TryParse(TextOf(videoSeconds), out var videoDefaultSeconds))
@@ -589,7 +603,7 @@ internal static class SettingsMediaPage
         {
             imageEndpoint.Text = config.ImageEndpoint;
             imageModel.Text = config.ImageModel;
-            imageApiKey.Text = config.ImageApiKey;
+            imageApiKey.Text = SecretDisplay(config.ImageApiKey);
             imageSize.Text = config.ImageSize;
             imageMaxRefs.Text = config.ImageMaxReferenceImages.ToString();
             imageSteps.Text = config.DefaultImageSteps;
@@ -599,7 +613,7 @@ internal static class SettingsMediaPage
             assetDir.Text = config.AssetDirectory;
             videoEndpoint.Text = config.VideoEndpoint;
             videoModel.Text = config.VideoModel;
-            videoApiKey.Text = config.VideoApiKey;
+            videoApiKey.Text = SecretDisplay(config.VideoApiKey);
             videoMaxRefs.Text = config.VideoMaxReferenceImages.ToString();
             videoSeconds.Text = config.VideoDefaultSeconds.ToString();
             gachaReveal.IsChecked = config.GachaReveal;

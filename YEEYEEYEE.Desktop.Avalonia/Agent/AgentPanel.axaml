@@ -104,8 +104,14 @@
                     ToolTip.Tip="打开设置：模型接入 / 生图生视频 / 技能管理 / 协作" Click="ModelSettings_OnClick" />
           </Grid>
 
-          <!-- 上一轮的用量。取不到的服务端一律显示 ——，不拿 0 冒充（0 会被读成"没花 token"）。 -->
-          <TextBlock x:Name="UsageText" Classes="dim" FontSize="10" TextTrimming="CharacterEllipsis" />
+          <!-- 上一轮的用量：一排**能折行**的小胶囊，点开看明细（口径都写在明细里）。
+               原先是一行 TextBlock + CharacterEllipsis——右侧栏就那么宽，一长就把尾巴剪掉，
+               而尾巴上挂的恰好是「缓存 / 上下文 / tok/s」，等于这一行白做。折行多占一行，
+               也比把要看的数字藏起来强。取不到的服务端一律显示 ——，不拿 0 冒充（0 会被读成"没花 token"）。 -->
+          <StackPanel Spacing="3">
+            <WrapPanel x:Name="UsagePanel" Orientation="Horizontal" />
+            <TextBlock x:Name="UsageNote" Classes="dim" FontSize="10" TextWrapping="Wrap" IsVisible="False" />
+          </StackPanel>
         </StackPanel>
       </Grid>
     </Panel>

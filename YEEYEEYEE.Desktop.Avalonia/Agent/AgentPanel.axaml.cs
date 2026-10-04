@@ -56,7 +56,19 @@ public partial class AgentPanel : UserControl
     /// <summary>本轮服务端回传的用量（没有回传时保持 Empty，界面上显示 —— 而不是 0）。</summary>
     private AiUsage lastUsage = AiUsage.Empty;
 
-    /// <summary>本轮第一个字 / 最后一个字的时刻（ticks，0 表示还没收到）。解码速率只算这一段。</summary>
+    /// <summary>本轮算出来的用量说明；点开明细时读它，所以留一份。</summary>
+    private AiUsageReport lastReport = AiUsageReport.None;
+
+    /// <summary>发出请求的时刻；首字延迟 = 第一个字 − 它。</summary>
+    private long requestStartedTicks;
+
+    /// <summary>
+    /// 第一个字（**思考或正文**）与最后一个正文字的时刻（ticks，0 表示还没收到）。
+    ///
+    /// 第一个字这里刻意把思考也算进去：思考型模型先想一会儿才吐正文，若从正文字起算，
+    /// 而服务端报的 completion_tokens **含思考**，分子分母就不是同一段东西，速率会高得离谱
+    /// （真见过这种数字）。从「模型开始吐字」起算，两头才对得上。
+    /// </summary>
     private long firstTokenTicks;
     private long lastTokenTicks;
 
@@ -67,6 +79,11 @@ public partial class AgentPanel : UserControl
         flushTimer.Tick += (_, _) => FlushStream();
         InputBox.KeyDown += InputBox_OnKeyDown;
         AuthModeBox.SelectedIndex = 0;
+        // 用量的「点开看明细」只挂一次：RefreshUsageRow 每收到一条用量事件都会跑，
+        // 在里面挂处理器等于每刷新一次就多叠一个，点一下会弹出 N 个窗口。
+        UsagePanel.Cursor = new Cursor(StandardCursorType.Hand);
+        UsagePanel.PointerPressed += (_, _) => { if (lastReport.HasAnything) ShowUsageDetails(); };
+        ToolTip.SetTip(UsagePanel, "点开看这一轮的用量明细");
         ShowEmptyState();
         RefreshHeader();
     }
@@ -375,9 +392,10 @@ public partial class AgentPanel : UserControl
         SetBusy(true);
         // 用量是「这一轮」的：新一轮开始就把上一轮的数字清掉，免得新的一轮还挂着旧数据。
         lastUsage = AiUsage.Empty;
+        requestStartedTicks = DateTimeOffset.UtcNow.Ticks;
         firstTokenTicks = 0;
         lastTokenTicks = 0;
-        UpdateUsageText();
+        RefreshUsageRow();
         PanelStatusText.Text = "正在连接…（同一个按钮会变成「停止」）";
         var bubble = AddBubble("Agent", Brush("DfPrimary"), isUser: false);
         streamTarget = bubble.Body;
@@ -422,7 +440,8 @@ public partial class AgentPanel : UserControl
             streamTarget = null;
             thinkingTarget = null;
             SetBusy(false);
-            UpdateUsageText();
+            // 最后再画一次：此刻最后一个字的时刻才算定下来，速率用的时间窗口要等这一刻才准。
+            RefreshUsageRow();
             PanelStatusText.Text = string.Empty;
             RefreshHeader();
             ScrollToEnd();
@@ -476,6 +495,8 @@ public partial class AgentPanel : UserControl
             },
             OnThinking: delta =>
             {
+                // 思考也算「模型开始吐字」：首字延迟与解码速率都从这一刻起算（见字段上的说明）。
+                if (firstTokenTicks == 0) firstTokenTicks = DateTimeOffset.UtcNow.Ticks;
                 if (thinkingSealed || bodyStarted) return;
                 // 思考只进折叠块：不拼正文、不进对话历史，界面上一行入口按字数更新。
                 Dispatcher.UIThread.Post(() =>
@@ -489,75 +510,97 @@ public partial class AgentPanel : UserControl
             OnUsage: usage => Dispatcher.UIThread.Post(() =>
             {
                 lastUsage = usage;
-                UpdateUsageText();
+                RefreshUsageRow();
             }));
     }
 
     /// <summary>
-    /// 把上一轮的用量写到输入框下面那一行。
+    /// 把上一轮的用量画成输入框下面那一排小胶囊；取不到就退成一句说明（<see cref="AiUsageReport.MissingNote"/>）。
     ///
-    /// 三条口径都要写准，否则就是假数据：
-    /// · **解码速率**用的是「第一个字到最后一个字」的时间，不是整轮墙钟——后者把排队与网络等待都算进去，
-    ///   会低得离谱；标签写 tok/s 而实际算的是端到端速度，比不显示更误导。
-    /// · **缓存命中率**取不到命中 / 未命中这两项的服务商显示 ——，不显示 0（0 会被读成"一次都没命中"）。
-    /// · **上下文用量**用服务端回传的真实 prompt token，而不是按字符估算的那个数（估算那个继续用于发送前截断）。
+    /// 数字本身怎么算是 <see cref="AiUsageReport"/> 的事——那边能被测试钉住，这边只管画。
+    /// 这里只做三件事：把两段时间算出来、折行摆开、挂上「点开看明细」。
     /// </summary>
-    private void UpdateUsageText()
+    private void RefreshUsageRow()
     {
-        if (host is null) { UsageText.Text = string.Empty; return; }
-        var usage = lastUsage;
-        var parts = new List<string>();
-        var details = new List<string>();
+        UsagePanel.Children.Clear();
 
-        var input = usage.InputTokens;
-        if (input > 0 || usage.CompletionTokens > 0)
+        if (host is null)
         {
-            parts.Add($"↑{Short(input)} ↓{Short(usage.CompletionTokens)}");
-            details.Add($"输入 {input:N0} token；其中缓存命中 {usage.CacheHitTokens:N0}、未命中 {usage.CacheMissTokens:N0}");
-            details.Add($"输出 {usage.CompletionTokens:N0} token");
+            UsagePanel.IsVisible = false;
+            UsageNote.IsVisible = false;
+            lastReport = AiUsageReport.None;
+            return;
         }
 
-        var cacheTotal = usage.CacheHitTokens + usage.CacheMissTokens;
-        if (cacheTotal > 0)
-        {
-            var rate = (double)usage.CacheHitTokens / cacheTotal;
-            parts.Add($"缓存 {rate:P0}");
-            details.Add($"缓存命中率 {rate:P1}（命中的部分按服务商的规则计价，通常便宜得多）");
-        }
+        // 解码窗口只算「第一个字 → 最后一个正文字」；首字延迟从请求发出算起（那一段含排队与网络）。
+        var decodeSeconds = firstTokenTicks > 0 && lastTokenTicks > firstTokenTicks
+            ? (lastTokenTicks - firstTokenTicks) / (double)TimeSpan.TicksPerSecond
+            : (double?)null;
+        var firstTokenSeconds = firstTokenTicks > 0 && requestStartedTicks > 0
+            ? (firstTokenTicks - requestStartedTicks) / (double)TimeSpan.TicksPerSecond
+            : (double?)null;
 
-        var window = host.ContextWindowTokens;
-        if (window > 0 && input > 0)
-        {
-            parts.Add($"上下文 {Short(input)}/{Short(window)}");
-            details.Add($"本次请求占上下文窗口 {input * 100.0 / window:0.#}%");
-        }
+        lastReport = AiUsageReport.From(lastUsage, host.ContextWindowTokens, decodeSeconds, firstTokenSeconds);
 
-        if (usage.CompletionTokens > 0 && firstTokenTicks > 0 && lastTokenTicks > firstTokenTicks)
-        {
-            var seconds = (lastTokenTicks - firstTokenTicks) / (double)TimeSpan.TicksPerSecond;
-            if (seconds >= 0.05)
-            {
-                var rate = usage.CompletionTokens / seconds;
-                parts.Add($"{rate:0} tok/s");
-                details.Add($"解码速率 {rate:0.0} tok/s（只算第一个字到最后一个字之间的 {seconds:0.0} 秒，不含排队与网络等待）");
-            }
-        }
+        foreach (var chip in lastReport.Chips) UsagePanel.Children.Add(UsageChip(chip));
+        UsagePanel.IsVisible = lastReport.Chips.Count > 0;
 
-        UsageText.Text = parts.Count == 0
-            ? "用量：—（这一家接口没有回传 token 用量）"
-            : string.Join("  ·  ", parts);
-        ToolTip.SetTip(UsageText, details.Count == 0
-            ? "这一家接口没有回传 token 用量，所以看不到速率与命中率——不是 0，是没有。"
-            : string.Join("\n", details));
+        // 一行都没有就直说「没有」，而不是留一片空白让人以为面板坏了。
+        // 但**正在跑的时候先别下结论**：这一轮还没回来，现在说「这家接口不回传用量」是抢答，
+        // 那句话要等本轮结束（busy 落下）才成立。
+        var missing = !lastReport.HasAnything && !busy;
+        UsageNote.Text = missing ? AiUsageReport.MissingNote : string.Empty;
+        UsageNote.IsVisible = missing;
     }
 
-    /// <summary>大数字缩写着看：12.3K / 1.2M。</summary>
-    private static string Short(long value) => value switch
+    private static Border UsageChip(string text) => new()
     {
-        >= 1_000_000 => $"{value / 1_000_000.0:0.#}M",
-        >= 1_000 => $"{value / 1_000.0:0.#}K",
-        _ => value.ToString()
+        Background = AgentDialogUi.Brush("DfSurface2"),
+        BorderBrush = AgentDialogUi.Brush("DfLine"),
+        BorderThickness = new Thickness(1),
+        CornerRadius = new CornerRadius(6),
+        Padding = new Thickness(6, 1),
+        Margin = new Thickness(0, 0, 5, 3),
+        Child = new TextBlock
+        {
+            Text = text,
+            FontSize = 10,
+            Foreground = AgentDialogUi.Brush("DfInk3")
+        }
     };
+
+    /// <summary>
+    /// 用量明细。摆在这儿而不是只放工具提示：工具提示要悬停才出现，而这一栏在窄栏里，
+    /// 一行行读口径才是「这些数字是怎么来的」唯一说得清的地方（dsh 也是点开一份明细的做法）。
+    /// </summary>
+    private async void ShowUsageDetails()
+    {
+        if (Window.GetTopLevel(this) is not Window owner) return;
+
+        var body = new StackPanel { Margin = new Thickness(20), Spacing = 6 };
+        body.Children.Add(AgentDialogUi.Header("这一轮"));
+        foreach (var line in lastReport.Details)
+            body.Children.Add(new TextBlock
+            {
+                Text = "· " + line,
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = AgentDialogUi.Brush("DfInk2")
+            });
+
+        var close = AgentDialogUi.Primary("知道了");
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Spacing = 6,
+            Children = { close }
+        };
+
+        var dialog = DialogShell.Create("用量明细", AgentDialogUi.Layout(body, AgentDialogUi.Footer(buttons)), 480);
+        close.Click += (_, _) => dialog.Close();
+        await dialog.ShowDialog(owner);
+    }
 
     /// <summary>把一段正文增量排进显示缓冲，并启动节流刷新。</summary>
     private void PushChunk(string chunk)

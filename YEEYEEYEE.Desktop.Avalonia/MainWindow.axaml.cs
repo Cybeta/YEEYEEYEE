@@ -299,6 +299,9 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         StartPage.IsVisible = false;
         WorkbenchRoot.IsVisible = true;
+        // 右侧栏默认落在 Agent 面板：进项目第一件事通常是想说点什么，而不是检查某个节点。
+        // 检查器没被删掉，点顶栏「◧」或面板右上角的「›」就回去（两处都走 ShowInspectorMode）。
+        ShowAgentMode();
         StatusText.Text = $"项目已打开：{project.Descriptor.Name}";
 
         // 先选项目、再问模型：两件事同时糊在脸上，用户不知道该先答哪个。
