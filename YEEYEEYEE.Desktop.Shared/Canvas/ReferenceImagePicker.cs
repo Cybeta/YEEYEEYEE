@@ -15,6 +15,50 @@ public sealed record ReferenceImagePlan(
     public bool UsesReferences => Paths.Count > 0;
 }
 
+/// <summary>
+/// 一处「这一次最多能喂几张参考图」的声明。<c>Max</c> 为 <c>null</c> 表示**这一处不设限**——
+/// 注意它与 0 不是一回事，见 <see cref="ReferenceCapResolver"/>。
+/// </summary>
+public sealed record ReferenceCapDeclaration(string Label, int? Max);
+
+/// <summary>算出来的上限，以及**是被哪一处卡住的**（0 或超限时要能说出是谁定的）。</summary>
+public sealed record ReferenceCapResult(int Cap, string BindingLabel);
+
+/// <summary>
+/// 把各处声明的上限取小（规格里的规则二）。
+///
+/// 为什么不能只看用户设置那一项：会犯两种相反的错——
+///   · 设置 3、这一家只吃 1：多出来的两张被服务端悄悄忽略，用户以为带了设定，其实没带；
+///   · 设置 1、这份工作流有 4 个底图入口：白白浪费掉工作流本身的能力（刚刚才把多槽绑定做通）。
+///
+/// **0 与 null 必须分清**：用户设置里的 0 是「不带参考图」，是一个真实的约束；
+/// 而池子没声明张数时是「不知道」，那是 <c>null</c>——它绝不该反过来把用户的上限压成 0。
+/// </summary>
+public static class ReferenceCapResolver
+{
+    /// <summary>
+    /// 取所有声明的**最小值**；并列时取先出现的那个（顺序本身就是权威顺序：设置 → 池子 → 工作流）。
+    /// 传进来的声明都是 <c>null</c>（谁都不设限）时返回 0——没有任何依据就别声称能带参考图。
+    /// </summary>
+    public static ReferenceCapResult Resolve(IReadOnlyList<ReferenceCapDeclaration> declarations)
+    {
+        ArgumentNullException.ThrowIfNull(declarations);
+
+        var cap = int.MaxValue;
+        var binding = string.Empty;
+        foreach (var declaration in declarations)
+        {
+            if (declaration.Max is not { } max) continue;
+            if (max < 0) max = 0;
+            if (max >= cap) continue;
+            cap = max;
+            binding = declaration.Label;
+        }
+
+        return cap == int.MaxValue ? new ReferenceCapResult(0, string.Empty) : new ReferenceCapResult(cap, binding);
+    }
+}
+
 /// <summary>把「这一镜引用了哪些设定」翻成「该喂哪几张图」。</summary>
 public static class ReferenceImagePicker
 {
@@ -27,8 +71,10 @@ public static class ReferenceImagePicker
     private static readonly EntityKind[] KindOrder = { EntityKind.Character, EntityKind.Prop, EntityKind.Scene };
 
     /// <summary>
-    /// 上限由调用方算好传进来（用户声明的与池子声明的取小），这里不碰配置——
-    /// 免得同一个上限有两处真值来源。
+    /// 上限由调用方算好传进来（见 <see cref="ReferenceCapResolver"/>：用户声明的、池子声明的、
+    /// 工作流槽位数三者取小），这里不碰配置——免得同一个上限有两处真值来源。
+    /// <paramref name="capSource"/> 是那个上限**来自哪一处**，只说给人听：上限是 0 或者超限时，
+    /// 必须说得出是谁定的，否则会把用户指去改错的地方（明明是这家池子只吃 1 张，却让人去改设置）。
     ///
     /// <paramref name="locatePath"/> 负责把附件解成磁盘上的文件；解不出、或文件不在，
     /// 这张就当作没有（不拿一张不存在的图去骗模型）。
@@ -37,8 +83,13 @@ public static class ReferenceImagePicker
         WorkflowCanvasState canvas,
         WorkflowNode node,
         int cap,
-        Func<WorkflowAttachment, string?> locatePath)
+        Func<WorkflowAttachment, string?> locatePath,
+        string capSource = "")
     {
+        ArgumentNullException.ThrowIfNull(canvas);
+        ArgumentNullException.ThrowIfNull(node);
+        ArgumentNullException.ThrowIfNull(locatePath);
+
         var limit = Math.Max(0, cap);
         var ranked = new List<(int Rank, string Label, string Path)>();
 
@@ -64,13 +115,16 @@ public static class ReferenceImagePicker
             kept.Select(item => item.Path).ToList(),
             dropped,
             limit,
-            Describe(limit, kept.Select(item => item.Label).ToList(), dropped));
+            Describe(limit, capSource, kept.Select(item => item.Label).ToList(), dropped));
     }
 
-    private static string Describe(int limit, IReadOnlyList<string> kept, IReadOnlyList<string> dropped)
+    private static string Describe(int limit, string capSource, IReadOnlyList<string> kept, IReadOnlyList<string> dropped)
     {
+        // 「卡在谁身上」只在**上限真的起了作用**时才说：三张都带上了还说「来自设置」是废话。
+        var because = capSource.Length > 0 ? "（来自" + capSource + "）" : string.Empty;
+
         if (limit == 0)
-            return "这一镜的参考图上限是 0（设置 → 生图生视频 →「图像参考图上限」），所以没有喂参考图："
+            return "这一镜的参考图上限是 0" + because + "，所以没有喂参考图："
                 + "角色 / 道具 / 场景都只能靠提示词描述，跨镜一致性会掉。";
 
         if (kept.Count == 0)
@@ -78,7 +132,7 @@ public static class ReferenceImagePicker
 
         var text = $"带了 {kept.Count} 张参考图：{string.Join("、", kept)}。";
         if (dropped.Count > 0)
-            text += $"上限是 {limit} 张，丢掉了：{string.Join("、", dropped)}——它们这一镜只能靠提示词描述。";
+            text += $"上限是 {limit} 张" + because + $"，丢掉了：{string.Join("、", dropped)}——它们这一镜只能靠提示词描述。";
         return text;
     }
 }

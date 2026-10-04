@@ -126,6 +126,7 @@ var tests = new (string Name, Action Run)[]
     ("生成链自检：图要在「引用（变体）」上，只在节点上出过也算缺口（道具会换样子就出在这）", GenerationAuditAsksForTheImageOnTheVariantToo),
     ("Agent 建设定节点：没点名实体时按「同类唯一同名」锚上自引用，同名有歧义就不猜", AgentAnchorsSettingNodesToTheirSetting),
     ("参考图装配：顺序固定 角色→道具→场景、变体只取第一张、超上限要说出丢了谁", ReferenceImagePlanOrdersCapsAndSaysWhatItDropped),
+    ("参考图上限：设置 / 池子 / 工作流三处取小，「0」与「没声明」不能混，note 要说对是谁定的", ReferenceCapResolverPicksTheTightestLimit),
     ("ComfyUI 绑定：每个底图入口按顺序各收一张参考图，给不满不拿同一张凑数", BinderFillsEveryImageSlotInOrder),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
@@ -8822,6 +8823,63 @@ static void ReferenceImagePlanOrdersCapsAndSaysWhatItDropped()
 
 	WorkflowNode bare = new WorkflowNode { Title = "分镜 3", Category = NodeCategory.Storyboard };
 	Expect(ReferenceImagePicker.Plan(canvas, bare, 3, locate).Note.Contains("还没有图"), "没引用任何设定时如实说按文生图出");
+}
+
+static void ReferenceCapResolverPicksTheTightestLimit()
+{
+	// 规格规则二：一镜的参考图上限**三处取小**（用户设置、池子清单声明的张数、这份工作流的底图入口数）。
+	// 只看设置那一项会犯两种相反的错：设置 3 而这家只吃 1（多出来的被服务端悄悄忽略，
+	// 用户以为带了设定其实没带）；设置 1 而工作流有 4 个入口（白白浪费工作流的能力）。
+	// 另外「0」与「没声明」必须分清：用户设置里的 0 是「不带参考图」（真实的约束），
+	// 池子没写张数只是「不知道」（null）——它不该反过来把用户的上限压成 0。
+	var setting = new ReferenceCapDeclaration("设置", 3);
+	var poolOne = new ReferenceCapDeclaration("池子", 1);
+	var poolUnknown = new ReferenceCapDeclaration("池子", null);
+	var workflowFour = new ReferenceCapDeclaration("工作流", 4);
+	var workflowNone = new ReferenceCapDeclaration("工作流", 0);
+
+	ReferenceCapResult tightest = ReferenceCapResolver.Resolve(new[] { setting, poolOne, workflowFour });
+	Expect(tightest.Cap == 1, "三处取小应是 1，实际 " + tightest.Cap);
+	Expect(tightest.BindingLabel == "池子", "卡住的应报池子，实际 " + tightest.BindingLabel);
+
+	ReferenceCapResult bySetting = ReferenceCapResolver.Resolve(new[] { new ReferenceCapDeclaration("设置", 0), poolUnknown, workflowFour });
+	Expect(bySetting.Cap == 0 && bySetting.BindingLabel == "设置",
+		"设置填 0 就是不带参考图，实际 " + bySetting.Cap + "/" + bySetting.BindingLabel);
+
+	ReferenceCapResult unknownPool = ReferenceCapResolver.Resolve(new[] { setting, poolUnknown, workflowFour });
+	Expect(unknownPool.Cap == 3 && unknownPool.BindingLabel == "设置",
+		"池子没声明张数是不设限，不该把用户的上限压成 0，实际 " + unknownPool.Cap + "/" + unknownPool.BindingLabel);
+
+	ReferenceCapResult noEntry = ReferenceCapResolver.Resolve(new[] { setting, poolUnknown, workflowNone });
+	Expect(noEntry.Cap == 0 && noEntry.BindingLabel == "工作流",
+		"工作流没有底图入口就是带不了参考图，实际 " + noEntry.Cap + "/" + noEntry.BindingLabel);
+
+	Expect(ReferenceCapResolver.Resolve(new[] { poolUnknown }).Cap == 0, "谁都没给依据时不声称能带参考图");
+
+	// note 要说对来源：上限来自池子还是来自设置，说法必须不同——否则会把用户指去改错的地方。
+	WorkflowCanvasState canvas = new WorkflowCanvasState();
+	WorkflowEntity chen = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+	WorkflowEntityVariant chenVariant = chen.CreateVariant("默认");
+	WorkflowEntity lamp = new WorkflowEntity { Kind = EntityKind.Prop, Name = "红罩台灯" };
+	WorkflowEntityVariant lampVariant = lamp.CreateVariant("默认");
+	canvas.Entities.Add(chen);
+	canvas.Entities.Add(lamp);
+	chenVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "chen-1", Name = "正视图" });
+	lampVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "lamp-1", Name = "台灯" });
+
+	WorkflowNode board = new WorkflowNode { Title = "分镜", Category = NodeCategory.Storyboard };
+	board.References.Add(new NodeReference { EntityId = chen.Id, VariantId = chenVariant.Id });
+	board.References.Add(new NodeReference { EntityId = lamp.Id, VariantId = lampVariant.Id });
+	Func<WorkflowAttachment, string?> locate = (WorkflowAttachment attachment) => "C:/assets/" + attachment.Reference + ".png";
+
+	ReferenceImagePlan fromPool = ReferenceImagePicker.Plan(canvas, board, 1, locate, "池子「某某模型 · 1K」");
+	Expect(fromPool.Dropped.Count == 1, "上限 1 而有两张，应丢掉一张，实际 " + fromPool.Dropped.Count);
+	Expect(fromPool.Note.Contains("池子「某某模型 · 1K」"), "上限来自池子时 note 要点名池子，实际：" + fromPool.Note);
+	Expect(!fromPool.Note.Contains("设置"), "上限不是设置定的就不该提设置，实际：" + fromPool.Note);
+
+	ReferenceImagePlan zero = ReferenceImagePicker.Plan(canvas, board, 0, locate, "设置里的「图像参考图上限」");
+	Expect(zero.Note.Contains("上限是 0") && zero.Note.Contains("设置里的「图像参考图上限」"),
+		"上限 0 要说清是设置定的，实际：" + zero.Note);
 }
 
 static void AgentAnchorsSettingNodesToTheirSetting()

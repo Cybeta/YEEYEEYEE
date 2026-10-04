@@ -3985,16 +3985,41 @@ public partial class MainWindow : Window, IAgentSessionHost
             else
             {
                 // 上限读设置；读不到就当 0（不声称带了参考图）——那份配置读不出来时，图像链路本来也建不起来。
-                var referenceCap = 0;
-                try { referenceCap = AiProviderSettings.Load().ImageMaxReferenceImages; }
+                var settingCap = 0;
+                try { settingCap = AiProviderSettings.Load().ImageMaxReferenceImages; }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException
-                    or System.Text.Json.JsonException or InvalidOperationException or NotSupportedException) { referenceCap = 0; }
+                    or System.Text.Json.JsonException or InvalidOperationException or NotSupportedException) { settingCap = 0; }
+
+                // 上限 = **三处取小**（规格规则二）：用户设置、池子清单里声明的张数、这份工作流的底图入口数。
+                // 只看设置会犯两种相反的错：设置 3 而这一家只吃 1（多出来的两张被服务端悄悄忽略，
+                // 用户以为带了设定其实没带）；设置 1 而这份工作流有 4 个底图入口（白白浪费工作流的能力）。
+                var declarations = new List<ReferenceCapDeclaration>
+                {
+                    new("设置里的「图像参考图上限」", settingCap)
+                };
+
+                // 池子没写张数（MaxReferenceImages 为 0）是「不知道」，不是「0 张」——那不该反过来压用户的上限。
+                if (source?.PoolItem is { MaxReferenceImages: > 0 } limitedPool)
+                    declarations.Add(new($"池子「{limitedPool.Label}」", limitedPool.MaxReferenceImages));
+
+                if (source?.Workflow is { } chosenWorkflow)
+                {
+                    // 走工作流时它自己能收几张由底图入口数决定。读不懂正文或没有底图入口的，
+                    // 按 0 处理——塞给一个没有底图入口的工作流只会白跑一次，不如先如实说清。
+                    var (workflowSlots, _) = ComfyUiWorkflowInspector.Inspect(chosenWorkflow.Site, chosenWorkflow.Workflow);
+                    declarations.Add(workflowSlots is { ImageNodeIds.Count: > 0 } slots
+                        ? new($"这份工作流的 {slots.ImageNodeIds.Count} 个底图入口", slots.ImageNodeIds.Count)
+                        : new("这份工作流（没有底图入口，或正文读不懂）", 0));
+                }
+
+                var referenceCap = ReferenceCapResolver.Resolve(declarations);
 
                 var plan = ReferenceImagePicker.Plan(
                     currentCanvas?.Canvas ?? new WorkflowCanvasState(),
                     node,
-                    referenceCap,
-                    attachment => AssetStore.Resolve(attachment.Reference) is { } candidate && File.Exists(candidate) ? candidate : null);
+                    referenceCap.Cap,
+                    attachment => AssetStore.Resolve(attachment.Reference) is { } candidate && File.Exists(candidate) ? candidate : null,
+                    referenceCap.BindingLabel);
                 referenceNote = plan.Note;
                 if (plan.Paths.Count > 0) references = plan.Paths.ToArray();
             }
