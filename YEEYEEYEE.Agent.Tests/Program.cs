@@ -252,6 +252,8 @@ var tests = new (string Name, Action Run)[]
     ("返工 G6-S3：删除变体先落库后动画布，失败时引用与实体原样、库回滚", VariantDeletionKeepsReferencesWhenPublishFails),
     ("返工 G6-T1：打开之后库被删也在执行前核验出来（旧标记不算数）", AuthorityRecheckCatchesLaterDeletedLibrary),
     ("返工 G6-T2：发布结果区分「真落库」与「本地内容」，本地实体不谎报已保存", PublishOutcomeDistinguishesLocalAndShared),
+    ("资源库：开跑前核验只动标记不动内容（不许抹掉未保存的编辑）", AuthorityRecheckOnlyTouchesMarks),
+    ("资源库：打开画布时按库对齐（刷新 / 补入引用到的 / 标缺失）", MergeIntoAlignsSharedEntitiesOnOpen),
     ("引用：查不到的变体 ID 要报失效，不悄悄换成第一个变体", ReferenceWithUnknownVariantFailsInsteadOfSwitching),
     ("章节改名/合并只跟随自己这一章的节点（同名章节不许互相改文本）", ChapterRenameOnlyFollowsItsOwnNodes),
     ("版本策略：存在版本可锁定，缺失版本拒绝且不静默降级", ReferenceVersionPolicy),
@@ -568,6 +570,91 @@ static void ProductVersionLedgerListsOnlyFilmsOldestFirst()
 	Expect(changes[5].StartsWith("时间：第 1 版 ", StringComparison.Ordinal), "时间那条要报出来，实际：" + changes[5]);
 	Expect(ledger.Latest!.ShotIds.Count == 2 && ledger.Latest.ShotIds[0] == shotA && ledger.Latest.ShotIds[1] == shotB,
 		"镜头 ID 也要记下来——比「多了哪一镜」靠的是它，不是标题");
+}
+
+/// <summary>
+/// 开跑前那次「现场核验共享资源」必须**只动标记、不动内容**：它每次开跑都跑一遍，
+/// 一旦顺手把库里的内容搬进来，未保存的编辑就会在用户按下「开始」的瞬间被抹掉。
+/// （桌面端的接线见 MainWindow.RecheckSharedAuthority：自检与一键开跑之前各核一次。）
+/// </summary>
+static void AuthorityRecheckOnlyTouchesMarks()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "刀客" };
+    entity.CreateVariant("默认");
+    entity.ManagedByProject = true;
+    var file = ProjectLibrary.Upsert(new[] { entity }, out _, out _);
+    Expect(ProjectLibrary.TrySave(file, out var saveError), "写入项目库应成功：" + saveError);
+
+    var canvas = new WorkflowCanvasState();
+    var local = ProjectEntityScope.CloneEntity(entity);
+    local.ManagedByProject = true;
+    local.Core = "刀客（画布上刚改的，还没保存）";
+    canvas.Entities.Add(local);
+
+    Expect(ProjectEntityScope.RefreshAuthority(canvas).Count == 0, "库里有这个资源就不该报缺失");
+    Expect(canvas.Entities[0].Core == "刀客（画布上刚改的，还没保存）", "核验不许把库里的内容搬进来");
+
+    // 库文件漏拷或被删 → 标记缺失，但**内容原样留着**（旧快照只作恢复参考，不再拿来照跑）
+    ProjectLibrary.TrySave(new ProjectEntityFile(), out _);
+    var missing = ProjectEntityScope.RefreshAuthority(canvas);
+    Expect(missing.Count == 1, "库里没有这个资源了要报一处缺失，实际 " + missing.Count);
+    Expect(canvas.Entities[0].IsProjectMissing, "缺失要打上标记（解析 / 预检 / 出图据此阻断）");
+    Expect(canvas.Entities[0].Core == "刀客（画布上刚改的，还没保存）", "报缺失也不该动内容");
+
+    // 资源回到库里 → 标记清掉，内容依旧不动
+    ProjectLibrary.TrySave(file, out _);
+    Expect(ProjectEntityScope.RefreshAuthority(canvas).Count == 0, "资源回到库里就不该再报缺失");
+    Expect(!canvas.Entities[0].IsProjectMissing, "标记要清掉");
+    Expect(canvas.Entities[0].Core == "刀客（画布上刚改的，还没保存）", "清标记也不该动内容");
+}
+
+/// <summary>
+/// 打开画布时的**合并对齐**（G6-R2）：托管的资源按库里那份刷新，被引用但本画布没有的补进来，
+/// 库里找不到的打上缺失标记。桌面端从画布库打开、进项目还原标签时各跑一次——
+/// 不然画布 A 要等到自己被保存才追平画布 B 的改动，那期间摆的是陈旧快照。
+/// </summary>
+static void MergeIntoAlignsSharedEntitiesOnOpen()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    var shared = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚", Core = "库里的内容" };
+    shared.CreateVariant("默认");
+    shared.ManagedByProject = true;
+    var other = new WorkflowEntity { Kind = EntityKind.Prop, Name = "刀", Core = "库里新加的" };
+    other.CreateVariant("默认");
+    other.ManagedByProject = true;
+    var file = ProjectLibrary.Upsert(new[] { shared, other }, out _, out _);
+    Expect(ProjectLibrary.TrySave(file, out var saveError), "写入项目库应成功：" + saveError);
+
+    var canvas = new WorkflowCanvasState();
+    var stale = ProjectEntityScope.CloneEntity(shared);
+    stale.ManagedByProject = true;
+    stale.Core = "画布里的旧快照";
+    canvas.Entities.Add(stale);
+    // 有一条引用指着库里的「刀」，但本画布没有这个实体 → 应当补进来
+    canvas.Nodes.Add(new WorkflowNode
+    {
+        Title = "分镜一", Category = NodeCategory.Storyboard,
+        References = { new NodeReference { EntityId = other.Id } }
+    });
+
+    var report = ProjectEntityScope.MergeInto(canvas);
+    Expect(report.Refreshed == 1, "陈旧的托管资源要按库刷新，实际 " + report.Refreshed);
+    Expect(report.Injected == 1, "被引用但本画布没有的要补进来，实际 " + report.Injected);
+    Expect(report.Missing.Count == 0 && report.Notes.Count == 2, "两句说明都要有：" + string.Join(" ", report.Notes));
+    Expect(canvas.Entities.Single(item => item.Id == shared.Id).Core == "库里的内容", "刷新的内容来自库");
+    Expect(canvas.Entities.Any(item => item.Id == other.Id), "补进来的实体要真的在画布上");
+    Expect(!canvas.Entities.Single(item => item.Id == other.Id).IsProjectMissing, "补进来的不该带缺失标记");
+
+    // 库里把这个资源删掉 → 合并时打缺失标记，内容留着
+    ProjectLibrary.TrySave(new ProjectEntityFile { Entities = { other } }, out _);
+    var second = ProjectEntityScope.MergeInto(canvas);
+    Expect(second.Missing.Count == 1 && canvas.Entities.Single(item => item.Id == shared.Id).IsProjectMissing,
+        "库里删掉的资源要标成缺失：" + string.Join(" ", second.Missing));
 }
 
 /// <summary>

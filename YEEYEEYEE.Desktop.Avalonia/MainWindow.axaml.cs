@@ -526,18 +526,26 @@ public partial class MainWindow : Window, IAgentSessionHost
         {
             canvasTabs.AddRange(restored);
             var target = canvasTabs.FirstOrDefault(tab => tab.Id == activeTabId) ?? canvasTabs[0];
+            // 还原出来的每一张都按项目库对齐（见 AlignSharedEntities）：不然要等到它自己被保存才追平，
+            // 那期间画布上摆的是陈旧快照。放在 AdoptCanvasTab 之前——那一步会重画。
+            var alignment = restored
+                .Select(tab => AlignSharedEntities(tab.Snapshot))
+                .Where(note => note.Length > 0)
+                .Distinct()
+                .ToList();
             AdoptCanvasTab(target);
-            StatusText.Text = $"已恢复 {canvasTabs.Count} 张画布：{target.Title}";
+            StatusText.Text = $"已恢复 {canvasTabs.Count} 张画布：{target.Title}" + string.Join(string.Empty, alignment);
             return;
         }
 
         var recent = CanvasLibrary.List().FirstOrDefault();
         if (recent is not null && CanvasLibrary.TryLoad(recent.Path, out var state) && state is not null)
         {
+            var alignment = AlignSharedEntities(state);
             var tab = new CanvasTab(state) { Path = recent.Path };
             canvasTabs.Add(tab);
             AdoptCanvasTab(tab);
-            StatusText.Text = $"已打开画布：{tab.Title}";
+            StatusText.Text = $"已打开画布：{tab.Title}" + alignment;
             return;
         }
 
@@ -1631,12 +1639,59 @@ public partial class MainWindow : Window, IAgentSessionHost
             return;
         }
 
+        // 从磁盘读进来的这一份，先按项目库对齐共享资源（见 AlignSharedEntities）。
+        var alignment = AlignSharedEntities(state);
         CaptureActiveTab();
         var tab = new CanvasTab(state) { Path = path };
         canvasTabs.Add(tab);
         AdoptCanvasTab(tab);
         PersistCanvasTabs(reportFailure: true);
-        StatusText.Text = $"已打开画布：{tab.Title}";
+        StatusText.Text = $"已打开画布：{tab.Title}" + alignment;
+    }
+
+    /// <summary>
+    /// 打开画布时按**项目库**对齐共享资源（目标 6 / G6-R2 的「打开」那一半）。
+    ///
+    /// 此前 <see cref="ProjectEntityScope.MergeInto"/> **只有测试在调**：于是画布 A 打开时看不到
+    /// 画布 B 对同一批共享资源的改动，要等 A 自己被保存时才由 RefreshSnapshots 追平——
+    /// 那期间画布上摆的是陈旧快照，而项目库本来是权威来源。它同时把「库里找不到的权威资源」
+    /// 标成缺失（G6-R3），缺失之后解析 / 预检 / 出图都会按阻断处理，不会拿旧内容照跑。
+    ///
+    /// 只在**打开**这条路上跑（进项目还原标签、从画布库打开），不在每次切标签时跑：
+    /// 切标签时手上的改动已经通过 TryPublish 落在库上，再拿库覆盖一遍只会让正在编辑的东西忽然变样。
+    /// 对齐失败不拦打开——如实说一句，画布照常开。
+    /// </summary>
+    private static string AlignSharedEntities(RecentCanvasState state)
+    {
+        try
+        {
+            var report = ProjectEntityScope.MergeInto(state.Canvas);
+            return report.Notes.Count == 0 ? string.Empty : "（" + string.Join(" ", report.Notes) + "）";
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return $"（项目库对齐失败：{error.Message}）";
+        }
+    }
+
+    /// <summary>
+    /// 开跑之前**现场核一遍**「项目级资源还在不在库里」（目标 6 / G6-T1）：打开画布时算出的缺失标记会过期，
+    /// 库可能在打开之后被删掉或漏拷，那时旧标记还写着「正常」，出图就会一路走到提供方。
+    ///
+    /// 只更新标记、**不碰实体内容**，所以随时可调，也不会覆盖未保存的编辑。返回一句如实的话（没问题就是空串）。
+    /// </summary>
+    private static string RecheckSharedAuthority(WorkflowCanvasState canvas)
+    {
+        try
+        {
+            var missing = ProjectEntityScope.RefreshAuthority(canvas);
+            if (missing.Count == 0) return string.Empty;
+            return $"有 {missing.Count} 个共享资源不在项目库里（{missing[0]}），相关引用会按缺失处理。";
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return $"核验共享资源失败：{error.Message}";
+        }
     }
 
     private async Task EditWorkTreeItem(WorkTreeItem item)
@@ -2420,8 +2475,11 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         if (currentCanvas is null) return;
 
+        // 开跑之前现场核一遍共享资源（见 RecheckSharedAuthority）：这一步只更新缺失标记，不碰内容，
+        // 所以不会覆盖未保存的编辑；但它决定了下面这份自检报不报「引用失效」。
+        var authority = RecheckSharedAuthority(currentCanvas.Canvas);
         var report = GenerationAudit.Build(currentCanvas.Canvas, node);
-        StatusText.Text = report.Describe();
+        StatusText.Text = authority.Length == 0 ? report.Describe() : authority + report.Describe();
 
         var outcome = await GenerationAuditDialog.ShowAsync(
             this,
@@ -2462,6 +2520,11 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         if (currentCanvas is null) return;
         var canvas = currentCanvas;
+
+        // 真正开跑之前再核一遍：自检窗口可能开着好一会儿，这期间项目库被删或漏拷都算数。
+        // 核出来的缺失会让相关引用解析不出来，于是那些节点会按缺失报错——**不会拿旧内容照跑**。
+        var authority = RecheckSharedAuthority(canvas.Canvas);
+        if (authority.Length > 0) StatusText.Text = authority;
 
         var total = (request.WantsImages ? request.ImageCount : 0) + (request.WantsVideos ? request.VideoCount : 0);
         if (total == 0)
