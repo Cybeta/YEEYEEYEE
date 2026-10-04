@@ -255,7 +255,7 @@ public static class ImageProviderFactory
             sharedHost = null;
             _ = stale.DisposeAsync();
         }
-        sharedHost = DesktopExecutionHost.Create();
+        sharedHost = DesktopExecutionHost.Create(config);
         sharedHostSignature = signature;
         return sharedHost.Execution;
     }

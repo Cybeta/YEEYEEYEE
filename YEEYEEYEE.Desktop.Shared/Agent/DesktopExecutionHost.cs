@@ -56,9 +56,18 @@ public sealed class DesktopExecutionHost : IAsyncDisposable
         }
     }
 
-    public static DesktopExecutionHost Create()
+    /// <summary>
+    /// 建一份执行宿主。<paramref name="config"/> 给了就用它，没给才去读配置文件。
+    ///
+    /// **必须能传配置进来**：调用方有时拿着一份临时副本（例如用户选了某个站点的池子，
+    /// 地址与密钥从池子来，只在那一次调用里生效）。早先这里一律自己读配置文件，
+    /// 于是「调用方以为在打 A，实际拿到的宿主按文件里的 B 建」——最坏的一种错：
+    /// 配置里没开 ComfyUI 时，它会悄悄退回**内存执行器**，任务在本地「成功」并产出一个
+    /// <c>local://</c> 的假引用，而调用方看到的是「跑完了却没有产物」。
+    /// </summary>
+    public static DesktopExecutionHost Create(AiProviderConfig? config = null)
     {
-        var config = AiProviderSettings.Load();
+        config ??= AiProviderSettings.Load();
         string? storeWarning = null;
         if (!config.IsComfyUiConfigured)
         {

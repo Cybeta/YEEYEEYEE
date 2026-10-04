@@ -34,7 +34,9 @@ public sealed class SkillStep
 
     /// <summary>
     /// 参考图来源，可用逗号组合多个：
-    /// 留空表示文生图；variant 用变体当前参考图；ref:N 用目标上下文的第 N 张参考图；
+    /// 留空表示文生图；variant 用变体当前参考图；
+    /// ref:N 用目标上下文的第 N 个**参考槽位**——槽位按 角色 → 道具 → 场景 排（同类内按引用顺序），
+    /// 每个实体只占一个槽位、变体带多张图时取第一张，所以角色带几张图都不会推后道具 / 场景的下标；
     /// 其余按前置步骤 id 取该步骤产出。用几张由执行方决定，这里不设上限。
     /// </summary>
     public string ReferenceFrom { get; set; } = string.Empty;
@@ -251,21 +253,22 @@ public static class SkillLibrary
     """;
 
     /// <summary>
-    /// 内置示例技能二：把前两张参考图合成到同一画面，产出标记为该镜头的出图底图。
-    /// 它演示 ref:N 引用来源与 node-base 产出目标，是「分步合成」的最小示例。
+    /// 内置示例技能二：把前两个参考槽位合成到同一画面，产出标记为该镜头的出图底图。
+    /// 它演示 ref:N 按**槽位**引用（角色 → 道具 → 场景，每实体一槽、取第一张）与 node-base 产出目标，
+    /// 是「分步合成」的最小示例。
     /// </summary>
     private const string DefaultReferenceMergeSkill = """
     {
       "id": "reference-merge-two",
       "name": "参考图两两合成",
-      "description": "把本镜头的前两张参考图合成到同一画面，产出作为该镜头的出图底图。",
+      "description": "把本镜头的前两个参考槽位合成到同一画面，产出作为该镜头的出图底图。",
       "version": "1.0.0",
       "targetKind": "Any",
       "outputTarget": "node-base",
       "steps": [
         {
           "id": "merge",
-          "name": "合成前两张参考图",
+          "name": "合成前两个参考槽位",
           "capability": "ImageToImage",
           "referenceFrom": "ref:0,ref:1",
           "denoise": 0.55,
@@ -431,6 +434,14 @@ public sealed class SkillRunResult
 {
     public bool Succeeded { get; init; }
     public string Message { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 参考图降级说明：ref:N 越界、或槽位还没有设定图时，把「哪条引用（谁）没带上」如实写出来。
+    /// 与出图 / 出视频那条路同一规矩（<c>ImageGenerationResult.ReferenceNote</c>）：用不了就要说，
+    /// 静默丢掉会让用户以为设定带上了。没有降级时为空串。
+    /// </summary>
+    public string ReferenceNote { get; init; } = string.Empty;
+
     public List<WorkflowAttachment> Produced { get; init; } = new();
 }
 
@@ -471,6 +482,8 @@ public static class SkillRunner
             return new SkillRunResult { Succeeded = false, Message = "该技能需要作用在工作树资源的变体上，但当前没有指定变体。" };
 
         var produced = new Dictionary<string, WorkflowAttachment>(StringComparer.OrdinalIgnoreCase);
+        // 参考图的降级说明（ref:N 越界 / 槽位没有设定图）：攒起来随运行结果一起报出去，绝不静默跳过。
+        var referenceNotes = new List<string>();
         for (var index = 0; index < skill.Steps.Count; index++)
         {
             var step = skill.Steps[index];
@@ -491,9 +504,20 @@ public static class SkillRunner
                     Message = $"步骤「{step.Name}」需要出视频链路，但当前没有可用的出视频实现：技能已保存，接入出视频执行方后即可直接运行。"
                 };
 
-            var referencePaths = ResolveReferences(step, target, produced);
+            var resolution = ResolveReferences(step, target, produced);
+            var referencePaths = resolution.Paths;
+            referenceNotes.AddRange(resolution.Degradations);
             if (needsReference && referencePaths.Count == 0)
-                return new SkillRunResult { Succeeded = false, Message = $"步骤「{step.Name}」需要参考图，但没有找到可用的参考图。" };
+            {
+                var note = string.Join(" ", referenceNotes);
+                return new SkillRunResult
+                {
+                    Succeeded = false,
+                    Message = $"步骤「{step.Name}」需要参考图，但没有找到可用的参考图。"
+                        + (note.Length == 0 ? string.Empty : " " + note),
+                    ReferenceNote = note
+                };
+            }
 
             var config = AiProviderSettings.Load();
             var (defaultWidth, defaultHeight) = ParseSize(config.ImageSize);
@@ -565,11 +589,14 @@ public static class SkillRunner
         }
         var sink = toNode ? target.Node!.Attachments : target.Variant!.Attachments;
         foreach (var attachment in list) sink.Add(attachment);
+        var referenceNote = string.Join(" ", referenceNotes);
         return new SkillRunResult
         {
             Succeeded = true,
             Produced = list,
+            ReferenceNote = referenceNote,
             Message = $"技能「{skill.Name}」完成，生成 {DescribeProduced(list)}。"
+                + (referenceNote.Length == 0 ? string.Empty : " 参考图说明：" + referenceNote)
         };
     }
 
@@ -586,14 +613,20 @@ public static class SkillRunner
 
     /// <summary>
     /// 解析步骤的参考图路径，支持三类来源（可用逗号组合）：
-    /// variant 取变体当前参考图；ref:N 取目标上下文的第 N 张参考图；
+    /// variant 取变体当前参考图；ref:N 取目标上下文的第 N 个**参考槽位**（顺序与真值见
+    /// <see cref="ReferenceImagePicker.ResolveSlots"/>：角色 → 道具 → 场景、每实体一槽、取第一张）；
     /// 其余按前置步骤 id 取该步骤产出。这里不做数量截断，用几张由执行方决定。
+    ///
+    /// 越界、或槽位还没有设定图时**不静默跳过**：写进 <see cref="SkillReferenceResolution.Degradations"/>，
+    /// 由调用方并入运行结果，让用户知道哪张（谁）没带上。
     /// </summary>
-    private static List<string> ResolveReferences(SkillStep step, SkillTarget target, IReadOnlyDictionary<string, WorkflowAttachment> produced)
+    private static SkillReferenceResolution ResolveReferences(
+        SkillStep step, SkillTarget target, IReadOnlyDictionary<string, WorkflowAttachment> produced)
     {
         var paths = new List<string>();
-        if (string.IsNullOrWhiteSpace(step.ReferenceFrom)) return paths;
-        var ordered = TargetReferenceImages(target);
+        var degradations = new List<string>();
+        if (string.IsNullOrWhiteSpace(step.ReferenceFrom)) return new SkillReferenceResolution(paths, degradations);
+        var slots = ReferenceSlots(target);
         foreach (var source in step.ReferenceFrom.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
         {
             if (string.Equals(source, "variant", StringComparison.OrdinalIgnoreCase))
@@ -603,7 +636,31 @@ public static class SkillRunner
             }
             if (source.StartsWith("ref:", StringComparison.OrdinalIgnoreCase) && int.TryParse(source[4..], out var referenceIndex))
             {
-                if (referenceIndex >= 0 && referenceIndex < ordered.Count) paths.Add(ordered[referenceIndex]);
+                if (referenceIndex < 0)
+                {
+                    degradations.Add($"步骤「{step.Name}」的参考图来源 {source} 不是合法的槽位号。");
+                    continue;
+                }
+                // 槽位模型只在「节点引用」这一上下文里有意义；变体目标没有引用结构，退回变体自身图片（与改动前一致）。
+                if (slots is null)
+                {
+                    var flat = VariantImages(target);
+                    if (referenceIndex < flat.Count) paths.Add(flat[referenceIndex]);
+                    else degradations.Add($"步骤「{step.Name}」的参考图来源 {source} 越界：这个变体只有 {flat.Count} 张参考图。");
+                    continue;
+                }
+                if (referenceIndex >= slots.Count)
+                {
+                    degradations.Add($"步骤「{step.Name}」的参考图来源 {source} 越界：这一镜只有 {slots.Count} 个参考槽位，这条引用没有带上。");
+                    continue;
+                }
+                var slot = slots[referenceIndex];
+                if (string.IsNullOrWhiteSpace(slot.Path))
+                {
+                    degradations.Add($"步骤「{step.Name}」的参考图来源 {source} 指向「{slot.Label}」，但它还没有设定图，没有带上。");
+                    continue;
+                }
+                paths.Add(slot.Path);
                 continue;
             }
             if (produced.TryGetValue(source, out var producedAttachment))
@@ -612,25 +669,18 @@ public static class SkillRunner
                 if (resolved is not null) paths.Add(resolved);
             }
         }
-        return paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return new SkillReferenceResolution(paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList(), degradations);
     }
 
     /// <summary>
-    /// 目标上下文里按顺序排列的参考图：节点目标按引用顺序取每条引用的参考图，
-    /// 变体目标取变体自身的参考图。ref:N 的下标就是这个顺序。
+    /// 节点目标下的参考槽位（顺序、每实体一槽、取第一张都由
+    /// <see cref="ReferenceImagePicker.ResolveSlots"/> 一份真值给出）；
+    /// 变体目标没有引用结构，返回 null——ref:N 退回变体自身图片。
     /// </summary>
-    private static List<string> TargetReferenceImages(SkillTarget target)
-    {
-        if (target.Node is { } node && target.Canvas is { } canvas)
-            return canvas.ResolveReferences(node)
-                .SelectMany(reference => reference.Attachments)
-                .Where(attachment => attachment.Kind == AttachmentKind.Image)
-                .Select(attachment => AssetStore.Resolve(attachment.Reference))
-                .Where(path => path is not null)
-                .Select(path => path!)
-                .ToList();
-        return VariantImages(target);
-    }
+    private static IReadOnlyList<ReferenceSlot>? ReferenceSlots(SkillTarget target) =>
+        target.Node is { } node && target.Canvas is { } canvas
+            ? ReferenceImagePicker.ResolveSlots(canvas, node, attachment => AssetStore.Resolve(attachment.Reference))
+            : null;
 
     private static List<string> VariantImages(SkillTarget target)
     {
@@ -643,6 +693,9 @@ public static class SkillRunner
             .Select(path => path!)
             .ToList();
     }
+
+    /// <summary>一步参考图解析的结果：解析到的路径 + 这一步的降级说明（越界 / 槽位没有设定图）。</summary>
+    private sealed record SkillReferenceResolution(List<string> Paths, List<string> Degradations);
 
     private static (int Width, int Height) ParseSize(string? size)
     {

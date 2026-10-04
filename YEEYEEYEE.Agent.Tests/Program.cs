@@ -21,6 +21,10 @@ var tests = new (string Name, Action Run)[]
     ("提议解析：剥离操作块并读出 source", ParseReplyAndSource),
     ("版本采纳：只接受JSON布尔true并传递到执行器", ParseVersionAdopted),
     ("同一批里建节点后用标题建立连线", CreateNodesThenConnectInOneBatch),
+    ("ID 优先：完整 Guid 精确命中同名节点中的那一个（N/D/B 三种写法）", FullGuidTargetsExactNodeAmongSameNames),
+    ("ID 优先：不存在的完整 Guid 如实报错，绝不退回同名对象", MissingFullGuidFailsInsteadOfFallingBackToName),
+    ("ID 优先回归：标题仍能命中唯一节点", TitleStillAddressesUniqueNode),
+    ("ID 优先回归：6–8 位短 id 前缀仍然可用", ShortIdPrefixStillAddressesNode),
     ("拒绝重复连线与自环", RejectDuplicateAndSelfLoop),
     ("预检提示找不到的连线端点", PrecheckMissingEndpoint),
     ("整批预检能看见同批新建的节点", BatchPrecheckSeesEarlierNodes),
@@ -296,6 +300,9 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 转换：动态下拉（SaveVideo.format）不能被当成连线槽位丢掉", ComfyUiConversionKeepsDynamicComboWidgets),
     ("对话用量：胶囊与明细的口径（命中率分母、没有就不给速率、缺失说成「不是 0」）", UsageReportFormatsWithoutLying),
     ("密钥框：脱敏显示不是密钥，存回去就是 401；新敲的、清空的、解不开的三条路各自分明", RedactedKeyDisplayIsNotAKey),
+    ("技能参考图：ref:N 按槽位寻址，三视图角色不再把道具/场景的下标推后", SkillReferenceRefIndexAddressesSlotsNotFlattenedImages),
+    ("技能参考图：变体带多张图只占一个槽位（取第一张）", SkillReferenceSlotTakesFirstImagePerEntity),
+    ("技能参考图：越界/槽位没图要报降级说明，不静默丢掉", SkillReferenceOutOfRangeIsReportedNotSilentlyDropped),
 };
 
 var failures = new List<string>();
@@ -370,6 +377,96 @@ static void CreateNodesThenConnectInOneBatch()
     Expect(canvas.Nodes.First(node => node.Title == "第一章 剧情").Id == canvas.Edges[0].SourceNodeId
         && canvas.Nodes.First(node => node.Title == "第一章 分镜").Id == canvas.Edges[0].TargetNodeId,
         "连线方向与 source/target 不一致");
+}
+
+/// <summary>
+/// ID 优先：两个同名节点时，用完整 Guid（N 32 位 / D 带连字符 / B 花括号包裹）能精确命中其中的某一个。
+/// 旧口径只认 6–8 位短前缀，完整 Guid 会退回名称路、在同名歧义里迷路；这条钉住「id 比名字更确定」。
+/// </summary>
+static void FullGuidTargetsExactNodeAmongSameNames()
+{
+    void Connects(string label, Func<Guid, string> format)
+    {
+        var canvas = new WorkflowCanvasState();
+        var first = new WorkflowNode { Title = "同名节点" };
+        var second = new WorkflowNode { Title = "同名节点" };
+        canvas.Nodes.Add(first);
+        canvas.Nodes.Add(second);
+
+        var result = AgentActionExecutor.Apply(new[]
+        {
+            new AgentAction { Kind = "create_edge", Source = format(first.Id), Target = format(second.Id) }
+        }, canvas, null);
+        Expect(result.Applied == 1 && result.Errors.Count == 0,
+            $"完整 Guid（{label}）应精确命中同名节点之一：{string.Join("；", result.Errors)}");
+        Expect(canvas.Edges.Count == 1 && canvas.Edges[0].SourceNodeId == first.Id && canvas.Edges[0].TargetNodeId == second.Id,
+            $"完整 Guid（{label}）连线的端点不是按 id 指定的那两个同名节点");
+    }
+
+    Connects("N", id => id.ToString("N"));
+    Connects("D", id => id.ToString("D"));
+    Connects("B", id => id.ToString("B"));
+}
+
+/// <summary>
+/// ID 优先：给一个不存在的完整 Guid 必须如实报错，绝不退回按名称命中同名对象。
+/// 这里刻意放一个标题恰好等于该 Guid 的节点：旧口径会沿名称路命中它，新口径必须拒绝——
+/// 否则「想按 id 引 A、结果连到了同名的 B」这种错会悄无声息地发生。
+/// </summary>
+static void MissingFullGuidFailsInsteadOfFallingBackToName()
+{
+    var canvas = new WorkflowCanvasState();
+    var ghost = Guid.NewGuid().ToString("N");
+    canvas.Nodes.Add(new WorkflowNode { Title = ghost });
+    canvas.Nodes.Add(new WorkflowNode { Title = "真实终点" });
+
+    var result = AgentActionExecutor.Apply(new[]
+    {
+        new AgentAction { Kind = "create_edge", Source = ghost, Target = "真实终点" }
+    }, canvas, null);
+    Expect(result.Applied == 0 && canvas.Edges.Count == 0,
+        "不存在的完整 Guid 必须如实报错，不能退回按名称命中同名对象");
+    Expect(result.Errors.Count == 1 && result.Errors[0].Contains(ghost, StringComparison.Ordinal),
+        $"报错要点名这个 id，实际：{string.Join("；", result.Errors)}");
+}
+
+/// <summary>ID 优先回归：名称那一路的「唯一命中才认」不因新分档而改变——按标题仍能命中唯一节点。</summary>
+static void TitleStillAddressesUniqueNode()
+{
+    var canvas = new WorkflowCanvasState();
+    var start = new WorkflowNode { Title = "第一章 剧情" };
+    var end = new WorkflowNode { Title = "第一章 分镜" };
+    canvas.Nodes.Add(start);
+    canvas.Nodes.Add(end);
+
+    var result = AgentActionExecutor.Apply(new[]
+    {
+        new AgentAction { Kind = "create_edge", Source = "第一章 剧情", Target = "第一章 分镜" }
+    }, canvas, null);
+    Expect(result.Applied == 1 && result.Errors.Count == 0,
+        $"按标题应能命中唯一节点：{string.Join("；", result.Errors)}");
+    Expect(canvas.Edges.Count == 1 && canvas.Edges[0].SourceNodeId == start.Id && canvas.Edges[0].TargetNodeId == end.Id,
+        "按标题建立的连线端点不对");
+}
+
+/// <summary>ID 优先回归：6–8 位短 id 前缀仍然可用（先按前缀找，找不到才回退名称，与旧行为一致）。</summary>
+static void ShortIdPrefixStillAddressesNode()
+{
+    var canvas = new WorkflowCanvasState();
+    var start = new WorkflowNode { Title = "节点甲" };
+    var end = new WorkflowNode { Title = "节点乙" };
+    canvas.Nodes.Add(start);
+    canvas.Nodes.Add(end);
+
+    var prefix = start.Id.ToString("N")[..8];
+    var result = AgentActionExecutor.Apply(new[]
+    {
+        new AgentAction { Kind = "create_edge", Source = prefix, Target = "节点乙" }
+    }, canvas, null);
+    Expect(result.Applied == 1 && result.Errors.Count == 0,
+        $"6–8 位短 id 前缀应仍然可用：{string.Join("；", result.Errors)}");
+    Expect(canvas.Edges.Count == 1 && canvas.Edges[0].SourceNodeId == start.Id,
+        "短 id 前缀没有命中预期节点");
 }
 
 /// <summary>
@@ -10325,7 +10422,7 @@ static void GenerationAuditListsStaleProducts()
 /// </summary>
 static void GenerationAuditAsksForTheImageOnTheVariantToo()
 {
-	// 参考图取自**变体**（`TargetReferenceImages` 读变体附件），而设定节点出图的产物挂在**节点**上。
+	// 参考图取自**变体**（`ReferenceImagePicker.ResolveSlots` 取的是变体附件），而设定节点出图的产物挂在**节点**上。
 	// 节点有图 ≠ 引用有图——这个中间态最像「已经锁好了」，实际每一镜都拿不到它。
 	// 一件道具因此会在第一集是剑、第二集变成刀，所以自检必须把它单独指出来。
 	WorkflowCanvasState canvas = new WorkflowCanvasState();
@@ -13742,6 +13839,138 @@ static void VideoProviderFactoryNamesWhatIsMissingForAChosenWorkflow()
     Expect(result.Error.Contains("A02") && result.Error.Contains("checkpoint"),
         "要说清是哪份工作流、缺什么，实际「" + result.Error + "」");
     Expect(result.FilePath.Length == 0, "一条路都不通时不许产出任何文件");
+}
+
+/// <summary>
+/// 搭一份「角色三视图 + 道具 + 场景」的分镜引用：技能按槽位寻址的用例共用它。
+/// 返回的 node 引用顺序是 角色 → 道具 → 场景，真值排序后槽位序号 0/1/2。
+/// </summary>
+static (WorkflowCanvasState Canvas, WorkflowNode Shot) NewSkillSlotFixture(IsolatedStores stores)
+{
+    foreach (var name in new[] { "hero-front.png", "hero-side.png", "hero-back.png", "lamp.png", "room.png" })
+        stores.WriteAsset(name);
+
+    var canvas = new WorkflowCanvasState();
+    var hero = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+    var heroVariant = hero.CreateVariant("默认");
+    var lamp = new WorkflowEntity { Kind = EntityKind.Prop, Name = "红罩台灯" };
+    var lampVariant = lamp.CreateVariant("默认");
+    var room = new WorkflowEntity { Kind = EntityKind.Scene, Name = "老城照相馆" };
+    var roomVariant = room.CreateVariant("默认");
+    canvas.Entities.AddRange(new[] { hero, lamp, room });
+    // 角色带三张（三视图），道具 / 场景各一张：旧口径按图片拍平会把后两个引用的下标整体推后。
+    heroVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://hero-front.png", Name = "正面" });
+    heroVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://hero-side.png", Name = "侧面" });
+    heroVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://hero-back.png", Name = "背面" });
+    lampVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://lamp.png" });
+    roomVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://room.png" });
+
+    var shot = new WorkflowNode { Title = "分镜 1", Category = NodeCategory.Storyboard };
+    shot.References.Add(new NodeReference { EntityId = hero.Id, VariantId = heroVariant.Id });
+    shot.References.Add(new NodeReference { EntityId = lamp.Id, VariantId = lampVariant.Id });
+    shot.References.Add(new NodeReference { EntityId = room.Id, VariantId = roomVariant.Id });
+    return (canvas, shot);
+}
+
+/// <summary>用一个图生图步骤跑给定 ReferenceFrom，返回结果；桩 provider 会记下实际发出去的参考图。</summary>
+static SkillRunResult RunReferenceSkill(WorkflowCanvasState canvas, WorkflowNode shot, string referenceFrom, IImageProvider provider)
+{
+    var skill = new SkillDefinition
+    {
+        Id = "slot-addressing-test",
+        Name = "槽位寻址测试技能",
+        TargetKind = "Any",
+        OutputTarget = "node",
+        Steps = new List<SkillStep>
+        {
+            new() { Id = "merge", Name = "合成", Capability = nameof(Capability.ImageToImage), ReferenceFrom = referenceFrom, Prompt = "把参考图合成到同一画面" }
+        }
+    };
+    return SkillRunner.RunAsync(skill, new SkillTarget { Canvas = canvas, Node = shot }, provider).GetAwaiter().GetResult();
+}
+
+/// <summary>
+/// 技能参考图 ref:N 改按**槽位**寻址：顺序固定 角色 → 道具 → 场景、每实体一槽、取第一张。
+/// 三视图角色不再把道具 / 场景的下标整体推后——ref:1 指向第二条引用（道具），而不是角色的第二张图。
+/// </summary>
+static void SkillReferenceRefIndexAddressesSlotsNotFlattenedImages()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+    var (canvas, shot) = NewSkillSlotFixture(stores);
+
+    var provider = new RecordingImageProvider(stores.AssetDirectory);
+    var refOne = RunReferenceSkill(canvas, shot, "ref:1", provider);
+    Expect(refOne.Succeeded, "按槽位引用 ref:1 应能跑通：" + refOne.Message);
+    var sent = provider.LastRequest!.ReferenceImages;
+    Expect(sent.Count == 1 && sent[0].EndsWith("lamp.png", StringComparison.Ordinal),
+        "ref:1 应指向第二条引用（道具），实际：" + string.Join("、", sent));
+    Expect(sent.All(path => !path.EndsWith("hero-side.png", StringComparison.Ordinal)),
+        "ref:1 不应再被角色的多张图推后到角色的侧视图上");
+
+    var refTwo = RunReferenceSkill(canvas, shot, "ref:2", provider);
+    Expect(refTwo.Succeeded, "按槽位引用 ref:2 应能跑通：" + refTwo.Message);
+    var sentTwo = provider.LastRequest!.ReferenceImages;
+    Expect(sentTwo.Count == 1 && sentTwo[0].EndsWith("room.png", StringComparison.Ordinal),
+        "ref:2 应指向第三条引用（场景），实际：" + string.Join("、", sentTwo));
+}
+
+/// <summary>
+/// 技能参考图槽位：变体带多张图只占一个槽位（取第一张），一个实体不会一口吃掉后面实体的位置。
+/// </summary>
+static void SkillReferenceSlotTakesFirstImagePerEntity()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+    var (canvas, shot) = NewSkillSlotFixture(stores);
+
+    var provider = new RecordingImageProvider(stores.AssetDirectory);
+    var run = RunReferenceSkill(canvas, shot, "ref:0,ref:1,ref:2", provider);
+    Expect(run.Succeeded, "同时引用三个槽位应能跑通：" + run.Message);
+    var sent = provider.LastRequest!.ReferenceImages;
+    Expect(sent.Count == 3, "三个实体各占一个槽位，应恰好三张，实际 " + sent.Count + "：" + string.Join("、", sent));
+    Expect(sent[0].EndsWith("hero-front.png", StringComparison.Ordinal), "角色槽位取第一张（正视图），实际：" + sent[0]);
+    Expect(sent.All(path => !path.EndsWith("hero-side.png", StringComparison.Ordinal) && !path.EndsWith("hero-back.png", StringComparison.Ordinal)),
+        "角色其余两张不占位，实际：" + string.Join("、", sent));
+    Expect(sent[1].EndsWith("lamp.png", StringComparison.Ordinal) && sent[2].EndsWith("room.png", StringComparison.Ordinal),
+        "道具、场景各自的一个槽位不被角色的多张图推后，实际：" + string.Join("、", sent));
+}
+
+/// <summary>
+/// 技能参考图降级不再静默：ref:N 越界、或槽位还没有设定图时，把「哪条引用（谁）没带上」写进
+/// 运行结果的 ReferenceNote（并并入 Message）——否则用户会以为设定带上了。
+/// </summary>
+static void SkillReferenceOutOfRangeIsReportedNotSilentlyDropped()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+    var (canvas, shot) = NewSkillSlotFixture(stores);
+
+    // 追加一条没有设定图的道具引用：它照样占一个槽位（排在同类的道具之后、场景之前），后面的引用不被推前。
+    var empty = new WorkflowEntity { Kind = EntityKind.Prop, Name = "空手" };
+    var emptyVariant = empty.CreateVariant("默认");
+    canvas.Entities.Add(empty);
+    shot.References.Add(new NodeReference { EntityId = empty.Id, VariantId = emptyVariant.Id });
+    // 槽位排序后：0=角色、1=红罩台灯、2=空手（无图）、3=场景。
+
+    var provider = new RecordingImageProvider(stores.AssetDirectory);
+    var run = RunReferenceSkill(canvas, shot, "ref:0,ref:2,ref:4", provider);
+    Expect(run.Succeeded, "有可用参考图时不该整步失败：" + run.Message);
+    Expect(provider.LastRequest!.ReferenceImages.Count == 1
+        && provider.LastRequest.ReferenceImages[0].EndsWith("hero-front.png", StringComparison.Ordinal),
+        "有图的那张仍要照常发出去，实际：" + string.Join("、", provider.LastRequest.ReferenceImages));
+    Expect(run.ReferenceNote.Contains("ref:4") && run.ReferenceNote.Contains("越界"),
+        "越界要说清是第几个来源越界，实际：" + run.ReferenceNote);
+    Expect(run.ReferenceNote.Contains("空手") && run.ReferenceNote.Contains("还没有设定图"),
+        "槽位没有设定图时要点名是谁没带上，实际：" + run.ReferenceNote);
+    Expect(run.Message.Contains("参考图说明"), "降级说明要进运行结果文案，不能只留在字段里：" + run.Message);
+
+    // 只有越界、一张可用图都没有：如实失败，并把越界原因一并报出。
+    var failing = new RecordingImageProvider(stores.AssetDirectory);
+    var failed = RunReferenceSkill(canvas, shot, "ref:4", failing);
+    Expect(!failed.Succeeded, "没有任何可用参考图时应如实失败");
+    Expect(failed.Message.Contains("ref:4") && failed.Message.Contains("越界"),
+        "失败原因要把越界说清楚，实际：" + failed.Message);
 }
 
 static class Sample

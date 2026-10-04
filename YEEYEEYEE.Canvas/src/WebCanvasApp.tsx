@@ -9,7 +9,7 @@ import { AgentPanel, type WebJob, type WebSkill } from './shell/AgentPanel'
 import { ChapterTree } from './shell/ChapterTree'
 import { InspectorPanel } from './shell/InspectorPanel'
 import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layoutPlan'
-import { describeLease, leaseCovering, shouldHoldNodeLease } from './shell/locks'
+import { describeLease, leaseCovering, shouldHoldNodeLease, clientLabel } from './shell/locks'
 import { buildNodeMenu, parseNodeAssist, type NodeAssistPlan, type NodeMenuItem } from './shell/nodeMenu'
 import { RightDock } from './shell/RightDock'
 import { SettingsPanel } from './shell/SettingsPanel'
@@ -17,11 +17,12 @@ import {
   canvasBounds, chapterGroups, isEditableRecord, kindOf, NODE_KINDS, nodeX, nodeY, parseScene, recordContent,
   recordTitle, type ShellScene, type ViewRecord
 } from './shell/records'
-import { canvasChangeText, followAction, hasUnsavedDraft, isOtherRevision } from './shell/serverEvents'
+import { canvasChangeText, followAction, hasUnsavedDraft, isOtherRevision, type PresencePerson } from './shell/serverEvents'
 import { useLeases } from './shell/useLeases'
 import { useNodeLease } from './shell/useNodeLease'
+import { usePresence } from './shell/usePresence'
 import { useServerEvents } from './shell/useServerEvents'
-import { uiText } from './shell/uiText'
+import { uiText, uiTextFill } from './shell/uiText'
 import { Workspace } from './shell/Workspace'
 import {
   WorkbenchShell, type DockMode, type RailSection, type StatusFacts, type WorkbenchChrome, type WorkbenchView
@@ -90,6 +91,8 @@ export function WebCanvasApp() {
   const generation = useRef(0)
   // 编辑锁读取：正常情况下靠推送立刻刷新，15 秒的轮询是兜底（推送断了、或锁因超时自然消失）。
   const { leases, error: leaseError, invalidCount: leaseInvalidCount, refresh: refreshLeases } = useLeases(!!auth?.user)
+  // 在线名单：与锁是两条独立的路（在线≠拥有锁）。推送到了立刻刷新，15 秒轮询兜底。
+  const { people: onlinePeople, error: presenceError, refresh: refreshPresence } = usePresence(!!auth?.user)
 
   const records = useMemo(() => scene?.records ?? [], [scene])
   const edges = useMemo(() => scene?.edges ?? [], [scene])
@@ -125,6 +128,8 @@ export function WebCanvasApp() {
   const events = useServerEvents({
     enabled: !!auth?.user,
     onEditsChanged: () => void refreshLeases(),
+    // 有人上线/下线：立刻重取名单。载荷只说「谁变了」，名单形状只有一处（GET /api/web/presence）。
+    onPresenceChanged: () => void refreshPresence(),
     onCanvasChanged: (event) => {
       if (!isOtherRevision(scene?.revision, event)) return
 
@@ -508,6 +513,7 @@ export function WebCanvasApp() {
     nodeLeaseState.error ? `编辑锁：${nodeLeaseState.error}` : '',
     leaseError ? `编辑锁暂时读不到：${leaseError}` : '',
     leaseInvalidCount > 0 ? `有 ${leaseInvalidCount} 条锁记录格式不对，已跳过` : '',
+    presenceError ? `在线名单暂时读不到：${presenceError}` : '',
     events.error
   ].filter((line) => line.length > 0).join(' · ')
 
@@ -838,6 +844,7 @@ export function WebCanvasApp() {
     <WorkbenchShell
       chrome={chrome}
       status={status}
+      presence={<PresenceChip people={onlinePeople} />}
       session={<SessionChip name={user.displayName || user.username} role={roleLabel(user.role)} onLogout={() => void logout()} />}
       tree={(
         <ChapterTree
@@ -1018,5 +1025,47 @@ function SessionChip({ name, role, onLogout }: { name: string; role: string; onL
       </span>
       <button type="button" className="df-tool-button" onClick={onLogout} title={`退出登录（${name} · ${role}）`}>退出</button>
     </span>
+  )
+}
+
+/**
+ * 命令条上的「N 人在线」，点开能看名字与各自的端。
+ *
+ * 措辞全部走共享文案（两端同一份）；**在线 ≠ 拥有锁**：这里只列人，不带任何节点或锁的信息。
+ * 名单为空时整块不渲染——「0 人在线」没有信息量，反而像出了故障。
+ */
+function PresenceChip({ people }: { people: PresencePerson[] }) {
+  if (people.length === 0) return null
+  const count = String(people.length)
+  const names = people.map((person) => person.displayName).join(uiText('separator'))
+  // 名单里的端是服务端给的自由字符串；认不出的交给 clientLabel 按「网页端」算（与锁那条路同一条规则）。
+  const clientTag = (client: string) => clientLabel(client === 'desktop' ? 'desktop' : client === 'web' ? 'web' : 'unknown')
+  return (
+    <details style={{ position: 'relative', display: 'inline-block' }}>
+      <summary
+        className="df-tool-button"
+        style={{ listStyle: 'none', cursor: 'pointer' }}
+        title={uiTextFill('presence.detail', { count, names })}
+      >
+        {uiTextFill('presence.count', { count })}
+      </summary>
+      <div
+        style={{
+          position: 'absolute', right: 0, top: '110%', zIndex: 40, minWidth: 160, padding: 8,
+          background: 'var(--df-surface-2)', border: '1px solid var(--df-line)', borderRadius: 8
+        }}
+      >
+        {people.map((person) => (
+          <div key={person.userId} style={{ fontSize: 12, padding: '2px 0', display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span>{person.displayName}</span>
+            {person.clients.length > 0 && (
+              <span className="df-dim" style={{ fontSize: 10 }}>
+                {person.clients.map((client) => clientTag(client)).join(uiText('separator'))}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </details>
   )
 }

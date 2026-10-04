@@ -115,6 +115,22 @@ public static class UiText
     public static string Who(string displayName, string? client) =>
         Fill("lease.who", ("name", displayName), ("client", ClientLabel(client)));
 
+    /// <summary>「N 人在线」。网页端命令条与桌面端状态条共用这一句（**在线 ≠ 拥有锁**）。</summary>
+    public static string OnlineCount(int count) =>
+        Fill("presence.count", ("count", count.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
+    /// <summary>
+    /// 「N 人在线：甲、乙」。名字用**共享分隔符**拼——两端各写一个「、」看着一样，改起来就不一样了。
+    /// 一个名字都没有时退回只有人数的说法。
+    /// </summary>
+    public static string OnlineDetail(int count, IEnumerable<string> names)
+    {
+        var joined = string.Join(Separator, names);
+        return joined.Length == 0
+            ? OnlineCount(count)
+            : Fill("presence.detail", ("count", count.ToString(System.Globalization.CultureInfo.InvariantCulture)), ("names", joined));
+    }
+
     private static JsonElement Load()
     {
         using var stream = typeof(UiText).Assembly.GetManifestResourceStream("UiText.json")

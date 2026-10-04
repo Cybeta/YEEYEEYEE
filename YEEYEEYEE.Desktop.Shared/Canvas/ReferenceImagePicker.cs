@@ -76,6 +76,13 @@ public sealed record ReferenceCandidate(string Key, string Label, string Path)
     }
 }
 
+/// <summary>
+/// 一个参考槽位：一条引用（实体 + 变体）占一个位置，带它当前的参考图。
+/// <see cref="Path"/> 为 null 表示这条引用还没有可用的设定图——**槽位仍然占位**，
+/// 这样后面的引用不会被推前，ref:N 也就不会因为「某个变体没图 / 带了几张图」而错位。
+/// </summary>
+public sealed record ReferenceSlot(string Key, string Label, string? Path);
+
 /// <summary>把「这一镜引用了哪些设定」翻成「该喂哪几张图」。</summary>
 public static class ReferenceImagePicker
 {
@@ -141,13 +148,26 @@ public static class ReferenceImagePicker
             .ToList();
     }
 
-    /// <summary>把引用翻成「排好序的候选」：顺序固定 角色 → 道具 → 场景，同类内按引用顺序。</summary>
-    private static List<RankedCandidate> Rank(
+    /// <summary>
+    /// 把节点引用翻成**排好序的槽位**——这是「参考图该喂哪几张、ref:N 指向谁」的唯一真值：
+    /// 顺序固定 角色 → 道具 → 场景（同类内按引用顺序），每条引用只占一个槽位，
+    /// 变体带多张图时只取第一张。出图路径（<see cref="Plan"/> / <see cref="Candidates"/>）
+    /// 与技能路径（<c>SkillRunner</c> 的 ref:N）都取它，两处不会各算一份、迟早对不上。
+    ///
+    /// <paramref name="locatePath"/> 解不出图的槽位 <see cref="ReferenceSlot.Path"/> 为 null：
+    /// 槽位**仍然占位**（后面引用的下标不被推前），调用方据 null 决定是自己跳过还是如实报出来。
+    /// 老引用（<c>VariantId == Guid.Empty</c>）先走底层解析里「落到第一个变体」的既有兜底，再算槽位。
+    /// </summary>
+    public static IReadOnlyList<ReferenceSlot> ResolveSlots(
         WorkflowCanvasState canvas,
         WorkflowNode node,
         Func<WorkflowAttachment, string?> locatePath)
     {
-        var ranked = new List<RankedCandidate>();
+        ArgumentNullException.ThrowIfNull(canvas);
+        ArgumentNullException.ThrowIfNull(node);
+        ArgumentNullException.ThrowIfNull(locatePath);
+
+        var slots = new List<RankedSlot>();
         foreach (var reference in node.References)
         {
             if (canvas.ResolveReferenceContent(reference) is not { } content) continue;
@@ -159,14 +179,27 @@ public static class ReferenceImagePicker
                 .Where(attachment => attachment.Kind == AttachmentKind.Image)
                 .Select(locatePath)
                 .FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(candidate));
-            if (path is null) continue;
 
-            ranked.Add(new RankedCandidate(rank, ReferenceCandidate.KeyOf(reference), content.Label, path));
+            slots.Add(new RankedSlot(rank, ReferenceCandidate.KeyOf(reference), content.Label, path));
         }
-        return ranked.OrderBy(item => item.Rank).ToList();
+        // OrderBy 是稳定排序：同类的槽位保持引用顺序。
+        return slots.OrderBy(item => item.Rank)
+            .Select(item => new ReferenceSlot(item.Key, item.Label, item.Path))
+            .ToList();
     }
 
-    private sealed record RankedCandidate(int Rank, string Key, string Label, string Path);
+    /// <summary>把引用翻成「排好序的候选」（只保留有图的那几张）：给界面与出图装配用。</summary>
+    private static List<RankedCandidate> Rank(
+        WorkflowCanvasState canvas,
+        WorkflowNode node,
+        Func<WorkflowAttachment, string?> locatePath) =>
+        ResolveSlots(canvas, node, locatePath)
+            .Where(slot => !string.IsNullOrWhiteSpace(slot.Path))
+            .Select(slot => new RankedCandidate(slot.Key, slot.Label, slot.Path!))
+            .ToList();
+
+    private sealed record RankedSlot(int Rank, string Key, string Label, string? Path);
+    private sealed record RankedCandidate(string Key, string Label, string Path);
 
     private static string Describe(
         int limit, string capSource, IReadOnlyList<string> kept, IReadOnlyList<string> dropped, bool handPicked)

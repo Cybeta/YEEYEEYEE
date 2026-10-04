@@ -468,4 +468,43 @@ internal sealed class UserStore(string databasePath)
         command.Parameters.AddWithValue("$now", Stamp(DateTimeOffset.UtcNow));
         return command.ExecuteNonQuery();
     }
+
+    /// <summary>
+    /// 最近活跃过的人（会话表的 <c>last_seen_at</c> 在 <paramref name="since"/> 之后）。
+    ///
+    /// 这是「在线」的第二条依据，专门给**没有订阅 SSE 的桌面端**、或**网页端刚断线**时兜底：
+    /// 活连接才是「此刻在线」的主依据，这条只是一个「刚还在」的痕迹，所以调用方必须把两种依据分开标。
+    ///
+    /// 同一个人可能有多条会话（多标签、多台机器），按用户聚合取最晚的那次；被停用的账号不算在线。
+    /// 客户端类型不在这里：会话表只存 User-Agent，认不出 wire 上的 web/desktop，宁可不标也不猜。
+    /// </summary>
+    public IReadOnlyList<SessionPresence> RecentSessions(DateTimeOffset since)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT u.id, u.username, u.display_name, MAX(s.last_seen_at) AS seen
+            FROM sessions s JOIN users u ON u.id = s.user_id
+            WHERE s.last_seen_at >= $since AND s.expires_at > $now AND u.disabled = 0
+            GROUP BY u.id, u.username, u.display_name
+            ORDER BY seen DESC
+            """;
+        command.Parameters.AddWithValue("$since", Stamp(since));
+        command.Parameters.AddWithValue("$now", Stamp(DateTimeOffset.UtcNow));
+        var results = new List<SessionPresence>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var username = reader.GetString(1);
+            var displayName = reader.GetString(2);
+            results.Add(new SessionPresence(
+                Guid.Parse(reader.GetString(0)),
+                string.IsNullOrWhiteSpace(displayName) ? username : displayName,
+                ParseStamp(reader.GetString(3))));
+        }
+        return results;
+    }
 }
+
+/// <summary>会话表里「最近活跃过」的一个人：给在线名单的第二条依据用（见 <see cref="UserStore.RecentSessions"/>）。</summary>
+public sealed record SessionPresence(Guid UserId, string DisplayName, DateTimeOffset LastSeenAt);

@@ -403,6 +403,8 @@
                   <TextBlock Text="●" Foreground="{StaticResource DfPrimary}" FontSize="11" />
                   <TextBlock Text="已同步" Foreground="{StaticResource DfPrimary}" FontSize="11" />
                 </StackPanel>
+                <!-- 谁在线（与锁无关）：N 人在线：甲、乙。措辞走两端共读的 uiText.json。 -->
+                <TextBlock x:Name="PresenceText" Classes="dim" FontSize="11" IsVisible="False" />
               </StackPanel>
               <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
                 <TextBlock x:Name="CanvasNodeCountText" Text="-- 节点" Classes="dim" FontSize="11" />

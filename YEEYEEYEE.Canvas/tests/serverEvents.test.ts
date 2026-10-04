@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canvasChangeText, isOtherRevision, parseServerEvent, type CanvasChangedEvent } from '../src/shell/serverEvents'
+import { canvasChangeText, isOtherRevision, parsePresence, parseServerEvent, type CanvasChangedEvent } from '../src/shell/serverEvents'
 
 /**
  * 服务端变更推送的读取口径（SSE 那条流）。
@@ -119,5 +119,64 @@ describe('把事件说成一句人话', () => {
 
   it('不知道名字时也只说改了一个节点，不编名字', () => {
     expect(canvasChangeText({ ...base, recordId: 'x', scope: 'record' })).toBe('陈默 改动了 1 个节点')
+  })
+})
+
+/**
+ * 在线名单与「有人上线/下线」的读取口径。
+ *
+ * 在线 ≠ 拥有锁：名单只说「这个人此刻连着我们」，`basis` 必须如实区分「活连接」与「刚活跃过」——
+ * 把两种依据混成一个「在线」，界面就会把「刚断线」读成「现在还在」，反过来也一样。
+ */
+describe('在线名单', () => {
+  it('presence.changed 收下，缺来源就说「有人」', () => {
+    const event = parseServerEvent('presence.changed', JSON.stringify({ type: 'presence.changed', reason: 'join', actor: '陈默' }))
+    expect(event).toMatchObject({ type: 'presence.changed', reason: 'join', actor: '陈默' })
+    const bare = parseServerEvent('presence.changed', JSON.stringify({ type: 'presence.changed', reason: 'leave' }))
+    expect(bare).toMatchObject({ type: 'presence.changed', reason: 'leave', actor: '有人' })
+  })
+
+  it('把 connection 与 recent 两条依据原样带出来，不合并', () => {
+    const snapshot = parsePresence({
+      people: [
+        {
+          userId: '11111111-1111-4111-8111-111111111111',
+          displayName: '陈默',
+          clients: ['web', 'desktop'],
+          connections: 2,
+          basis: 'connection',
+          lastSeenSeconds: 3
+        },
+        {
+          userId: '22222222-2222-4222-8222-222222222222',
+          displayName: '苏黎',
+          clients: [],
+          connections: 0,
+          basis: 'recent',
+          lastSeenSeconds: 40
+        }
+      ],
+      lifetimeSeconds: 120
+    })
+    expect(snapshot.lifetimeSeconds).toBe(120)
+    expect(snapshot.people).toHaveLength(2)
+    expect(snapshot.people[0]).toMatchObject({ displayName: '陈默', connections: 2, basis: 'connection' })
+    expect(snapshot.people[1]).toMatchObject({ displayName: '苏黎', basis: 'recent' })
+  })
+
+  it('形状不对的项跳过而不是编一个：名单错一个名字比少一个更糟', () => {
+    const snapshot = parsePresence({
+      people: [null, 'x', { displayName: '没有 id' }, { userId: '', displayName: '空 id' }, {
+        userId: '11111111-1111-4111-8111-111111111111', displayName: '陈默'
+      }]
+    })
+    expect(snapshot.people).toHaveLength(1)
+    expect(snapshot.people[0].displayName).toBe('陈默')
+    // 缺连接数与依据时给不撒谎的默认值，而不是猜成「在线」。
+    expect(snapshot.people[0]).toMatchObject({ connections: 0, basis: 'recent', clients: [] })
+  })
+
+  it('不是对象就回空名单，不抛错', () => {
+    for (const raw of [null, undefined, 'x', 3, [1, 2]]) expect(parsePresence(raw).people).toHaveLength(0)
   })
 })

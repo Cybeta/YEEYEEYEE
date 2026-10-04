@@ -17,10 +17,10 @@ public sealed class AgentAction
     /// </summary>
     public string Kind { get; set; } = string.Empty;
 
-    /// <summary>目标：节点或实体的短 id（Guid 前 8 位）或标题；修改与删除必填。连线的终点节点也用它。</summary>
+    /// <summary>目标：节点或实体的 id 或标题；修改与删除必填。推荐用 id（完整 Guid 或 8 位短 id 前缀）——同名对象多时 id 最稳。连线的终点节点也用它。</summary>
     public string Target { get; set; } = string.Empty;
 
-    /// <summary>连线的起点节点（短 id 或标题）。只有 create_edge / delete_edge 使用。</summary>
+    /// <summary>连线的起点节点（id 或标题，推荐 id）。只有 create_edge / delete_edge 使用。</summary>
     public string Source { get; set; } = string.Empty;
 
     /// <summary>标题（新建节点/实体时使用，修改时可选）。</summary>
@@ -1036,19 +1036,22 @@ public static class AgentActionExecutor
     }
 
     /// <summary>
-    /// 解析模型给的节点引用。四层，从最确定到最宽容：
-    /// ① 短 id（Guid 前 8 位）；② 标题精确匹配；③ **工作树条目名 → 绑到该条目的节点**；
-    /// ④ 标题归一化后再比一次（去空白与分隔符、全角转半角）。
+    /// 解析模型给的节点引用。**按 id 强度分档**，从最确定到最宽容：
+    /// ① 完整 Guid（N/D/B 形式）：**只按 id 解析**，找不到就返回 null——绝不退回按名称；
+    /// ② 6–8 位 hex 前缀：先按 id 前缀找，找不到再走名称（与旧行为兼容）；
+    /// ③ 标题精确匹配；④ **工作树条目名 → 绑到该条目的节点**；
+    /// ⑤ 标题归一化后再比一次（去空白与分隔符、全角转半角）。
     ///
-    /// 为什么要 ③④：模型经常按「章节名」引用节点，而章节可能只建了条目还没放上画布，
-    /// 或者名字里的分隔符写法与节点标题不完全一样（「第1章 雨夜」vs「第1章：雨夜」）。
-    /// 这两种情况以前一律报「找不到起点节点」，整批连线全废。
-    /// ③④都**只在唯一命中时才认**：名字相近的两个节点宁可报错，也不能连错。
+    /// 为什么完整 Guid 不退回名称：32 位 hex 撞上某个标题的概率极低，真撞上就说明模型想按 id 引，
+    /// 此时悄悄换成同名的另一个对象比报错更危险；短前缀则保留兼容，改不动今天能跑的东西。
+    /// 名称这几层都**只在唯一命中时才认**：名字相近的两个节点宁可报错，也不能连错。
     /// </summary>
     private static WorkflowNode? FindNode(WorkflowCanvasState canvas, string target)
     {
-        var match = MatchByShortId(canvas.Nodes, target, node => node.Id);
-        if (match is not null) return match;
+        var form = ClassifyIdForm(target, out var fullId);
+        if (form == TargetIdForm.Full) return MatchByFullId(canvas.Nodes, fullId, node => node.Id);
+        if (form == TargetIdForm.ShortPrefix && MatchByShortId(canvas.Nodes, target, node => node.Id) is { } shortMatch)
+            return shortMatch;
 
         var wanted = (target ?? string.Empty).Trim();
         if (wanted.Length == 0) return null;
@@ -1174,8 +1177,10 @@ public static class AgentActionExecutor
 
     private static WorkTreeItem? FindWorkItem(WorkflowCanvasState canvas, string target)
     {
-        var match = MatchByShortId(canvas.WorkTree, target, item => item.Id);
-        if (match is not null) return match;
+        var form = ClassifyIdForm(target, out var fullId);
+        if (form == TargetIdForm.Full) return MatchByFullId(canvas.WorkTree, fullId, item => item.Id);
+        if (form == TargetIdForm.ShortPrefix && MatchByShortId(canvas.WorkTree, target, item => item.Id) is { } shortMatch)
+            return shortMatch;
         var wanted = (target ?? string.Empty).Trim();
         if (wanted.Length == 0) return null;
         var matches = canvas.WorkTree.Where(item => string.Equals(item.Name, wanted, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -1352,8 +1357,10 @@ public static class AgentActionExecutor
 
     private static WorkflowEntity? FindEntity(WorkflowCanvasState canvas, string target)
     {
-        var match = MatchByShortId(canvas.Entities, target, entity => entity.Id);
-        if (match is not null) return match;
+        var form = ClassifyIdForm(target, out var fullId);
+        if (form == TargetIdForm.Full) return MatchByFullId(canvas.Entities, fullId, entity => entity.Id);
+        if (form == TargetIdForm.ShortPrefix && MatchByShortId(canvas.Entities, target, entity => entity.Id) is { } shortMatch)
+            return shortMatch;
         var wanted = (target ?? string.Empty).Trim();
         if (wanted.Length == 0) return null;
         var byName = canvas.Entities.Where(entity => string.Equals(entity.Name, wanted, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -1362,8 +1369,10 @@ public static class AgentActionExecutor
 
     private static WorkflowEntityVariant? FindVariant(WorkflowEntity entity, string target)
     {
-        var match = MatchByShortId(entity.Variants, target, variant => variant.Id);
-        if (match is not null) return match;
+        var form = ClassifyIdForm(target, out var fullId);
+        if (form == TargetIdForm.Full) return MatchByFullId(entity.Variants, fullId, variant => variant.Id);
+        if (form == TargetIdForm.ShortPrefix && MatchByShortId(entity.Variants, target, variant => variant.Id) is { } shortMatch)
+            return shortMatch;
         if (string.IsNullOrWhiteSpace(target)) return entity.Variants.Count == 1 ? entity.Variants[0] : null;
         var matches = entity.Variants.Where(variant => string.Equals(variant.Name, target.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
         return matches.Count == 1 ? matches[0] : null;
@@ -1373,14 +1382,48 @@ public static class AgentActionExecutor
     {
         if (string.IsNullOrWhiteSpace(target)) return null;
         var value = target.Trim();
-        var match = MatchByShortId(variant.Versions, value, version => version.Id);
-        if (match is not null) return match;
+        var form = ClassifyIdForm(value, out var fullId);
+        if (form == TargetIdForm.Full) return MatchByFullId(variant.Versions, fullId, version => version.Id);
+        if (form == TargetIdForm.ShortPrefix && MatchByShortId(variant.Versions, value, version => version.Id) is { } shortMatch)
+            return shortMatch;
         var numberText = value.TrimStart('v', 'V');
         return int.TryParse(numberText, out var number)
             ? variant.Versions.FirstOrDefault(version => version.Number == number)
             : null;
     }
 
+    /// <summary>
+    /// 目标键的 id 形态：完整 Guid / 6–8 位十六进制前缀 / 都不是。
+    /// 判断顺序必须是「完整 Guid 优先」：32 位 hex 若先被当成长前缀去前缀匹配，
+    /// 失败后就会悄悄退到名称路，可能命中同名对象——正是要防的那种错。
+    /// </summary>
+    private enum TargetIdForm { None, ShortPrefix, Full }
+
+    /// <summary>
+    /// 判定一个目标串属于哪一档 id：完整 Guid 接受 N（32 位）、D（带连字符）、B（{} 包裹）三种写法；
+    /// 6–8 位纯 hex 视为短前缀；其余归名称。完整 Guid 解析出的值由 <paramref name="fullId"/> 带出。
+    /// </summary>
+    private static TargetIdForm ClassifyIdForm(string? target, out Guid fullId)
+    {
+        fullId = Guid.Empty;
+        var wanted = (target ?? string.Empty).Trim();
+        if (wanted.Length == 0) return TargetIdForm.None;
+        if (Guid.TryParseExact(wanted, "N", out fullId)
+            || Guid.TryParseExact(wanted, "D", out fullId)
+            || Guid.TryParseExact(wanted, "B", out fullId))
+            return TargetIdForm.Full;
+        if (wanted.Length is >= 6 and <= 8 && wanted.All(Uri.IsHexDigit)) return TargetIdForm.ShortPrefix;
+        return TargetIdForm.None;
+    }
+
+    /// <summary>完整 Guid 只按 id 精确匹配；找不到返回 null，由调用方如实报错，绝不退回名称路。</summary>
+    private static T? MatchByFullId<T>(IEnumerable<T> items, Guid id, Func<T, Guid> idSelector) where T : class =>
+        items.FirstOrDefault(item => idSelector(item) == id);
+
+    /// <summary>
+    /// 6–8 位 hex 前缀：按 Guid 的 N 形式做前缀匹配。只在 <see cref="TargetIdForm.ShortPrefix"/> 档调用，
+    /// 找不到时调用方会继续走名称路（保持既有兼容）。
+    /// </summary>
     private static T? MatchByShortId<T>(IEnumerable<T> items, string target, Func<T, Guid> idSelector) where T : class
     {
         var wanted = (target ?? string.Empty).Trim();

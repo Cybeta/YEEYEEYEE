@@ -5600,7 +5600,33 @@ public partial class MainWindow : Window, IAgentSessionHost
         session.StartWatching(
             notice => Dispatcher.UIThread.Post(() => OnRemoteCanvasChanged(notice)),
             // 别人抢了/放了锁：顺手把锁列表刷新一遍，设置页里那行「谁在编辑」就不会停在旧状态。
-            () => Dispatcher.UIThread.Post(() => _ = session.RefreshLeasesAsync()));
+            () => Dispatcher.UIThread.Post(() => _ = session.RefreshLeasesAsync()),
+            // 有人上线/下线：重取在线名单并更新状态条上那句「N 人在线：甲、乙」。
+            () => Dispatcher.UIThread.Post(() => _ = RefreshPresenceAsync(session)));
+        // 订阅本身就把自己登记成在线了；这里再拉一次，状态条马上就能显示「N 人在线」。
+        _ = RefreshPresenceAsync(session);
+    }
+
+    /// <summary>
+    /// 取一次在线名单并更新状态条。与锁是两条独立的路（在线 ≠ 拥有锁）：这里只问「谁此刻连着我们」，
+    /// 不碰任何节点锁。取不到就**如实说不显示**，不留一句过期的名单在界面上。
+    /// </summary>
+    private async Task RefreshPresenceAsync(CollaborationSession session)
+    {
+        var result = await session.RefreshPresenceAsync();
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            if (!result.Ok || session.OnlinePeople.Count == 0)
+            {
+                PresenceText.Text = string.Empty;
+                PresenceText.IsVisible = false;
+                return;
+            }
+
+            PresenceText.Text = UiText.OnlineDetail(
+                session.OnlinePeople.Count, session.OnlinePeople.Select(person => person.DisplayName));
+            PresenceText.IsVisible = true;
+        });
     }
 
     /// <summary>

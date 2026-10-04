@@ -25,7 +25,15 @@ export type EditsChangedEvent = {
   at: string
 }
 
-export type ServerEvent = CanvasChangedEvent | EditsChangedEvent
+/** 有人上线 / 下线。载荷只给原因与是谁，名单仍要自己去取（与 edits.changed 同形）。 */
+export type PresenceChangedEvent = {
+  type: 'presence.changed'
+  reason: string
+  actor: string
+  at: string
+}
+
+export type ServerEvent = CanvasChangedEvent | EditsChangedEvent | PresenceChangedEvent
 
 function text(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback
@@ -43,6 +51,9 @@ export function parseServerEvent(type: string, data: string): ServerEvent | null
 
   if (kind === 'edits.changed')
     return { type: 'edits.changed', reason: text(item.reason, 'unknown'), actor: text(item.actor, '有人'), at }
+
+  if (kind === 'presence.changed')
+    return { type: 'presence.changed', reason: text(item.reason, 'unknown'), actor: text(item.actor, '有人'), at }
 
   if (kind === 'canvas.changed') {
     const revision = item.revision
@@ -112,4 +123,63 @@ export function hasUnsavedDraft(
   if (focused) return true
   if (record === null) return false
   return current.title !== record.title || current.content !== record.content
+}
+
+/**
+ * 在线名单里的一项（`GET /api/web/presence` 的读侧投影）。
+ *
+ * `basis` 如实说明这个人是靠哪条依据算出来的：
+ * · `connection`：有一条活着的 SSE 连接（此刻在线的主依据），`connections` 是他的连接数；
+ * · `recent`：会话表 `last_seen_at` 还在 TTL 内（桌面的兜底、或网页端刚断），此时没有连接数。
+ * 两种依据不合并：`connection` 说「现在」，`recent` 只能说「刚还在」。
+ */
+export type PresencePerson = {
+  userId: string
+  displayName: string
+  clients: string[]
+  connections: number
+  basis: 'connection' | 'recent' | string
+  lastSeenSeconds: number
+}
+
+export type PresenceSnapshot = {
+  people: PresencePerson[]
+  lifetimeSeconds: number
+}
+
+const EMPTY_PRESENCE: PresenceSnapshot = { people: [], lifetimeSeconds: 0 }
+
+/** 解析在线名单。形状不对的项**跳过而不是编一个**——名单错一个名字比少一个更糟。 */
+export function parsePresence(raw: unknown): PresenceSnapshot {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return EMPTY_PRESENCE
+  const item = raw as Record<string, unknown>
+  const people: PresencePerson[] = []
+  if (Array.isArray(item.people)) {
+    for (const entry of item.people) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+      const person = entry as Record<string, unknown>
+      const userId = text(person.userId)
+      if (userId.length === 0) continue
+      people.push({
+        userId,
+        displayName: text(person.displayName, '有人'),
+        clients: Array.isArray(person.clients)
+          ? person.clients.filter((client): client is string => typeof client === 'string')
+          : [],
+        connections: typeof person.connections === 'number' && Number.isFinite(person.connections)
+          ? person.connections
+          : 0,
+        basis: text(person.basis, 'recent'),
+        lastSeenSeconds: typeof person.lastSeenSeconds === 'number' && Number.isFinite(person.lastSeenSeconds)
+          ? person.lastSeenSeconds
+          : 0
+      })
+    }
+  }
+  return {
+    people,
+    lifetimeSeconds: typeof item.lifetimeSeconds === 'number' && Number.isFinite(item.lifetimeSeconds)
+      ? item.lifetimeSeconds
+      : 0
+  }
 }

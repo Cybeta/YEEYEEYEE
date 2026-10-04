@@ -30,6 +30,11 @@ public static class CollaborationEvents
     public static bool IsEditsChangedFrame(string type, string data) =>
         string.Equals(type, "edits.changed", StringComparison.Ordinal) && Parse(type, data) is not null;
 
+    /// <summary>这条帧是不是我们认得出来的 <c>presence.changed</c>（有人上线/下线）。
+    /// 载荷只有原因与是谁，名单另外去 <c>GET /api/web/presence</c> 取——形状只有一处。</summary>
+    public static bool IsPresenceChangedFrame(string type, string data) =>
+        string.Equals(type, "presence.changed", StringComparison.Ordinal) && Parse(type, data) is not null;
+
     private static Frame? Parse(string expectedType, string data)
     {
         try

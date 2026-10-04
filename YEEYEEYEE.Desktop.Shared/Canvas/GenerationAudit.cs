@@ -448,7 +448,7 @@ public static class GenerationAudit
 
         // 引用到了、**变体上却没有图**，而承载它的设定节点其实出过图。
         //
-        // 为什么必须单独列：参考图取自**变体**（`Skills.TargetReferenceImages` 读的就是变体附件），
+        // 为什么必须单独列：参考图取自**变体**（`ReferenceImagePicker.ResolveSlots` 取的是变体附件），
         // 而设定节点出图的产物挂在**节点**上——节点有图 ≠ 引用有图。这个中间态最像「已经锁好了」，
         // 实际上每一镜都拿不到它：道具于是换样子，「第一集是剑、第二集变刀」就出在这里。
         foreach (var need in ReferencesWaitingForCommit(canvas, scope, settings, exists))

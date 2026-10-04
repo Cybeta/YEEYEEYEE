@@ -30,14 +30,25 @@ internal sealed class CanvasEventHub
     };
 
     private readonly ConcurrentDictionary<Guid, Channel<CanvasEventMessage>> subscribers = new();
+    private readonly PresenceRegistry presence;
+
+    public CanvasEventHub(PresenceRegistry presence)
+    {
+        this.presence = presence;
+    }
 
     public int SubscriberCount => subscribers.Count;
 
     /// <summary>
     /// 订阅。容量 16 的通道对「变化通知」够用——一次协作里的变更密度远低于此，
     /// 而满了说明这个客户端已经跟不上，丢最旧的正是想要的语义。
+    ///
+    /// <paramref name="userId"/> 为 null 表示这条连接没有用户身份（桌面桥的 Bearer 令牌不带用户）：
+    /// 它照样能订阅，但**不登记在线**——「谁在线」问的是人，没有人的连接不该被算成人。
+    /// 身份由调用方从会话里取（见 <c>WebEventApi</c>），注册表只认这里传进来的东西。
     /// </summary>
-    public (Guid Id, ChannelReader<CanvasEventMessage> Reader) Subscribe()
+    public (Guid Id, ChannelReader<CanvasEventMessage> Reader) Subscribe(
+        Guid? userId = null, string? displayName = null, string? client = null)
     {
         var channel = Channel.CreateBounded<CanvasEventMessage>(new BoundedChannelOptions(16)
         {
@@ -46,13 +57,25 @@ internal sealed class CanvasEventHub
             SingleWriter = false
         });
         var id = Guid.NewGuid();
+
+        // 先登记、先广播，**再**加进订阅表：广播不会发给刚刚订阅的这个人——他不需要知道「我上线了」，
+        // 需要知道的是别人。这也让「订阅后不该凭空收到自己那条 presence.changed」自然成立。
+        if (userId is { } user && client is { Length: > 0 })
+        {
+            var name = string.IsNullOrWhiteSpace(displayName) ? "有人" : displayName;
+            if (presence.Join(user, name, client, id)) PresenceChanged("join", name);
+        }
+
         subscribers[id] = channel;
         return (id, channel.Reader);
     }
 
     public void Unsubscribe(Guid id)
     {
+        // 先移出订阅表，再注销在线：离开的这个人收不到自己的那条「下线」，别的订阅者收得到。
         if (subscribers.TryRemove(id, out var channel)) channel.Writer.TryComplete();
+        if (presence.Leave(id) is { } gone && !presence.HasUser(gone.UserId))
+            PresenceChanged("leave", gone.DisplayName);
     }
 
     /// <summary>
@@ -80,4 +103,11 @@ internal sealed class CanvasEventHub
     /// 一处形状两处拼，迟早会分叉。</summary>
     public void EditsChanged(string reason, string actor) =>
         Publish("edits.changed", new { reason, actor });
+
+    /// <summary>
+    /// 有人上线 / 下线。载荷只给原因与是谁（与 <see cref="EditsChanged"/> 同形），在线名单本身让客户端
+    /// 自己去 <c>GET /api/web/presence</c> 取——**在线 ≠ 拥有锁**，这条推送不参与任何锁或权限决策。
+    /// </summary>
+    public void PresenceChanged(string reason, string actor) =>
+        Publish("presence.changed", new { reason, actor });
 }

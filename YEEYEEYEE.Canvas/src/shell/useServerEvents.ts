@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { parseServerEvent, type CanvasChangedEvent, type EditsChangedEvent } from './serverEvents'
+import { parseServerEvent, type CanvasChangedEvent, type EditsChangedEvent, type PresenceChangedEvent } from './serverEvents'
 
 /**
  * 订阅服务端的变更推送（SSE）。
@@ -14,6 +14,7 @@ export function useServerEvents(options: {
   enabled: boolean
   onCanvasChanged?: (event: CanvasChangedEvent) => void
   onEditsChanged?: (event: EditsChangedEvent) => void
+  onPresenceChanged?: (event: PresenceChangedEvent) => void
 }): ServerEventsState {
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
@@ -39,15 +40,21 @@ export function useServerEvents(options: {
       const event = parseServerEvent('edits.changed', (raw as MessageEvent<string>).data ?? '')
       if (event?.type === 'edits.changed') handlers.current.onEditsChanged?.(event)
     }
+    const onPresence = (raw: Event) => {
+      const event = parseServerEvent('presence.changed', (raw as MessageEvent<string>).data ?? '')
+      if (event?.type === 'presence.changed') handlers.current.onPresenceChanged?.(event)
+    }
 
     // 具名事件：服务端写 `event: canvas.changed`，这里按名字分别接。一条 JSON 也能干这事，
     // 但具名事件让浏览器开发者工具里一眼能看出来了什么，也让客户端不必先解析再分派。
     source.addEventListener('canvas.changed', onCanvas)
     source.addEventListener('edits.changed', onEdits)
+    source.addEventListener('presence.changed', onPresence)
 
     return () => {
       source.removeEventListener('canvas.changed', onCanvas)
       source.removeEventListener('edits.changed', onEdits)
+      source.removeEventListener('presence.changed', onPresence)
       source.close()
       setConnected(false)
     }

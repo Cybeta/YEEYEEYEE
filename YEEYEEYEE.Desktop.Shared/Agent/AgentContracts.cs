@@ -46,7 +46,7 @@ public sealed record AgentContext(
         };
         if (!string.IsNullOrWhiteSpace(NodeTitle)) lines.Add($"- 选中节点：{NodeTitle}");
         if (!string.IsNullOrWhiteSpace(NodeContent)) lines.Add($"- 选中节点内容：\n{NodeContent}");
-        if (!string.IsNullOrWhiteSpace(CanvasSummary)) lines.Add($"- 画布节点（target 可用短 id 或标题）：\n{CanvasSummary}");
+        if (!string.IsNullOrWhiteSpace(CanvasSummary)) lines.Add($"- 画布节点（target 推荐用 id：完整 Guid 或 8 位短 id；也可用标题。同一个名字可能对应多个对象，用 id 最稳）：\n{CanvasSummary}");
         if (!string.IsNullOrWhiteSpace(LibrarySummary)) lines.Add($"- 资源视觉内容：{LibrarySummary}");
         if (!string.IsNullOrWhiteSpace(WorkTreeSummary)) lines.Add($"- 工作树（**叙事轴**：人物/能力/道具及剧情版本与来源章节）：\n{WorkTreeSummary}");
         if (!string.IsNullOrWhiteSpace(WorkspaceSummary)) lines.Add($"- 工作文件夹：{WorkspaceSummary}");
@@ -93,18 +93,18 @@ public sealed record AgentContext(
     如果你需要改动画布或写入文件，**不要声称已经完成**，而是在回复的最后附上一个 JSON 代码块：
     ```json
     {"actions":[
-      {"kind":"create_node","title":"剧情概括 / 章节 / 分镜 / 成品标题","nodeCategory":"剧情概括|章节|通用|分镜|成品","content":"节点内容","parentTarget":"父节点短id或标题；剧情概括留空作为画布首节点","workTreeTarget":"要关联的工作树章节/能力条目名或短id","entityTargets":["这一镜出现的角色/场景/道具设定名，可多个"],"entityTarget":"单条引用（要指定变体或版本时才用）","variantTarget":"变体名或短id","variantVersion":"v2或版本短id，省略表示跟随当前","reason":"为什么建这个"},
-      {"kind":"update_node","target":"节点短id或标题","title":"可选新标题","content":"新的内容","workTreeTarget":"可选：改挂到哪个工作树章节/能力条目","entityTargets":["可选：替换成这组引用"],"reason":"为什么改"},
-      {"kind":"delete_node","target":"节点短id或标题","reason":"为什么删"},
-      {"kind":"create_edge","source":"起点节点短id或标题","target":"终点节点短id或标题","reason":"为什么要连"},
-      {"kind":"delete_edge","source":"起点节点短id或标题","target":"终点节点短id或标题","reason":"为什么断开"},
+      {"kind":"create_node","title":"剧情概括 / 章节 / 分镜 / 成品标题","nodeCategory":"剧情概括|章节|通用|分镜|成品","content":"节点内容","parentTarget":"父节点 id（推荐）或标题；剧情概括留空作为画布首节点","workTreeTarget":"要关联的工作树章节/能力条目 id（推荐）或名","entityTargets":["这一镜出现的角色/场景/道具设定名，可多个"],"entityTarget":"单条引用（要指定变体或版本时才用）","variantTarget":"变体名或 id（推荐）","variantVersion":"v2或版本 id（推荐），省略表示跟随当前","reason":"为什么建这个"},
+      {"kind":"update_node","target":"节点 id（推荐）或标题","title":"可选新标题","content":"新的内容","workTreeTarget":"可选：改挂到哪个工作树章节/能力条目","entityTargets":["可选：替换成这组引用"],"reason":"为什么改"},
+      {"kind":"delete_node","target":"节点 id（推荐）或标题","reason":"为什么删"},
+      {"kind":"create_edge","source":"起点节点 id（推荐）或标题","target":"终点节点 id（推荐）或标题","reason":"为什么要连"},
+      {"kind":"delete_edge","source":"起点节点 id（推荐）或标题","target":"终点节点 id（推荐）或标题","reason":"为什么断开"},
       {"kind":"create_entity","entityKind":"角色","title":"实体名","content":"核心设定","reason":"为什么建"},
       {"kind":"update_entity","target":"实体名","content":"新的核心设定","reason":"为什么改"},
       {"kind":"delete_entity","target":"实体名","reason":"为什么删"},
-      {"kind":"create_work_item","title":"角色名、能力或道具名称","workTreeKind":"Chapter|Character|Ability|Prop|Scene|Version|Project（Ability=角色能力，不是生成技能）","parentTarget":"父工作树条目名或短id，可空；能力/道具必须指向角色","entityTarget":"对应资源视觉内容实体名或短id，可空；角色/能力/道具有视觉实体时必填","variantTarget":"可选变体名或短id","variantVersion":"可选版本","chapter":"第10章","version":"0.2","content":"叙事设定（剧情向；外观与参考图请写进资源视觉内容）","reason":"为什么新增"},
-      {"kind":"create_entity_version","entityTarget":"实体名或短id","variantTarget":"变体名或短id","chapter":"第3章","content":"新版本设定内容","versionNote":"本章升级说明","reason":"为什么创建新版本"},
-      {"kind":"update_work_item","target":"工作树条目名或短id","title":"可选新名称","workTreeKind":"可选类型（Character|Ability|Prop|Scene|Version）","chapter":"可选来源章节","version":"可选版本","content":"可选新叙事设定（外观请写进资源视觉内容）","entityTarget":"可选实体名或短id","variantTarget":"可选变体名或短id","variantVersion":"可选版本","reason":"为什么更新"},
-      {"kind":"delete_work_item","target":"工作树条目名或短id","reason":"为什么删除"},
+      {"kind":"create_work_item","title":"角色名、能力或道具名称","workTreeKind":"Chapter|Character|Ability|Prop|Scene|Version|Project（Ability=角色能力，不是生成技能）","parentTarget":"父工作树条目 id（推荐）或名，可空；能力/道具必须指向角色","entityTarget":"对应资源视觉内容实体 id（推荐）或名，可空；角色/能力/道具有视觉实体时必填","variantTarget":"可选变体 id（推荐）或名","variantVersion":"可选版本","chapter":"第10章","version":"0.2","content":"叙事设定（剧情向；外观与参考图请写进资源视觉内容）","reason":"为什么新增"},
+      {"kind":"create_entity_version","entityTarget":"实体 id（推荐）或名","variantTarget":"变体 id（推荐）或名","chapter":"第3章","content":"新版本设定内容","versionNote":"本章升级说明","reason":"为什么创建新版本"},
+      {"kind":"update_work_item","target":"工作树条目 id（推荐）或名","title":"可选新名称","workTreeKind":"可选类型（Character|Ability|Prop|Scene|Version）","chapter":"可选来源章节","version":"可选版本","content":"可选新叙事设定（外观请写进资源视觉内容）","entityTarget":"可选实体 id（推荐）或名","variantTarget":"可选变体 id（推荐）或名","variantVersion":"可选版本","reason":"为什么更新"},
+      {"kind":"delete_work_item","target":"工作树条目 id（推荐）或名","reason":"为什么删除"},
       {"kind":"write_file","path":"相对工作文件夹的路径.md","content":"文件内容","reason":"为什么写"}
     ]}
     ```
@@ -129,6 +129,9 @@ public sealed record AgentContext(
     对应的章节或能力条目，这样它才会跟着项目树更新。
     连线规则：source 是上游、target 是下游，方向不能反；一次提议里**新建的节点**可以在后续
     动作里用它的标题作为 source/target（按顺序执行，前面建好的节点后面就能连上）。
+    寻址规则：引用已有对象时**优先用 id（完整 Guid 或 8 位短 id）**——同一个名字可能对应多个对象，
+    用 id 最稳；完整 Guid 找不到就如实报错，不会退回到同名对象。只有同批新建、还没有 id 可引用的
+    节点才用标题。
     **重要**：用户要求改动时，不要用文字描述改动方案来代替这个块——只写文字等于什么都没做，
     用户看不到任何可批准的改动。必须输出上面的 JSON 块。
     例如用户说「给第一章加个分镜节点」：你应当输出一个 create_node 提议，

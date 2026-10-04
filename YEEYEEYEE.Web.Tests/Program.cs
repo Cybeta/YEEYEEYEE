@@ -24,7 +24,7 @@ var dll = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "YEEYEEYEE.Web
 if (!File.Exists(dll)) throw new Exception("Web assembly missing");
 Process? server = null;
 var port = 0;
-async Task Start(string? token = "secret-value", string claims = "canvas.edit,skill.invoke,job.cancel", string approval = "preapproved-local-image", bool standalone = true, string? projectCanvas = null, string? userDatabase = null, string? setupToken = null, int? leaseSeconds = null)
+async Task Start(string? token = "secret-value", string claims = "canvas.edit,skill.invoke,job.cancel", string approval = "preapproved-local-image", bool standalone = true, string? projectCanvas = null, string? userDatabase = null, string? setupToken = null, int? leaseSeconds = null, int? presenceSeconds = null)
 {
     SetClaims(claims);
     using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -51,6 +51,9 @@ async Task Start(string? token = "secret-value", string claims = "canvas.edit,sk
     // 编辑锁的有效期可配：默认两分钟，测过期时缩到几秒，否则用例得干等两分钟。
     if (leaseSeconds is null) start.Environment.Remove("YEEYEEYEE__EditLeaseLifetimeSeconds");
     else start.Environment["YEEYEEYEE__EditLeaseLifetimeSeconds"] = leaseSeconds.Value.ToString();
+    // 在线的兜底 TTL 也可配：用例要验「断开之后不再算在线」，就得把它缩到几秒，否则要干等两分钟。
+    if (presenceSeconds is null) start.Environment.Remove("YEEYEEYEE__PresenceLifetimeSeconds");
+    else start.Environment["YEEYEEYEE__PresenceLifetimeSeconds"] = presenceSeconds.Value.ToString();
     start.Environment["ComfyUI__BaseUrl"] = "http://127.0.0.1:8188";
     start.Environment["ComfyUI__Checkpoint"] = "offline-model.safetensors";
     // appsettings.json reloads in the running server, allowing real HTTP revocation tests.
@@ -141,6 +144,13 @@ async Task<(string Type, JsonElement Data)?> ReadFrame(StreamReader reader)
         if (line.StartsWith("event:", StringComparison.Ordinal)) type = line[6..].Trim();
         else if (line.StartsWith("data:", StringComparison.Ordinal)) data.Append(line[5..].Trim());
     }
+}
+/// <summary>在线名单里某个人那一项；不在名单里回 null。用来把「算一个人」与「basis/connections」逐项核实。</summary>
+JsonElement? PresenceOf(JsonElement snapshot, Guid userId)
+{
+    foreach (var person in snapshot.GetProperty("people").EnumerateArray())
+        if (person.GetProperty("userId").GetGuid() == userId) return person.Clone();
+    return null;
 }
 try
 {
@@ -591,7 +601,9 @@ try
         if (File.Exists(leftover)) File.Delete(leftover);
     var leasePath = scenePath + ".edits.json";
     if (File.Exists(leasePath)) File.Delete(leasePath);
-    await Start(userDatabase: leaseDatabase);
+    // 这段服务后面要跑编辑锁、推送、桌面端、结构写入与在线状态；在线的兜底 TTL 缩到 3 秒，
+    // 好让「断开之后不再算在线」这个用例不用干等两分钟。
+    await Start(userDatabase: leaseDatabase, presenceSeconds: 3);
 
     using var boss = CookieClient();
     await Setup(boss, "{\"username\":\"lin\",\"password\":\"longenough\",\"displayName\":\"林晚\"}");
@@ -1557,8 +1569,9 @@ try
     }
 
     // 独立场景模式下没有章节与泳道（引擎要的状态它没有），要如实说用不了，而不是拿裸 JSON 硬算。
+    // 在线兜底 TTL 一样缩到 3 秒：下一段的「断开之后不再算在线」要用到它。
     Stop();
-    await Start(standalone: true, userDatabase: layoutDatabase);
+    await Start(standalone: true, userDatabase: layoutDatabase, presenceSeconds: 3);
     using var standaloneArranger = CookieClient();
     await Check(standaloneArranger, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"lin\",\"password\":\"longenough\"}");
     Assert((await Check(standaloneArranger, HttpMethod.Post, "/api/web/layout/plan", 409, PlanBody()))
@@ -1586,8 +1599,114 @@ try
         .GetProperty("records")[0].GetProperty("recordType").GetString() == "prop",
         "独立场景模式下也要能改类别");
 
+    // ---------- 在线状态（谁在线）：看得见人，但**不接进锁或权限** ----------
+    // 在线是「这个人此刻连着我们」，锁是「谁正在编辑哪个节点」——两条独立的依据，别用一个去推另一个。
+    using (var presenceAnon = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") })
+        await Check(presenceAnon, HttpMethod.Get, "/api/web/presence", 401);
+
+    // 这一段的客户端都现建：前面经过多次重启，端口与账号库都换过，旧客户端指向的是死地址。
+    using var presenceAdmin = CookieClient();
+    var presenceAdminLogin = await Check(presenceAdmin, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"lin\",\"password\":\"longenough\"}");
+    var presenceAdminId = presenceAdminLogin.GetProperty("user").GetProperty("id").GetGuid();
+
+    // 观察者（管理员林晚）先订阅 SSE：它用来在「别人上下线」时收到 presence.changed。
+    using (var observerEvents = await presenceAdmin.GetAsync("/api/web/events", HttpCompletionOption.ResponseHeadersRead))
+    {
+        var observerReader = new StreamReader(await observerEvents.Content.ReadAsStreamAsync());
+        var observerPending = ReadFrame(observerReader);
+        async Task<(string Type, JsonElement Data)?> NextObserverEvent(int milliseconds)
+        {
+            if (await Task.WhenAny(observerPending, Task.Delay(milliseconds)) != observerPending) return null;
+            var frame = await observerPending;
+            observerPending = ReadFrame(observerReader);
+            return frame;
+        }
+        Assert(await NextObserverEvent(1000) is null, "观察者订阅之后不该凭空收到事件");
+
+        // 专用账号：独立于其它用例的订阅，好让「断开之后不再算在线」干净地成立。
+        var presenceCreated = await Check(presenceAdmin, HttpMethod.Post, "/api/auth/users", 200,
+            "{\"username\":\"presence1\",\"password\":\"longenough\",\"displayName\":\"在线甲\",\"role\":\"Editor\"}");
+        var presenceId = presenceCreated.GetProperty("user").GetProperty("id").GetGuid();
+        using var presenceUser = CookieClient();
+        var presenceLogin = await Check(presenceUser, HttpMethod.Post, "/api/auth/login", 200,
+            "{\"username\":\"presence1\",\"password\":\"longenough\"}");
+        Assert(presenceLogin.GetProperty("user").GetProperty("id").GetGuid() == presenceId, "登录要回同一个人");
+
+        // 登录本身就会刷新会话 last_seen_at：此刻他应当以「recent」（兜底依据）出现，而不是「connection」。
+        var justLoggedIn = await Check(presenceAdmin, HttpMethod.Get, "/api/web/presence", 200);
+        var recentEntry = PresenceOf(justLoggedIn, presenceId);
+        Assert(recentEntry is not null && recentEntry.Value.GetProperty("basis").GetString() == "recent",
+            "刚登录、还没订阅时应当以 recent 依据出现：" + justLoggedIn.GetRawText());
+
+        // 订阅 SSE（开两条连接）：同一个人多端/多标签只算一个人，但要如实说他有几条连接。
+        var connection1 = await presenceUser.GetAsync("/api/web/events", HttpCompletionOption.ResponseHeadersRead);
+        var connection2 = await presenceUser.GetAsync("/api/web/events", HttpCompletionOption.ResponseHeadersRead);
+        try
+        {
+            JsonElement? live = null;
+            for (var attempt = 0; attempt < 30; attempt++)
+            {
+                live = PresenceOf(await Check(presenceAdmin, HttpMethod.Get, "/api/web/presence", 200), presenceId);
+                if (live is { } found && found.GetProperty("connections").GetInt32() == 2) break;
+                await Task.Delay(100);
+            }
+            Assert(live is not null, "订阅之后名单里应当有他");
+            var person = live!.Value;
+            Assert(person.GetProperty("basis").GetString() == "connection", "有活连接时依据应当是 connection");
+            Assert(person.GetProperty("connections").GetInt32() == 2, "两条连接要如实报成 2：" + person.GetRawText());
+            Assert(person.GetProperty("clients").EnumerateArray().Select(client => client.GetString()).Contains("web"),
+                "要说出他用的端：" + person.GetRawText());
+            var occurrences = (await Check(presenceAdmin, HttpMethod.Get, "/api/web/presence", 200))
+                .GetProperty("people").EnumerateArray().Count(item => item.GetProperty("userId").GetGuid() == presenceId);
+            Assert(occurrences == 1, "同一个人开两个连接也只能算一个人，实际出现 " + occurrences + " 次");
+
+            // 上线要广播：观察者应当收到一条 presence.changed(join)。
+            var joined = await NextObserverEvent(5000);
+            Assert(joined is not null && joined.Value.Type == "presence.changed" &&
+                joined.Value.Data.GetProperty("reason").GetString() == "join" &&
+                joined.Value.Data.GetProperty("actor").GetString() == "在线甲",
+                "有人上线应当推一条 presence.changed(join)");
+        }
+        finally
+        {
+            connection1.Dispose();
+            connection2.Dispose();
+        }
+
+        // 下线也要广播：两条连接都断开之后才算下线。
+        var left = await NextObserverEvent(5000);
+        Assert(left is not null && left.Value.Type == "presence.changed" &&
+            left.Value.Data.GetProperty("reason").GetString() == "leave", "有人下线应当推一条 presence.changed(leave)");
+
+        // 桌面端自己也要被算作在线：它订阅 SSE 时带 ?client=desktop，服务端据此记成「桌面端」。
+        // 同一个人的多条连接要聚合到一个条目上（下面 lin 同时有网页端观察者与这台桌面端）。
+        using (var desktopPresence = new YEEYEEYEE.Desktop.CollaborationSession($"http://127.0.0.1:{port}"))
+        {
+            Assert((await desktopPresence.SignInAsync("lin", "longenough")).Ok, "桌面端先登录");
+            desktopPresence.StartWatching(_ => { }, () => { });
+            JsonElement? desktopEntry = null;
+            for (var attempt = 0; attempt < 30; attempt++)
+            {
+                desktopEntry = PresenceOf(await Check(presenceAdmin, HttpMethod.Get, "/api/web/presence", 200), presenceAdminId);
+                if (desktopEntry is { } found && found.GetProperty("clients").EnumerateArray()
+                    .Any(client => client.GetString() == "desktop")) break;
+                await Task.Delay(100);
+            }
+            Assert(desktopEntry is not null &&
+                desktopEntry.Value.GetProperty("clients").EnumerateArray().Any(client => client.GetString() == "desktop"),
+                "桌面端订阅之后应当以 desktop 端出现在在线名单：" + (desktopEntry?.GetRawText() ?? "不在名单里"));
+        }
+
+        // 断开之后不再以「活连接」算在线；会话的 last_seen 兜底也会随 TTL（这里 3 秒）过期而消失。
+        await Task.Delay(4000);
+        var afterLeave = await Check(presenceAdmin, HttpMethod.Get, "/api/web/presence", 200);
+        Assert(PresenceOf(afterLeave, presenceId) is null,
+            "断开并等过 TTL 之后，名单里不该还有他：" + afterLeave.GetRawText());
+    }
+
     Stop();
     Console.WriteLine("HTTP regression passed: auth, live canvas.edit revocation, byte-preserving denials, jobs, assets, conflicts, persistence, and project/standalone modes");
+    Console.WriteLine("Presence regression passed: SSE subscribe registers as connection basis with the live connection count, one person stays one regardless of connections, the two bases stay apart (recent before subscribing), join/leave broadcast presence.changed, disconnect plus TTL removes the person, anonymous gets 401");
     Console.WriteLine("Auth regression passed: first user becomes admin, role-derived claims, session persistence, disable/password revocation, setup token");
     Console.WriteLine("Edit-lease regression passed: node/tree granularity, idempotent acquire, holder identity, heartbeat renew, expiry vs missing, admin force takeover, corrupt-file self-healing, restart persistence, canvas bytes untouched");
     Console.WriteLine("Layout regression passed: shared swimlane engine on the server, chapter scope, stale revision, tree-lease arbitration, preview equals what lands on disk, idempotent no-op, standalone refusal");

@@ -26,5 +26,7 @@
   "dock.agent": "Agent 协作",
   "lease.client.desktop": "桌面端",
   "lease.client.web": "网页端",
-  "lease.who": "{name}（{client}）"
+  "lease.who": "{name}（{client}）",
+  "presence.count": "{count} 人在线",
+  "presence.detail": "{count} 人在线：{names}"
 }

@@ -64,6 +64,8 @@ export type WorkbenchChrome = {
 export type WorkbenchShellProps = {
   chrome: WorkbenchChrome
   status: StatusFacts
+  /** 在线人数与名单（可展开）。与锁无关，放在命令条上只作展示。 */
+  presence?: ReactNode
   session: ReactNode
   tree: ReactNode
   workspace: ReactNode
@@ -94,7 +96,7 @@ const SYNC_COLORS: Record<SyncTone, string> = {
   stale: 'var(--df-warning)'
 }
 
-export function WorkbenchShell({ chrome, status, session, tree, workspace, dock, badge }: WorkbenchShellProps) {
+export function WorkbenchShell({ chrome, status, presence, session, tree, workspace, dock, badge }: WorkbenchShellProps) {
   return (
     <div className={`df-workbench${chrome.dockOpen ? '' : ' is-dock-closed'}`}>
       <div className="df-aurora" aria-hidden="true" />
@@ -159,6 +161,7 @@ export function WorkbenchShell({ chrome, status, session, tree, workspace, dock,
               disabled={chrome.saveDisabled}
               title={chrome.saveDisabled ? '没有待保存的修改' : '把检查器里的修改写回画布'}
             >{chrome.saveLabel}</button>
+            {presence}
             {session}
           </div>
         </div>

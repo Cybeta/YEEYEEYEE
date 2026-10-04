@@ -47,6 +47,8 @@ var users = new UserStore(userDatabasePath);
 users.EnsureSchema();
 builder.Services.AddSingleton(users);
 // 变更推送的中枢：进程内广播，不持久化。没人在听时发布是空操作。
+// 在线登记处与它共用一份：SSE 订阅 / 断开是「此刻在线」的主依据（见 CanvasEventHub.Subscribe）。
+builder.Services.AddSingleton<PresenceRegistry>();
 builder.Services.AddSingleton<CanvasEventHub>();
 var callbackSecret = configuration["ComfyUI:CallbackSecret"];
 if (!string.IsNullOrWhiteSpace(callbackSecret))
@@ -69,6 +71,8 @@ EditLeaseApi.Map(app);
 WebLayoutApi.Map(app);
 // 变更推送（SSE）：场景、锁、布局三处写成功之后往这里发一条「变了」，客户端据此刷新。
 WebEventApi.Map(app);
+// 在线名单：谁此刻连着我们。与锁无关——锁是「谁在编辑哪个节点」，在线是「这个人连没连着」。
+PresenceApi.Map(app, users);
 
 // 整画布写入（PUT /api/web/canvas）：桌面端把保存交给服务端，锁与修订都由服务端仲裁。
 WebCanvasApi.Map(app);

@@ -21,6 +21,21 @@ public sealed record CollaborationLease(
     DateTimeOffset ExpiresAt);
 
 /// <summary>
+/// 在线名单里的一项（服务端 <c>GET /api/web/presence</c> 的读侧投影）。
+///
+/// <c>Basis</c> 如实说明这个人是靠哪条依据算出来的：<c>connection</c>（有活连接，主依据）
+/// 还是 <c>recent</c>（会话表 <c>last_seen_at</c> 在 TTL 内，兜底）。**在线 ≠ 拥有锁**：
+/// 这份名单不带任何节点或锁的信息。
+/// </summary>
+public sealed record CollaborationPerson(
+    Guid UserId,
+    string DisplayName,
+    string[] Clients,
+    int Connections,
+    string Basis,
+    long LastSeenSeconds);
+
+/// <summary>
 /// 一次协作调用的结果。
 ///
 /// 成功与失败都必须带一句**能直接给人看的话**，失败另外带上服务端的错误码——
@@ -72,6 +87,12 @@ public sealed class CollaborationSession : IDisposable
 
     /// <summary>最近一次成功取回的编辑锁列表。</summary>
     public IReadOnlyList<CollaborationLease> Leases { get; private set; } = Array.Empty<CollaborationLease>();
+
+    /// <summary>
+    /// 最近一次成功取回的在线名单（谁此刻连着我们）。与 <see cref="Leases"/> **各走各的**：
+    /// 在线是人级的、锁是目标级的，别用一个去推另一个。
+    /// </summary>
+    public IReadOnlyList<CollaborationPerson> OnlinePeople { get; private set; } = Array.Empty<CollaborationPerson>();
 
     public bool IsConfigured => BaseUrl.Length > 0;
 
@@ -191,6 +212,41 @@ public sealed class CollaborationSession : IDisposable
             var payload = await response.Content.ReadFromJsonAsync<LeaseResponse>(Options, cancellationToken);
             Leases = payload?.Leases ?? Array.Empty<CollaborationLease>();
             return CollaborationResult.Success(Leases.Count == 0 ? "当前没有人正在编辑" : $"当前 {Leases.Count} 条编辑锁");
+        }
+        catch (Exception error) when (IsTransport(error))
+        {
+            return TransportFailure(error);
+        }
+    }
+
+    /// <summary>
+    /// 取一次在线名单（谁此刻连着我们）。与 <see cref="RefreshLeasesAsync"/> 是两条独立的路：
+    /// 在线问「这个人连没连着」，锁问「谁正在编辑哪个节点」，互不推导。
+    /// 会话失效会当场把身份清掉，界面据此提示重新登录。
+    /// </summary>
+    public async Task<CollaborationResult> RefreshPresenceAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsConfigured) return CollaborationResult.Failure("NOT_CONFIGURED", "还没有填服务器地址");
+        if (!IsSignedIn) return CollaborationResult.Failure("NOT_SIGNED_IN", "先登录才能看谁在线");
+
+        try
+        {
+            using var response = await http.GetAsync($"{BaseUrl}/api/web/presence", cancellationToken);
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                Forget();
+                return CollaborationResult.Failure("UNAUTHORIZED", "登录已失效，请重新登录");
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await ReadErrorAsync(response, cancellationToken);
+                return CollaborationResult.Failure(error.Code ?? string.Empty, error.Message);
+            }
+
+            var payload = await response.Content.ReadFromJsonAsync<PresenceResponse>(Options, cancellationToken);
+            OnlinePeople = payload?.People ?? Array.Empty<CollaborationPerson>();
+            return CollaborationResult.Success(OnlinePeople.Count == 0 ? "当前没有人在线" : $"当前 {OnlinePeople.Count} 人在线");
         }
         catch (Exception error) when (IsTransport(error))
         {
@@ -380,20 +436,24 @@ public sealed class CollaborationSession : IDisposable
     /// 不主动断开的话，退出之后那条流还开着，桌面端会继续收到「别人改了画布」。
     /// 回调跑在后台线程上，界面自己负责切回 UI 线程。
     /// </summary>
-    public void StartWatching(Action<CanvasChangedNotice> onCanvasChanged, Action onEditsChanged)
+    public void StartWatching(Action<CanvasChangedNotice> onCanvasChanged, Action onEditsChanged, Action? onPresenceChanged = null)
     {
         if (watchCancellation is not null || !IsSignedIn) return;
         var cancellation = new CancellationTokenSource();
         watchCancellation = cancellation;
-        _ = Task.Run(() => WatchAsync(onCanvasChanged, onEditsChanged, cancellation.Token));
+        _ = Task.Run(() => WatchAsync(onCanvasChanged, onEditsChanged, onPresenceChanged, cancellation.Token));
     }
 
     /// <summary>
     /// 订阅服务端的变更推送，直到取消。**断线自己重连**（退避 3 秒）：
     /// 浏览器的 <c>EventSource</c> 会按服务端给的 <c>retry</c> 自己回来，HttpClient 读流不会。
+    ///
+    /// 订阅时带上 <c>?client=desktop</c>：服务端据此把这条连接记成「桌面端在线」——
+    /// 桌面端不用额外的心跳接口，订阅这条最自然的连接本身就是它在线的依据。
     /// </summary>
     public async Task WatchAsync(
-        Action<CanvasChangedNotice> onCanvasChanged, Action onEditsChanged, CancellationToken cancellationToken)
+        Action<CanvasChangedNotice> onCanvasChanged, Action onEditsChanged, Action? onPresenceChanged,
+        CancellationToken cancellationToken)
     {
         if (!IsConfigured) return;
 
@@ -402,7 +462,7 @@ public sealed class CollaborationSession : IDisposable
             try
             {
                 using var response = await http.GetAsync(
-                    $"{BaseUrl}/api/web/events", HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                    $"{BaseUrl}/api/web/events?client=desktop", HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
                 {
                     // 会话已经失效：别再空转，把身份清掉，让界面提示重新登录。
@@ -414,7 +474,7 @@ public sealed class CollaborationSession : IDisposable
                 {
                     using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
                     using var reader = new StreamReader(stream);
-                    await ReadFramesAsync(reader, onCanvasChanged, onEditsChanged, cancellationToken);
+                    await ReadFramesAsync(reader, onCanvasChanged, onEditsChanged, onPresenceChanged, cancellationToken);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -437,7 +497,7 @@ public sealed class CollaborationSession : IDisposable
     /// </summary>
     private static async Task ReadFramesAsync(
         StreamReader reader, Action<CanvasChangedNotice> onCanvasChanged, Action onEditsChanged,
-        CancellationToken cancellationToken)
+        Action? onPresenceChanged, CancellationToken cancellationToken)
     {
         var type = (string?)null;
         var data = new StringBuilder();
@@ -451,6 +511,7 @@ public sealed class CollaborationSession : IDisposable
                 {
                     if (CollaborationEvents.ParseCanvasChanged(type, data.ToString()) is { } notice) onCanvasChanged(notice);
                     else if (CollaborationEvents.IsEditsChangedFrame(type, data.ToString())) onEditsChanged();
+                    else if (CollaborationEvents.IsPresenceChangedFrame(type, data.ToString())) onPresenceChanged?.Invoke();
                 }
 
                 type = null;
@@ -469,6 +530,8 @@ public sealed class CollaborationSession : IDisposable
     {
         User = null;
         Leases = Array.Empty<CollaborationLease>();
+        // 身份没了，在线名单也不再代表任何人：它问的是「谁在线」，而我已经不是其中之一了。
+        OnlinePeople = Array.Empty<CollaborationPerson>();
         // 身份没了，手上那条锁也就不再代表任何人了：本地记录必须跟着清。
         HeldNodeLease = null;
         // 订阅也要停：服务端只在订阅那一刻校验过身份，不主动断开的话退出之后它还在推。
@@ -524,6 +587,9 @@ public sealed class CollaborationSession : IDisposable
     private sealed record CanvasWriteResponse(long Revision, int Nodes);
 
     private sealed record LeaseResponse(CollaborationLease[]? Leases);
+
+    /// <summary>在线名单的响应：<c>{ people, lifetimeSeconds }</c>。读侧只关心名单本身。</summary>
+    private sealed record PresenceResponse(CollaborationPerson[]? People);
 
     /// <summary>占锁的响应：<c>{ lease, displaced }</c>。</summary>
     private sealed record LeaseEnvelope(CollaborationLease? Lease);

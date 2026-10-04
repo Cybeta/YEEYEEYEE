@@ -367,6 +367,15 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         if (result.State != JobState.Succeeded)
             return Failed(result.ErrorMessage ?? $"ComfyUI 任务状态为 {result.State}。");
 
+        // 先分清两件完全不同的事，否则报出来的话会把人指向错的地方：
+        // ① **这次根本没提交到 ComfyUI**——配置没配齐时执行链会退回内存执行器，任务在本地「成功」，
+        //    给一个 local:// 的假引用；这时该去看 ComfyUI 配置；
+        // ② 提交了、跑完了，但产物不在我们认的四个桶里；这时该去看那份工作流的末端节点。
+        // 混着报就是「跑完了却没有产物」这种谁看了都不知道从哪儿下手的话。
+        if (string.IsNullOrWhiteSpace(result.ExternalTaskId))
+            return Failed("这次没有真的提交到 ComfyUI（任务在本地就结束了，外部任务号是空的）："
+                + "到「设置 → 生图与生视频 → ComfyUI」检查一下地址与 checkpoint 填好了没有。");
+
         const string prefix = "asset://";
         var assets = result.Outputs
             .Where(asset => asset.Ref.StartsWith(prefix, StringComparison.Ordinal))

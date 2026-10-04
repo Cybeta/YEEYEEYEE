@@ -19,7 +19,7 @@ internal static class WebEventApi
 
     public static void Map(WebApplication app)
     {
-        app.MapGet("/api/web/events", async (HttpContext context, CanvasEventHub hub) =>
+        app.MapGet("/api/web/events", async (HttpContext context, CanvasEventHub hub, PresenceRegistry presence) =>
         {
             // 这条流会说出「谁在编辑、谁改了什么」，所以不能匿名读。
             // 权限是统一的判据：登录用户按角色拿（只读账号也有读权限），桌面桥按服务端配置的 claim。
@@ -36,7 +36,17 @@ internal static class WebEventApi
             await context.Response.WriteAsync("retry: 3000\n\n", context.RequestAborted);
             await context.Response.Body.FlushAsync(context.RequestAborted);
 
-            var (id, reader) = hub.Subscribe();
+            // 身份取自账号会话。桌面桥的 Bearer 没有用户，<c>CurrentUser</c> 为 null —— 它照样能订阅，
+            // 只是不登记在线（在线问的是人）。
+            var user = WebAccessGuard.CurrentUser(context);
+            var displayName = user is null
+                ? null
+                : (string.IsNullOrWhiteSpace(user.DisplayName) ? user.Username : user.DisplayName);
+            // 端由调用方声明（桌面端订阅时带 ?client=desktop），认不出的按网页端算；它只影响界面文案。
+            var requestedClient = context.Request.Query["client"].ToString();
+            var client = EditClient.IsValid(requestedClient) ? requestedClient : EditClient.Web;
+
+            var (id, reader) = hub.Subscribe(user?.Id, displayName, client);
             try
             {
                 var pending = reader.ReadAsync(context.RequestAborted).AsTask();
@@ -54,6 +64,8 @@ internal static class WebEventApi
                     {
                         // 等这条 Delay 落地（或被取消），别把它丢在那儿不管——不观察的异常任务会被记进日志。
                         try { await beat; } catch (OperationCanceledException) { break; }
+                        // 心跳能发出去，说明这条连接还在：把最后活跃时间推一下（TTL 的兜底才有意义）。
+                        if (user is not null) presence.Touch(user.Id);
                         await context.Response.WriteAsync(": ping\n\n", context.RequestAborted);
                         await context.Response.Body.FlushAsync(context.RequestAborted);
                     }
