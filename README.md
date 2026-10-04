@@ -269,7 +269,8 @@ npm.cmd --prefix YEEYEEYEE.Canvas run build
 docker compose up -d --build   # 起容器，浏览器开 http://localhost:8080
 ```
 
-`YEEYEEYEE.slnx` 只包含 6 个生产项目，测试项目要单独运行——所以「解决方案构建通过」覆盖的是生产代码，测试项目自身的编译错误不会被它拦到（CI 里那五条 `dotnet run` 会拦到）。
+`YEEYEEYEE.slnx` 含**全部 12 个项目**（7 个生产 + 5 个测试），所以第一行那步构建就是「连测试项目一起编得过吗」。**只负责编**——这五个测试工程是控制台 runner（不是 `dotnet test` 那套），跑还得各自 `dotnet run`。
+那条守卫在用例里：仓库里任何一个 `*.csproj` 只要没出现在 `YEEYEEYEE.slnx` 里，`SolutionCoversEveryProject` 就会红。第 132 轮的教训是「构建通过」被读成了「什么都没坏」，而当时测试项目与 `YEEYEEYEE.Mcp` 都漏在解决方案外面。
 
 发版用 `tools/publish-release.ps1`：按项目文件里的版本号打出一个便携 zip，默认框架依赖（约 12 MB，目标机器需要 .NET 10 运行时），加 `-SelfContained` 则把运行时一起打进去。把 zip 上传到对应的 GitHub 发行版，应用内升级下载的就是它。
 
@@ -387,3 +388,7 @@ ComfyUI 那边的绑值分两种情况：入口同属一组时按「角色 → �
 代码侧已经做了两件事：`AppPaths.CanWriteDirectory` 会真的建目录、写文件再删掉来探针；启动页在失败时提示可能是权限或安全策略拦截。绕过办法是改用资源管理器直接启动、选一个可写的目录，或把目标目录加进启动环境的允许列表。
 
 同一个错误也可能来自普通目录权限或安全软件，不能把所有拒绝访问都断定为沙箱问题。先确认启动方式与目标目录是否可写，再查 ACL 与系统策略。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。各家的名字、配色与形象只用于说明「这是我们支持的接口提供方」，**不用任何厂家的 logo 或网上流传的拟人形象**——那些是各自的商标与著作权作品；`provider-art/` 里那九张是出图接口生成的自创角色，提示词与模型记在 `provider-art/_generation.json`。

@@ -1,8 +1,21 @@
 <Solution>
+  <!-- 生产项目 -->
   <Project Path="YEEYEEYEE.Core/YEEYEEYEE.Core.csproj" />
   <Project Path="YEEYEEYEE.Desktop.Core/YEEYEEYEE.Desktop.Core.csproj" />
   <Project Path="YEEYEEYEE.Desktop.Shared/YEEYEEYEE.Desktop.Shared.csproj" />
   <Project Path="YEEYEEYEE.Desktop.Avalonia/YEEYEEYEE.Desktop.Avalonia.csproj" />
   <Project Path="YEEYEEYEE.Host/YEEYEEYEE.Host.csproj" />
   <Project Path="YEEYEEYEE.Web/YEEYEEYEE.Web.csproj" />
+  <Project Path="YEEYEEYEE.Mcp/YEEYEEYEE.Mcp.csproj" />
+
+  <!-- 测试项目也装进来：装进来之后「解决方案构建通过」才等于「连测试一起编得过」。
+       此前它们不在里面，第 132 轮改共享层时测试项目编译失败而解决方案构建照样通过——
+       那个坑就是「构建通过」这四个字被读成了「什么都没坏」。
+       注意：四个测试项目的目标框架是 net10.0-windows，所以这个解决方案只能在 Windows 上构建；
+       容器那条链是单独 publish YEEYEEYEE.Web 的（见 Dockerfile），不受影响。 -->
+  <Project Path="YEEYEEYEE.Core.Tests/YEEYEEYEE.Core.Tests.csproj" />
+  <Project Path="YEEYEEYEE.Agent.Tests/YEEYEEYEE.Agent.Tests.csproj" />
+  <Project Path="YEEYEEYEE.Migration.Tests/YEEYEEYEE.Migration.Tests.csproj" />
+  <Project Path="YEEYEEYEE.G6V1.Tests/YEEYEEYEE.G6V1.Tests.csproj" />
+  <Project Path="YEEYEEYEE.Web.Tests/YEEYEEYEE.Web.Tests.csproj" />
 </Solution>

@@ -252,6 +252,7 @@ var tests = new (string Name, Action Run)[]
     ("返工 G6-S3：删除变体先落库后动画布，失败时引用与实体原样、库回滚", VariantDeletionKeepsReferencesWhenPublishFails),
     ("返工 G6-T1：打开之后库被删也在执行前核验出来（旧标记不算数）", AuthorityRecheckCatchesLaterDeletedLibrary),
     ("返工 G6-T2：发布结果区分「真落库」与「本地内容」，本地实体不谎报已保存", PublishOutcomeDistinguishesLocalAndShared),
+    ("解决方案覆盖了仓库里每一个 csproj（新增项目忘了加会红）", SolutionCoversEveryProject),
     ("形象提示词只有一份：表里的设计说明与 provider-art 记录的出图原话逐条对账", ProviderAvatarPromptsMatchTheRecordedBatch),
     ("资源库：开跑前核验只动标记不动内容（不许抹掉未保存的编辑）", AuthorityRecheckOnlyTouchesMarks),
     ("资源库：打开画布时按库对齐（刷新 / 补入引用到的 / 标缺失）", MergeIntoAlignsSharedEntitiesOnOpen),
@@ -598,6 +599,40 @@ static void ProductVersionLedgerListsOnlyFilmsOldestFirst()
 	Expect(changes[5].StartsWith("时间：第 1 版 ", StringComparison.Ordinal), "时间那条要报出来，实际：" + changes[5]);
 	Expect(ledger.Latest!.ShotIds.Count == 2 && ledger.Latest.ShotIds[0] == shotA && ledger.Latest.ShotIds[1] == shotB,
 		"镜头 ID 也要记下来——比「多了哪一镜」靠的是它，不是标题");
+}
+
+/// <summary>
+/// 钉住「仓库里每一个 csproj 都装进了解决方案」。这条不是洁癖：第 132 轮改共享层时，
+/// 测试项目编译失败而 `dotnet build YEEYEEYEE.slnx` 照样通过——「构建通过」这四个字
+/// 被读成了「什么都没坏」。测试项目与 `YEEYEEYEE.Mcp` 就是这么漏在外面的。
+/// 以后新增项目忘了加，这条会红，而不是等到某天有人本机构建通过、CI 才炸。
+/// </summary>
+static void SolutionCoversEveryProject()
+{
+    var directory = new DirectoryInfo(AppContext.BaseDirectory);
+    while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "YEEYEEYEE.slnx")))
+        directory = directory.Parent;
+    Expect(directory is not null, "找不到仓库根目录（YEEYEEYEE.slnx）");
+    var root = directory!.FullName;
+
+    var declared = System.Text.RegularExpressions.Regex
+        .Matches(File.ReadAllText(Path.Combine(root, "YEEYEEYEE.slnx")), "Path=\"([^\"]+)\"")
+        .Select(match => match.Groups[1].Value.Replace('\\', '/'))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    Expect(declared.Count >= 10, "解决方案里认出的项目太少，解析方式可能变了：" + declared.Count);
+
+    var onDisk = Directory.EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories)
+        .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+            && !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+            && !path.Contains($"{Path.DirectorySeparatorChar}node_modules{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+        .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/'))
+        .ToList();
+    Expect(onDisk.Count >= 10, "仓库里认出的 csproj 太少：" + onDisk.Count);
+
+    var missing = onDisk.Where(path => !declared.Contains(path)).ToList();
+    var extra = declared.Where(path => !onDisk.Contains(path, StringComparer.OrdinalIgnoreCase)).ToList();
+    Expect(missing.Count == 0, "这些项目没装进 YEEYEEYEE.slnx（构建覆盖不到它们）：" + string.Join("、", missing));
+    Expect(extra.Count == 0, "解决方案里列了仓库里不存在的项目：" + string.Join("、", extra));
 }
 
 /// <summary>
