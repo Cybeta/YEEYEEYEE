@@ -2777,6 +2777,31 @@ public partial class MainWindow : Window, IAgentSessionHost
         body.Children.Add(AgentDialogUi.Note(plan.Note,
             plan.CanConcat ? AgentNoteLevel.Info : AgentNoteLevel.Warning));
 
+        // 这一版已经拼过几次。摆在「开始拼接」之前，而不是拼完再补一句——
+        // 每次拼都会多留一段（不覆盖旧的），用户该在按下去之前就知道手上已经有哪几版、彼此差在哪。
+        var ledger = ProductVersions.For(currentCanvas.Canvas, node);
+        body.Children.Add(AgentDialogUi.Header("已经拼过的版本"));
+        if (!ledger.HasVersions)
+        {
+            body.Children.Add(AgentDialogUi.Note("这一版还没拼过成片。"));
+        }
+        else
+        {
+            body.Children.Add(AgentDialogUi.Note(
+                $"共 {ledger.Versions.Count} 版（旧的都留着，不会被覆盖）："));
+            foreach (var version in ledger.Versions)
+                body.Children.Add(AgentDialogUi.Note(
+                    $"· {version.Label}{(version.IsLatest ? "（最新）" : string.Empty)} · {version.FactsText}"
+                    + $" · 接了 {version.CompositionText} · {version.AddedAt.ToLocalTime():MM-dd HH:mm}",
+                    version.Film.Readable ? AgentNoteLevel.Info : AgentNoteLevel.Warning));
+            if (ledger.LatestChanges.Count > 0)
+            {
+                body.Children.Add(AgentDialogUi.Note("最新一版与上一版比："));
+                foreach (var change in ledger.LatestChanges)
+                    body.Children.Add(AgentDialogUi.Note("· " + change));
+            }
+        }
+
         var go = AgentDialogUi.Primary("开始拼接");
         go.IsEnabled = plan.CanConcat;
         var cancel = AgentDialogUi.Secondary("取消");
@@ -2787,7 +2812,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             Spacing = 6,
             Children = { cancel, go }
         };
-        var dialog = DialogShell.Create($"成片 · {node.Title}", AgentDialogUi.Layout(body, AgentDialogUi.Footer(buttons)), 620, 540);
+        var dialog = DialogShell.Create($"成片 · {node.Title}", AgentDialogUi.Layout(body, AgentDialogUi.Footer(buttons)), 660, 640);
         cancel.Click += (_, _) => dialog.Close();
         go.Click += (_, _) =>
         {
@@ -2806,6 +2831,10 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (currentCanvas is null) return;
         var canvas = currentCanvas;
         var output = Path.Combine(AssetStore.EnsureDirectory(), $"product-{Guid.NewGuid():N}.mp4");
+
+        // 先算一遍「这一版会接哪几镜」：拼完要把它记进产物里。**事后从文件里反推不出镜头清单**
+        // （容器里只有时长与帧数），而版本对比要回答的正是「这一版比上一版多了哪一镜」。
+        var plan = ProductVideoAssembly.Plan(canvas.Canvas, node);
 
         StatusText.Text = $"正在拼接「{node.Title}」的成片…";
         var result = await Task.Run(() => ProductVideoAssembly.Concat(canvas.Canvas, node, output));
@@ -2826,7 +2855,8 @@ public partial class MainWindow : Window, IAgentSessionHost
                 Kind = AttachmentKind.Video,
                 Reference = reference,
                 Name = $"{node.Title}-成片.mp4",
-                Source = "成片 · 无损拼接（不重新编码）",
+                Source = WorkflowAttachment.SourceFilmJoin,
+                ShotList = string.Join("、", plan.Shots.Select(shot => shot.Title)),
                 Prompt = string.Empty,
                 NegativePrompt = string.Empty
             });
@@ -5788,6 +5818,17 @@ public partial class MainWindow : Window, IAgentSessionHost
             if (chapterNodes.Count == 0) column.Children.Add(Label("这一章还没有分镜节点", 10, "#5C6A7C"));
             foreach (var node in chapterNodes)
                 column.Children.Add(Label($"· {node.Title}（{StatusName(node.ExecutionStatus)}）", 10, "#93A1B3"));
+
+            // 「章节 → 成品」：这一章的成品各自拼过几次、最新那一版多长，以及和上一版差在哪。
+            // 成片在这里才是一「版」——不再是挂在成品节点上看不见的一段视频，而是能和上一版并排比较的东西。
+            // 走的是 ProductVersions（共享层）：它读的是容器头里的真实时长 / 帧数 / 分辨率，不看文件名。
+            foreach (var product in ProductVersions.ForChapter(state, chapter.Id))
+            {
+                column.Children.Add(Label($"成品 · {product.Headline()}", 10, "#E879F9"));
+                foreach (var change in product.LatestChanges)
+                    column.Children.Add(Label($"　{change}", 10, "#5C6A7C"));
+            }
+
             card.Child = column;
             lane.Children.Add(card);
         }

@@ -163,6 +163,9 @@ var tests = new (string Name, Action Run)[]
     ("成片拼接：轨道/时基/编码参数不一致就拒绝，并说清哪一段哪一项", Mp4ConcatRefusesMismatch),
     ("成片拼接：认不出的形状（分片 / co64 / 只有一段 / 文件不在）如实拒绝", Mp4ConcatRefusesUnsupportedShapes),
     ("成片装配：顺序跟画布（工作树显式顺序）、缺哪一镜就拒绝且镜号不往前挪", ProductVideoJoinsShotsInStoryboardOrder),
+    ("成品版本对比：只认成片、旧的在前、事实来自容器头（时长/帧数/分辨率）", ProductVersionLedgerListsOnlyFilmsOldestFirst),
+    ("成品版本对比：读不出来就点名，其余照比；镜头清单没记就说没记", ProductVersionComparisonNamesTheVersionItCannotRead),
+    ("章节 → 成品：一章下每个成品都列出来、顺序跟工作树、没拼过的也写清楚", ProductVersionsForChapterGroupsByProductInReadingOrder),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -468,6 +471,203 @@ static void DeleteNodeRemovesEdges()
         new[] { new AgentAction { Kind = "delete_node", Target = "第一章 剧情" } }, canvas, null);
     Expect(result.Applied == 1 && canvas.Nodes.Count == 1 && canvas.Edges.Count == 0,
         $"删节点应连带删边，实际剩 {canvas.Nodes.Count} 个节点 / {canvas.Edges.Count} 条边");
+}
+
+/// <summary>
+/// 「章节 → 成品」的版本对比：只认成片、（按挂上来的先后）旧的在前、最新那版标出来，
+/// 事实来自**容器头**（时长 / 帧数 / 分辨率 / 体积）而不是文件名或附件标题。
+///
+/// 特意在成品节点上放了一段「出视频」出来的视频：它不是成片（是按提示词生成的一段画面），
+/// 混进版本序列会得出「第 3 版」这种不存在的版本。
+/// </summary>
+static void ProductVersionLedgerListsOnlyFilmsOldestFirst()
+{
+	var directory = NewTempDirectory("product-versions");
+	uint[] threeFrames = [512, 512, 512];                        // 3 帧 / 12288 = 125ms
+	uint[] sixFrames = [512, 512, 512, 512, 512, 512];           // 6 帧 = 250ms
+	uint[] audio = [1024, 1000, 1000, 1000, 1000];
+	var first = Path.Combine(directory, "v1.mp4");
+	var second = Path.Combine(directory, "v2.mp4");
+	var stray = Path.Combine(directory, "shot.mp4");
+	File.WriteAllBytes(first, TinyMp4(threeFrames, 1024, audio, 1024));
+	File.WriteAllBytes(second, TinyMp4(sixFrames, 1024, audio, 1024));
+	File.WriteAllBytes(stray, TinyMp4(threeFrames, 1024, audio, 1024));
+	var locate = (string reference) => reference.StartsWith("asset://", StringComparison.Ordinal)
+		? Path.Combine(directory, reference["asset://".Length..])
+		: null;
+
+	var canvas = new WorkflowCanvasState();
+	var chapterItem = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章", Order = 10 };
+	canvas.WorkTree.Add(chapterItem);
+	var storyboard = new WorkflowNode
+	{
+		Title = "分镜一", Category = NodeCategory.Storyboard, WorkTreeItemId = chapterItem.Id
+	};
+	var product = new WorkflowNode
+	{
+		Title = "成片 v1", Category = NodeCategory.Product, ParentNodeId = storyboard.Id,
+		Attachments =
+		{
+			new WorkflowAttachment { Kind = AttachmentKind.Video, Name = "出视频那段", Reference = "asset://shot.mp4" },
+			new WorkflowAttachment
+			{
+				Kind = AttachmentKind.Video, Name = "成片-第1次.mp4", Reference = "asset://v1.mp4",
+				Source = WorkflowAttachment.SourceFilmJoin, ShotList = "分镜一"
+			},
+			new WorkflowAttachment
+			{
+				Kind = AttachmentKind.Video, Name = "成片-第2次.mp4", Reference = "asset://v2.mp4",
+				Source = WorkflowAttachment.SourceFilmJoin, ShotList = "分镜一、分镜二"
+			}
+		}
+	};
+	canvas.Nodes.Add(storyboard);
+	canvas.Nodes.Add(product);
+	canvas.Edges.Add(new WorkflowEdge { SourceNodeId = storyboard.Id, TargetNodeId = product.Id });
+
+	var ledger = ProductVersions.For(canvas, product, locate);
+	Expect(ledger.Versions.Count == 2, "只有成片算版本，「出视频」那段不算，实际 " + ledger.Versions.Count);
+	Expect(ledger.Versions[0].Label == "第 1 版" && ledger.Versions[1].Label == "第 2 版", "版本号按挂上来的先后编号");
+	Expect(!ledger.Versions[0].IsLatest && ledger.Latest is { IsLatest: true }, "最新一版只有一条，且是最后挂上来的那条");
+	Expect(ledger.OwnerTitle == "分镜一", "要说清这一版挂在哪一镜下，实际 " + ledger.OwnerTitle);
+	Expect(ledger.ChapterId == chapterItem.Id && ledger.ChapterName == "第1章",
+		"要能归到章节上（「章节 → 成品」），实际 " + ledger.ChapterName);
+
+	// 事实来自容器头。时长走 mvhd（TinyMp4 没写 mvhd 的时长，于是退到视频轨的 mdhd），
+	// 帧数走 stsz 的样本数，分辨率走采样条目里的宽高。
+	Expect(Math.Abs(ledger.Versions[0].Film.Seconds - 0.125) < 0.001, "第 1 版 3 帧应是 0.125 秒，实际 " + ledger.Versions[0].Film.Seconds);
+	Expect(Math.Abs(ledger.Latest!.Film.Seconds - 0.25) < 0.001, "第 2 版 6 帧应是 0.25 秒，实际 " + ledger.Latest.Film.Seconds);
+	Expect(ledger.Versions[0].Film.Frames == 3 && ledger.Latest.Film.Frames == 6,
+		"帧数读的是 stsz 的样本数：" + ledger.Versions[0].Film.Frames + " / " + ledger.Latest.Film.Frames);
+	Expect(ledger.Latest.Film.Width == 864 && ledger.Latest.Film.Height == 480,
+		"分辨率读采样条目里的宽高，实际 " + ledger.Latest.Film.Width + "×" + ledger.Latest.Film.Height);
+	Expect(ledger.Latest.Film.Tracks == 2, "两条轨道，实际 " + ledger.Latest.Film.Tracks);
+
+	var changes = ledger.LatestChanges;
+	Expect(changes.Count == 6, "六行：时长 / 帧数 / 分辨率 / 体积 / 接的镜数 / 时间，实际 " + changes.Count);
+	Expect(changes[0] == "时长 0.13 秒 → 0.25 秒（+0.13）", "时长差要报出来，实际：" + changes[0]);
+	Expect(changes[1] == "帧数 3 帧 → 6 帧（+3）", "帧数差要报出来，实际：" + changes[1]);
+	Expect(changes[2] == "分辨率没变 864×480", "分辨率没变也要说，实际：" + changes[2]);
+	Expect(changes[3].StartsWith("体积 ", StringComparison.Ordinal), "体积那条要报出来，实际：" + changes[3]);
+	Expect(changes[4] == "接的镜数 1 → 2；新增 分镜二", "要指出新增了哪一镜，实际：" + changes[4]);
+	Expect(changes[5].StartsWith("时间：第 1 版 ", StringComparison.Ordinal), "时间那条要报出来，实际：" + changes[5]);
+}
+
+/// <summary>
+/// 版本对比不能因为一版坏掉就整段作废：读不出来的**点名**，其余能比的照比。
+/// 镜头清单没记的那种老版本也要如实说「没记」，不按当前分镜猜。
+/// </summary>
+static void ProductVersionComparisonNamesTheVersionItCannotRead()
+{
+	var directory = NewTempDirectory("product-versions-broken");
+	uint[] threeFrames = [512, 512, 512];
+	uint[] audio = [1024, 1000, 1000, 1000, 1000];
+	File.WriteAllBytes(Path.Combine(directory, "ok.mp4"), TinyMp4(threeFrames, 1024, audio, 1024));
+	File.WriteAllText(Path.Combine(directory, "broken.mp4"), "不是 mp4，只是一段文本");
+	var locate = (string reference) => reference.StartsWith("asset://", StringComparison.Ordinal)
+		? Path.Combine(directory, reference["asset://".Length..])
+		: null;
+
+	var canvas = new WorkflowCanvasState();
+	// 老版本没记镜头清单（那时还没开始记），新版本记了。
+	var product = new WorkflowNode
+	{
+		Title = "成片 v1", Category = NodeCategory.Product,
+		Attachments =
+		{
+			new WorkflowAttachment
+			{
+				Kind = AttachmentKind.Video, Reference = "asset://ok.mp4",
+				Source = WorkflowAttachment.SourceFilmJoin, ShotList = string.Empty
+			},
+			new WorkflowAttachment
+			{
+				Kind = AttachmentKind.Video, Reference = "asset://broken.mp4",
+				Source = WorkflowAttachment.SourceFilmJoin, ShotList = "分镜一"
+			}
+		}
+	};
+	var missing = new WorkflowNode
+	{
+		Title = "成片 v2", Category = NodeCategory.Product,
+		Attachments =
+		{
+			new WorkflowAttachment
+			{
+				Kind = AttachmentKind.Video, Reference = "asset://gone.mp4",
+				Source = WorkflowAttachment.SourceFilmJoin, ShotList = "分镜一"
+			}
+		}
+	};
+	canvas.Nodes.Add(product);
+	canvas.Nodes.Add(missing);
+
+	var ledger = ProductVersions.For(canvas, product, locate);
+	Expect(ledger.Versions.Count == 2, "两版都要列出来，坏的那版不能悄悄消失");
+	Expect(!ledger.Latest!.Film.Readable && ledger.Latest.Film.Problem.Contains("不是 mp4"),
+		"坏的那版要如实说读不出来并给出原因，实际：" + ledger.Latest.Film.Problem);
+	Expect(ledger.Latest.Film.Bytes > 0, "读不出来也还能报体积（文件在那儿）");
+
+	var changes = ledger.LatestChanges;
+	Expect(changes.Any(line => line.Contains("第 2 版读不出来") && line.Contains("不是 mp4")), "坏的那版要点名：" + string.Join(" / ", changes));
+	Expect(changes.All(line => !line.StartsWith("时长", StringComparison.Ordinal)), "一版读不出来就不报时长差，不拿 0 秒冒充");
+	Expect(changes.Any(line => line.Contains("接的镜数：第 1 版没记")), "没记镜头清单要说「没记」，不猜：" + string.Join(" / ", changes));
+
+	// 文件整个不见了：报的是「文件不在资产目录里」，且不抛异常。
+	var gone = ProductVersions.For(canvas, missing, locate);
+	Expect(gone.Versions.Count == 1 && !gone.Latest!.Film.Readable
+		&& gone.Latest.Film.Problem.Contains("不在"), "文件不在也要如实说，实际：" + gone.Latest.Film.Problem);
+	Expect(gone.LatestChanges.Count == 0, "只有一版时没有「和上一版比」");
+
+	// 探针自身：不是 mp4、文件不在、路径为空，三条都要说清而不是报 0 秒。
+	Expect(!Mp4Concatenator.Probe(Path.Combine(directory, "broken.mp4")).Readable, "文本文件不是 mp4");
+	Expect(Mp4Concatenator.Probe(Path.Combine(directory, "nope.mp4")).Problem.Contains("不在"), "文件不在要说清");
+}
+
+/// <summary>
+/// 「章节 → 成品」：一章下的每个成品各算一条，顺序跟泳道布局同一份规则（工作树显式顺序在前），
+/// 没拼过的成品也要列出来（写着「还没拼过成片」），不能因为没版本就整条消失。
+/// </summary>
+static void ProductVersionsForChapterGroupsByProductInReadingOrder()
+{
+	var directory = NewTempDirectory("product-versions-chapter");
+	uint[] threeFrames = [512, 512, 512];
+	uint[] audio = [1024, 1000, 1000, 1000, 1000];
+	File.WriteAllBytes(Path.Combine(directory, "a.mp4"), TinyMp4(threeFrames, 1024, audio, 1024));
+	var locate = (string reference) => reference.StartsWith("asset://", StringComparison.Ordinal)
+		? Path.Combine(directory, reference["asset://".Length..])
+		: null;
+
+	var canvas = new WorkflowCanvasState();
+	var chapterItem = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章", Order = 10 };
+	canvas.WorkTree.Add(chapterItem);
+	// 两张分镜各自锚到一个**能力条目**（挂在章节下），工作树顺序说「乙」在前、画布横坐标说「甲」在前 —— 必须跟工作树。
+	// 锚点用能力条目而不是章节条目本身，是因为节点归章要沿父链上溯（CanvasChapters.ChapterOfAnchor）。
+	var alphaItem = new WorkTreeItem { Kind = WorkTreeKind.Ability, ParentId = chapterItem.Id, Name = "甲", Order = 20 };
+	var betaItem = new WorkTreeItem { Kind = WorkTreeKind.Ability, ParentId = chapterItem.Id, Name = "乙", Order = 10 };
+	canvas.WorkTree.Add(alphaItem);
+	canvas.WorkTree.Add(betaItem);
+	var alpha = new WorkflowNode { Title = "分镜甲", Category = NodeCategory.Storyboard, X = 100, WorkTreeItemId = alphaItem.Id };
+	var beta = new WorkflowNode { Title = "分镜乙", Category = NodeCategory.Storyboard, X = 900, WorkTreeItemId = betaItem.Id };
+	var alphaProduct = new WorkflowNode
+	{
+		Title = "甲成片", Category = NodeCategory.Product, ParentNodeId = alpha.Id,
+		Attachments = { new WorkflowAttachment { Kind = AttachmentKind.Video, Reference = "asset://a.mp4", Source = WorkflowAttachment.SourceFilmJoin, ShotList = "分镜甲" } }
+	};
+	var betaProduct = new WorkflowNode { Title = "乙成片", Category = NodeCategory.Product, ParentNodeId = beta.Id };
+	canvas.Nodes.Add(alpha);
+	canvas.Nodes.Add(beta);
+	canvas.Nodes.Add(alphaProduct);
+	canvas.Nodes.Add(betaProduct);
+
+	var ledgers = ProductVersions.ForChapter(canvas, chapterItem.Id, locate);
+	Expect(ledgers.Count == 2, "两个成品都要列出来（没拼过的那个也算一条），实际 " + ledgers.Count);
+	Expect(ledgers[0].ProductTitle == "乙成片" && ledgers[1].ProductTitle == "甲成片",
+		"顺序跟工作树显式顺序（乙在前），不是横坐标；实际 " + string.Join("、", ledgers.Select(item => item.ProductTitle)));
+	Expect(ledgers[0].HasVersions == false && ledgers[0].Headline().Contains("还没拼过成片"),
+		"没拼过的成品要如实说，实际：" + ledgers[0].Headline());
+	Expect(ledgers[1].HasVersions && ledgers[1].Headline().Contains("1 版"), "拼过的成品要报几版：" + ledgers[1].Headline());
+	Expect(ProductVersions.ForChapter(canvas, Guid.NewGuid(), locate).Count == 0, "别的章下没有成品");
 }
 
 /// <summary>
@@ -11817,6 +12017,28 @@ static byte[] TinySampleEntry(string type, params byte[][] children)
 	return TinyBox(type, payload.ToArray());
 }
 
+/// <summary>
+/// 视频采样条目（VisualSampleEntry）：比音频那条多 16 字节的预定义/保留，然后才是 width/height。
+/// **宽高必须真的写进去**——探针报的「分辨率」读的就是这两个字段，版本对比也要靠它说明画面变没变；
+/// 写个空条目会让探针永远报 0×0，用例就验不到东西了。
+/// </summary>
+static byte[] TinyVisualEntry(ushort width, ushort height, string type, params byte[][] children)
+{
+	var payload = new List<byte> { 0, 0, 0, 0, 0, 0, 0, 1 };   // 保留(6) + data_reference_index(2)
+	payload.AddRange(new byte[16]);                             // pre_defined(2) + reserved(2) + pre_defined[3](12)
+	payload.AddRange(BigEndian32(width)[2..]);
+	payload.AddRange(BigEndian32(height)[2..]);
+	payload.AddRange(BigEndian32(0x00480000));                  // horizresolution
+	payload.AddRange(BigEndian32(0x00480000));                  // vertresolution
+	payload.AddRange(BigEndian32(0));                           // reserved
+	payload.AddRange(BigEndian32(1)[2..]);                      // frame_count
+	payload.AddRange(Encoding.ASCII.GetBytes("tiny".PadRight(32, '\0')));   // compressorname[32]
+	payload.AddRange(BigEndian32(0x18)[2..]);                   // depth = 24
+	payload.AddRange(BigEndian32(0xFFFF)[2..]);                 // pre_defined = -1
+	foreach (var child in children) payload.AddRange(child);
+	return TinyBox(type, payload.ToArray());
+}
+
 static byte[] TinyTrack(
 	string handler, uint timescale, uint[] deltas, int cttsOffset, bool hasCtts,
 	byte[] entry, long elstMediaTime, int sampleSize, int fillBase, long mdatStart, bool useCo64)
@@ -11894,7 +12116,7 @@ static byte[] TinyMp4(
 	var audioSamples = TinyJoin(Enumerable.Range(0, audioDeltas.Length).Select(index => Enumerable.Repeat((byte)(0x20 + index), 20).ToArray()).ToArray());
 	var payload = TinyJoin(videoSamples, audioSamples);
 
-	var videoEntry = TinySampleEntry("avc1",
+	var videoEntry = TinyVisualEntry(864, 480, "avc1",
 		TinyBox("avcC", videoConfig ?? [0x01, 0x64, 0x00, 0x1E, 0xFF, 0xE1]),
 		videoBitrate ?? TinyBtrt(1114372, 0));
 	var audioEntry = TinySampleEntry("mp4a", audioBitrate ?? TinyEsds(128000, 127924));

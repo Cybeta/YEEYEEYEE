@@ -7,6 +7,27 @@ namespace YEEYEEYEE.Desktop;
 public sealed record Mp4ConcatResult(bool Ok, string FilePath, string Error, string Note);
 
 /// <summary>
+/// 一段片子的容器事实——不解码就读得出来的那几项。给版本对比用：要比两版成片，先得知道每一版究竟是什么。
+///
+/// <see cref="Readable"/> 为 false 时只有 <see cref="Problem"/> 与 <see cref="Bytes"/> 可信：
+/// **读不出来就说读不出来**，不拿 0 秒 / 0 帧冒充一个「量过了」的结果。
+/// </summary>
+public sealed record Mp4FilmInfo(
+    bool Readable, string Problem, double Seconds, int Tracks, int Width, int Height, int Frames, long Bytes)
+{
+    public static Mp4FilmInfo Unreadable(string problem, long bytes = 0) => new(false, problem, 0, 0, 0, 0, 0, bytes);
+
+    /// <summary>人话一行。读不出来就直说，不编数字。</summary>
+    public string Describe() => Readable
+        ? $"{Seconds:0.00} 秒 · {Width}×{Height} · {Frames} 帧 · {Tracks} 条轨 · {Size(Bytes)}"
+        : $"读不出来（{Problem}）";
+
+    public static string Size(long bytes) => bytes >= 1024 * 1024
+        ? $"{bytes / 1024.0 / 1024.0:0.0} MB"
+        : $"{Math.Max(bytes, 0) / 1024.0:0} KB";
+}
+
+/// <summary>
 /// 把若干个 mp4 **无损**接成一个（不重编码：样本字节原样搬过去，只重排容器里的表）。
 ///
 /// 为什么要有它：分镜是逐段出的，成片要把它们接起来；而引一堆 ffmpeg 进来是另一笔账
@@ -50,6 +71,112 @@ public static class Mp4Concatenator
         }
         // 编辑列表说的起点超过了整轨长度：这份文件本身就不正常，别剪，交给播放器。
         return remaining <= 0 ? dropped : 0;
+    }
+
+    /// <summary>
+    /// 只读探针：不解码，只读容器头，报出这段片子「多久、几轨、画面多大、多少帧、多大」。
+    /// 给版本对比用——要比两版成片，先得知道每一版究竟是什么，而这件事不能靠文件名或附件标题。
+    ///
+    /// 宽容度比拼接高：拼接认不出的形状（分片 mp4、co64）这里照样能报出时长，
+    /// 因为「量一下」与「接起来」是两件事。真读不出来（没 ftyp、没 moov、文件不在）就如实说，不报 0。
+    ///
+    /// 读法是「先只读头部」：我们自己的成片 moov 都在前面，量一次只碰几百 KB，不必把整段片子搬进内存。
+    /// moov 不在头部那一段里（别的工具出的、没做 faststart 的文件）才整份读——那样慢，但结果一样。
+    /// </summary>
+    public static Mp4FilmInfo Probe(string path)
+    {
+        long bytes = 0;
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists) return Mp4FilmInfo.Unreadable("文件不在了");
+            bytes = info.Length;
+
+            var data = ReadHead(path, 1 << 20);
+            var top = Mp4File.Boxes(data, 0, data.Length);
+            if (top.All(box => box.Type != "ftyp")) return Mp4FilmInfo.Unreadable("不是 mp4（没有 ftyp）", bytes);
+            var moov = top.FirstOrDefault(box => box.Type == "moov");
+            if (moov is null || moov.End > data.Length)
+            {
+                data = File.ReadAllBytes(path);
+                top = Mp4File.Boxes(data, 0, data.Length);
+                moov = top.FirstOrDefault(box => box.Type == "moov");
+            }
+            if (moov is null)
+                return Mp4FilmInfo.Unreadable(
+                    top.Any(box => box.Type == "moof") ? "是分片 mp4，moov 不在文件里" : "没有 moov", bytes);
+
+            var children = Mp4File.Boxes(data, moov.PayloadStart, moov.PayloadEnd);
+            var version = 0;
+            uint movieTimescale = 0;
+            ulong movieDuration = 0;
+            if (children.FirstOrDefault(box => box.Type == "mvhd") is { } mvhd)
+            {
+                version = data[mvhd.PayloadStart];
+                var timescaleAt = mvhd.PayloadStart + (version == 1 ? 20 : 12);
+                var durationAt = mvhd.PayloadStart + (version == 1 ? 24 : 16);
+                if (durationAt + (version == 1 ? 8 : 4) <= mvhd.PayloadEnd)
+                {
+                    movieTimescale = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(timescaleAt, 4));
+                    movieDuration = version == 1
+                        ? BinaryPrimitives.ReadUInt64BigEndian(data.AsSpan(durationAt, 8))
+                        : BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(durationAt, 4));
+                }
+            }
+
+            var tracks = 0;
+            var width = 0;
+            var height = 0;
+            var frames = 0;
+            var videoTimescale = 0u;
+            ulong videoDuration = 0;
+            foreach (var trak in children.Where(box => box.Type == "trak"))
+            {
+                tracks++;
+                var mdia = Mp4File.Boxes(data, trak.PayloadStart, trak.PayloadEnd).FirstOrDefault(box => box.Type == "mdia");
+                if (mdia is null) continue;
+                var mdiaBoxes = Mp4File.Boxes(data, mdia.PayloadStart, mdia.PayloadEnd);
+                if (mdiaBoxes.FirstOrDefault(box => box.Type == "hdlr") is not { } hdlr || hdlr.PayloadStart + 12 > hdlr.PayloadEnd) continue;
+                if (Encoding.ASCII.GetString(data, hdlr.PayloadStart + 8, 4) != "vide") continue;
+
+                if (mdiaBoxes.FirstOrDefault(box => box.Type == "mdhd") is { } mdhd && mdhd.PayloadStart + 16 <= mdhd.PayloadEnd)
+                {
+                    videoTimescale = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(mdhd.PayloadStart + 12, 4));
+                    videoDuration = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(mdhd.PayloadStart + 16, 4));
+                }
+                if (mdiaBoxes.FirstOrDefault(box => box.Type == "minf") is not { } minf) continue;
+                if (Mp4File.Boxes(data, minf.PayloadStart, minf.PayloadEnd).FirstOrDefault(box => box.Type == "stbl") is not { } stbl) continue;
+                var stblBoxes = Mp4File.Boxes(data, stbl.PayloadStart, stbl.PayloadEnd);
+
+                // 帧数就是视频轨的样本数：我们这条流水线一帧一个样本。
+                if (stblBoxes.FirstOrDefault(box => box.Type == "stsz") is { } stsz && stsz.PayloadStart + 12 <= stsz.PayloadEnd)
+                    frames = (int)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(stsz.PayloadStart + 8, 4));
+
+                // 宽高在采样条目里：8 字节 SampleEntry 头 + 16 字节 VisualSampleEntry 头，之后是 width/height。
+                if (stblBoxes.FirstOrDefault(box => box.Type == "stsd") is not { } stsd) continue;
+                if (Mp4File.Boxes(data, stsd.PayloadStart + 8, stsd.PayloadEnd).FirstOrDefault() is not { } entry) continue;
+                if (entry.PayloadStart + 28 > entry.PayloadEnd) continue;
+                width = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(entry.PayloadStart + 24, 2));
+                height = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(entry.PayloadStart + 26, 2));
+            }
+
+            // mvhd 的时长优先；到顶值（0xFFFFFFFF，有些封装器在收尾前就这么写）或读不到时，
+            // 退到视频轨自己的 mdhd —— 两条都不行才认「时长读不出来」。
+            var seconds = movieTimescale > 0 && movieDuration is > 0 and not uint.MaxValue
+                ? (double)movieDuration / movieTimescale
+                : 0d;
+            if (seconds <= 0 && videoTimescale > 0)
+                seconds = (double)videoDuration / videoTimescale;
+            if (seconds <= 0)
+                return Mp4FilmInfo.Unreadable("容器里的时长是空的（mvhd 与视频轨的 mdhd 都没给出有效时长）", bytes);
+
+            return new Mp4FilmInfo(true, string.Empty, seconds, tracks, width, height, frames, bytes);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException
+            or InvalidDataException or IndexOutOfRangeException or OverflowException)
+        {
+            return Mp4FilmInfo.Unreadable(exception.Message, bytes);
+        }
     }
 
     public static Mp4ConcatResult Concat(IReadOnlyList<string> inputs, string outputPath)
@@ -540,6 +667,16 @@ public static class Mp4Concatenator
         return payload.ToArray();
     }
 
+    /// <summary>只读文件开头这一段（最多 <paramref name="limit"/> 字节）。</summary>
+    private static byte[] ReadHead(string path, int limit)
+    {
+        using var stream = File.OpenRead(path);
+        var length = (int)Math.Min(stream.Length, limit);
+        var buffer = new byte[length];
+        stream.ReadExactly(buffer, 0, length);
+        return buffer;
+    }
+
     private static byte[] BoxHeader(string type, int size)
     {
         var header = new byte[8];
@@ -811,7 +948,7 @@ internal sealed class Mp4File
         return offsets;
     }
 
-    private static List<Box> Boxes(byte[] data, int start, int end)
+    internal static List<Box> Boxes(byte[] data, int start, int end)
     {
         var boxes = new List<Box>();
         var offset = start;

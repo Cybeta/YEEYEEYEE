@@ -17,6 +17,12 @@ public enum AttachmentKind { Image, Video, Audio, Other }
 public sealed class WorkflowAttachment
 {
     public const string SourceComposition = "合成底图";
+
+    /// <summary>「成片」这个产物的来源标记：由本机的无损拼接（<c>ProductVideoAssembly</c>）产生。
+    /// 单独给它一个常量，是因为版本对比要能**只认出成片**——成品节点上同样可能挂着「出视频」出来的那几段，
+    /// 把两者混在一起当「同一版成片的历次结果」是错的。</summary>
+    public const string SourceFilmJoin = "成片 · 无损拼接（不重新编码）";
+
     public Guid Id { get; set; } = Guid.NewGuid();
     public AttachmentKind Kind { get; set; } = AttachmentKind.Image;
     public string Reference { get; set; } = string.Empty;
@@ -33,6 +39,15 @@ public sealed class WorkflowAttachment
 
     /// <summary>与 <see cref="Prompt"/> 配套发出去的负面提示词。</summary>
     public string NegativePrompt { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 这一版成片**接了哪几镜**（按分镜顺序的标题，原样留着）。
+    ///
+    /// 只在成片这类产物上有值，别的产物是空。之所以要在拼的时候就记下来：事后从文件里**反推不出**镜头清单
+    /// （容器里只有时长与帧数），而版本对比要回答的正是「这一版比上一版多了哪一镜」。
+    /// 空有两种含义——老产物没记，或者这一版压根不是拼出来的——两种都如实说「没记」，不按当前分镜去猜。
+    /// </summary>
+    public string ShotList { get; set; } = string.Empty;
 
     /// <summary>
     /// 这张产物是**照着哪一版设定**做出来的：引用键（<c>实体Id/变体Id</c>）→ 当时的设定指纹。
