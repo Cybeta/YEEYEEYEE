@@ -366,6 +366,21 @@ public static class GenerationAudit
                 + "也没有图：到引用画廊里给这个变体补一张设定图。",
                 Actionable: false));
 
+        // 引用到了、**变体上却没有图**，而承载它的设定节点其实出过图。
+        //
+        // 为什么必须单独列：参考图取自**变体**（`Skills.TargetReferenceImages` 读的就是变体附件），
+        // 而设定节点出图的产物挂在**节点**上——节点有图 ≠ 引用有图。这个中间态最像「已经锁好了」，
+        // 实际上每一镜都拿不到它：道具于是换样子，「第一集是剑、第二集变刀」就出在这里。
+        foreach (var need in ReferencesWaitingForCommit(canvas, scope, settings, exists))
+            missing.Add(new GenerationAuditItem(
+                GenerationStage.SettingImage,
+                need.NodeId,
+                need.NodeTitle,
+                need.Label,
+                $"「{need.Label}」在「{need.NodeTitle}」上出过图，但那张图还没提交到引用（变体）上："
+                + "参考图取的是变体，所以引用它的分镜拿不到它——每一镜都会各编一套外观。",
+                Actionable: true));
+
         return new GenerationAuditLayer(
             GenerationStage.SettingImage,
             "设定图",
@@ -407,6 +422,44 @@ public static class GenerationAudit
 
             if (HasKind(content.Attachments, AttachmentKind.Image, exists)) continue;
             result.Add($"{content.Entity.Name} · {content.Variant.Name}");
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 引用到了、**变体上却没有图**，而承载它的设定节点出过图的那些。
+    ///
+    /// 节点有图 ≠ 引用有图：参考图读的是**变体**附件，节点上的产物帮不了任何一镜。
+    /// 没有承载节点的那种归 <see cref="GalleryOnlyNeeds"/>（那条路本来就按变体判），
+    /// 节点自己也没图的那种归上面第一条，两边都不重复报。
+    /// </summary>
+    private static List<(Guid NodeId, string NodeTitle, string Label)> ReferencesWaitingForCommit(
+        WorkflowCanvasState canvas,
+        IReadOnlyList<WorkflowNode> scope,
+        IReadOnlyList<WorkflowNode> settings,
+        Func<string, bool> exists)
+    {
+        var result = new List<(Guid, string, string)>();
+        var seen = new HashSet<(Guid, Guid)>();
+
+        foreach (var owner in scope)
+        foreach (var reference in owner.References)
+        {
+            if (!seen.Add((reference.EntityId, reference.VariantId))) continue;
+
+            var carrier = settings.FirstOrDefault(node =>
+                node.References.Any(item => item.EntityId == reference.EntityId && item.VariantId == reference.VariantId));
+            if (carrier is null) continue;
+
+            // 节点自己也没图：上面第一条已经报过了，别报两遍。
+            if (!HasKind(carrier.Attachments, AttachmentKind.Image, exists)) continue;
+
+            var content = canvas.ResolveReferenceContent(reference);
+            if (content is null) continue;
+            if (HasKind(content.Attachments, AttachmentKind.Image, exists)) continue;
+
+            result.Add((carrier.Id, carrier.Title, $"{content.Entity.Name} · {content.Variant.Name}"));
         }
 
         return result;

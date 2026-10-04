@@ -123,6 +123,7 @@ var tests = new (string Name, Action Run)[]
     ("空密钥是「没填」而不是「解不开」，也不该被说成「已密文落盘」", EmptyKeyMeansMissingNotUnreadable),
     ("设置页保存：刚敲的密钥存好后，回显与再保存一次都不能把它擦掉", SaveKeepsWhatTheFormJustTyped),
     ("生成链自检：四层缺口报数与花费预估、预勾只管挡路的那几件、缺失文件不算已出图", GenerationAuditReportsDependencyChain),
+    ("生成链自检：图要在「引用（变体）」上，只在节点上出过也算缺口（道具会换样子就出在这）", GenerationAuditAsksForTheImageOnTheVariantToo),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
     ("AI 建实体：内容同时落到核心设定与默认变体，引用卡不再空白", AgentEntityContentReachesVariantAndCard),
@@ -8674,6 +8675,46 @@ static void CiphertextFromAnotherPlatformIsReportedUnreadable()
 	Expect(!SecretProtector.IsEncryptedAtRest("sk-proj:abcdef"), "未知前缀更不算真的加密落盘");
 	Expect(SecretProtector.IsProtected("plain:x"), "plain: 是已知前缀");
 	Expect(!SecretProtector.IsEncryptedAtRest("plain:x"), "plain: 不能被算作加密落盘");
+}
+
+static void GenerationAuditAsksForTheImageOnTheVariantToo()
+{
+	// 参考图取自**变体**（`TargetReferenceImages` 读变体附件），而设定节点出图的产物挂在**节点**上。
+	// 节点有图 ≠ 引用有图——这个中间态最像「已经锁好了」，实际每一镜都拿不到它。
+	// 一件道具因此会在第一集是剑、第二集变成刀，所以自检必须把它单独指出来。
+	WorkflowCanvasState canvas = new WorkflowCanvasState();
+	WorkflowEntity prop = new WorkflowEntity { Kind = EntityKind.Prop, Name = "青光剑" };
+	WorkflowEntityVariant variant = prop.CreateVariant("默认");
+	canvas.Entities.Add(prop);
+
+	WorkflowNode propNode = new WorkflowNode { Title = "道具 · 青光剑", Category = NodeCategory.Prop };
+	propNode.References.Add(new NodeReference { EntityId = prop.Id, VariantId = variant.Id });
+	propNode.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://sword.png", Name = "青光剑设定图" });
+
+	WorkflowNode board = new WorkflowNode { Title = "分镜 1", Category = NodeCategory.Storyboard };
+	board.References.Add(new NodeReference { EntityId = prop.Id, VariantId = variant.Id });
+	canvas.Nodes.Add(propNode);
+	canvas.Nodes.Add(board);
+
+	GenerationAuditLayer layer = GenerationAudit.Build(canvas, board, null, (string _) => true)
+		.Layers.First((GenerationAuditLayer item) => item.Stage == GenerationStage.SettingImage);
+	Expect(layer.MissingCount == 1, "节点上有图、变体上没有图：这是「还没提交到引用」，要报出来，实际 " + layer.MissingCount);
+	Expect(layer.Missing[0].Reason.Contains("还没提交到引用"), "要说清是没提交到引用，不能笼统说「还没有图」，实际：" + layer.Missing[0].Reason);
+	Expect(layer.Missing[0].ActionNodeId == propNode.Id, "要能定位到承载它的那个设定节点");
+	Expect(layer.Missing[0].Actionable, "这一项可动作：到那个节点上补图并提交");
+
+	// 把图提交到变体上（= 参考图真正取到的地方）之后，缺口消失。
+	variant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://sword.png", Name = "青光剑设定图" });
+	Expect(GenerationAudit.Build(canvas, board, null, (string _) => true)
+			.Layers.First((GenerationAuditLayer item) => item.Stage == GenerationStage.SettingImage).MissingCount == 0,
+		"变体上有图之后就不该再报——参考图拿得到它了");
+
+	// 节点也没图时只报原来那条，不许出现两条。
+	propNode.Attachments.Clear();
+	GenerationAuditLayer layer2 = GenerationAudit.Build(canvas, board, null, (string _) => true)
+		.Layers.First((GenerationAuditLayer item) => item.Stage == GenerationStage.SettingImage);
+	Expect(layer2.MissingCount == 1 && !layer2.Missing[0].Reason.Contains("还没提交到引用"),
+		"节点也没图时只报一条「还没有图」，不重复报，实际：" + layer2.Missing[0].Reason);
 }
 
 static void GenerationAuditReportsDependencyChain()
