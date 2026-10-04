@@ -419,10 +419,14 @@
 
       <!-- 右下角常驻的 Agent 入口：面板被「叉掉」之后还能把它叫回来
            （以前叉掉就只剩右键菜单里那几条「交给 Agent」，没有一个看得见的入口）。
-           字母与颜色跟着当前模型的厂家走，是**自绘的字母徽标**，不是别家的 logo（理由见 ProviderBadges）。
-           放在启动页之前：没打开项目时它跟着工作台一起被启动页盖住，不抢注意力。 -->
+           字母与颜色跟着当前模型的厂家走，是**自绘的黑洞徽标**，不是别家的 logo（理由见 ProviderBadges）。
+           离底的 46 = 工作台自身的下边距 10 + 底部状态条的 34 + 2 的间隙。
+           早先这里写的是 22，而状态条下沿就在 10 的位置、上沿在 44——于是徽标整整压住状态条上面 12px，
+           鼠标移上来变实之后，右下角那几行状态就明显被挡。
+           放在启动页之前：没打开项目时它跟着工作台一起被启动页盖住，不抢注意力
+           （那一刻它的动画也是停的，见 BlackHoleBadge.Running）。 -->
       <Button x:Name="AgentBadgeButton" HorizontalAlignment="Right" VerticalAlignment="Bottom"
-              Width="46" Height="46" Margin="0,0,24,22" Padding="0"
+              Width="46" Height="46" Margin="0,0,24,46" Padding="0"
               Background="Transparent" BorderThickness="0" IsVisible="False" Click="AgentBadge_OnClick"
               Opacity="0.5" PointerEntered="AgentBadge_OnPointerEntered" PointerExited="AgentBadge_OnPointerExited">
         <!-- 平时半透明（它浮在画布上，实心时会挡住底下的节点），鼠标移上来才变实。
@@ -433,12 +437,10 @@
           </Transitions>
         </Button.Transitions>
 
-        <!-- 圆环放在按钮**里面**的 Border 上：Avalonia 的 Button 自己没有 BoxShadow，
-             而光晕（BoxShadow）正是这枚徽标「亮着」的那一层。 -->
-        <Border x:Name="AgentBadgeRing" Width="42" Height="42" CornerRadius="21" BorderThickness="1">
-          <TextBlock x:Name="AgentBadgeText" Text="AI" FontSize="12" FontWeight="Bold"
-                     HorizontalAlignment="Center" VerticalAlignment="Center" />
-        </Border>
+        <!-- 图标本体：一个一直在吸积物质的黑洞（视界、光子环、转着的吸积盘、往里掉的碎块）。
+             尺寸写死：这是个自绘控件，不给它显式大小的话它会以 0 参与测量、什么都画不出来。
+             外晕与光子环都由它自己画（原先那层 BoxShadow 去掉了），颜色跟着厂家走。 -->
+        <local:BlackHoleBadge x:Name="AgentBadgeSurface" Width="46" Height="46" />
       </Button>
 
       <!-- 启动页：盖在工作台之上。选项目之前不展示画布、工作树、Agent 面板与设置，

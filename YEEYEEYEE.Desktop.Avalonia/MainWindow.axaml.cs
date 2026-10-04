@@ -261,6 +261,8 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         WorkbenchRoot.IsVisible = false;
         StartPage.IsVisible = true;
+        // 工作台整体藏起来了，右下角那枚黑洞也跟着停——不然它会在启动页背后一直转。
+        UpdateAgentBadge();
         RefreshRecentProjects();
     }
 
@@ -6360,13 +6362,14 @@ public partial class MainWindow : Window, IAgentSessionHost
         var badge = ProviderBadges.Of(preset.Id);
         var color = Color.Parse(badge.ColorHex);
 
-        AgentBadgeText.Text = badge.Abbreviation;
-        AgentBadgeText.Foreground = new SolidColorBrush(color);
-        // 圆环自己不填色：底色压到很淡，只留一圈厂家色的边与一层同色光晕，
-        // 这样它在画布、左栏、右栏上面都不会变成一块突兀的色块。
-        AgentBadgeRing.Background = new SolidColorBrush(Color.FromArgb(30, color.R, color.G, color.B));
-        AgentBadgeRing.BorderBrush = new SolidColorBrush(color);
-        AgentBadgeRing.BoxShadow = BoxShadows.Parse($"0 0 18 -4 #{color.R:X2}{color.G:X2}{color.B:X2}");
+        // 图标本体自己画（黑洞：视界 / 光子环 / 转着的吸积盘 / 往里掉的碎块），
+        // 这里只把「哪一家」交给它：颜色与缩写。外晕也由它画，所以不再设 BoxShadow。
+        AgentBadgeSurface.Label = badge.Abbreviation;
+        AgentBadgeSurface.Accent = color;
+        // 看不见的时候把动画停掉：面板打开时这枚徽标藏着；没打开项目时它被启动页整个盖住
+        // （那一刻 WorkbenchRoot 是隐藏的）——两种情况都不该还在转。
+        // 窗口最小化那一种由控件自己盯着，这里看不到。
+        AgentBadgeSurface.Running = !open && WorkbenchRoot.IsVisible;
         ToolTip.SetTip(AgentBadgeButton,
             $"打开 Agent 协作 · {ProviderBadges.Describe(preset.Id, preset.Name)}");
     }
