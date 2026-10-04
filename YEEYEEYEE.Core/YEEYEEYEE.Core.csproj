@@ -6,4 +6,12 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <!-- 协议表：**两份实现共读一个文件**。这个文件住在 YEEYEEYEE.Canvas/src/shared/，
+       网页端直接 import，这一侧嵌进来（和 Desktop.Shared 嵌 uiText.json 是同一种做法）。
+       ⚠ 这条链会在 Docker 镜像里构建（Web → Host → Core），所以 Dockerfile 的②段必须把这个 json
+       也拷进构建上下文（本机不缺文件、镜像里缺，那种错只在镜像构建时出现）。 -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\YEEYEEYEE.Canvas\src\shared\protocol.json" LogicalName="protocol.json" Visible="false" />
+  </ItemGroup>
+
 </Project>

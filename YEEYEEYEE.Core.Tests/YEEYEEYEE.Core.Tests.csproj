@@ -14,6 +14,14 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.9" />
   </ItemGroup>
 
+  <!-- 协议表与它的固定样本：**还是同一份文件**（住在 YEEYEEYEE.Canvas/src/shared/）。
+       测试直接读源码树里的那两份，用来核「C# 嵌的就是它」以及「样本逐条都对得上」——
+       拷成副本的话，副本过期这件事本身又没人管了。 -->
+  <ItemGroup>
+    <Content Include="..\YEEYEEYEE.Canvas\src\shared\protocol.json" Link="fixtures\protocol.json" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <Content Include="..\YEEYEEYEE.Canvas\src\shared\protocolFixtures.json" Link="fixtures\protocolFixtures.json" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>

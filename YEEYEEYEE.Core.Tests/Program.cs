@@ -21,7 +21,8 @@ var tests = new (string Name, Action Run)[]
     ("任务重试血缘的持久化与恢复", JobRetryPersistence),
     ("返工 R1：重试上限按整条尝试链判定，历史源与并发都绕不过", JobRetryCapCannotBeBypassed),
     ("协议字段严格校验", StrictProtocolFields),
-    ("资源版本替换协议", ResourceReplaceProtocol),
+    ("资源版本替换协议（照两端共读的固定样本验）", ResourceReplaceProtocol),
+    ("协议表只有一份：C# 嵌的就是网页端那份 json（逐字节）", ProtocolTableIsSharedWithCanvas),
     ("资源版本替换状态", ResourceReplaceState),
     ("引用媒体草稿隔离与定向提交", ReferenceMediaDraftIsolation),
     ("媒体版本回滚仅影响草稿", MediaVersionRollbackDraftOnly),
@@ -406,51 +407,88 @@ static void StrictProtocolFields()
     ExpectThrows<ProtocolViolationException>(() => YEEYEEYEEProtocol.Decode(valid.Replace("\"ts\":1", "\"ts\":1.5"), "canvasToHost"), "PROTOCOL_MALFORMED");
 }
 
+/// <summary>
+/// 资源版本替换协议：**照固定样本验**，不照现场手写的 JSON 验。
+///
+/// 样本住在 <c>YEEYEEYEE.Canvas/src/shared/protocolFixtures.json</c>——两端共读同一份。
+/// 用手写内联 JSON 的时候，「什么算合法」只存在于这一个测试里，另一端的实现没有可照的东西；
+/// 而这类协议最容易出的错就是两边各自理解了一遍「必填」。
+/// </summary>
 static void ResourceReplaceProtocol()
 {
-    var recordId = Guid.NewGuid();
-    var entityId = Guid.NewGuid();
-    var variantId = Guid.NewGuid();
-    var valid = JsonSerializer.Serialize(new
+    var fixturePath = Path.Combine(AppContext.BaseDirectory, "fixtures", "protocolFixtures.json");
+    Expect(File.Exists(fixturePath), "找不到协议样本：" + fixturePath);
+
+    using var document = JsonDocument.Parse(File.ReadAllText(fixturePath));
+    var root = document.RootElement;
+    var checkedCases = 0;
+    foreach (var section in new[] { "request", "result" })
     {
-        v = 1,
-        id = Guid.NewGuid(),
-        type = "canvas/resource.replace.request",
-        ts = 1L,
-        payload = new
+        var block = root.GetProperty(section);
+        var type = block.GetProperty("type").GetString()!;
+        var direction = block.GetProperty("direction").GetString()!;
+        Expect(YEEYEEYEEProtocol.DirectionOf(type) == direction, $"{type} 的方向与协议表里不一致");
+
+        foreach (var item in block.GetProperty("cases").EnumerateArray())
         {
-            recordId,
-            entityId,
-            variantId,
-            variantVersionId = (Guid?)null
+            checkedCases++;
+            var name = item.GetProperty("name").GetString();
+            // 样本可以自己改方向（用来验「方向反了就拒」那条）。
+            var useDirection = item.TryGetProperty("direction", out var overridden)
+                ? overridden.GetString()!
+                : direction;
+            var message = JsonSerializer.Serialize(new
+            {
+                v = YEEYEEYEEProtocol.Version,
+                id = Guid.NewGuid(),
+                type,
+                ts = 1L,
+                payload = item.GetProperty("payload")
+            });
+
+            if (item.GetProperty("ok").GetBoolean())
+            {
+                using var decoded = YEEYEEYEEProtocol.Decode(message, useDirection);
+                Expect(decoded.RootElement.GetProperty("type").GetString() == type, $"样本「{name}」应当验得过");
+                continue;
+            }
+
+            var code = item.GetProperty("code").GetString()!;
+            try { ExpectThrows<ProtocolViolationException>(() => YEEYEEYEEProtocol.Decode(message, useDirection), code); }
+            catch (InvalidOperationException error) { throw new InvalidOperationException($"样本「{name}」：" + error.Message); }
         }
-    });
-    using var decoded = YEEYEEYEEProtocol.Decode(valid, "canvasToHost");
-    Expect(decoded.RootElement.GetProperty("type").GetString() == "canvas/resource.replace.request", "资源替换请求未通过协议校验");
+    }
 
-    var invalid = valid.Replace(recordId.ToString(), "bad-record-id", StringComparison.Ordinal);
-    ExpectThrows<ProtocolViolationException>(() => YEEYEEYEEProtocol.Decode(invalid, "canvasToHost"), "PROTOCOL_MALFORMED");
+    // 扫到 0 条说明样本文件没被读到，这条对拍就成了摆设。
+    Expect(checkedCases >= 8, "样本太少了，这条对拍等于没验：" + checkedCases);
+}
 
-    var missingVersion = valid.Replace(",\"variantVersionId\":null", string.Empty, StringComparison.Ordinal);
-    ExpectThrows<ProtocolViolationException>(() => YEEYEEYEEProtocol.Decode(missingVersion, "canvasToHost"), "PROTOCOL_MALFORMED");
+/// <summary>
+/// 协议表只有一份：C# 嵌进去的必须**逐字节等于**源码树里那个 json，
+/// 而不是另抄的一张小表。抄一份的话，「某条消息莫名被判为未知类型」这类症状
+/// 没人会想到去查协议表——两端各存一份表，先对不上的那次就是这样表现。
+/// </summary>
+static void ProtocolTableIsSharedWithCanvas()
+{
+    var tablePath = Path.Combine(AppContext.BaseDirectory, "fixtures", "protocol.json");
+    Expect(File.Exists(tablePath), "找不到共享协议表：" + tablePath);
+    var onDisk = File.ReadAllBytes(tablePath);
 
-    var result = JsonSerializer.Serialize(new
-    {
-        v = 1,
-        id = Guid.NewGuid(),
-        type = "host/resource.replace.result",
-        ts = 1L,
-        payload = new
-        {
-            requestId = Guid.NewGuid(),
-            ok = true,
-            message = "资源版本替换成功。",
-            revision = 3
-        }
-    });
-    using var resultDocument = YEEYEEYEEProtocol.Decode(result, "hostToCanvas");
-    Expect(resultDocument.RootElement.GetProperty("type").GetString() == "host/resource.replace.result", "资源替换结果未通过协议校验");
-    ExpectThrows<ProtocolViolationException>(() => YEEYEEYEEProtocol.Decode(result, "canvasToHost"), "PROTOCOL_DIRECTION_MISMATCH");
+    using var embedded = typeof(YEEYEEYEEProtocol).Assembly.GetManifestResourceStream("protocol.json");
+    Expect(embedded is not null, "嵌入式协议表不见了：检查 YEEYEEYEE.Core.csproj 里那条 EmbeddedResource");
+    using var buffer = new MemoryStream();
+    embedded!.CopyTo(buffer);
+    Expect(buffer.ToArray().SequenceEqual(onDisk), "嵌进去的协议表与源码树里那份不一致：是不是有人另抄了一份");
+
+    Expect(YEEYEEYEEProtocol.MessageTypes.Count >= 10, "表里的消息类型少得不像话：" + YEEYEEYEEProtocol.MessageTypes.Count);
+    var directions = YEEYEEYEEProtocol.MessageTypes.Select(YEEYEEYEEProtocol.DirectionOf).Distinct().ToList();
+    Expect(directions.All(item => item is "canvasToHost" or "hostToCanvas"),
+        "方向只该有那两个，实际 " + string.Join("、", directions));
+    Expect(directions.Count == 2, "两个方向都该用到");
+    Expect(YEEYEEYEEProtocol.RequiredFieldsOf("canvas/resource.replace.request").Count == 4,
+        "必填字段读的是表里的那一份");
+    Expect(YEEYEEYEEProtocol.DirectionOf("不存在的类型") is null, "表里没有的类型就该是 null");
+    Expect(YEEYEEYEEProtocol.RequiredFieldsOf("不存在的类型").Count == 0, "表里没有的类型没有必填字段");
 }
 
 static void ResourceReplaceState()

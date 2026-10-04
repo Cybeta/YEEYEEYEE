@@ -4,12 +4,29 @@ namespace YEEYEEYEE.Core;
 
 public static class YEEYEEYEEProtocol
 {
-    public const int Version = 1;
-    private static readonly IReadOnlyDictionary<string, string> Directions = new Dictionary<string, string>(StringComparer.Ordinal)
-    {
-        ["canvas/hello"] = "canvasToHost", ["canvas/op.batch"] = "canvasToHost", ["canvas/undo.request"] = "canvasToHost", ["canvas/redo.request"] = "canvasToHost", ["canvas/invoke.request"] = "canvasToHost", ["canvas/job.cancel.request"] = "canvasToHost", ["canvas/selection.changed"] = "canvasToHost", ["canvas/resource.replace.request"] = "canvasToHost", ["canvas/diagnostic"] = "canvasToHost",
-        ["host/init"] = "hostToCanvas", ["host/op.batch"] = "hostToCanvas", ["host/scene.reset"] = "hostToCanvas", ["host/undo.result"] = "hostToCanvas", ["host/job.update"] = "hostToCanvas", ["host/capabilities"] = "hostToCanvas", ["host/error"] = "hostToCanvas", ["host/resource.replace.result"] = "hostToCanvas"
-    };
+    /// <summary>
+    /// 消息表：类型 → 方向 + 必填字段 + 协议版本。**只有一份**，住在
+    /// <c>YEEYEEYEE.Canvas/src/shared/protocol.json</c>，这一侧用 EmbeddedResource 把
+    /// **同一个文件**嵌进来（见 <c>YEEYEEYEE.Core.csproj</c>）。
+    ///
+    /// 为什么不留一份 C# 里的副本：两端各存一份表的时候，先对不上的那次只会表现成
+    /// 「某条消息莫名被判为未知类型」——没有人会想到去查协议表。版本号同理，只有 json 里那一个。
+    /// </summary>
+    private static readonly ProtocolTable Table = ProtocolTable.Load();
+
+    /// <summary>信封版本。</summary>
+    public static int Version => Table.Version;
+
+    /// <summary>表里认得的全部消息类型（顺序即表里的顺序）。</summary>
+    public static IReadOnlyList<string> MessageTypes => Table.Types;
+
+    /// <summary>某个类型的方向；表里没有就是 null。</summary>
+    public static string? DirectionOf(string type) =>
+        Table.Directions.TryGetValue(type, out var direction) ? direction : null;
+
+    /// <summary>某个类型的必填字段；表里没有就是空。</summary>
+    public static IReadOnlyList<string> RequiredFieldsOf(string type) =>
+        Table.Required.TryGetValue(type, out var fields) ? fields : Array.Empty<string>();
 
     public static JsonDocument Decode(string json, string direction)
     {
@@ -20,7 +37,7 @@ public static class YEEYEEYEEProtocol
         { doc.Dispose(); throw new ProtocolViolationException("PROTOCOL_MALFORMED", "信封字段无效"); }
         if (v.GetInt32() != Version) { doc.Dispose(); throw new ProtocolViolationException("PROTOCOL_VERSION_MISMATCH", "协议版本不匹配"); }
         var typeValue = type.GetString()!;
-        if (!Directions.TryGetValue(typeValue, out var expectedDirection)) { doc.Dispose(); throw new ProtocolViolationException("PROTOCOL_UNKNOWN_TYPE", $"未知消息类型 {typeValue}"); }
+        if (!Table.Directions.TryGetValue(typeValue, out var expectedDirection)) { doc.Dispose(); throw new ProtocolViolationException("PROTOCOL_UNKNOWN_TYPE", $"未知消息类型 {typeValue}"); }
         if (!StringComparer.Ordinal.Equals(expectedDirection, direction)) { doc.Dispose(); throw new ProtocolViolationException("PROTOCOL_DIRECTION_MISMATCH", $"消息方向错误 {typeValue}"); }
         ValidatePayload(typeValue, payload);
         return doc;
@@ -28,7 +45,7 @@ public static class YEEYEEYEEProtocol
 
     private static void ValidatePayload(string type, JsonElement payload)
     {
-        foreach (var field in RequiredFields(type)) if (!payload.TryGetProperty(field, out _)) throw new ProtocolViolationException("PROTOCOL_MALFORMED", $"{type} 缺少字段 {field}");
+        foreach (var field in RequiredFieldsOf(type)) if (!payload.TryGetProperty(field, out _)) throw new ProtocolViolationException("PROTOCOL_MALFORMED", $"{type} 缺少字段 {field}");
         if ((type is "canvas/undo.request" or "canvas/redo.request") && (!payload.TryGetProperty("localOnly", out var local) || local.ValueKind != JsonValueKind.True)) throw new ProtocolViolationException("PROTOCOL_UNAUTHORIZED", "只能执行单人本地撤销", "warning");
         if (type == "host/undo.result" && payload.TryGetProperty("localOnly", out var resultLocal) && resultLocal.ValueKind != JsonValueKind.True) throw new ProtocolViolationException("PROTOCOL_FAIL_CLOSED", "禁止协作快照撤销");
         if (type == "canvas/invoke.request" && (!payload.TryGetProperty("idempotencyKey", out var key) || key.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(key.GetString()))) throw new ProtocolViolationException("PROTOCOL_MALFORMED", "执行请求缺少幂等键");
@@ -44,8 +61,8 @@ public static class YEEYEEYEEProtocol
             if (!Guid.TryParse(payload.GetProperty(field).GetString(), out _))
                 throw new ProtocolViolationException("PROTOCOL_MALFORMED", $"资源替换请求的 {field} 无效");
 
-        if (payload.TryGetProperty("variantVersionId", out var version)
-            && version.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+        if (!payload.TryGetProperty("variantVersionId", out var version)) return;
+        if (version.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
             throw new ProtocolViolationException("PROTOCOL_MALFORMED", "资源替换请求的 variantVersionId 无效");
 
         if (version.ValueKind == JsonValueKind.String
@@ -80,23 +97,64 @@ public static class YEEYEEYEEProtocol
         var map = new Dictionary<string, string> { ["canEditCanvas"] = "canvas.edit", ["canInvokeSkill"] = "skill.invoke", ["canCancelJob"] = "job.cancel", ["canUndo"] = "canvas.undo" };
         foreach (var item in map) if (payload.TryGetProperty(item.Key, out var enabled) && enabled.ValueKind == JsonValueKind.True && !claims.Contains(item.Value)) throw new ProtocolViolationException("PROTOCOL_UNAUTHORIZED", $"能力位 {item.Key} 超出声明集");
     }
+}
 
-    private static IEnumerable<string> RequiredFields(string type) => type switch
+/// <summary>
+/// 协议表本体，从嵌进来的 <c>protocol.json</c> 读。
+///
+/// **加载时就把表验一遍**：真出问题要在这一处炸开并说清是哪一个类型，而不是等到某条消息
+/// 被判成未知类型——那种症状离原因太远（一个「未知消息类型」可以是表坏了、也可以真的是对方发错了）。
+/// </summary>
+internal sealed class ProtocolTable
+{
+    private ProtocolTable(
+        int version,
+        IReadOnlyList<string> types,
+        IReadOnlyDictionary<string, string> directions,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> required)
     {
-        "canvas/hello" => ["canvasVersion", "protocolVersion", "minHostProtocol", "features"],
-        "canvas/op.batch" => ["batchId", "baseRevision", "source", "ops"],
-        "canvas/undo.request" or "canvas/redo.request" => ["localOnly"],
-        "canvas/invoke.request" => ["invocation", "idempotencyKey"],
-        "canvas/resource.replace.request" => ["recordId", "entityId", "variantId", "variantVersionId"],
-        "canvas/job.cancel.request" => ["jobId"],
-        "host/init" => ["protocolVersion", "hostVersion", "session", "capabilities", "scene", "locale"],
-        "host/op.batch" => ["batchId", "revision", "origin", "actorSessionId", "ops"],
-        "host/scene.reset" => ["revision", "reason", "scene"],
-        "host/undo.result" => ["ok", "localOnly", "revision", "reason"],
-        "host/job.update" => ["jobId", "invocationId", "state", "progressPercent", "outputs"],
-        "host/capabilities" => ["serverClaims", "canEditCanvas", "canInvokeSkill", "canCancelJob", "canUndo"],
-        "host/resource.replace.result" => ["requestId", "ok", "message"],
-        "host/error" => ["code", "message", "severity"],
-        _ => Array.Empty<string>()
-    };
+        Version = version;
+        Types = types;
+        Directions = directions;
+        Required = required;
+    }
+
+    public int Version { get; }
+    public IReadOnlyList<string> Types { get; }
+    public IReadOnlyDictionary<string, string> Directions { get; }
+    public IReadOnlyDictionary<string, IReadOnlyList<string>> Required { get; }
+
+    public static ProtocolTable Load()
+    {
+        using var stream = typeof(YEEYEEYEEProtocol).Assembly.GetManifestResourceStream("protocol.json")
+            ?? throw new InvalidOperationException(
+                "嵌入式协议表 protocol.json 不见了：检查 YEEYEEYEE.Core.csproj 里那条 EmbeddedResource"
+                + "（它指向 YEEYEEYEE.Canvas/src/shared/protocol.json），"
+                + "以及 Dockerfile 有没有把那个 json 拷进构建上下文。");
+
+        using var document = JsonDocument.Parse(stream);
+        var root = document.RootElement;
+        var version = root.GetProperty("version").GetInt32();
+        var allowed = root.GetProperty("directions").EnumerateArray().Select(item => item.GetString() ?? string.Empty).ToList();
+
+        var types = new List<string>();
+        var directions = new Dictionary<string, string>(StringComparer.Ordinal);
+        var required = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        foreach (var item in root.GetProperty("messages").EnumerateArray())
+        {
+            var type = item.GetProperty("type").GetString() ?? string.Empty;
+            var direction = item.GetProperty("direction").GetString() ?? string.Empty;
+            if (type.Length == 0) throw new InvalidOperationException("协议表里有条目没写 type。");
+            if (!allowed.Contains(direction, StringComparer.Ordinal))
+                throw new InvalidOperationException($"协议表里 {type} 的方向「{direction}」不在允许的两个里。");
+            if (!directions.TryAdd(type, direction))
+                throw new InvalidOperationException($"协议表里 {type} 写了两遍。");
+            types.Add(type);
+            required[type] = item.GetProperty("required").EnumerateArray()
+                .Select(field => field.GetString() ?? string.Empty).ToList();
+        }
+
+        if (types.Count == 0) throw new InvalidOperationException("协议表里一条消息都没有。");
+        return new ProtocolTable(version, types, directions, required);
+    }
 }

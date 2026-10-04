@@ -36,10 +36,12 @@ COPY YEEYEEYEE.Host/ YEEYEEYEE.Host/
 COPY YEEYEEYEE.Desktop.Core/ YEEYEEYEE.Desktop.Core/
 COPY YEEYEEYEE.Desktop.Shared/ YEEYEEYEE.Desktop.Shared/
 COPY YEEYEEYEE.Web/ YEEYEEYEE.Web/
-# 两端共读的界面文案：它住在**网页端项目**里（那边的 TS 只能 import 项目内的文件），
-# 而 Desktop.Shared 用 EmbeddedResource 嵌同一个文件（见它 csproj 里的说明）。
-# 所以这条链上也得拷它——少这一行就是「本机照过、镜像构建才炸」那种错。
-COPY YEEYEEYEE.Canvas/src/shared/uiText.json YEEYEEYEE.Canvas/src/shared/uiText.json
+# 两端共读的共享文件（界面文案 uiText.json、协议表 protocol.json）：它们住在**网页端项目**里
+# （那边的 TS 只能 import 项目内的文件），而 Desktop.Shared 与 Core 用 EmbeddedResource
+# 嵌的是同一个文件（见各自 csproj 里的说明），所以这条链上也得拷它们——
+# 少一行就是「本机照过、镜像构建才炸」那种错。
+# 这里整个目录一起拷，而不是一个文件一行：以后再加共享文件不必记得回来补一行（这正是这类错的来源）。
+COPY YEEYEEYEE.Canvas/src/shared/ YEEYEEYEE.Canvas/src/shared/
 RUN dotnet publish YEEYEEYEE.Web/YEEYEEYEE.Web.csproj -c Release -o /app --no-restore
 
 # ---------- ③ 运行时 ----------

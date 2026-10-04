@@ -1,0 +1,106 @@
+{
+  "note": "协议固定样本：两端共用同一份。这里放的是**载荷**，信封（v/id/type/ts/payload）由各自的对拍代码按同一形状补上——信封只有一种形状，样本要钉的是「载荷里什么算合法」。改判定先改这里，两份实现（C# 的 YEEYEEYEEProtocol、网页端将来那条路）都照它验。",
+  "request": {
+    "type": "canvas/resource.replace.request",
+    "direction": "canvasToHost",
+    "cases": [
+      {
+        "name": "锁定到具体一版",
+        "ok": true,
+        "payload": {
+          "recordId": "6f1f0d9e-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+          "entityId": "11111111-2222-3333-4444-555555555555",
+          "variantId": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+          "variantVersionId": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+        }
+      },
+      {
+        "name": "解除锁定（variantVersionId 明确为 null）",
+        "ok": true,
+        "payload": {
+          "recordId": "6f1f0d9e-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+          "entityId": "11111111-2222-3333-4444-555555555555",
+          "variantId": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+          "variantVersionId": null
+        }
+      },
+      {
+        "name": "recordId 不是 Guid",
+        "ok": false,
+        "code": "PROTOCOL_MALFORMED",
+        "payload": {
+          "recordId": "记录一号",
+          "entityId": "11111111-2222-3333-4444-555555555555",
+          "variantId": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+          "variantVersionId": null
+        }
+      },
+      {
+        "name": "变体 ID 不是 Guid",
+        "ok": false,
+        "code": "PROTOCOL_MALFORMED",
+        "payload": {
+          "recordId": "6f1f0d9e-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+          "entityId": "11111111-2222-3333-4444-555555555555",
+          "variantId": "默认变体",
+          "variantVersionId": null
+        }
+      },
+      {
+        "name": "variantVersionId 既不是字符串也不是 null",
+        "ok": false,
+        "code": "PROTOCOL_MALFORMED",
+        "payload": {
+          "recordId": "6f1f0d9e-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+          "entityId": "11111111-2222-3333-4444-555555555555",
+          "variantId": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+          "variantVersionId": 3
+        }
+      },
+      {
+        "name": "缺必填字段 variantId",
+        "ok": false,
+        "code": "PROTOCOL_MALFORMED",
+        "payload": {
+          "recordId": "6f1f0d9e-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+          "entityId": "11111111-2222-3333-4444-555555555555",
+          "variantVersionId": null
+        }
+      },
+      {
+        "name": "方向反了（宿主方向收画布请求）",
+        "ok": false,
+        "code": "PROTOCOL_DIRECTION_MISMATCH",
+        "direction": "hostToCanvas",
+        "payload": {
+          "recordId": "6f1f0d9e-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+          "entityId": "11111111-2222-3333-4444-555555555555",
+          "variantId": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+          "variantVersionId": null
+        }
+      }
+    ]
+  },
+  "result": {
+    "type": "host/resource.replace.result",
+    "direction": "hostToCanvas",
+    "cases": [
+      {
+        "name": "替换成功",
+        "ok": true,
+        "payload": { "requestId": "6f1f0d9e-1a2b-4c3d-8e4f-5a6b7c8d9e0f", "ok": true, "message": "已换成 v2" }
+      },
+      {
+        "name": "替换被拒（业务上的拒绝仍然是合法消息）",
+        "ok": true,
+        "payload": { "requestId": "6f1f0d9e-1a2b-4c3d-8e4f-5a6b7c8d9e0f", "ok": false, "message": "这条引用锁定了版本，先解锁" }
+      },
+      {
+        "name": "缺 message",
+        "ok": false,
+        "code": "PROTOCOL_MALFORMED",
+        "payload": { "requestId": "6f1f0d9e-1a2b-4c3d-8e4f-5a6b7c8d9e0f", "ok": true }
+      }
+    ]
+  }
+}

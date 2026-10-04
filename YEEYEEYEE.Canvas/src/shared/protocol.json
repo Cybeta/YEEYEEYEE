@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "note": "画布与宿主之间的消息表：类型 → 方向 + 必填字段。**唯一的一份**：C# 侧（YEEYEEYEE.Core）用 EmbeddedResource 嵌的就是这个文件，网页端直接 import 它。两端各存一份表的时候，先对不上的那次只会表现成「某条消息莫名被判为未知类型」，而没有人会去查协议表。",
+  "directions": ["canvasToHost", "hostToCanvas"],
+  "messages": [
+    { "type": "canvas/hello", "direction": "canvasToHost", "required": ["canvasVersion", "protocolVersion", "minHostProtocol", "features"] },
+    { "type": "canvas/op.batch", "direction": "canvasToHost", "required": ["batchId", "baseRevision", "source", "ops"] },
+    { "type": "canvas/undo.request", "direction": "canvasToHost", "required": ["localOnly"] },
+    { "type": "canvas/redo.request", "direction": "canvasToHost", "required": ["localOnly"] },
+    { "type": "canvas/invoke.request", "direction": "canvasToHost", "required": ["invocation", "idempotencyKey"] },
+    { "type": "canvas/job.cancel.request", "direction": "canvasToHost", "required": ["jobId"] },
+    { "type": "canvas/selection.changed", "direction": "canvasToHost", "required": [] },
+    { "type": "canvas/resource.replace.request", "direction": "canvasToHost", "required": ["recordId", "entityId", "variantId", "variantVersionId"] },
+    { "type": "canvas/diagnostic", "direction": "canvasToHost", "required": [] },
+
+    { "type": "host/init", "direction": "hostToCanvas", "required": ["protocolVersion", "hostVersion", "session", "capabilities", "scene", "locale"] },
+    { "type": "host/op.batch", "direction": "hostToCanvas", "required": ["batchId", "revision", "origin", "actorSessionId", "ops"] },
+    { "type": "host/scene.reset", "direction": "hostToCanvas", "required": ["revision", "reason", "scene"] },
+    { "type": "host/undo.result", "direction": "hostToCanvas", "required": ["ok", "localOnly", "revision", "reason"] },
+    { "type": "host/job.update", "direction": "hostToCanvas", "required": ["jobId", "invocationId", "state", "progressPercent", "outputs"] },
+    { "type": "host/capabilities", "direction": "hostToCanvas", "required": ["serverClaims", "canEditCanvas", "canInvokeSkill", "canCancelJob", "canUndo"] },
+    { "type": "host/resource.replace.result", "direction": "hostToCanvas", "required": ["requestId", "ok", "message"] },
+    { "type": "host/error", "direction": "hostToCanvas", "required": ["code", "message", "severity"] }
+  ]
+}
