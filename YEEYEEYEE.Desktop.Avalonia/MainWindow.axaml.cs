@@ -2889,10 +2889,78 @@ public partial class MainWindow : Window, IAgentSessionHost
             frame.Length == 0
                 ? "这个节点上还没有图：这次走文生视频，画面由模型照着提示词自己编——先出一张这一镜的画面再来，会稳得多。"
                 : workflowTakesFrame == false
-                    ? $"首帧：节点上最新那张图（{Path.GetFileName(frame)}）——但这份工作流没有底图入口，"
-                      + "首帧不会被用上（它只能文生视频）。"
+                    ? slots?.CanTakeVideo == true
+                        ? $"首帧：节点上最新那张图（{Path.GetFileName(frame)}）——但这份工作流吃的是**一段片子**"
+                          + "（它有源视频入口，没有底图入口），首帧不会被用上。"
+                        : $"首帧：节点上最新那张图（{Path.GetFileName(frame)}）——但这份工作流没有底图入口，"
+                          + "首帧不会被用上（它只能文生视频）。"
                     : $"首帧：节点上最新那张图（{Path.GetFileName(frame)}）——走图生视频，出来的是这一镜动起来的样子。",
             frame.Length > 0 && workflowTakesFrame != false ? AgentNoteLevel.Info : AgentNoteLevel.Warning));
+
+        // ---------- 源视频 / 源音频 ----------
+        // 影视二创、对口型、视频修复、补帧超分那一支吃的是**一段片子**：首帧对它们没用，
+        // 真正要喂的是这个。所以这一行**只在那份工作流确实有这种入口时**才出现——
+        // 每份工作流都挂一行「选视频」只会让人以为随便哪份都能吃片子。
+        var sourceVideoPaths = new List<string>();
+        var sourceAudioPaths = new List<string>();
+
+        StackPanel SourceMediaRow(string label, string pickTitle, string[] patterns, List<string> sink, string hint)
+        {
+            var box = new TextBox { Width = 300, FontSize = 12, IsReadOnly = true, Watermark = "还没选" };
+            var pick = AgentDialogUi.Secondary("选文件…");
+            var clear = AgentDialogUi.Secondary("清空");
+            pick.Click += async (_, _) =>
+            {
+                var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+                {
+                    Title = pickTitle,
+                    AllowMultiple = false,
+                    FileTypeFilter = new[] { new FilePickerFileType(label) { Patterns = patterns } }
+                });
+                var path = files.FirstOrDefault()?.TryGetLocalPath();
+                if (string.IsNullOrWhiteSpace(path)) return;
+                sink.Clear();
+                sink.Add(path);
+                box.Text = path;
+            };
+            clear.Click += (_, _) =>
+            {
+                sink.Clear();
+                box.Text = string.Empty;
+            };
+
+            var row = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 8,
+                Children =
+                {
+                    new TextBlock { Text = label, FontSize = 11, Foreground = AgentDialogUi.Brush("DfInk2"), VerticalAlignment = VerticalAlignment.Center },
+                    box,
+                    pick,
+                    clear
+                }
+            };
+            body.Children.Add(row);
+            body.Children.Add(AgentDialogUi.Note(hint));
+            return row;
+        }
+
+        if (slots?.CanTakeVideo == true)
+        {
+            SourceMediaRow(
+                "源视频", "选一段要处理的视频", new[] { "*.mp4", "*.mov", "*.webm", "*.mkv", "*.gif" }, sourceVideoPaths,
+                $"这份工作流吃的是**一段片子**（节点 {string.Join("、", slots.VideoNodeIds)}）：选一段本机视频，"
+                + "它会被先传到那台 ComfyUI 上再写进这些入口。不选的话它会拿它自己示例里的片段跑——"
+                + "出来的内容与你的素材无关，而且从结果上看不出来。");
+        }
+
+        if (slots?.CanTakeAudio == true)
+        {
+            SourceMediaRow(
+                "源音频", "选一段音（对口型 / 配乐）", new[] { "*.mp3", "*.wav", "*.flac", "*.m4a", "*.ogg" }, sourceAudioPaths,
+                $"这份工作流还要一段音（节点 {string.Join("、", slots.AudioNodeIds)}）：不选就沿用它自己示例里的那一段。");
+        }
 
         // ---------- 时长 / 比例 / 目标像素 ----------
         // 这三个是出视频的参数入口。**比例与目标像素只在走工作流时才有意义**：接口站那条路只发时长，
@@ -2981,13 +3049,24 @@ public partial class MainWindow : Window, IAgentSessionHost
         go.Click += (_, _) =>
         {
             var text = prompt.Text ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(text))
+            // 提示词这一段只在**这份工作流确实收文字**时才必须要：视频修复 / 补帧超分 / 去水印
+            // 那一支本来就不吃提示词（它按你给的那段片子干活），拿「提示词是空的」挡下来等于把这类用法关在门外。
+            if (string.IsNullOrWhiteSpace(text) && slots?.CanTextToImage != false)
             {
                 StatusText.Text = "提示词是空的，没有发出任何请求。";
                 return;
             }
+            // 这一支要吃片子却没选：当面说清，别让它拿工作流自带的那段示例素材跑——
+            // 那种结果与你给的东西无关，而且从画面上完全看不出来。
+            if (slots?.CanTakeVideo == true && sourceVideoPaths.Count == 0)
+            {
+                StatusText.Text = "这份工作流要吃一段**源视频**（视频修复 / 补帧超分 / 影视二创这一类）："
+                    + "先在窗口里选一段本机视频再点。不选的话它会拿它自己示例里的片段跑。";
+                return;
+            }
             dialog.Close();
-            _ = RunVideoAsync(node, text, frame, CurrentSeconds(), source, provider, CurrentAspect(), CurrentMegapixels());
+            _ = RunVideoAsync(node, text, frame, CurrentSeconds(), source, provider, CurrentAspect(), CurrentMegapixels(),
+                sourceVideoPaths, sourceAudioPaths);
         };
         await dialog.ShowDialog(this);
     }
@@ -3000,7 +3079,8 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// </summary>
     private async Task RunVideoAsync(
         WorkflowNode node, string prompt, string frame, int seconds, ImageSourceChoice? source, IVideoProvider provider,
-        string aspectRatio = "", double megapixels = 0)
+        string aspectRatio = "", double megapixels = 0,
+        IReadOnlyList<string>? sourceVideos = null, IReadOnlyList<string>? sourceAudios = null)
     {
         if (currentCanvas is null) return;
 
@@ -3043,6 +3123,10 @@ public partial class MainWindow : Window, IAgentSessionHost
             AspectRatio = aspectRatio,
             Megapixels = megapixels,
             ReferenceImages = frames,
+            // 源视频 / 源音频：那一支工作流吃的是**一段片子**（对口型还要一段音）。
+            // 首帧照旧带上——有些工作流两样都要（例如「按参考片做动作迁移、用首帧定外观」）。
+            SourceVideos = sourceVideos ?? Array.Empty<string>(),
+            SourceAudios = sourceAudios ?? Array.Empty<string>(),
             // 走 ComfyUI 工作流时带这三个：站点 id + 正文文件名 + 工作流键（与出图那条路同一套口径）。
             // 三个都空 = 走接口站的视频池子。
             WorkflowSiteId = source?.Workflow?.Site.Id ?? string.Empty,

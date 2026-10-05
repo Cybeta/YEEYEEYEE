@@ -40,7 +40,7 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
 
     public async Task<ExecutionOutput> ExecuteAsync(SessionContext session, Invocation invocation, Job job, CancellationToken cancellationToken)
     {
-        var effective = await ResolveReferenceImagesAsync(invocation, cancellationToken).ConfigureAwait(false);
+        var effective = await ResolveUploadsAsync(invocation, cancellationToken).ConfigureAwait(false);
         var response = await http.PostAsJsonAsync(
             "prompt",
             new ComfyUiPromptRequest { Prompt = workflowFactory(effective), ClientId = clientId },
@@ -77,35 +77,57 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
             : string.Empty;
 
     /// <summary>
-    /// 把本机参考图全部上传到 ComfyUI 的输入目录，LoadImage 节点才能按文件名引用它们。
-    /// 上传后把 referenceImages 替换成 ComfyUI 侧的文件名；能用几张由工作流模板决定。
+    /// 把本机的**素材**（参考图 / 源视频 / 源音频）全部上传到 ComfyUI 的输入目录——
+    /// 工作流里的 <c>LoadImage</c> / <c>VHS_LoadVideo</c> / <c>LoadAudio</c> 这些节点是按**文件名**引用它们的。
+    /// 上传后把这些字段换成 ComfyUI 侧的文件名；能用几个由那份工作流说了算。
+    ///
+    /// 为什么三样都走同一个端点：实测 <c>/upload/image</c> 收视频与音频一样好使——它就是往 input 目录里
+    /// 存一个文件，不校验内容类型。传一段 mp4 上去之后，它立刻出现在 <c>VHS_LoadVideo.video</c> 的候选清单里
+    /// （这就是那些工作流「从服务器文件里挑一个」的清单）。
     /// </summary>
-    private async Task<Invocation> ResolveReferenceImagesAsync(Invocation invocation, CancellationToken cancellationToken)
+    private async Task<Invocation> ResolveUploadsAsync(Invocation invocation, CancellationToken cancellationToken)
     {
-        var localPaths = ReadReferencePaths(invocation);
-        if (localPaths.Count == 0) return invocation;
+        var images = ReadLocalPaths(invocation, "referenceImages", "referenceImage");
+        var videos = ReadLocalPaths(invocation, "referenceVideos", null);
+        var audios = ReadLocalPaths(invocation, "referenceAudios", null);
+        if (images.Count == 0 && videos.Count == 0 && audios.Count == 0) return invocation;
 
-        var uploaded = new List<string>();
-        foreach (var path in localPaths)
-        {
-            if (!File.Exists(path)) continue;
-            uploaded.Add(await UploadImageAsync(path, cancellationToken).ConfigureAwait(false));
-        }
-        if (uploaded.Count == 0) return invocation;
+        var uploadedImages = await UploadAllAsync(images, "参考图", cancellationToken).ConfigureAwait(false);
+        var uploadedVideos = await UploadAllAsync(videos, "源视频", cancellationToken).ConfigureAwait(false);
+        var uploadedAudios = await UploadAllAsync(audios, "源音频", cancellationToken).ConfigureAwait(false);
 
-        var inputs = new Dictionary<string, JsonElement>(invocation.Inputs)
-        {
-            ["referenceImages"] = JsonSerializer.SerializeToElement(uploaded)
-        };
+        var inputs = new Dictionary<string, JsonElement>(invocation.Inputs);
+        if (uploadedImages.Count > 0) inputs["referenceImages"] = JsonSerializer.SerializeToElement(uploadedImages);
+        if (uploadedVideos.Count > 0) inputs["referenceVideos"] = JsonSerializer.SerializeToElement(uploadedVideos);
+        if (uploadedAudios.Count > 0) inputs["referenceAudios"] = JsonSerializer.SerializeToElement(uploadedAudios);
         inputs.Remove("referenceImage");
         return invocation with { Inputs = inputs };
     }
 
-    /// <summary>读取参考图的本机路径：优先列表形式，兼容旧的单图输入。</summary>
-    private static List<string> ReadReferencePaths(Invocation invocation)
+    /// <summary>
+    /// 逐个上传。**素材在本机找不到时不提交**：报错比「悄悄用工作流自带的那段示例素材」
+    /// 好得多——后者出来的东西跟用户给的素材毫无关系，而且看不出哪里错了。
+    /// </summary>
+    private async Task<List<string>> UploadAllAsync(
+        IReadOnlyList<string> paths, string label, CancellationToken cancellationToken)
+    {
+        var uploaded = new List<string>(paths.Count);
+        foreach (var path in paths)
+        {
+            if (!File.Exists(path))
+                throw new InvalidOperationException(
+                    $"这段{label}在本机找不到了：{path}。没有提交——不然这份工作流会拿它自己带的示例素材出片，"
+                    + "出来的是别的东西，而你从结果上看不出来。重新选一次素材再出。");
+            uploaded.Add(await UploadFileAsync(path, label, cancellationToken).ConfigureAwait(false));
+        }
+        return uploaded;
+    }
+
+    /// <summary>读素材的本机路径：优先列表形式，兼容旧的单图输入（<paramref name="legacyName"/> 为空表示没有旧写法）。</summary>
+    private static List<string> ReadLocalPaths(Invocation invocation, string name, string? legacyName)
     {
         var paths = new List<string>();
-        if (invocation.Inputs.TryGetValue("referenceImages", out var value))
+        if (invocation.Inputs.TryGetValue(name, out var value))
         {
             if (value.ValueKind == JsonValueKind.Array)
             {
@@ -118,8 +140,8 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
                 paths.Add(value.GetString()!);
             }
         }
-        if (paths.Count == 0
-            && invocation.Inputs.TryGetValue("referenceImage", out var single)
+        if (paths.Count == 0 && legacyName is not null
+            && invocation.Inputs.TryGetValue(legacyName, out var single)
             && single.ValueKind == JsonValueKind.String
             && !string.IsNullOrWhiteSpace(single.GetString()))
         {
@@ -128,8 +150,8 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
         return paths;
     }
 
-    /// <summary>上传单张图片，返回 ComfyUI 侧的文件名。</summary>
-    private async Task<string> UploadImageAsync(string localPath, CancellationToken cancellationToken)
+    /// <summary>上传单个文件，返回 ComfyUI 侧的文件名（含子目录时带上）。</summary>
+    private async Task<string> UploadFileAsync(string localPath, string label, CancellationToken cancellationToken)
     {
         using var form = new MultipartFormDataContent();
         var bytes = await File.ReadAllBytesAsync(localPath, cancellationToken).ConfigureAwait(false);
@@ -144,13 +166,13 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
             var detail = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             if (detail.Length > 800) detail = detail[..800] + "…";
             throw new InvalidOperationException(
-                $"往 ComfyUI 传参考图被拒（HTTP {(int)response.StatusCode}）："
+                $"往 ComfyUI 传{label}被拒（HTTP {(int)response.StatusCode}）："
                 + (detail.Trim().Length > 0 ? detail.Trim() : "服务端没有给正文")
                 + RejectionHint(response.StatusCode));
         }
         var uploaded = await response.Content.ReadFromJsonAsync<ComfyUiUploadResponse>(cancellationToken: cancellationToken).ConfigureAwait(false);
         if (uploaded is null || string.IsNullOrWhiteSpace(uploaded.Name))
-            throw new InvalidOperationException("ComfyUI 未返回上传后的图片名");
+            throw new InvalidOperationException($"ComfyUI 未返回上传后的文件名（{label}）");
 
         return string.IsNullOrWhiteSpace(uploaded.Subfolder) ? uploaded.Name : $"{uploaded.Subfolder}/{uploaded.Name}";
     }

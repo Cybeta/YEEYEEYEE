@@ -198,13 +198,30 @@ public static class ComfyUiWorkflowConversion
             var value = Coerce(raw, spec.Type);
             if (value is null) continue;
 
-            // 固定选提取的是「选项 + 界面装饰」时纠正成那个选项（见 RepairComboValue）。
-            if (spec.Options is { Count: > 0 } choices
-                && value is JsonValue candidate && candidate.TryGetValue<string>(out var text)
-                && RepairComboValue(choices, text) is { } repaired)
+            // 固定选项的值必须是清单里的一个，两种形状要纠正（见 RepairComboValue）。
+            if (spec.Options is { Count: > 0 } choices && value is JsonValue candidate)
             {
-                comboRepairs.Add($"{spec.Name}「{text}」→「{repaired}」");
-                value = JsonValue.Create(repaired);
+                if (candidate.TryGetValue<string>(out var text))
+                {
+                    if (RepairComboValue(choices, text) is { } repaired)
+                    {
+                        comboRepairs.Add($"{spec.Name}「{text}」→「{repaired}」");
+                        value = repaired.DeepClone();
+                    }
+                }
+                else if (!choices.Any(option => SameOption(option, candidate)))
+                {
+                    // 数字/布尔写进固定选项是错的（多半是别的版本里的下标）：退回节点定义里声明的默认值——
+                    // 和官方前端遇到不认的值时的做法一致。**写回选项本身那个节点**，不要自己造字符串：
+                    // 有的清单是数字（`RIFE VFI.scale_factor` 的选项就是 0.25/0.5/1.0/2.0），
+                    // 写一个字符串进去会换一种错。
+                    var fallback = spec.Default is { } declared
+                                   && choices.Any(option => SameOption(option, declared))
+                        ? declared
+                        : choices[0];
+                    comboRepairs.Add($"{spec.Name}「{candidate}」→「{fallback}」（不是它认的选项，退回默认值）");
+                    value = fallback?.DeepClone();
+                }
             }
 
             inputs[spec.Name] = value;
@@ -265,24 +282,52 @@ public static class ComfyUiWorkflowConversion
     }
 
     private sealed record WidgetSpec(
-        string Name, string Type, bool ControlAfterGenerate, JsonNode? Default, IReadOnlyList<string>? Options = null);
+        string Name, string Type, bool ControlAfterGenerate, JsonNode? Default, IReadOnlyList<JsonNode?>? Options = null);
+
+    /// <summary>
+    /// 两个值是不是「同一个选项」。数字按**数值**比：清单里写的是 <c>1.0</c>，网页文件里存的是 <c>1</c>，
+    /// 它们是同一个数（全库 84 处这种写法，例如 `RIFE VFI.scale_factor`）——按文本比会把它们全判成写错。
+    /// </summary>
+    private static bool SameOption(JsonNode? option, JsonNode? value)
+    {
+        if (option is null || value is null) return false;
+        var left = option.ToString();
+        var right = value.ToString();
+        if (string.Equals(left, right, StringComparison.Ordinal)) return true;
+        return double.TryParse(left, NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
+            && double.TryParse(right, NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
+            && x.Equals(y);
+    }
 
     /// <summary>
     /// 固定选项（COMBO）的值必须**正好是清单里的一个**，否则服务端一次 <c>value_not_in_list</c> 就把它拒了。
-    /// 网页文件里存的值有时是「选项 + 界面上的装饰」，实测 `MiniMaxH3AudioConditioningT8.task_type`
-    /// 存的是 <c>Ref2VA — 参考生音视频</c>，而服务端的选项只有 <c>Ref2VA</c>（全库 13 处这种）。
-    /// 官方前端遇到不认的值会退回清单里的一个；我们做得更保守：**只有值以某个合法选项开头时**才纠正成那个选项
-    /// （取最长的那个前缀），其余情况一个字不动——文件引用这类「值不在清单里」是正常的，
-    /// 那说的是服务器 input 目录里此刻有什么文件，不是这份工作流写错了。
+    /// 两种要纠正的形状：
+    /// ① 值是「选项 + 界面上的装饰」——实测 `MiniMaxH3AudioConditioningT8.task_type` 存的是
+    ///    <c>Ref2VA — 参考生音视频</c>，服务端只认 <c>Ref2VA</c>（全库 13 处）。取**最长的那个合法前缀**；
+    /// ② 值是**数字**（多半是别的版本里的下标）——实测 `RTXVideoSuperResolution.quality` 存的是 <c>2</c>，
+    ///    而它的选项是 <c>LOW / MEDIUM / HIGH / ULTRA</c>。官方前端遇到不认的值会退回清单里一个，
+    ///    我们照做：写节点定义里声明的默认值（没有就写第一个选项）。
+    ///
+    /// **只对这两种动手**：字符串型的值还可能是**文件引用**（`LoadImage.image` 那种），
+    /// 「不在清单里」对它来说是正常的——清单说的是服务器 input 目录此刻有什么文件，
+    /// 不是这份工作流写错了。那种一个字都不能动。
     /// </summary>
-    private static string? RepairComboValue(IReadOnlyList<string> options, string text)
+    private static JsonNode? RepairComboValue(IReadOnlyList<JsonNode?> options, string text)
     {
-        if (options.Any(option => string.Equals(option, text, StringComparison.Ordinal))) return null;
-        var match = options
-            .Where(option => option.Length > 0 && text.StartsWith(option, StringComparison.Ordinal))
-            .OrderByDescending(option => option.Length)
-            .FirstOrDefault();
-        return match;
+        if (options.Any(option => option is not null && string.Equals(option.ToString(), text, StringComparison.Ordinal)))
+            return null;
+
+        JsonNode? best = null;
+        var bestLength = 0;
+        foreach (var option in options)
+        {
+            var candidate = option?.ToString() ?? string.Empty;
+            if (candidate.Length <= bestLength) continue;
+            if (!text.StartsWith(candidate, StringComparison.Ordinal)) continue;
+            best = option;
+            bestLength = candidate.Length;
+        }
+        return best;
     }
 
     /// <summary>
@@ -367,8 +412,8 @@ public static class ComfyUiWorkflowConversion
                 var choicesList = declared != "COMBO"
                     ? null
                     : (spec.Count > 1 ? options?["options"] as JsonArray : null) is { } declaredChoices
-                        ? TextList(declaredChoices)
-                        : first is JsonArray literalChoices ? TextList(literalChoices) : null;
+                        ? CloneList(declaredChoices)
+                        : (first as JsonArray) is { } literalChoices ? CloneList(literalChoices) : null;
 
                 list.Add(new WidgetSpec(pair.Key, declared, control, fallback, choicesList));
             }
@@ -376,12 +421,11 @@ public static class ComfyUiWorkflowConversion
         return list;
     }
 
-    /// <summary>把候选清单（可能是字符串数组，也可能是对象数组）取成字符串清单。</summary>
-    private static List<string> TextList(JsonArray source)
+    /// <summary>把候选清单克隆成一份（**保留原来的类型**：有的是字符串，有的是数字）。</summary>
+    private static List<JsonNode?> CloneList(JsonArray source)
     {
-        var list = new List<string>(source.Count);
-        foreach (var item in source)
-            if (item is not null && item.ToString() is { Length: > 0 } text) list.Add(text);
+        var list = new List<JsonNode?>(source.Count);
+        foreach (var item in source) list.Add(item?.DeepClone());
         return list;
     }
 

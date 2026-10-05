@@ -172,7 +172,11 @@ public sealed class ComfyUiWorkflowFactory
             ImageName = images.Count > 0 ? images[0] : string.Empty,
             // 整份列表一起给：一份工作流有多个底图入口时，按顺序各收一张
             //（顺序由装配那一侧定死：角色 → 道具 → 场景）。
-            ImageNames = images
+            ImageNames = images,
+            // 源视频 / 源音频（已经上传过的服务器侧文件名）：视频二创、对口型、视频修复那一支吃的是
+            // **一段片子**（对口型还要一段音），底图那条路对它们没用。
+            VideoNames = GetStringList(invocation, "referenceVideos"),
+            AudioNames = GetStringList(invocation, "referenceAudios")
         });
 
         return JsonDocument.Parse(bound.ToJsonString()).RootElement.Clone();

@@ -131,6 +131,13 @@ public sealed class ComfyUiWorkflowSlots
     public bool IsFrameDriven => PositiveNodeId.Length == 0 && CanTakeImage;
 
     /// <summary>
+    /// 只吃**一段片子**、不收文字：视频修复 / 补帧超分 / 去水印 / 影视二创那一支是「给一段它就干」，
+    /// 本来就不需要提示词。和 <see cref="IsFrameDriven"/> 同理——是正当用法，不是「认不出提示词」的残次品，
+    /// 不该在提交前被挡掉（实测 `M05-视频修复-SeedVR2.5`、`M10-视频高清放大-补帧`、`M09-LTX一键去字幕` 都被挡了）。
+    /// </summary>
+    public bool IsSourceDriven => PositiveNodeId.Length == 0 && CanTakeVideo;
+
+    /// <summary>
     /// 秒数写在哪：当「帧数」不是字面量、而是由一个表达式从**秒数**折出来的时候用它。
     ///
     /// 实测形状（`U02-minimax_h3_图生视频基础版`）：`MiniMaxH3ImageToVideo.length` ←
@@ -155,6 +162,24 @@ public sealed class ComfyUiWorkflowSlots
     /// <summary>能不能改比例（要有那种固定选项的比例输入，且它的写法我们认得）。</summary>
     public bool CanSetAspect => AspectNodeId.Length > 0;
 
+    /// <summary>
+    /// 收「源视频」的入口（`VHS_LoadVideo` / `LoadVideoUI` / `LoadVideo` / `VideoLoader` 这类）。
+    ///
+    /// 为什么要单列：影视二创、对口型、视频修复、补帧超分那一支工作流吃的是**一段片子**，不是一张图——
+    /// 底图那条路对它们没用（`VHS_LoadVideo.video` 的候选清单就是服务器 input 目录里的视频文件）。
+    /// 按节点 id 稳定排序，多个入口按顺序各收一段；这个槽位里存的是**写哪个输入名**（视频是 `video`）。
+    /// </summary>
+    public List<string> VideoNodeIds { get; set; } = new();
+    public List<string> VideoInputs { get; set; } = new();
+
+    /// <summary>收「源音频」的入口（`VHS_LoadAudioUpload` / `LoadAudio` 这类）：对口型那一支还要一段音。</summary>
+    public List<string> AudioNodeIds { get; set; } = new();
+    public List<string> AudioInputs { get; set; } = new();
+
+    public bool CanTakeVideo => VideoNodeIds.Count > 0;
+
+    public bool CanTakeAudio => AudioNodeIds.Count > 0;
+
     public string Describe()
     {
         var parts = new List<string>();
@@ -167,6 +192,10 @@ public sealed class ComfyUiWorkflowSlots
             : CanSetSeconds ? "时长✓（写秒数，帧数由它自己折）" : "时长✗");
         parts.Add(SeedNodeIds.Count > 0 ? "种子✓" : "种子✗");
         parts.Add(CanTakeImage ? "底图✓" : "底图✗");
+        // 源视频 / 源音频只在**这份工作流确实有**的时候出现：绝大多数工作流没有，
+        // 每行都挂两个 ✗ 只会把真正要看的那几项淹掉。
+        if (CanTakeVideo) parts.Add($"源视频✓（{VideoNodeIds.Count} 个入口）");
+        if (CanTakeAudio) parts.Add($"源音频✓（{AudioNodeIds.Count} 个入口）");
         return string.Join(" ", parts);
     }
 }
@@ -241,10 +270,13 @@ public static class ComfyUiWorkflowBinder
         ResolveAspect(apiWorkflow, slots);
         AttachAspectOptions(apiWorkflow, slots, optionValues);
         ResolveSeeds(apiWorkflow, slots);
+        // 先认影音入口再认底图：底图「没找到」时那句说明要能分辨
+        // 「这份工作流只能文生图」和「它吃的是片子、不吃图」——那是两回事。
+        ResolveMedia(apiWorkflow, slots);
         ResolveImage(apiWorkflow, slots);
         ResolveLength(apiWorkflow, slots);
 
-        if (!slots.CanTextToImage && !slots.IsFrameDriven)
+        if (!slots.CanTextToImage && !slots.IsFrameDriven && !slots.IsSourceDriven)
             slots.Notes.Add("认不出收提示词的节点：这份工作流的文字可能是由别的节点生成的"
                 + "（例如内置的提示词改写），直接往里塞提示词不会生效，换一份工作流。");
 
@@ -676,7 +708,9 @@ public static class ComfyUiWorkflowBinder
 
         if (loaders.Count == 0)
         {
-            slots.Notes.Add("没找到底图入口（LoadImage）：这份工作流用不了参考图，只能文生图。");
+            slots.Notes.Add(slots.CanTakeVideo
+                ? "没有底图入口（LoadImage）：这份工作流吃的是**一段片子**（源视频入口），不吃参考图。"
+                : "没找到底图入口（LoadImage）：这份工作流用不了参考图，只能文生图。");
             return;
         }
 
@@ -693,6 +727,52 @@ public static class ComfyUiWorkflowBinder
                 + string.Join("；", slots.ImageGroups.Select(group => "[" + string.Join("、", group) + "]"))
                 + "。参考图**按组填**：每组各取「角色 → 道具 → 场景」的前几张（前面那组少拿几张），"
                 + "不再按节点顺序把图平铺到前几个入口上——那样会喂错组。");
+    }
+
+    /// <summary>
+    /// 认「源视频 / 源音频」入口：影视二创、对口型、视频修复那一支吃的是**一段片子**。
+    ///
+    /// 判据分两步，都不猜：
+    /// ① 节点类型里有 <c>LoadVideo</c> / <c>VideoLoader</c> → 视频，有 <c>LoadAudio</c> / <c>AudioLoader</c> → 音频。
+    ///    实测这台服务器上这一类节点是 <c>VHS_LoadVideo.video</c>、<c>VHS_LoadVideoFFmpeg.video</c>、
+    ///    <c>LoadVideoUI.video</c>、<c>LoadVideo.file</c>、<c>VideoLoader.file</c>（音频有
+    ///    <c>VHS_LoadAudioUpload.audio</c>、<c>LoadAudio.audio</c>、<c>LoadAudioUI.audio</c>、
+    ///    <c>YusuLoadAudioUI.audio</c>、<c>CSLoadAudioUI.audio</c>、<c>VRGDG_LoadAudioWithPath.audio</c>）。
+    /// ② 输入名只认 <c>video</c> / <c>audio</c> / <c>file</c>：**故意不收 <c>video_path</c> 这类**——
+    ///    那种槽位要的是服务器上的**绝对路径**，而我们是把本机文件传到 input 目录、按**文件名**引用，
+    ///    写进去只会让服务端找不到文件。
+    /// </summary>
+    private static void ResolveMedia(JsonObject graph, ComfyUiWorkflowSlots slots)
+    {
+        foreach (var pair in graph.OrderBy(pair => pair.Key, NodeIdComparer.Instance))
+        {
+            if (pair.Value is not JsonObject node || node["inputs"] is not JsonObject inputs) continue;
+            var flat = new string(ClassTypeOf(node).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+            var video = flat.Contains("loadvideo", StringComparison.Ordinal)
+                || flat.Contains("videoloader", StringComparison.Ordinal);
+            var audio = !video && (flat.Contains("loadaudio", StringComparison.Ordinal)
+                || flat.Contains("audioloader", StringComparison.Ordinal));
+            if (!video && !audio) continue;
+
+            var names = video ? new[] { "video", "file" } : new[] { "audio", "file" };
+            var name = names.FirstOrDefault(candidate => inputs[candidate] is JsonValue);
+            if (name is null) continue;
+
+            if (video)
+            {
+                slots.VideoNodeIds.Add(pair.Key);
+                slots.VideoInputs.Add(name);
+            }
+            else
+            {
+                slots.AudioNodeIds.Add(pair.Key);
+                slots.AudioInputs.Add(name);
+            }
+        }
+
+        if (slots.VideoNodeIds.Count > 1)
+            slots.Notes.Add($"这份工作流有 {slots.VideoNodeIds.Count} 个源视频入口（节点 {string.Join("、", slots.VideoNodeIds)}）："
+                + "按顺序各收一段片子（例如「主片 + 参考片」这种两张图的用法）。");
     }
 
     /// <summary>
@@ -873,6 +953,17 @@ public static class ComfyUiWorkflowBinder
             foreach (var seedNodeId in slots.SeedNodeIds)
                 SetInput(graph, seedNodeId, "seed", JsonValue.Create(seed));
 
+        // 源视频 / 源音频：视频二创、对口型、视频修复那一支吃的是**一段片子**（对口型还要一段音）。
+        // 与底图同一条规矩：按入口顺序对号入座，给不满就只写前几个，多出来的保持它自己的示例，
+        // **不拿同一段去凑数**——那样等于谎报输入。
+        for (var index = 0; index < slots.VideoNodeIds.Count && index < values.VideoNames.Count; index++)
+            if (values.VideoNames[index].Length > 0)
+                SetInput(graph, slots.VideoNodeIds[index], slots.VideoInputs[index], JsonValue.Create(values.VideoNames[index]));
+
+        for (var index = 0; index < slots.AudioNodeIds.Count && index < values.AudioNames.Count; index++)
+            if (values.AudioNames[index].Length > 0)
+                SetInput(graph, slots.AudioNodeIds[index], slots.AudioInputs[index], JsonValue.Create(values.AudioNames[index]));
+
         // 底图：值为空时**不动**原来的那张（工作流里往往自带一张示例图，
         // 清掉会让它连示例都跑不了）；有值时写上传后的名字。
         //
@@ -1000,4 +1091,10 @@ public sealed record ComfyUiBindValues
     /// 参考图的顺序由装配那一侧定死，这里不重排。
     /// </summary>
     public IReadOnlyList<string> ImageNames { get; init; } = Array.Empty<string>();
+
+    /// <summary>这次要喂的源视频文件名（已上传到 ComfyUI），按顺序对到每个源视频入口。</summary>
+    public IReadOnlyList<string> VideoNames { get; init; } = Array.Empty<string>();
+
+    /// <summary>这次要喂的源音频文件名（已上传到 ComfyUI），按顺序对到每个源音频入口。</summary>
+    public IReadOnlyList<string> AudioNames { get; init; } = Array.Empty<string>();
 }

@@ -102,6 +102,25 @@ internal static class VideoShapeNotice
                 + "它靠首帧动起来、不收文字，你写的提示词不会进工作流。");
         }
 
+        // 源视频 / 源音频：这一支吃的是**一段片子**。不说的话，用户会以为首帧就是它的输入，
+        // 而实际上它会拿自己示例里的片段跑——那种错从结果上完全看不出来。
+        if (slots.CanTakeVideo)
+        {
+            lines.Add("· 源视频：这份工作流吃的是**一段片子**（节点 " + string.Join("、", slots.VideoNodeIds) + "）——"
+                + "在上面的输入框里选一段本机视频；不选的话它会拿它自己示例里的片段跑，出来的内容与你的素材无关。");
+            if (slots.IsSourceDriven)
+            {
+                lines.Add("· 提示词—（按片子干活）：这份工作流不收文字，它按你给的那段片子干；"
+                    + "你写的提示词不会进工作流。");
+            }
+        }
+
+        if (slots.CanTakeAudio)
+        {
+            lines.Add("· 源音频：这份工作流还要一段音（节点 " + string.Join("、", slots.AudioNodeIds) + "）；"
+                + "不选就沿用它自己示例里的那一段。");
+        }
+
         return string.Join("\n", lines);
     }
 

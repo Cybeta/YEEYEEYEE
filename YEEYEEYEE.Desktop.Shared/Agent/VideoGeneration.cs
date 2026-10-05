@@ -44,6 +44,16 @@ public sealed class VideoGenerationRequest
     public IReadOnlyList<string> ReferenceImages { get; init; } = Array.Empty<string>();
 
     /// <summary>
+    /// 源视频的本机绝对路径列表：影视二创、对口型、视频修复、补帧超分那一支工作流吃的是
+    /// **一段片子**，不是一张图——首帧那条路对它们没用（它们真正的入口是 `VHS_LoadVideo.video` 这类）。
+    /// 交给 ComfyUI 之前会先传到它的 input 目录，再按文件名写进那些入口。
+    /// </summary>
+    public IReadOnlyList<string> SourceVideos { get; init; } = Array.Empty<string>();
+
+    /// <summary>源音频的本机绝对路径列表（对口型那一支还要一段音）。</summary>
+    public IReadOnlyList<string> SourceAudios { get; init; } = Array.Empty<string>();
+
+    /// <summary>
     /// 选定的 ComfyUI 出视频工作流：站点 id + 正文文件名 + 工作流键，三个一起才认得出来源。
     ///
     /// 与出图侧（<see cref="ImageGenerationRequest.WorkflowPayloadFile"/>）同一套口径：
@@ -265,7 +275,6 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
     public async Task<VideoGenerationResult> GenerateAsync(
         VideoGenerationRequest request, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(request.Prompt)) return Failed("视频提示词为空，无法生成。");
         if (string.IsNullOrWhiteSpace(request.WorkflowPayloadFile))
             return Failed("这一路要用一份选定的 ComfyUI 工作流出视频，而这次没带上工作流正文。");
 
@@ -301,9 +310,14 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         // ① 只吃首帧的那种（SVD / 动作迁移 / 人物替换）**是正当用法**——它按底图动起来，本来就不收文字。
         //    这时不写提示词，但要把「你写的提示词没进工作流」说出来（不说的话，用户会以为画面是自己那句话决定的）。
         // ② 既没有提示词入口、也没有底图入口，才是真的驱动不了。
-        if (!detected.CanTextToImage && !detected.IsFrameDriven)
-            return Failed("这份工作流既收不到提示词、也没有底图入口，所以没提交："
+        if (!detected.CanTextToImage && !detected.IsFrameDriven && !detected.IsSourceDriven)
+            return Failed("这份工作流既收不到提示词、也没有底图或源视频入口，所以没提交："
                 + string.Join("；", detected.Notes));
+
+        // 提示词：只在**这份工作流确实收文字**时才必须要。视频修复 / 补帧超分 / 去水印那一支
+        // 本来就不吃提示词（它按你给的那段片子干活），要求它等于把一整类正当用法挡在门外。
+        if (detected.CanTextToImage && string.IsNullOrWhiteSpace(request.Prompt))
+            return Failed("视频提示词为空，无法生成。");
 
         var references = request.ReferenceImages
             .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
@@ -311,9 +325,44 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         var useReference = references.Count > 0 && detected.CanTakeImage;
         var promptBound = detected.CanTextToImage;
 
+        // 源视频 / 源音频：影视二创、对口型、视频修复那一支吃的是**一段片子**（对口型还要一段音）。
+        // 与参考图同一条规矩：本机找不到的**不静默丢掉**，直接说清（真正上传与写槽位在 Host 那一侧做）。
+        var sourceVideos = request.SourceVideos
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .ToList();
+        var sourceAudios = request.SourceAudios
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .ToList();
+        var missingSources = sourceVideos.Concat(sourceAudios).Where(path => !File.Exists(path)).ToList();
+        sourceVideos = sourceVideos.Where(File.Exists).ToList();
+        sourceAudios = sourceAudios.Where(File.Exists).ToList();
+
         // ── 时长：把「要几秒」按那份工作流自己的帧率换算成帧数，并贴到它自己的帧数家族上 ──
         // 换算不出来（它没有帧数入口、或找不到帧率）时**什么都不写**，并在说明里讲清是哪种情况。
         var notes = new List<string>();
+        foreach (var missing in missingSources)
+            notes.Add($"你给的素材在本机找不到了，它不会被用上：{missing}");
+
+        // ── 源视频 / 源音频 ──
+        // 这一支工作流吃的是**一段片子**：给了要说清写到哪个节点，没给要说清它会拿自己的示例片子跑——
+        // 「我给了素材、它却用了别人的片段」这件事从结果上完全看不出来（与参考图那条规矩同理）。
+        if (detected.CanTakeVideo)
+        {
+            notes.Add(sourceVideos.Count == 0
+                ? $"这份工作流要吃一段**源视频**（节点 {string.Join("、", detected.VideoNodeIds)}），这次没给："
+                  + "它会拿它自己示例里的那段片子跑，出来的内容与你的素材无关。"
+                : $"源视频已写入：节点 {string.Join("、", detected.VideoNodeIds.Take(sourceVideos.Count))}。");
+        }
+        else if (sourceVideos.Count > 0)
+        {
+            notes.Add("这次给了源视频，但这份工作流没有源视频入口（LoadVideo 这类），它用不上："
+                + "要处理一段片子请换「影视二创 / 对口型 / 视频修复」那一支工作流。");
+        }
+
+        if (detected.CanTakeAudio && sourceAudios.Count > 0)
+            notes.Add($"源音频已写入：节点 {string.Join("、", detected.AudioNodeIds.Take(sourceAudios.Count))}。");
+        else if (!detected.CanTakeAudio && sourceAudios.Count > 0)
+            notes.Add("这次给了源音频，但这份工作流没有音频入口（LoadAudio 这类），它用不上。");
         int? frames = null;
         double? secondsToWrite = null;
         if (request.Seconds > 0)
@@ -420,12 +469,18 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
             inputs["referenceImages"] = JsonSerializer.SerializeToElement(references);
             inputs["referenceMode"] = JsonSerializer.SerializeToElement("img2vid");
         }
+        // 源视频 / 源音频：Host 那一侧会先把它们传到 ComfyUI 的 input 目录，再按文件名写进对应入口。
+        if (sourceVideos.Count > 0) inputs["referenceVideos"] = JsonSerializer.SerializeToElement(sourceVideos);
+        if (sourceAudios.Count > 0) inputs["referenceAudios"] = JsonSerializer.SerializeToElement(sourceAudios);
 
-        // 只吃首帧的那类工作流：不写提示词，但必须说出来——
+        // 只吃素材、不收文字的那类工作流：不写提示词，但必须说出来——
         // 不说的话，用户会以为画面是自己那句话决定的，出了偏差只会怪模型。
         if (!promptBound && request.Prompt.Length > 0)
-            notes.Add("这份工作流不收文字提示词（它是靠首帧动起来的，SVD / 动作迁移 / 人物替换这一类）："
-                + "你写的提示词没有进工作流，画面由首帧与它自己的运动参数决定。");
+            notes.Add(detected.CanTakeVideo
+                ? "这份工作流不收文字提示词（它是按你给的那段片子干活的，视频修复 / 补帧超分 / 去水印这一类）："
+                  + "你写的提示词没有进工作流，出来的内容由源素材与它自己的参数决定。"
+                : "这份工作流不收文字提示词（它是靠首帧动起来的，SVD / 动作迁移 / 人物替换这一类）："
+                  + "你写的提示词没有进工作流，画面由首帧与它自己的运动参数决定。");
 
         // 「你想要的是什么」单独留一份：出完之后要和**量出来的真实结果**并排说出来，
         // 不然「15 秒」变成 5 秒这件事没人会注意到。

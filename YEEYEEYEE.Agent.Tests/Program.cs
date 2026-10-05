@@ -191,13 +191,14 @@ var tests = new (string Name, Action Run)[]
     ("出视频 · 时长换算：帧数贴到那份工作流自己的家族上（121 帧推出 8n+1），推不出来就如实说", VideoFrameMathSnapsToTheWorkflowsOwnFrameFamily),
     ("出视频 · 认时长与比例槽位：只认生成侧，VHS_VideoCombine 的 frame_rate 不算", WorkflowBinderReadsLengthAndAspectSlots),
     ("出视频 · 只吃首帧那一类（SVD）不再算成驱动不了，但要说清提示词没进工作流", WorkflowBinderTreatsFrameDrivenShapeAsUsable),
+    ("出视频 · 只吃一段片子的那一类（视频修复 / 补帧 / 二创）单列出来，源视频按入口顺序写进去", WorkflowBinderTreatsSourceVideoShapeAsUsable),
     ("出视频 · 写进去的到底是什么：帧数与比例照写、帧率一个字不动、没给就不许乱写", WorkflowBinderWritesLengthAspectAndSize),
     ("出视频 · 帧数是算出来的时候：认出那个收秒的常量（判据是表达式里带着帧率），写秒不写帧", WorkflowBinderFindsTheSecondsWhenFramesAreComputed),
     ("转换 · Set/Get 配对是转发不是丢弃：Get 的值接到同名 Set 的源头，两个都不进 API", WorkflowConversionFollowsSetGetPairs),
     ("转换 · PrimitiveNode 的值内联进下游；Fast Bypasser 当直通跟到源头", ComfyUiConversionInlinesPrimitiveAndFollowsBypasser),
     ("转换 · 子图「输入直通到输出」要接到外面喂给容器那个输入的地方", ComfyUiConversionWiresContainerPassThrough),
     ("转换 · 旁路判定要认逗号分隔的联合类型（FLOAT,INT,BOOLEAN 也算接得上）", ComfyUiConversionBypassesThroughUnionTypedInputs),
-    ("转换 · 固定选项的值是界面显示的写法（Ref2VA — …）要纠正成清单里的那个", ComfyUiConversionRepairsDecoratedComboValues),
+    ("转换 · 固定选项的值是界面写法（Ref2VA — …）或数字下标时要纠正成它认的那个", ComfyUiConversionRepairsDecoratedComboValues),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -14307,6 +14308,69 @@ static void WorkflowBinderTreatsFrameDrivenShapeAsUsable()
 }
 
 /// <summary>
+/// 钉住「源视频 / 源音频」这一支：影视二创、对口型、视频修复、补帧超分吃的是**一段片子**，
+/// 不是一张图——它们连提示词都不收，所以既不属于「认不出提示词」也不属于「只吃首帧」，
+/// 单列成「按片子干活」（<see cref="ComfyUiWorkflowSlots.IsSourceDriven"/>）。
+///
+/// 判据是节点类型 + 输入名，实测这台服务器上的形状：`VHS_LoadVideo.video`、`VHS_LoadVideoFFmpeg.video`、
+/// `LoadVideoUI.video`、`LoadVideo.file`、`VideoLoader.file`；音频是 `VHS_LoadAudioUpload.audio`、
+/// `LoadAudio.audio`、`YusuloadAudioUI.audio` 这些。
+/// 而 `VHS_LoadVideoPath.video_path` 这种**故意不认**：那种槽位要的是服务器上的绝对路径，
+/// 我们传的是本机文件、按文件名引用，写进去只会让服务端找不到文件。
+/// </summary>
+static void WorkflowBinderTreatsSourceVideoShapeAsUsable()
+{
+    const string template = """
+    {
+      "3": {"class_type":"VHS_LoadVideo","inputs":{"video":"他们的片子.mp4","frame_load_cap":0}},
+      "5": {"class_type":"LoadVideoUI","inputs":{"video":"另一段.mp4"}},
+      "7": {"class_type":"VHS_LoadAudioUpload","inputs":{"audio":"他们的音.mp3"}},
+      "9": {"class_type":"VHS_LoadVideoPath","inputs":{"video_path":"/root/absolute.mp4"}},
+      "11": {"class_type":"VHS_VideoCombine","inputs":{"images":["3",0],"frame_rate":24}}
+    }
+    """;
+
+    var slots = ComfyUiWorkflowBinder.Detect(template);
+    Expect(!slots.CanTextToImage, "视频修复这一类确实不收文字提示词");
+    Expect(slots.CanTakeVideo, "但它有源视频入口：" + slots.Describe());
+    Expect(slots.IsSourceDriven, "所以它是「按片子干活」那一类，不该算成驱动不了");
+    Expect(!slots.IsFrameDriven, "它也不是「只吃首帧」那一类（没有底图入口）");
+    Expect(!slots.Notes.Any(item => item.Contains("认不出收提示词")),
+        "不该报「认不出收提示词的节点」——那是对这类工作流的误判：" + string.Join("；", slots.Notes));
+    Expect(!slots.Notes.Any(item => item.Contains("只能文生图")),
+        "也不该说它「只能文生图」——它吃的是片子：" + string.Join("；", slots.Notes));
+    Expect(slots.Describe().Contains("源视频✓"), "Describe 要写明这一点：" + slots.Describe());
+
+    Expect(slots.VideoNodeIds.Count == 2 && slots.VideoInputs.SequenceEqual(new[] { "video", "video" }),
+        "两个源视频入口都要认出来（按节点 id 排），实际 " + string.Join("/", slots.VideoNodeIds));
+    Expect(slots.CanTakeAudio && slots.AudioInputs[0] == "audio", "音频入口也要认出来：" + slots.Describe());
+    Expect(!slots.VideoNodeIds.Contains("9"),
+        "VHS_LoadVideoPath 要的是服务器上的绝对路径，不能当文件入口写（写进去服务端找不到文件）");
+    Expect(slots.VideoNodeIds.Count == 2 && slots.Notes.Any(item => item.Contains("2 个源视频入口")),
+        "多个源视频入口要说出来：" + string.Join("；", slots.Notes));
+
+    var bound = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues
+    {
+        VideoNames = new[] { "上传后的.mp4", "第二段.mp4" },
+        AudioNames = new[] { "上传后的.mp3" }
+    });
+    Expect(bound["3"]!["inputs"]!["video"]!.GetValue<string>() == "上传后的.mp4",
+        "源视频要按入口顺序写进去，实际 " + bound["3"]!["inputs"]!["video"]);
+    Expect(bound["5"]!["inputs"]!["video"]!.GetValue<string>() == "第二段.mp4", "第二个入口写第二段");
+    Expect(bound["7"]!["inputs"]!["audio"]!.GetValue<string>() == "上传后的.mp3", "源音频同理");
+    Expect(bound["9"]!["inputs"]!["video_path"]!.GetValue<string>() == "/root/absolute.mp4",
+        "不认的那种槽位一个字都不许动");
+
+    // 给不满只写前几个，多出来的保持它自己的示例——**不拿同一段去凑数**。
+    var partial = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues
+    {
+        VideoNames = new[] { "只有一段.mp4" }
+    });
+    Expect(partial["5"]!["inputs"]!["video"]!.GetValue<string>() == "另一段.mp4",
+        "给不满时第二个入口保持原样，实际 " + partial["5"]!["inputs"]!["video"]);
+}
+
+/// <summary>
 /// 钉住「写进去的到底是什么」：帧数写进时长槽位、比例照它的写法写、宽高写进画幅节点，
 /// 而**帧率一个字不动**（改了它动作的快慢也跟着变——用户要的是「这么多秒的这段动」）。
 /// </summary>
@@ -14644,6 +14708,10 @@ static void ComfyUiConversionRepairsDecoratedComboValues()
     {
       "MiniMaxH3AudioConditioningT8": {"input": {"required": {
         "task_type": ["COMBO", {"default": "auto", "options": ["auto", "T2VA", "I2VA", "Ref2VA"]}]}}},
+      "RTXVideoSuperResolution": {"input": {"required": {
+        "images": ["IMAGE"],
+        "resize_type": ["COMBO", {"default": "scale by multiplier", "options": ["scale by multiplier", "scale by factor"]}],
+        "quality": ["COMBO", {"default": "ULTRA", "options": ["LOW", "MEDIUM", "HIGH", "ULTRA"]}]}}},
       "LoadImage": {"input": {"required": {
         "image": ["COMBO", {"default": "a.png", "options": ["a.png", "b.png"]}]}}},
       "SaveImage": {"input": {"required": {"images": ["IMAGE"], "filename_prefix": ["STRING"]}}}
@@ -14658,11 +14726,15 @@ static void ComfyUiConversionRepairsDecoratedComboValues()
          "outputs": [], "widgets_values": ["Ref2VA — 参考生音视频"]},
         {"id": 6, "type": "LoadImage", "mode": 0, "inputs": [],
          "outputs": [{"name":"IMAGE","type":"IMAGE","links":[8]}], "widgets_values": ["作者自己那张.png"]},
-        {"id": 7, "type": "SaveImage", "mode": 0,
+        {"id": 7, "type": "RTXVideoSuperResolution", "mode": 0,
          "inputs": [{"name":"images","type":"IMAGE","link":8}],
+         "outputs": [{"name":"IMAGE","type":"IMAGE","links":[9]}],
+         "widgets_values": ["scale by multiplier", 2]},
+        {"id": 8, "type": "SaveImage", "mode": 0,
+         "inputs": [{"name":"images","type":"IMAGE","link":9}],
          "outputs": [], "widgets_values": ["yeeeyee"]}
       ],
-      "links": [[8, 6, 0, 7, 0, "IMAGE"]],
+      "links": [[8, 6, 0, 7, 0, "IMAGE"], [9, 7, 0, 8, 0, "IMAGE"]],
       "groups": [], "config": {}, "extra": {}, "version": 0.4
     }
     """;
@@ -14676,6 +14748,15 @@ static void ComfyUiConversionRepairsDecoratedComboValues()
         "改过值要说出来（原本写的是什么、提交的是什么）：" + converted.SkippedSummary);
     Expect(converted.SkippedSummary.Contains("Ref2VA"),
         "说明里要带上纠正前后的值：" + converted.SkippedSummary);
+
+    // 数字写进固定选项一定是错的（多半是别的版本里的下标）：退回节点定义里的默认值。
+    // 实测代价：M17 的 quality 存的是 2，而选项是 LOW/MEDIUM/HIGH/ULTRA——
+    // 服务端不报错，只是**跑完什么产物都没有**（那种错最难看出来）。
+    Expect(api["7"]!["inputs"]!["quality"]!.GetValue<string>() == "ULTRA",
+        "数字型的固定选项要退回默认值，实际 " + api["7"]!["inputs"]!["quality"]);
+    Expect(converted.SkippedSummary.Contains("退回默认值"), "还要说清是退回默认值：" + converted.SkippedSummary);
+    Expect(api["7"]!["inputs"]!["resize_type"]!.GetValue<string>() == "scale by multiplier",
+        "没问题的固定选项一个字都不许动");
 
     // 文件引用这类「不在清单里」是正常的：清单说的是服务器 input 目录此刻有什么文件。
     Expect(api["6"]!["inputs"]!["image"]!.GetValue<string>() == "作者自己那张.png",
