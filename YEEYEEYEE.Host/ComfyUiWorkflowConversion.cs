@@ -558,11 +558,17 @@ public static class ComfyUiWorkflowConversion
 
     /// <summary>
     /// Set/Get 配对的虚拟节点（前端用来把一条连线拉长，避免横穿整张图），<c>/object_info</c> 里同样查不到。
-    /// 名字取自实测：那台机器上的 G12 原稿里就是 <c>SetNode</c> / <c>GetNode</c>，靠同一个名字配对。
+    /// 名字取自实测：<c>SetNode</c> / <c>GetNode</c>（G12 那份原稿里一对），
+    /// 以及 Easy-Use 自己那套 <c>easy setNode</c> / <c>easy getNode</c>（H29 里 28 + 18 个）。
+    /// 配对靠同一个名字（写在 <c>widgets_values</c> 的第一个字符串上，名字是作者随手起的，如 "width"、"high"）。
     /// </summary>
-    private static bool IsVirtualSetter(string type) => type is "SetNode" or "NodeSet";
+    private static bool IsVirtualSetter(string type) => NormalizeVirtualType(type) is "setnode" or "nodeset" or "easysetnode";
 
-    private static bool IsVirtualGetter(string type) => type is "GetNode" or "NodeGet";
+    private static bool IsVirtualGetter(string type) => NormalizeVirtualType(type) is "getnode" or "nodeget" or "easygetnode";
+
+    /// <summary>类型名归一：去掉空格与符号、统一小写（`easy setNode` → `easysetnode`）。</summary>
+    private static string NormalizeVirtualType(string type)
+        => new(type.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 
     /// <summary>
     /// 「只转发」的那几种：它们都不进 API，但**连线已经被接到真正的源头**了

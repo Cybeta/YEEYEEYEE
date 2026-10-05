@@ -14250,12 +14250,20 @@ static void WorkflowConversionFollowsSetGetPairs()
         {"id": 5, "type": "GetNode", "mode": 0, "inputs": [],
          "outputs": [{"name":"CLIP","type":"CLIP","links":[13]}], "widgets_values": ["CLIP"]},
         {"id": 6, "type": "CLIPTextEncode", "mode": 0, "inputs": [{"name":"clip","type":"CLIP","link":13}],
-         "outputs": [{"name":"CONDITIONING","type":"CONDITIONING","links":[]}], "widgets_values": ["模糊"]}
+         "outputs": [{"name":"CONDITIONING","type":"CONDITIONING","links":[]}], "widgets_values": ["模糊"]},
+        {"id": 7, "type": "easy setNode", "mode": 0, "inputs": [{"name":"*","type":"*","link":14}],
+         "outputs": [], "widgets_values": ["width"]},
+        {"id": 8, "type": "easy getNode", "mode": 0, "inputs": [],
+         "outputs": [{"name":"*","type":"*","links":[15]}], "widgets_values": ["width"]},
+        {"id": 9, "type": "CLIPTextEncode", "mode": 0, "inputs": [{"name":"clip","type":"CLIP","link":15}],
+         "outputs": [{"name":"CONDITIONING","type":"CONDITIONING","links":[]}], "widgets_values": ["Easy-Use 那一对"]}
       ],
       "links": [
         [11, 1, 0, 2, 0, "CLIP"],
         [12, 3, 0, 4, 0, "CLIP"],
-        [13, 5, 0, 6, 0, "CLIP"]
+        [13, 5, 0, 6, 0, "CLIP"],
+        [14, 1, 0, 7, 0, "*"],
+        [15, 8, 0, 9, 0, "*"]
       ],
       "groups": [], "config": {}, "extra": {}, "version": 0.4
     }
@@ -14273,6 +14281,13 @@ static void WorkflowConversionFollowsSetGetPairs()
 
     Expect(!api.ContainsKey("2") && !api.ContainsKey("3") && !api.ContainsKey("5"),
         "Set / Get 本身不该进 API，实际留下了 " + string.Join("、", api.Select(pair => pair.Key)));
+
+    // Easy-Use 自己那套 `easy setNode` / `easy getNode` 是同一类（H29 里 28 + 18 个），也要跟过去。
+    var easy = api["9"]!["inputs"]!["clip"]!.AsArray();
+    Expect(easy.Count == 2 && easy[0]!.GetValue<string>() == "1",
+        "easy getNode 也要接到同名 easy setNode 的源头，实际 " + easy.ToJsonString());
+    Expect(!api.ContainsKey("7") && !api.ContainsKey("8"), "easy set/get 也不该进 API");
+
     Expect(converted.SkippedSummary.Contains("只转发的前端节点"),
         "跳过说明要说清它们是「只转发」而不是「被丢掉」：" + converted.SkippedSummary);
 }
