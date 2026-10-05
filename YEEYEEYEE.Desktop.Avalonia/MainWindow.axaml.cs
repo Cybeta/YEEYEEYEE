@@ -5252,7 +5252,9 @@ public partial class MainWindow : Window, IAgentSessionHost
             MarkCanvasDirty();
             UpdateCanvasUi(currentCanvasPath ?? string.Empty);
             report($"已出图并挂到「{item.Entity.Name}」的参考图：{fileName}（{result.Provider}"
-                + $"{(string.IsNullOrWhiteSpace(result.ReferenceNote) ? string.Empty : " · " + result.ReferenceNote)}）——记得点「保存修订」");
+                + $"{(string.IsNullOrWhiteSpace(result.ReferenceNote) ? string.Empty : " · " + result.ReferenceNote)}）——记得点「保存修订」"
+                // 这份工作流的体检结论（有断线 / 我们转换时丢过输入）：出图可能缺东西，得当面说。
+                + (string.IsNullOrWhiteSpace(result.WorkflowNote) ? string.Empty : Environment.NewLine + result.WorkflowNote));
             return SettingImageOutcome.Succeeded;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)

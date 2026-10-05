@@ -89,6 +89,37 @@ public sealed record ComfyUiImportAuditReport(
 
         return string.Join(Environment.NewLine, lines);
     }
+
+    /// <summary>
+    /// 把账落到每一份工作流上（导入与重转各调一次）。
+    ///
+    /// 为什么要落下来、而不是只留在报告里：报告是一次性的，而「这份工作流有 18 处断线」这件事
+    /// 在**选择器里**、在**点下去出片之前**都还要看得到——它决定用户要不要换一份。
+    /// 先清零再写：这次没有的结论不能留着上一次的数（重转之后问题可能已经没了）。
+    /// </summary>
+    public void ApplyTo(IEnumerable<SiteWorkflow> workflows)
+    {
+        ArgumentNullException.ThrowIfNull(workflows);
+
+        var counts = Findings
+            .Where(item => item.Kind is ComfyUiFindingKind.DroppedByConversion or ComfyUiFindingKind.BrokenInSource)
+            .GroupBy(item => item.WorkflowKey, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => (
+                    Dropped: group.Count(item => item.Kind == ComfyUiFindingKind.DroppedByConversion),
+                    Broken: group.Count(item => item.Kind == ComfyUiFindingKind.BrokenInSource)),
+                StringComparer.Ordinal);
+
+        foreach (var workflow in workflows)
+        {
+            workflow.DroppedInputs = 0;
+            workflow.BrokenInputs = 0;
+            if (!counts.TryGetValue(workflow.Key, out var found)) continue;
+            workflow.DroppedInputs = found.Dropped;
+            workflow.BrokenInputs = found.Broken;
+        }
+    }
 }
 
 /// <summary>
@@ -493,5 +524,59 @@ public static class ComfyUiImportAuditor
 
         /// <summary>给模型看的说明要短：原稿里一个节点的 JSON 可能上千字符，截到能读清形状就够了。</summary>
         private static string Compact(string text) => text.Length <= 900 ? text : text[..900] + "…（截断）";
+    }
+}
+
+/// <summary>
+/// 一份工作流的「体检结论」写成给人看的话——选择器里、出片之前都要用到，所以只写一处。
+///
+/// 为什么非说不可：这两种问题都让「用它出片」缺东西，而服务端往往还回 **success**、只是产出为空。
+/// 不说的话，用户只会觉得「这模型不行」，而真正该做的是换一份工作流。
+/// </summary>
+public static class ComfyUiWorkflowHealth
+{
+    /// <summary>
+    /// 按「站点 id + 工作流键」把这一份找出来（找不到、或站点文件读不到都返回 null）。
+    /// 出图与出视频两条链都要用它，所以放在这里一份——两处各写一遍迟早会有一处漏掉新的判断。
+    /// </summary>
+    public static SiteWorkflow? Find(string siteId, string workflowKey)
+    {
+        if (siteId.Length == 0 || workflowKey.Length == 0) return null;
+        try
+        {
+            return SiteCatalog.Load().Sites
+                .FirstOrDefault(item => item.Id == siteId)?
+                .Workflows.FirstOrDefault(item => item.Key == workflowKey);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.Text.Json.JsonException or InvalidOperationException or ArgumentException)
+        {
+            _ = error;
+            return null;
+        }
+    }
+
+    /// <summary>没有问题时返回空串（不占地方、也不制造假警报）。</summary>
+    public static string Describe(SiteWorkflow workflow)
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        var lines = new List<string>();
+        if (workflow.DroppedInputs > 0)
+            lines.Add($"⚠ 这份工作流有 **{workflow.DroppedInputs} 处输入是我们转换时丢掉的**"
+                + "（导入体检查出来的）：用它出片可能缺东西，甚至跑完什么都不产出——先换一份，"
+                + "或者重新导入时选「让大模型认一认」。");
+        if (workflow.BrokenInputs > 0)
+            lines.Add($"⚠ 这份工作流**自己**有 {workflow.BrokenInputs} 处断线"
+                + "（没接线的 Reroute、没有同名 Set 的 Get——不是转换的问题）：用它出片会缺东西，"
+                + "建议换一份，或去 ComfyUI 里把那几处线接上。");
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>选择器那一行挂的记号（列表里一眼能看出哪几份有问题）。没有问题就是空串。</summary>
+    public static string ShortMark(SiteWorkflow workflow)
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        if (workflow.DroppedInputs > 0) return "｜⚠ 转换丢过输入";
+        return workflow.BrokenInputs > 0 ? "｜⚠ 自己有断线" : string.Empty;
     }
 }

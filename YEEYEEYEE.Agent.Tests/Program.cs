@@ -201,6 +201,8 @@ var tests = new (string Name, Action Run)[]
     ("转换 · 固定选项的值是界面写法（Ref2VA — …）或数字下标时要纠正成它认的那个", ComfyUiConversionRepairsDecoratedComboValues),
     ("ComfyUI 导入体检：把我们丢掉的输入指到具体哪一份哪一处，并分清不是我们丢的那几类", ComfyUiImportAuditNamesWhatWeDropped),
     ("ComfyUI 导入体检：大模型说它是直通/界面件，都要照它重转核对过才采用", ComfyUiImportAuditOnlyKeepsVerifiedModelRules),
+    ("ComfyUI 导入整链：拉取→体检→让模型认→重转→落盘（真实 HTTP 与磁盘）", ComfyUiImportRepairsThroughTheWholeChain),
+    ("ComfyUI 站点标识：同一主机不同端口不撞车，同一台重新导入沿用原 id", ComfyUiSiteIdsDoNotCollideAcrossPorts),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -14928,6 +14930,123 @@ static void ComfyUiImportAuditOnlyKeepsVerifiedModelRules()
         && noJson.Contains("没有给出 JSON"), "没给 JSON 也要如实说");
 }
 
+/// <summary>
+/// 把「导入 → 体检 → 让大模型认一认 → 重转落地」这条链**整跑一遍**：真实 HTTP 往返（假服务器）+ 真实落盘。
+///
+/// 前面那些用例是把每一段拆开钉，这一条确认它们接得上——尤其确认**落盘之后**那条工作流上的体检结论是对的：
+/// 选择器里那一行警告、出片那一刻那句提醒、以及「下次导入自动接着用学到的规则」，全靠它。
+/// </summary>
+static void ComfyUiImportRepairsThroughTheWholeChain()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    const string objectInfo = """
+    {
+      "CheckpointLoaderSimple": {"input":{"required":{"ckpt_name":["STRING"]}},"output":["MODEL","CLIP","VAE"]},
+      "EmptyLatentImage": {"input":{"required":{"width":["INT"],"height":["INT"]}},"output":["LATENT"]},
+      "VAEDecode": {"input":{"required":{"samples":["LATENT"],"vae":["VAE"]}},"output":["IMAGE"]}
+    }
+    """;
+    // 中间夹着一个我们不认识的纯前端节点（其实是直通）：它下游的 samples 会整项消失。
+    const string draft = """
+    {
+      "last_node_id": 4, "last_link_id": 12,
+      "nodes": [
+        {"id": 1, "type": "CheckpointLoaderSimple", "mode": 0, "inputs": [],
+         "outputs": [{"name":"MODEL","type":"MODEL","links":[]},{"name":"CLIP","type":"CLIP","links":[]},
+                     {"name":"VAE","type":"VAE","links":[12]}], "widgets_values": ["a.safetensors"]},
+        {"id": 4, "type": "EmptyLatentImage", "mode": 0, "inputs": [],
+         "outputs": [{"name":"LATENT","type":"LATENT","links":[10]}], "widgets_values": [512, 512]},
+        {"id": 2, "type": "FancyBridge", "mode": 0,
+         "inputs": [{"name":"","type":"*","link":10}],
+         "outputs": [{"name":"LATENT","type":"LATENT","links":[11]}]},
+        {"id": 3, "type": "VAEDecode", "mode": 0,
+         "inputs": [{"name":"samples","type":"LATENT","link":11},{"name":"vae","type":"VAE","link":12}],
+         "outputs": [{"name":"IMAGE","type":"IMAGE","links":[]}]}
+      ],
+      "links": [[10, 4, 0, 2, 0, "LATENT"], [11, 2, 0, 3, 0, "LATENT"], [12, 1, 2, 3, 1, "VAE"]]
+    }
+    """;
+
+    var server = new ComfyUiStubServer { ObjectInfo = objectInfo };
+    server.Add("T/一份.json", draft);
+    using var http = new HttpClient(server.Handler()) { BaseAddress = new Uri("http://127.0.0.1:8188/") };
+
+    var fetched = ComfyUiLibrary.FetchAsync("http://127.0.0.1:8188", http).GetAwaiter().GetResult();
+    var audit = fetched.Audit!;
+    Expect(audit.NeedsAttention && audit.Count(ComfyUiFindingKind.DroppedByConversion) == 1,
+        "拉下来就该查出那一处被丢掉的输入：" + audit.Describe());
+    Expect(fetched.RawDrafts.Count == 1 && fetched.ObjectInfo is not null,
+        "原稿与节点定义要留在结果里——体检与「让模型认一认」都要用，不该事后再拉一遍");
+
+    // 用户选「先这样导入」：结论要落到那一份上，选择器里才看得到警告。
+    var (asIs, asIsError) = ComfyUiLibrary.Install(fetched, "假服务器", string.Empty, null);
+    Expect(asIs is not null && asIsError.Length == 0, "先这样导入也要落盘：" + asIsError);
+    var plain = asIs!.Workflows.First(item => item.Key == "T/一份.json");
+    Expect(plain.DroppedInputs == 1, "这份的结论要记在条目上，实际 " + plain.DroppedInputs);
+    Expect(ComfyUiWorkflowHealth.Describe(plain).Contains("我们转换时丢掉的"),
+        "选择器那一行要说人话：" + ComfyUiWorkflowHealth.Describe(plain));
+    Expect(ComfyUiWorkflowHealth.ShortMark(plain).Contains("⚠"), "列表里也要挂记号：" + ComfyUiWorkflowHealth.ShortMark(plain));
+
+    // 用户改选「让大模型认一认」：模型说它是直通，照它重转之后账要清掉。
+    var completer = new FakeJsonCompleter("{\"kind\":\"passthrough\",\"input_slot\":0,\"why\":\"只是把连线拉长\"}");
+    var learned = ComfyUiVirtualNodeLearner
+        .LearnAsync(fetched, completer, Array.Empty<ComfyUiVirtualNodeRule>()).GetAwaiter().GetResult();
+    Expect(learned.Verdicts.Count == 1 && learned.Verdicts[0].Accepted,
+        "这一条规则验证得过，应当采用：" + learned.Describe());
+    Expect(completer.Prompts.Count == 1 && completer.Prompts[0].Contains("FancyBridge")
+        && completer.Prompts[0].Contains("节点 4") && completer.Prompts[0].Contains("VAEDecode"),
+        "问模型的话里要说清它长什么样、输入接的谁、输出接到了谁："
+        + (completer.Prompts.Count > 0 ? completer.Prompts[0] : "（根本没问）"));
+
+    var repaired = ComfyUiLibrary.Reconvert(fetched, learned.Accepted);
+    var (fixedSite, fixedError) = ComfyUiLibrary.Install(repaired, "假服务器", string.Empty, asIs);
+    Expect(fixedSite is not null && fixedError.Length == 0, "重转之后要能落盘：" + fixedError);
+    var healed = fixedSite!.Workflows.First(item => item.Key == "T/一份.json");
+    Expect(healed.DroppedInputs == 0 && ComfyUiWorkflowHealth.Describe(healed).Length == 0,
+        "修好之后结论要清掉（不能留着上一次的警告）");
+    Expect(fixedSite.VirtualNodeRules.Count == 1 && fixedSite.VirtualNodeRules[0].Type == "FancyBridge",
+        "学到的规则要落在站点上，下次导入自动接着用");
+
+    // 落盘的正文确实是修好的那一份：samples 接回了真正的源头（节点 4）。
+    var payload = SiteCatalog.LoadPayload(fixedSite.Id, healed.PayloadFile);
+    Expect(payload is not null, "正文要按份落盘");
+    var samples = System.Text.Json.Nodes.JsonNode.Parse(payload!)!["3"]!["inputs"]!["samples"]!.AsArray();
+    Expect(samples[0]!.GetValue<string>() == "4", "落盘的正文里那条线要指向节点 4，实际 " + samples[0]);
+
+    // 同一台重新导入仍然沿用原 id（用户的停用/推荐跟着保住），而**另一个端口**不能撞进来。
+    var (sameAgain, _) = ComfyUiLibrary.Install(repaired, "假服务器", string.Empty, fixedSite);
+    Expect(sameAgain!.Id == fixedSite.Id, "同一台重新导入要沿用原 id：" + sameAgain.Id);
+}
+
+/// <summary>
+/// 同一台主机上的两个端口（一台机器跑两个 ComfyUI）不能共用一个站点标识——
+/// 那会互相覆盖整份工作流库（先导进来的那份工作流说没就没），而用户的停用/推荐也会被搬错家。
+/// </summary>
+static void ComfyUiSiteIdsDoNotCollideAcrossPorts()
+{
+    using var stores = new IsolatedStores();
+    AppPaths.UseProject(ProjectContext.Create(stores.Root, "agent-tests"));
+
+    ComfyUiLibraryResult Of(string baseUrl, string key) => new(
+        "127", baseUrl,
+        new[] { new SiteWorkflow { Key = key, Title = Path.GetFileNameWithoutExtension(key), Folder = "T" } },
+        new Dictionary<string, string>(StringComparer.Ordinal), Array.Empty<string>());
+
+    var (first, firstError) = ComfyUiLibrary.Install(Of("http://127.0.0.1:8188", "T/甲.json"), "本地 8188", string.Empty, null);
+    Expect(first is not null && firstError.Length == 0, "第一台要能落盘：" + firstError);
+
+    // 同一主机、另一个端口：id 派生规则只看主机名，所以到这里是「撞名了」。
+    var (second, secondError) = ComfyUiLibrary.Install(Of("http://127.0.0.1:8189", "T/乙.json"), "本地 8189", string.Empty, first);
+    Expect(second is not null && secondError.Length == 0, "第二台要能落盘：" + secondError);
+    Expect(second!.Id != first!.Id, "两个端口的站点标识必须分开，实际都是 " + second.Id);
+    Expect(second.Id.Contains("8189", StringComparison.Ordinal), "新登记的那一台用端口做后缀：" + second.Id);
+    Expect(second.Workflows.Any(item => item.Key == "T/乙.json") && second.Workflows.All(item => item.Key != "T/甲.json"),
+        "第二台里不该混进第一台的工作流");
+    Expect(SiteCatalog.Load().Sites.Count == 2, "两份站点文件并存，谁也不覆盖谁：" + SiteCatalog.Load().Sites.Count);
+}
+
 static class Sample
 {
     /// <summary>1x1 透明 PNG：用真实图片字节，而不是随便凑一段数据。</summary>
@@ -15007,6 +15126,23 @@ sealed class IsolatedStores : IDisposable
         Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", previousAssetDirectory);
         Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG", previousConfig);
         try { if (Directory.Exists(Root)) Directory.Delete(Root, true); } catch (IOException) { }
+    }
+}
+
+/// <summary>按调用顺序交出预设的 JSON —— 「让大模型认一认」这条路用它，测试里不真调模型。</summary>
+sealed class FakeJsonCompleter : IAiJsonCompleter
+{
+    private readonly Queue<string> answers;
+
+    public FakeJsonCompleter(params string[] answers) => this.answers = new Queue<string>(answers);
+
+    /// <summary>每次问出去的话（要能核对「问清楚没有」）。</summary>
+    public List<string> Prompts { get; } = new();
+
+    public Task<string> CompleteJsonAsync(string systemPrompt, string userPrompt, CancellationToken cancellationToken = default)
+    {
+        Prompts.Add(userPrompt);
+        return Task.FromResult(answers.Count > 0 ? answers.Dequeue() : "{}");
     }
 }
 

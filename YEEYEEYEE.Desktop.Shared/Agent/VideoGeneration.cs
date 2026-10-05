@@ -299,11 +299,12 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
                 + "可能站点被删了或正文被清掉了，到「设置 → 技能管理 → 站点与池子」重新导入一次即可。");
 
         ComfyUiWorkflowSlots detected;
+        var site = SiteOf(request.WorkflowSiteId);
         try
         {
             // 站点那张「见过的选项值」表一起带上：比例这一项要写出服务端认的值就得靠它
             //（见 SiteProfile.OptionValues；只照当前值的写法把数字换掉会造出它不认的字符串）。
-            detected = ComfyUiWorkflowBinder.Detect(template, OptionValuesOf(request.WorkflowSiteId));
+            detected = ComfyUiWorkflowBinder.Detect(template, site?.OptionValues);
         }
         catch (Exception error) when (error is System.Text.Json.JsonException or InvalidOperationException)
         {
@@ -346,6 +347,14 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         var notes = new List<string>();
         foreach (var missing in missingSources)
             notes.Add($"你给的素材在本机找不到了，它不会被用上：{missing}");
+
+        // 导入体检的结论：这份工作流有断线（或我们转换时丢过输入）时，**先说**——
+        // 不说的话，出片会缺东西、甚至跑完什么都不产出，而用户只会以为「这模型不行」。
+        if (ComfyUiWorkflowHealth.Find(request.WorkflowSiteId, request.WorkflowKey) is { } picked)
+        {
+            var health = ComfyUiWorkflowHealth.Describe(picked);
+            if (health.Length > 0) notes.Add(health);
+        }
 
         // ── 源视频 / 源音频 ──
         // 这一支工作流吃的是**一段片子**：给了要说清写到哪个节点，没给要说清它会拿自己的示例片子跑——
@@ -610,15 +619,15 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
     }
 
     /// <summary>
-    /// 这个站点那张「全库用过的固定选项值」表（比例这一项靠它写出服务端认的值）。
-    /// 读不到就当没有——那种情况下退回到「照当前值的写法造一个」，与以前一样，不会因此不干活。
+    /// 这个站点（比例那一项的「见过的选项值」与每份工作流的体检结论都在它上面）。
+    /// 读不到就当没有——那种情况下退回老做法，不会因此不干活。
     /// </summary>
-    private static IReadOnlyDictionary<string, List<string>>? OptionValuesOf(string siteId)
+    private static SiteProfile? SiteOf(string siteId)
     {
         if (siteId.Length == 0) return null;
         try
         {
-            return SiteCatalog.Load().Sites.FirstOrDefault(item => item.Id == siteId)?.OptionValues;
+            return SiteCatalog.Load().Sites.FirstOrDefault(item => item.Id == siteId);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException
             or System.Text.Json.JsonException or InvalidOperationException or ArgumentException)

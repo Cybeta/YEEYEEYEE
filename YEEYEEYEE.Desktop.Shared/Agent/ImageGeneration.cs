@@ -87,6 +87,13 @@ public sealed class ImageGenerationResult
     /// 执行方用不了全部参考图时，必须在这里说明，而不是静默丢弃。
     /// </summary>
     public string ReferenceNote { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 这份工作流的**体检结论**（导入时查出来的：有几处断线、有几处是我们转换时丢的输入）。
+    /// 有内容就说明「用它出图可能缺东西、甚至跑完什么都不产出」——必须说出来，
+    /// 否则用户只会觉得是模型不行，而真正该做的是换一份工作流。
+    /// </summary>
+    public string WorkflowNote { get; init; } = string.Empty;
 }
 
 /// <summary>
@@ -565,12 +572,19 @@ public sealed class ComfyUiImageProvider : IImageProvider
         string template = string.Empty;
         string slots = string.Empty;
         ComfyUiWorkflowSlots? detected = null;
+        var workflowNote = string.Empty;
         if (request.WorkflowPayloadFile.Length > 0)
         {
             template = SiteCatalog.LoadPayload(request.WorkflowSiteId, request.WorkflowPayloadFile) ?? string.Empty;
             if (template.Length == 0)
                 return Failed($"这份工作流的正文读不到（站点 {request.WorkflowSiteId} 的 {request.WorkflowPayloadFile}）："
                     + "可能站点被删了或正文被清掉了，到「设置 → 技能管理 → 站点与池子」重新导入一次即可。");
+
+            // 导入体检的结论：这份工作流有断线（或我们转换时丢过输入）时先说清——
+            // 不说的话，出图会缺东西、甚至跑完什么都不产出，而用户只会以为「这模型不行」。
+            workflowNote = ComfyUiWorkflowHealth.Find(request.WorkflowSiteId, request.WorkflowKey) is { } picked
+                ? ComfyUiWorkflowHealth.Describe(picked)
+                : string.Empty;
 
             try
             {
@@ -657,7 +671,7 @@ public sealed class ComfyUiImageProvider : IImageProvider
             }).ConfigureAwait(false);
 
             var result = await completion.Task.ConfigureAwait(false);
-            return MapResult(result, ModelLabel(request, template.Length > 0), ReferenceNote(references.Count, detected));
+            return MapResult(result, ModelLabel(request, template.Length > 0), ReferenceNote(references.Count, detected), workflowNote);
         }
         catch (OperationCanceledException) { return Failed("ComfyUI 任务已取消。"); }
         catch (TimeoutException error) { return Failed(error.Message); }
@@ -694,7 +708,7 @@ public sealed class ComfyUiImageProvider : IImageProvider
         return string.Empty;
     }
 
-    private ImageGenerationResult MapResult(ExecutionResult result, string modelLabel, string referenceNote)
+    private ImageGenerationResult MapResult(ExecutionResult result, string modelLabel, string referenceNote, string workflowNote)
     {
         if (result.State != JobState.Succeeded)
             return Failed(result.ErrorMessage ?? $"ComfyUI 任务状态为 {result.State}。");
@@ -711,10 +725,15 @@ public sealed class ComfyUiImageProvider : IImageProvider
                     FilePath = path,
                     Provider = Name,
                     Model = modelLabel,
-                    ReferenceNote = referenceNote
+                    ReferenceNote = referenceNote,
+                    WorkflowNote = workflowNote
                 };
         }
-        return Failed("ComfyUI 任务完成但没有返回可用图片。");
+
+        // 「跑完了但什么都没有」正是体检里那两种问题的典型症状：这时候把结论附上，
+        // 用户才知道该换一份工作流，而不是一遍遍重试同一份。
+        return Failed("ComfyUI 任务完成但没有返回可用图片。"
+            + (workflowNote.Length > 0 ? Environment.NewLine + workflowNote : string.Empty));
     }
 
     private ImageGenerationResult Failed(string error) => new()

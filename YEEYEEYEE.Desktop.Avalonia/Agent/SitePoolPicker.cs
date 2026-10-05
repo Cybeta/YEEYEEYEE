@@ -256,6 +256,11 @@ internal static class SitePoolPicker
                 $"这份工作流能收到：{slots.Describe()}",
                 workflow.Note.Length > 0 ? "转换时的说明：" + workflow.Note : "转换时没有被跳过的节点。"
             };
+
+            // 体检的结论放在**最前面**：它决定的是「要不要选这一份」，比「它能收到什么」更该先看到。
+            // 这两种问题都会让出片缺东西，而服务端往往还回 success、只是产出为空——那时用户只会怪模型。
+            var health = ComfyUiWorkflowHealth.Describe(workflow);
+            if (health.Length > 0) lines.Insert(0, health);
             if (slots.IsFrameDriven)
                 lines.Add("这一份只吃首帧、不收文字提示词（SVD / 动作迁移 / 人物替换这一类，是正当用法）："
                     + "画面由首帧与它自己的运动参数决定，你写的提示词不会进工作流。");
@@ -306,7 +311,10 @@ internal static class SitePoolPicker
                 foreach (var workflow in workflows)
                     workflowBox.Items.Add(workflow.Title
                         + (workflow.Recommended ? "（推荐）" : string.Empty)
-                        + $"｜节点 {workflow.NodeCount}");
+                        + $"｜节点 {workflow.NodeCount}"
+                        // 有问题的（转换丢过输入、或它自己有断线）在列表里就挂个记号：
+                        // 免得逐份点开才知道「这一份用了会缺东西」。
+                        + ComfyUiWorkflowHealth.ShortMark(workflow));
                 workflowBox.SelectedIndex = workflows.Count > 0 ? 0 : -1;
 
                 var recommended = workflows.FirstOrDefault(workflow => workflow.Recommended);

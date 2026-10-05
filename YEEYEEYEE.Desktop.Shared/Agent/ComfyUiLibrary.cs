@@ -286,9 +286,18 @@ public static class ComfyUiLibrary
     {
         ArgumentNullException.ThrowIfNull(result);
 
+        // 站点标识：同一台（地址一样）就是**重新导入**，沿用原来的 id，用户的取舍也跟着保住；
+        // 同一个主机名但**端口不同**（一台机器上跑两个 ComfyUI）不能共用一个 id——那会互相覆盖
+        // 整份工作流库。这时只给**新登记的这一台**加后缀，现有站点一个字不改（改名等于连它那份取舍一起换掉）。
+        var clash = previous is not null
+            && !string.Equals(previous.BaseUrl, result.BaseUrl, StringComparison.OrdinalIgnoreCase);
+        var id = clash ? $"{result.SiteId}-{SiteCatalog.PortOf(result.BaseUrl)}" : result.SiteId;
+        // 撞名时那份「上一个站点」是**别的机器**，它的停用/推荐不该被搬过来。
+        var carryOver = clash ? null : previous;
+
         var site = new SiteProfile
         {
-            Id = result.SiteId,
+            Id = id,
             DisplayName = displayName.Length > 0 ? displayName : SiteCatalog.DefaultDisplayNameFor(result.BaseUrl),
             BaseUrl = result.BaseUrl,
             SourceUrl = result.BaseUrl,
@@ -304,7 +313,7 @@ public static class ComfyUiLibrary
 
         // 重新导入时保住用户自己的取舍：被标成「停用」的仍然停用，用户手工改过的推荐项仍然推荐。
         // 不保的话，用户每刷新一次清单就要重新把不想要的那几十份再关一遍。
-        var previousByKey = previous?.Workflows.ToDictionary(item => item.Key, StringComparer.Ordinal)
+        var previousByKey = carryOver?.Workflows.ToDictionary(item => item.Key, StringComparer.Ordinal)
             ?? new Dictionary<string, SiteWorkflow>(StringComparer.Ordinal);
 
         foreach (var workflow in result.Workflows)
@@ -325,6 +334,9 @@ public static class ComfyUiLibrary
 
         // 只有「一个推荐都没有」的组才自动补一份：用户选过的那一组不再插手。
         MarkRecommended(site.Workflows);
+
+        // 体检的账落到每一份上：选择器里、点下去出片之前都要看得到（报告是一次性的，滑过去就没了）。
+        result.Audit?.ApplyTo(site.Workflows);
 
         foreach (var pair in result.Payloads)
         {
@@ -526,12 +538,15 @@ public static class ComfyUiLibrary
             }
         }
 
+        var audit = ComfyUiImportAuditor.Inspect(result.RawDrafts, payloads, result.ObjectInfo);
+        // 重转之后账要重新落到每一份上：之前那份结论（例如「转换丢过输入」）多半已经不成立了。
+        audit.ApplyTo(workflows);
         return result with
         {
             Workflows = workflows,
             Payloads = payloads,
             AppliedRules = rules,
-            Audit = ComfyUiImportAuditor.Inspect(result.RawDrafts, payloads, result.ObjectInfo)
+            Audit = audit
         };
     }
 

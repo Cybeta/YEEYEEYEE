@@ -131,6 +131,21 @@ public sealed class SiteWorkflow
     /// <summary>API 正文落在哪个文件（相对 <see cref="SiteCatalog.PayloadDirectory"/> 的文件名）。</summary>
     public string PayloadFile { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 导入体检的结论：这份工作流有几个必填输入是**我们转换时丢的**。
+    ///
+    /// 为什么要把这个数留在条目上（而不是只写在导入那一次的报告里）：它会让「用它出片」缺东西，
+    /// 而服务端往往还回 success、只是产出为空——那种错从结果上完全看不出来。必须在**选它的那一刻**
+    /// 与**点下去出片之前**都能看到，而报告滑过去就没了。
+    /// </summary>
+    public int DroppedInputs { get; set; }
+
+    /// <summary>
+    /// 这份工作流**自己**原稿里就断着的输入有几处（不是转换的问题：没接线的 Reroute、没有同名 Set 的 Get）。
+    /// 同上：选它出片会缺东西，得让人在选之前就知道，而不是跑完发现产出是空的。
+    /// </summary>
+    public int BrokenInputs { get; set; }
+
     public DateTimeOffset ConvertedAt { get; set; } = DateTimeOffset.Now;
 
     [JsonIgnore]
@@ -431,6 +446,18 @@ public static class SiteCatalog
         var picked = labels.Length > start ? labels[start] : labels[0];
         return Slug(picked);
     }
+
+    /// <summary>
+    /// 地址里的端口（没写端口时给出协议默认端口：http 80 / https 443）。
+    ///
+    /// 为什么要它：站点标识**只由主机名派生**，所以「同一台主机上跑两个 ComfyUI（端口不同）」
+    /// 会派生出同一个 id——两个站点文件互相覆盖，先导进来的那份工作流库说没就没。
+    /// 撞名时用端口给新登记的那一台加后缀（见 <see cref="ComfyUiLibrary.Install"/>）。
+    /// </summary>
+    public static string PortOf(string? url)
+        => Uri.TryCreate((url ?? string.Empty).Trim(), UriKind.Absolute, out var uri)
+            ? uri.Port.ToString()
+            : string.Empty;
 
     /// <summary>
     /// 按「上次用的那一个」的印记在现有站点里把池子找回来；找不到返回 null。
