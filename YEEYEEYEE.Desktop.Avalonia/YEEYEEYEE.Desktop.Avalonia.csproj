@@ -40,8 +40,10 @@
        构建时拷进输出目录，程序就从**程序目录旁的 provider-art/** 读到它们；用户配置目录里那一份优先，
        所以用户自己换的图不会被版本更新覆盖掉。
        CopyToOutputDirectory 用 PreserveNewest：重复构建不会每次重拷这几 MB。
-       **只拷图、不拷那底下别的东西**：那个目录里还留着出图管线自己写的记录（`_generation.json`，
-       里面是生成时的模型/池子与提示词），它是旁产物，不该跟着发布包走。 -->
+       **只拷图、不拷那底下别的东西**：那个目录里还有一份出图管线写的记录（`_generation.json`，
+       里面是生成当时用的模型/池子与提示词），它在仓库里是「图上画的是哪一版设计」的凭据
+       （用例 `ProviderAvatarPromptsMatchTheRecordedBatch` 要读它对账），可**运行时没人读**，
+       所以只入仓库、不进发布包。 -->
   <ItemGroup>
     <None Include="..\provider-art\**\*.png;..\provider-art\**\*.jpg;..\provider-art\**\*.jpeg;..\provider-art\**\*.svg;..\provider-art\**\*.webp"
           Link="provider-art\%(RecursiveDir)%(Filename)%(Extension)"
