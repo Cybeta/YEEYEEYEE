@@ -148,6 +148,7 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 多路音源：两个音频口按顺序各收一段，只给一段时后面的入口保持它自己的示例", ComfyUiFeedsEveryAudioEntryInOrder),
     ("ComfyUI 认入口：认不出就说「我没认出来，请指给我」，不许说成「用不了」", ComfyUiBinderSaysWhatItCouldNotRecognize),
     ("ComfyUI 认入口：服务器声明为文件选择的槽也算底图入口（空着的那几格照样算）", ComfyUiDeclaredFileSlotsBecomeEntries),
+    ("ComfyUI 认提示词：中文包的 `提示词` 要认、正负不许指同一格、跳一跳要穿过中转、名字对不上时用图结构兜底", ComfyUiPromptSlotsFallBackToTheGraph),
     ("ComfyUI 体检：服务器上没有那个类型时只能说「判断不了」，不能说成「是我们转换丢的」", ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
@@ -10918,6 +10919,97 @@ static void ComfyUiDeclaredFileSlotsBecomeEntries()
 		"首帧要写得进去：" + framed.ToJsonString());
 	Expect(framed["1"]!["inputs"]!["filename_prefix"]!.GetValue<string>() == "out.png",
 		"不是素材槽的那几格一个字都不许动");
+}
+
+/// <summary>
+/// 钉住提示词入口的四条规矩（都是这一轮按证据加的）：
+///
+/// ① **中文包的输入名也要认**：实测这台机器上 `NanFengH3MultiReferenceGeneratorV10/V15` 与
+///    `ZealmanLLM_Generate` 的输入叫 `提示词`，而名单原先一个中文名都没有——在中文包上等于没有名单，
+///    跑起来用的是**作者那份的示例提示词**（用户写的分镜进不去）。中文名一律排在英文名**后面**。
+/// ② **同一个输入不能既当正向又当负向**：实测有两份工作流两边都指到同一个 `prompt` 上（互相覆盖）。
+/// ③ **跳一跳要能穿过中转节点**：采样器的 `positive` 常常不是直接接文字节点，中间隔一层 Reroute / 拼接；
+///    只走单路，分叉就停手（跟不到就说跟不到，不挑一条猜）。
+/// ④ **名字一个都对不上时，用图结构兜底**（经典 `CLIPTextEncode.text`）：把「另一路」那一支排掉之后
+///    **只剩一处**才认；剩多处、一处不剩就照旧说没找到——猜错的代价是把分镜描述写进负面词里。
+/// </summary>
+static void ComfyUiPromptSlotsFallBackToTheGraph()
+{
+	// ① 中文名。
+	const string chinese = """
+	{"1": {"class_type": "NanFengMulti", "inputs": {"提示词": "作者那份的示例提示词", "采样步数": 20}}}
+	""";
+	var chineseSlots = ComfyUiWorkflowBinder.Detect(chinese);
+	Expect(chineseSlots.CanTextToImage && chineseSlots.PositiveNodeId == "1" && chineseSlots.PositiveInput == "提示词",
+		"中文包的 `提示词` 要认出来：" + chineseSlots.Describe());
+	var written = ComfyUiWorkflowBinder.Bind(chinese, chineseSlots,
+		new ComfyUiBindValues { Prompt = "第三镜：她推开木门" });
+	Expect(written["1"]!["inputs"]!["提示词"]!.GetValue<string>() == "第三镜：她推开木门",
+		"要写得进去：" + written.ToJsonString());
+
+	// ①b 那一格放的若是**结构化模板**（H3 那族的六节），要**说出来**会整段被替换（不是拦着不写）。
+	const string templated = """
+	{"1": {"class_type": "NanFengMulti", "inputs": {"提示词": "段1\nsubject_definitions:\n<Subject 1> is the character referenced from <Picture 1>.\n\nsummary:\n[reference generation] 作者那份的示例场景。\n\nretention_analysis:\n<Subject 1> fully_preserved.\n\ndetailed_description:\n作者写的分镜描述。\n"}}}
+	""";
+	var templatedSlots = ComfyUiWorkflowBinder.Detect(templated);
+	Expect(templatedSlots.PositiveInput == "提示词"
+		&& templatedSlots.Notes.Any((string note) => note.Contains("结构化模板")),
+		"模板式提示词要认出来并把「整段会被替换」说出来：" + string.Join("；", templatedSlots.Notes));
+
+	// ② 正负两路指到同一格 → 不许重复占，另一路宁可说没找到。
+	const string sameSlot = """
+	{
+	  "1": {"class_type": "KSampler", "inputs": {"positive": ["2", 0], "negative": ["2", 0]}},
+	  "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "同一格文字"}}
+	}
+	""";
+	var sameSlots = ComfyUiWorkflowBinder.Detect(sameSlot);
+	Expect(sameSlots.PositiveNodeId == "2" && sameSlots.PositiveInput == "text",
+		"正向该落在那一格上：" + sameSlots.Describe());
+	Expect(sameSlots.NegativeNodeId.Length == 0,
+		"同一格被正向占了之后，负面不许再指到它上：" + sameSlots.Describe());
+
+	// ③ 跳一跳要能穿过 Reroute 这类中转。
+	const string through = """
+	{
+	  "1": {"class_type": "KSampler", "inputs": {"positive": ["4", 0], "negative": ["5", 0]}},
+	  "4": {"class_type": "Reroute", "inputs": {"input": ["2", 0]}},
+	  "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "正向文字"}},
+	  "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "负向文字"}}
+	}
+	""";
+	var throughSlots = ComfyUiWorkflowBinder.Detect(through);
+	Expect(throughSlots.PositiveNodeId == "2" && throughSlots.PositiveInput == "text",
+		"要能穿过中转节点找到文字：" + throughSlots.Describe());
+
+	// ④ 名字都对不上：排掉负向那一支之后只剩一处 → 认它；剩两处 → 认不出（不猜）。
+	const string fallback = """
+	{
+	  "1": {"class_type": "KSampler", "inputs": {"negative": ["3", 0], "samples": ["2", 0]}},
+	  "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "应该被认成正向的那一处"}},
+	  "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "负向文字"}}
+	}
+	""";
+	var fallbackSlots = ComfyUiWorkflowBinder.Detect(fallback);
+	Expect(fallbackSlots.PositiveNodeId == "2" && fallbackSlots.PositiveInput == "text",
+		"排掉负向那一支后只剩一处，就该认它：" + fallbackSlots.Describe()
+		+ "｜说说：" + string.Join("；", fallbackSlots.Notes));
+	Expect(fallbackSlots.Notes.Any((string note) => note.Contains("分不出正负")),
+		"这么认下来必须在说明里讲清是怎么定下来的：" + string.Join("；", fallbackSlots.Notes));
+
+	const string ambiguous = """
+	{
+	  "1": {"class_type": "KSampler", "inputs": {"negative": ["3", 0], "samples": ["2", 0]}},
+	  "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "候选一"}},
+	  "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "负向文字"}},
+	  "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "候选二"}},
+	  "5": {"class_type": "SomeSaver", "inputs": {"value": ["4", 0]}}
+	}
+	""";
+	var ambiguousSlots = ComfyUiWorkflowBinder.Detect(ambiguous);
+	Expect(!ambiguousSlots.CanTextToImage,
+		"剩下两处可写的地方时不许挑一个猜（猜错就把分镜写进别处）：" + ambiguousSlots.Describe()
+		+ "｜说说：" + string.Join("；", ambiguousSlots.Notes));
 }
 
 /// <summary>

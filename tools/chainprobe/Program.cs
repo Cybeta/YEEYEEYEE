@@ -1559,6 +1559,58 @@ if (mode == "stubtest")
     return;
 }
 
+if (mode == "prompts")
+{
+    // prompts：把每份工作流「提示词入口认到哪儿了」列出来，供「改输入名名单」前后逐份对照。
+    // 认不出的那些还会把它**身上像提示词的输入名**一起列出来 —— 名单该加什么，照这个证据定，不靠猜。
+    var site = sites.First(item => item.IsComfyUi);
+    var rows = new List<string>();
+    var noPrompt = 0;
+    var candidates = new Dictionary<string, int>(StringComparer.Ordinal);
+    foreach (var workflow in site.Workflows)
+    {
+        var payload = SiteCatalog.LoadPayload(site.Id, workflow.PayloadFile) ?? string.Empty;
+        ComfyUiWorkflowSlots slots;
+        try { slots = ComfyUiWorkflowBinder.Detect(payload, site.OptionValues, site.FileSlots); }
+        catch (Exception error) { _ = error; rows.Add(workflow.Title + "｜读不了"); continue; }
+
+        var positive = slots.CanTextToImage ? slots.PositiveNodeId + "." + slots.PositiveInput : "✗";
+        var negative = slots.NegativeNodeId.Length > 0 ? slots.NegativeNodeId + "." + slots.NegativeInput : "✗";
+        rows.Add($"{workflow.Title}｜正向 {positive}｜负面 {negative}");
+        if (slots.CanTextToImage) continue;
+        noPrompt++;
+
+        // 认不出时，看看它身上有哪些「像提示词」的字符串输入名（只报名字，不报内容）。
+        var names = new SortedSet<string>(StringComparer.Ordinal);
+        if (System.Text.Json.Nodes.JsonNode.Parse(payload) is System.Text.Json.Nodes.JsonObject api)
+            foreach (var node in api)
+            {
+                if (node.Value?["inputs"] is not System.Text.Json.Nodes.JsonObject inputs) continue;
+                foreach (var field in inputs)
+                {
+                    if (field.Value is not System.Text.Json.Nodes.JsonValue value
+                        || !value.TryGetValue<string>(out _)) continue;
+                    var low = field.Key.ToLowerInvariant();
+                    if (low.Contains("提示") || low.Contains("词") || low.Contains("prompt")
+                        || low.Contains("text") || low.Contains("caption"))
+                    {
+                        names.Add(field.Key);
+                        candidates[field.Key] = candidates.TryGetValue(field.Key, out var seen) ? seen + 1 : 1;
+                    }
+                }
+            }
+        if (names.Count > 0) rows.Add("    · 它身上像提示词的输入名：" + string.Join("、", names));
+    }
+
+    Console.WriteLine($"{site.Workflows.Count} 份里认不出正向提示词的：{noPrompt} 份");
+    foreach (var pair in candidates.OrderByDescending(pair => pair.Value))
+        Console.WriteLine($"  候选名 {pair.Key}：{pair.Value} 份");
+    Console.WriteLine();
+    foreach (var row in rows) Console.WriteLine(row);
+    File.WriteAllLines(Path.Combine(Path.GetTempPath(), "prompts.txt"), rows, System.Text.Encoding.UTF8);
+    return;
+}
+
 if (mode == "pull-archive")
 {
     // pull-archive [地址] [目录]：把一台 ComfyUI 上的**全部原稿**与节点定义留档到本地。

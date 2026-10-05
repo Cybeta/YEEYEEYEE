@@ -307,10 +307,27 @@ public static class ComfyUiWorkflowBinder
     /// 而 Wan 的视频编码器是 <c>WanVideoTextEncode.positive_prompt</c>（连出来一个「Text Multiline」）。
     /// 按名字找这两种形状用同一条规则就覆盖了；按类型找得每见一个新包加一条分支。
     /// </summary>
-    private static readonly string[] PositiveNames = { "positive_prompt", "positive", "positive_text", "text_g", "prompt" };
+    private static readonly string[] PositiveNames =
+    {
+        "positive_prompt", "positive", "positive_text", "text_g", "prompt",
+        // 中文包的写法。实测这台机器上 `NanFengH3MultiReferenceGeneratorV10/V15` 与 `ZealmanLLM_Generate`
+        // 的输入叫 `提示词`，而这张名单原先**一个中文名都没有**——在中文包上等于没有名单，
+        // 于是这些工作流认不出提示词入口，跑起来用的是**作者那份的示例提示词**（用户写的分镜进不去）。
+        // 一律**排在最后**：同时存在 `prompt` 这类英文名时，仍然以英文名为准（更明确的那一档优先）。
+        "提示词", "正向提示词", "正面提示词"
+    };
 
     /// <summary>负面提示词的输入名，同样按明确程度排序。</summary>
-    private static readonly string[] NegativeNames = { "negative_prompt", "negative", "negative_text", "text_l" };
+    private static readonly string[] NegativeNames =
+        { "negative_prompt", "negative", "negative_text", "text_l", "负面提示词", "负向提示词", "反向提示词" };
+
+    /// <summary>
+    /// 名字一个都对不上时的**最后兜底**只认这一个名字：经典 `CLIPTextEncode.text`（实测这台机器上
+    /// 108 份工作流是这样写的）。别的像提示词的名字（`preset_prompt` / `system_prompt` / `Text4` /
+    /// `prompt_1` 这些）不收：它们多半是**别的东西**（预设、给大模型的系统指令、分段列表），
+    /// 认错比不认坏。
+    /// </summary>
+    private static readonly string[] FallbackTextNames = { "text" };
 
     /// <summary>跳一跳之后，认哪些输入名是「可以直接写文字的地方」。</summary>
     private static readonly string[] WritableTextNames = { "text", "value", "string", "prompt", "text_positive", "text_negative" };
@@ -395,6 +412,7 @@ public static class ComfyUiWorkflowBinder
 
         if (candidates.Count == 0)
         {
+            if (ResolvePromptByGraph(graph, positive, slots)) return;
             slots.Notes.Add($"没找到{label}：图里没有任何节点的输入叫 {string.Join(" / ", names)}。");
             return;
         }
@@ -410,7 +428,21 @@ public static class ComfyUiWorkflowBinder
         {
             if (candidate.Value is JsonValue)
             {
+                // 同一个输入不能既当正向又当负向：另一路已经写下的那一格要跳过
+                //（实测有两份工作流原先两边都指到同一个 `prompt` 上——那样会互相覆盖）。
+                if (TakenByOtherSide(slots, positive, candidate.NodeId, candidate.Input))
+                {
+                    reasons.Add($"{candidate.Input}（节点 {candidate.NodeId}）已经判给另一路了");
+                    continue;
+                }
+
                 Assign(slots, positive, candidate.NodeId, candidate.Input);
+                if (candidate.Value is JsonValue literal && literal.TryGetValue<string>(out var current)
+                    && SectionNames(current) is { Count: >= 3 } sections)
+                    slots.Notes.Add($"这一份的{label}是一段**结构化模板**（{string.Join(" / ", sections.Take(4))} "
+                        + "这几节）：按名字认出来了，所以这一镜的描述会**整段**替换掉它，那几节结构跟着没了。"
+                        + "这种模板往往正是**把 `<Picture 1>` 这些参考图点起来**的那一段——这份对格式敏感，"
+                        + "出来不像就回来说一声（可以改成只替换其中某几节）。");
                 NoteAmbiguity(slots, label, ordered, candidate);
                 return;
             }
@@ -421,7 +453,7 @@ public static class ComfyUiWorkflowBinder
                 continue;
             }
 
-            if (graph[link.NodeId] is not JsonObject source || source["inputs"] is not JsonObject sourceInputs)
+            if (graph[link.NodeId] is not JsonObject source)
             {
                 reasons.Add($"{candidate.Input} 指向的节点 {link.NodeId} 不在图里");
                 continue;
@@ -443,23 +475,166 @@ public static class ComfyUiWorkflowBinder
                 return;
             }
 
-            // 跳一跳：文字往往挂在被指向的那个节点上。
-            var target = WritableTextNames.FirstOrDefault(name => sourceInputs[name] is JsonValue);
-            if (target is null)
+            // 跳一跳：文字往往挂在被指向的那个节点上，也可能隔着一两个中转节点（Reroute / 拼接）。
+            var walked = WalkToWritableText(graph, link.NodeId);
+            if (walked is not { } target)
             {
                 reasons.Add($"{candidate.Input}（节点 {candidate.NodeId}）指向 {type}（节点 {link.NodeId}），"
-                    + "那里没有可直接写的文字输入");
+                    + "从那里往回走找不到一处能写字的输入（或者分叉了，分不清该走哪一条）");
                 continue;
             }
 
-            Assign(slots, positive, link.NodeId, target);
-            slots.Notes.Add($"{label}写在节点 {link.NodeId}（{type}）的 {target} 上："
-                + $"它是由节点 {candidate.NodeId} 的 {candidate.Input} 引用过来的。");
+            if (TakenByOtherSide(slots, positive, target.NodeId, target.Input))
+            {
+                reasons.Add($"{candidate.Input} 最后指到的是已经判给另一路的那一格");
+                continue;
+            }
+
+            Assign(slots, positive, target.NodeId, target.Input);
+            slots.Notes.Add($"{label}写在节点 {target.NodeId}（{target.Type}）的 "
+                + $"{target.Input} 上：它是从节点 {candidate.NodeId} 的 {candidate.Input} 沿连线找过来的。");
             NoteAmbiguity(slots, label, ordered, candidate);
             return;
         }
 
+        if (ResolvePromptByGraph(graph, positive, slots)) return;
         foreach (var reason in reasons) slots.Notes.Add($"没找到{label}：{reason}。");
+    }
+
+    /// <summary>
+    /// 从某个节点往回走，找「写着字的地方」（一个可以直接写文字的输入）；找不到返回 null。
+    ///
+    /// 只沿**唯一那条连线**往下走（最多 6 跳）：一个节点上有多条连线、或者一处节点上能写字的地方不止一处，
+    /// 就停手——那是判不清，宁可照实说「跟不到」，也不挑一条猜（挑错的代价是把提示词写到别的输入上）。
+    /// </summary>
+    private static (string NodeId, string Input, string Type)? WalkToWritableText(JsonObject graph, string startNodeId)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var nodeId = startNodeId;
+        for (var hop = 0; hop < 7; hop++)
+        {
+            if (!seen.Add(nodeId)) return null;
+            if (graph[nodeId] is not JsonObject node || node["inputs"] is not JsonObject inputs) return null;
+
+            var writable = WritableTextNames.Where(name => inputs[name] is JsonValue).ToList();
+            if (writable.Count == 1) return (nodeId, writable[0], ClassTypeOf(node));
+            if (writable.Count > 1) return null;
+
+            var links = inputs.Where(field => ReadLink(inputs, field.Key) is not null).ToList();
+            if (links.Count != 1) return null;
+            if (ReadLink(inputs, links[0].Key) is not { } jump) return null;
+            nodeId = jump.NodeId;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 名字一个都对不上时的**最后兜底**：经典 `CLIPTextEncode.text` 那一套写法。
+    ///
+    /// 凭什么敢往里写：**把「另一路」排掉之后，只剩一处能写字的地方**。两条结构证据一起用——
+    ///   ① 候选池取**「名字说明是这一路」的那些输入能追到的节点**（采样器 `positive` 往回追到的那一支，
+    ///      文字节点绝大多数就在里面）；那一支追不到时（这份没有这种写法）才在全图里找。
+    ///   ② 把**另一路**（`negative` / `negative_prompt` 那些名字往回追到的节点）整支排掉。
+    /// 这是结构证据，不是按名字猜。剩多处、一处不剩、或者那一处根本没被谁读过，就照旧说「没找到」：
+    /// 名字分不出正负，猜错的代价是把用户的分镜描述写进**负面词**里，那比不写坏得多。
+    /// </summary>
+    private static bool ResolvePromptByGraph(JsonObject graph, bool positive, ComfyUiWorkflowSlots slots)
+    {
+        var side = ReachableFromNamedInputs(graph, positive ? PositiveNames : NegativeNames);
+        var blocked = ReachableFromNamedInputs(graph, positive ? NegativeNames : PositiveNames);
+        // 另一路已经写下的那一格也排掉（同一个输入不能既当正向又当负向）。
+        if (positive && slots.NegativeNodeId.Length > 0) blocked.Add(slots.NegativeNodeId);
+        if (!positive && slots.PositiveNodeId.Length > 0) blocked.Add(slots.PositiveNodeId);
+
+        // 只收「真的被谁读过」的那些：没人读的文本框（比如作者留在画布上的草稿）不算入口。
+        var referenced = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var pair in graph)
+            if (pair.Value?["inputs"] is JsonObject inputs)
+                foreach (var field in inputs)
+                    if (ReadLink(inputs, field.Key) is { } link) referenced.Add(link.NodeId);
+
+        var left = new List<(string NodeId, string Input)>();
+        foreach (var pair in graph)
+        {
+            if (pair.Value is not JsonObject node || node["inputs"] is not JsonObject inputs) continue;
+            if (side.Count > 0 && !side.Contains(pair.Key)) continue;
+            if (!referenced.Contains(pair.Key) || blocked.Contains(pair.Key)) continue;
+            foreach (var name in FallbackTextNames)
+                if (inputs[name] is JsonValue) left.Add((pair.Key, name));
+        }
+        if (left.Count != 1) return false;
+
+        Assign(slots, positive, left[0].NodeId, left[0].Input);
+        slots.Notes.Add($"{(positive ? "正向提示词" : "负面词")}写在节点 {left[0].NodeId} 的 {left[0].Input} 上："
+            + "这一份的输入名分不出正负（就叫 `text`），是**顺着连线把另一路排掉之后只剩这一处**才定下来的。");
+        return true;
+    }
+
+    /// <summary>这一格是不是已经判给**另一路**了（一个输入不能既当正向又当负向）。</summary>
+    private static bool TakenByOtherSide(ComfyUiWorkflowSlots slots, bool positive, string nodeId, string input)
+        => positive
+            ? slots.NegativeNodeId == nodeId && slots.NegativeInput == input
+            : slots.PositiveNodeId == nodeId && slots.PositiveInput == input;
+
+    /// <summary>
+    /// 一段文字里**单独成行的小节标题**（`subject_definitions:` 这种）。
+    ///
+    /// 干什么用：实测 H3 那一族的 `提示词` 是**六节模板**（`subject_definitions` / `summary` /
+    /// `retention_analysis` / `detailed_description` / `overall_soundscape` / `non_diegetic_music`），
+    /// 而那种模板往往正是**把 `<Picture 1>` 这些参考图点起来**的那一段。我们按名字认出来之后会把整段换成
+    /// 这一镜的描述、结构就没了——所以要把这件事**说出来**（不是在拦：拦着不写，分镜照样进不去，
+    /// 那正是这些工作流本来的毛病）。
+    /// </summary>
+    private static List<string> SectionNames(string text)
+    {
+        var names = new List<string>();
+        foreach (var line in (text ?? string.Empty).Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length is < 4 or > 24) continue;
+            if (trimmed[^1] is not (':' or '：')) continue;
+            var head = trimmed[..^1].Trim();
+            if (head.Length is < 3 or > 20) continue;
+            if (!head.All(ch => char.IsLetterOrDigit(ch) || ch == '_' || ch == ' ' || ch > 127)) continue;
+            names.Add(head);
+        }
+        return names;
+    }
+
+    /// <summary>
+    /// 从「名字里已经说明是哪一路」的那些输入出发，把它们**往回能追到的节点**全收起来
+    /// （`negative` / `negative_prompt` 这些名字，或 `positive` / `prompt` 那些名字）。
+    ///
+    /// 用途只有一个：给「名字分不出正负」的兜底那一档**排掉另一路**。
+    /// </summary>
+    private static HashSet<string> ReachableFromNamedInputs(JsonObject graph, string[] names)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var pair in graph)
+        {
+            if (pair.Value?["inputs"] is not JsonObject inputs) continue;
+            foreach (var name in names)
+                if (ReadLink(inputs, name) is { } link)
+                    set.UnionWith(BackwardReachable(graph, link.NodeId));
+        }
+        return set;
+    }
+
+    /// <summary>沿连线往回追，能到达哪些节点（含起点自己）；上限 400 个节点防病态图。</summary>
+    private static HashSet<string> BackwardReachable(JsonObject graph, string startNodeId)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Stack<string>();
+        pending.Push(startNodeId);
+        while (pending.Count > 0)
+        {
+            var nodeId = pending.Pop();
+            if (!seen.Add(nodeId) || seen.Count > 400) continue;
+            if (graph[nodeId]?["inputs"] is not JsonObject inputs) continue;
+            foreach (var field in inputs)
+                if (ReadLink(inputs, field.Key) is { } link) pending.Push(link.NodeId);
+        }
+        return seen;
     }
 
     private static void Assign(ComfyUiWorkflowSlots slots, bool positive, string nodeId, string input)
