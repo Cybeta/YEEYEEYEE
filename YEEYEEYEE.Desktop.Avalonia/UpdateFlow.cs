@@ -215,11 +215,7 @@ internal static class UpdateFlow
     private static string Describe(Exception? error) => error switch
     {
         null => "没有拿到具体原因。",
-        // 这一句要在最前面说怎么办：国内访问 GitHub 基本都要代理，而「代理只配在 git 里」很常见
-        // （实测就是这么卡住的：git 能推代码，应用下不了包）。应用现在也认 git 里那个代理了，
-        // 但万一用户用的是别的写法，这句话至少给出一条能走通的路。
-        HttpRequestException http => "网络请求失败：" + http.Message
-            + "\n国内访问 GitHub 通常要走代理：设环境变量 HTTPS_PROXY，或把代理写进 git 配置（https.proxy）后重启应用。",
+        HttpRequestException http => "网络请求失败：" + http.Message,
         TaskCanceledException or OperationCanceledException => "连接超时或被取消。",
         IOException io => "读写文件失败：" + io.Message,
         UnauthorizedAccessException => "没有权限写入目标目录。",

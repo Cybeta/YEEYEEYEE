@@ -1,6 +1,3 @@
-using System.Diagnostics;
-using System.Net;
-
 namespace YEEYEEYEE.Desktop;
 
 /// <summary>
@@ -19,68 +16,22 @@ public static class UpdateService
     /// <summary>下载更新包：给足时间，真正的取消交给令牌。</summary>
     private static readonly HttpClient DownloadClient = CreateClient(TimeSpan.FromMinutes(30));
 
-    private static HttpClient CreateClient(TimeSpan timeout)
-    {
-        var handler = new HttpClientHandler();
-        if (ResolveProxy() is { } proxy) handler.Proxy = proxy;
-        return new HttpClient(handler) { Timeout = timeout };
-    }
-
     /// <summary>
-    /// 更新这条链路要用的代理。**为什么单给它一份**：查发行版与下包都落在 github.com 上，
-    /// 而国内拉 GitHub 基本都要走代理；很多机器上代理**只配在 git 里**（`https.proxy`），
-    /// 应用默认只认系统设置——结果就是「git 能推代码、应用下不了更新包」。
-    /// 实测卡住过：报「网络请求失败」，一路查到 git 配置里那个 `127.0.0.1:10809`。
+    /// 更新用的 HTTP 客户端：**代理这件事交给平台**，应用自己不塞、也不到处去找。
     ///
-    /// 依次看：`YEEYEEYEE_PROXY`（自己人排查用）→ `HTTPS_PROXY` / `HTTP_PROXY`（通用约定）
-    /// → git 配置里的 `https.proxy` / `http.proxy`（开发者机器上通常就配在那儿）→ 都没有就用系统默认。
+    /// 为什么不去读 git 配置（`https.proxy`）那些地方——那是别的工具的私事，而且很可能过期：
+    /// 一个已经不用的代理写在那里，会让本来直连好好的用户直接下不了包（把「能连」改成「连不上」）。
+    /// 实测这台机器就是这样：系统代理**是关的**（`ProxyEnable=0`，只记着那个 `127.0.0.1:10809` 的值），
+    /// 环境变量也没有，WinHTTP 直连——平台回答得很清楚「没有代理」。应用当时连不上 GitHub
+    /// 是**正确**行为，该做的是让用户去系统设置里打开代理，不是替他去翻别的工具的配置。
+    ///
+    /// 要找回来的话：`HttpClientHandler` 默认 `UseProxy = true`，Windows 上读的就是用户系统设置
+    /// （macOS / Linux 读环境变量），这已经是最妥当的一档。`CreateHandler` 单列出来是为了让用例盯住它：
+    /// 「没把 UseProxy 关掉、也没自己塞一个 Proxy」。
     /// </summary>
-    internal static IWebProxy? ResolveProxy()
-    {
-        // 我们自己的那个变量放最前面：排查时想临时指到别处，不该被机器上的 HTTPS_PROXY 挡回去。
-        if (EnvCompat.Get("PROXY") is { Length: > 0 } custom && Uri.TryCreate(custom, UriKind.Absolute, out var fromCustom))
-            return new WebProxy(fromCustom);
+    private static HttpClient CreateClient(TimeSpan timeout) => new(CreateHandler()) { Timeout = timeout };
 
-        foreach (var name in new[] { "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY" })
-        {
-            var value = Environment.GetEnvironmentVariable(name);
-            if (!string.IsNullOrWhiteSpace(value) && Uri.TryCreate(value, UriKind.Absolute, out var fromEnvironment))
-                return new WebProxy(fromEnvironment);
-        }
-
-        foreach (var key in new[] { "https.proxy", "http.proxy" })
-            if (GitConfig(key) is { Length: > 0 } value && Uri.TryCreate(value, UriKind.Absolute, out var fromGit))
-                return new WebProxy(fromGit);
-
-        return null;
-    }
-
-    /// <summary>读 git 配置里的一个键（读不到、没装 git、超时都返回 null）。只读，不写任何东西。</summary>
-    private static string? GitConfig(string key)
-    {
-        try
-        {
-            var start = new ProcessStartInfo("git")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            start.ArgumentList.Add("config");
-            start.ArgumentList.Add("--get");
-            start.ArgumentList.Add(key);
-            using var process = Process.Start(start);
-            if (process is null) return null;
-            var text = process.StandardOutput.ReadToEnd().Trim();
-            process.WaitForExit(2000);
-            return text.Length > 0 ? text : null;
-        }
-        catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
-        {
-            return null;
-        }
-    }
+    internal static HttpClientHandler CreateHandler() => new();
 
     public static async Task<UpdateCheckResult> CheckAsync(
         bool force = false,

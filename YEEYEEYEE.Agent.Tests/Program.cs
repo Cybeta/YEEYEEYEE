@@ -72,6 +72,7 @@ var tests = new (string Name, Action Run)[]
     ("更新：重启标记能原样存回（前一版 / 目标版 / 更新内容）", UpdateMarkerRoundTrips),
     ("更新：替换脚本只含 ASCII（PS5 会把无 BOM 的 UTF-8 当 ANSI 读）", UpdateSwapScriptIsAsciiOnly),
     ("更新：替换脚本实测——真换掉一个目录并留下结果文件", UpdateSwapScriptActuallyReplacesDirectory),
+    ("更新：代理交给平台（不许关掉 UseProxy、也不许自己塞一个代理）", UpdateClientLeavesProxyToTheSystem),
     ("出图批次：整批还在跑时单张一律不能操作（漏文件那条路的入口）", BatchSlotsAreNotActionableWhileRunning),
     ("出图开奖：按张数排布（一行最多 3 张 / 4 张 2×2 / 卡片固定 2:3 / 末行按自己的张数居中）", GachaCardLayoutIsPinnedByCount),
     ("出图开奖：分数 → 档位（9 分以上金 / 7-8 红 / 5-6 紫 / 3-4 蓝 / 2 分以下白；光点从金到白严格递减）", QualityTierFollowsScore),
@@ -289,7 +290,6 @@ var tests = new (string Name, Action Run)[]
     ("返工 G6-T2：发布结果区分「真落库」与「本地内容」，本地实体不谎报已保存", PublishOutcomeDistinguishesLocalAndShared),
     ("解决方案覆盖了仓库里每一个 csproj（新增项目忘了加会红）", SolutionCoversEveryProject),
     ("形象提示词只有一份：表里的设计说明与 provider-art 记录的出图原话逐条对账", ProviderAvatarPromptsMatchTheRecordedBatch),
-    ("更新链路要认代理：环境变量（HTTPS_PROXY）里的代理优先被采纳", UpdateProxyPrefersEnvironment),
     ("资源库：开跑前核验只动标记不动内容（不许抹掉未保存的编辑）", AuthorityRecheckOnlyTouchesMarks),
     ("资源库：打开画布时按库对齐（刷新 / 补入引用到的 / 标缺失）", MergeIntoAlignsSharedEntitiesOnOpen),
     ("引用：查不到的变体 ID 要报失效，不悄悄换成第一个变体", ReferenceWithUnknownVariantFailsInsteadOfSwitching),
@@ -9363,6 +9363,23 @@ static void UpdateSwapScriptActuallyReplacesDirectory()
 	}
 }
 
+/// <summary>
+/// 钉住「代理交给平台」：更新用的 handler 不许自己关掉代理、也不许自己塞一个进去。
+///
+/// 为什么这条要有：真机上报过一次「网络请求失败」，一路查到 git 配置里有个**已经不用的**
+/// `127.0.0.1:10809`。当时的「修法」是让应用去读环境变量和 git 配置——那是错的：那台机器的
+/// 系统代理**本来就是关的**（`ProxyEnable=0`，只是还记着那个值），平台回答得很清楚「直连」，
+/// 应用连不上 GitHub 才是正确行为。而读别的工具的过期配置，会把本来直连正常的用户直接弄坏。
+/// 代理该由用户在自己的系统设置里开，应用只用平台给的默认（Windows 读系统设置，
+/// macOS / Linux 读环境变量）。这条看着朴素，挡的正是「再修一次」。
+/// </summary>
+static void UpdateClientLeavesProxyToTheSystem()
+{
+	using var handler = UpdateService.CreateHandler();
+	Expect(handler.UseProxy, "不许把 UseProxy 关掉：关掉就等于无视用户在系统里设的代理。");
+	Expect(handler.Proxy is null, "不许自己塞代理：应用不替用户猜代理在哪，实际 " + (handler.Proxy?.ToString() ?? "null"));
+}
+
 // 「跑着的时候不能挑」这条规则此前只写在 CanPick 上（算提示文字用的），而右键菜单是按**格子状态**建的，
 // 于是「单张已出好、其余还在跑」时菜单直接给「用这一张」。点下去会把整批丢掉、却不取消还在跑的请求，
 // 那些请求跑完后仍会把图写进资产目录，可那时批次已经不在表里了——没人引用（漏文件）。
@@ -10653,40 +10670,6 @@ static void ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer()
 	Expect(known.Kind == ComfyUiFindingKind.DroppedByConversion
 		&& known.Detail == "源头是个活着的后端节点",
 		"类型在服务器上就照旧说「源头是个活着的后端节点」：" + known.Detail);
-}
-
-/// <summary>
-/// 钉住更新链路认代理：`YEEYEEYEE_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` 给了就用。
-///
-/// 为什么这条必须有：查发行版与下包都落在 GitHub 上，而**国内拉 GitHub 基本都要走代理**，
-/// 很多机器上代理只配在 git 里（`https.proxy`）——应用默认只认系统设置，于是出现
-/// 「git 能推代码、应用下不了更新包」。实测就是这么卡住的（报「网络请求失败」），
-/// 一路查到 git 配置里那个 `127.0.0.1:10809`。环境变量那一档是确定性最好验的，先钉住它。
-/// </summary>
-static void UpdateProxyPrefersEnvironment()
-{
-    var previous = Environment.GetEnvironmentVariable("HTTPS_PROXY");
-    var previousCustom = Environment.GetEnvironmentVariable("YEEYEEYEE_PROXY");
-    try
-    {
-        Environment.SetEnvironmentVariable("YEEYEEYEE_PROXY", null);
-        Environment.SetEnvironmentVariable("HTTPS_PROXY", "http://127.0.0.1:18099");
-        var fromEnvironment = UpdateService.ResolveProxy();
-        Expect(fromEnvironment is WebProxy { Address: { } environmentAddress }
-            && environmentAddress.Host == "127.0.0.1" && environmentAddress.Port == 18099,
-            "HTTPS_PROXY 里的代理要被认出来，实际 " + (fromEnvironment?.ToString() ?? "null"));
-
-        // 我们自己的那个变量优先于通用约定：排查时想临时指到别处，不该被机器上的 HTTPS_PROXY 挡回去。
-        Environment.SetEnvironmentVariable("YEEYEEYEE_PROXY", "http://127.0.0.1:18098");
-        var fromCustom = UpdateService.ResolveProxy();
-        Expect(fromCustom is WebProxy { Address: { } customAddress } && customAddress.Port == 18098,
-            "YEEYEEYEE_PROXY 要盖过 HTTPS_PROXY，实际 " + (fromCustom?.ToString() ?? "null"));
-    }
-    finally
-    {
-        Environment.SetEnvironmentVariable("HTTPS_PROXY", previous);
-        Environment.SetEnvironmentVariable("YEEYEEYEE_PROXY", previousCustom);
-    }
 }
 
 /// <summary>
