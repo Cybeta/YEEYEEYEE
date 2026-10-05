@@ -78,7 +78,9 @@ public static class ComfyUiWorkflowConversion
         // 连线重编号），再把结果交给下面这条既有流水线——那条流水线一行都不用改。
         nodes = ExpandSubgraphs(ui, nodes);
 
-        var links = ResolvePassThroughs(ReadLinks(ui["links"] as JsonArray), IndexById(nodes));
+        var nodesById = IndexById(nodes);
+        var links = ResolvePassThroughs(ReadLinks(ui["links"] as JsonArray), nodesById);
+        var primitives = CollectPrimitiveValues(nodesById);
 
         var output = new JsonObject();
         var skipped = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -102,16 +104,18 @@ public static class ComfyUiWorkflowConversion
                 // 不是后端节点：备注、Label 这类纯界面物件。官方靠 comfyClass 为空落空，效果一致。
                 // **但「只转发」的那几种要分开说**：Reroute 与 Set/Get 配对也不进 API，
                 // 可它们的连线被接到了真正的源头——把它们算进「被丢掉的」会让人去查根本没丢的东西。
-                Bump(skipped, IsForwardingOnly(type)
-                    ? "只转发的前端节点（连线已接到真正的源头）"
-                    : "不是后端节点（" + type + "）");
+                Bump(skipped, IsPrimitiveValueNode(type)
+                    ? "纯前端的值节点（值已内联进下游）"
+                    : IsForwardingOnly(type)
+                        ? "只转发的前端节点（连线已接到真正的源头）"
+                        : "不是后端节点（" + type + "）");
                 continue;
             }
 
             var id = IdText(node["id"]);
             if (id is null) continue;
 
-            var (apiNode, unnamed) = BuildApiNode(node, def, type, links);
+            var (apiNode, unnamed) = BuildApiNode(node, def, type, links, primitives);
             output[id] = apiNode;
             if (unnamed > 0)
             {
@@ -128,7 +132,10 @@ public static class ComfyUiWorkflowConversion
         return new ComfyUiConversionResult(output, [.. DescribeSkips(skipped), .. unnamedNotes]);
     }
 
-    private static (JsonObject Node, int UnnamedWidgets) BuildApiNode(JsonObject node, JsonObject def, string type, IReadOnlyDictionary<long, (string OriginId, int OriginSlot)> links)
+    private static (JsonObject Node, int UnnamedWidgets) BuildApiNode(
+        JsonObject node, JsonObject def, string type,
+        IReadOnlyDictionary<long, (string OriginId, int OriginSlot)> links,
+        IReadOnlyDictionary<string, JsonNode?> primitives)
     {
         var inputs = new JsonObject();
 
@@ -199,6 +206,17 @@ public static class ComfyUiWorkflowConversion
                 if (string.IsNullOrEmpty(name)) continue;
                 var linkId = ReadLong(input["link"]);
                 if (linkId is not { } key || !links.TryGetValue(key, out var origin)) continue;
+
+                // 源头是 PrimitiveNode 时**不写连线，写常量**：那是个纯前端的「裸值」节点，
+                // 官方导出时会把它内联成消费者这个输入的值（它自己不进 API）。实测三种形状都对得上：
+                // `JsonExtractString.key` ← "Quality"、`VHS_LoadVideo.video` ← ["xxx.mp4","increment",""]、
+                // `TextEncodeAceStepAudio1.5.duration` ← [120,"fixed"]，取第一个值当字面量即可。
+                if (primitives.TryGetValue(origin.OriginId, out var literal) && literal is not null)
+                {
+                    inputs[name] = literal.DeepClone();
+                    continue;
+                }
+
                 // 官方是 resolveInput：连着线就以线为准（即使这个槽位本身是个控件）。
                 inputs[name] = new JsonArray(JsonValue.Create(origin.OriginId), JsonValue.Create(origin.OriginSlot));
             }
@@ -470,6 +488,10 @@ public static class ComfyUiWorkflowConversion
             // 值就在它的输入上——和 Reroute 一样继续往上走，不跟的话下游那个输入就没了。
             if (IsVirtualSetter(TypeOf(node))) return ResolveInput(nodeId, 0, type, visited);
 
+            // rgthree 的「Fast Bypasser」也是直通：它的输入是那几个被它旁路的节点（输入名就是节点标题），
+            // 输出 OPT_CONNECTION 一路传下去。实测 D20：`SaveImage.images ← Fast Bypasser ← Add Film Grain`。
+            if (IsVirtualBypasser(TypeOf(node))) return ResolveInput(nodeId, 0, type, visited);
+
             return (nodeId, slot);
         }
 
@@ -575,16 +597,48 @@ public static class ComfyUiWorkflowConversion
 
     private static bool IsVirtualGetter(string type) => NormalizeVirtualType(type) is "getnode" or "nodeget" or "easygetnode";
 
+    /// <summary>
+    /// rgthree 的「Fast Bypasser / Fast Groups Bypasser」：它自己不进 API（<c>/object_info</c> 里没有），
+    /// 但**是个直通**——输入接的是被旁路的那些节点，输出 <c>OPT_CONNECTION</c> 一路传下去。
+    /// </summary>
+    private static bool IsVirtualBypasser(string type)
+    {
+        var key = NormalizeVirtualType(type);
+        return key.StartsWith("fastbypasser", StringComparison.Ordinal)
+            || key.StartsWith("fastgroupsbypasser", StringComparison.Ordinal);
+    }
+
     /// <summary>类型名归一：去掉空格与符号、统一小写（`easy setNode` → `easysetnode`）。</summary>
     private static string NormalizeVirtualType(string type)
         => new(type.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+
+    /// <summary>
+    /// 纯前端的「裸值」节点：<c>PrimitiveNode</c>（<c>/object_info</c> 里没有）。
+    /// 它只带一个控件值，官方导出时会把它**内联成消费者那个输入的值**（见 <see cref="BuildApiNode"/>），
+    /// 而不是留一条连线。值的位置实测三种形状：裸字符串 <c>"Quality"</c>、
+    /// 数组 <c>["xxx.mp4","increment",""]</c>（第一项才是值）、<c>[120,"fixed"]</c>。
+    /// </summary>
+    private static bool IsPrimitiveValueNode(string type) => type == "PrimitiveNode";
+
+    private static Dictionary<string, JsonNode?> CollectPrimitiveValues(Dictionary<string, JsonObject> nodesById)
+    {
+        var values = new Dictionary<string, JsonNode?>(StringComparer.Ordinal);
+        foreach (var pair in nodesById)
+        {
+            if (!IsPrimitiveValueNode(TypeOf(pair.Value))) continue;
+            var raw = pair.Value["widgets_values"];
+            var first = raw is JsonArray array && array.Count > 0 ? array[0] : raw;
+            if (first is not null) values[pair.Key] = first.DeepClone();
+        }
+        return values;
+    }
 
     /// <summary>
     /// 「只转发」的那几种：它们都不进 API，但**连线已经被接到真正的源头**了
     /// （见 <see cref="ResolvePassThroughs"/>）。把它们说成「不是后端节点、丢掉了」会让人去查根本没丢的东西。
     /// </summary>
     private static bool IsForwardingOnly(string type)
-        => IsVirtualPassThroughType(type) || IsVirtualSetter(type) || IsVirtualGetter(type);
+        => IsVirtualPassThroughType(type) || IsVirtualSetter(type) || IsVirtualGetter(type) || IsVirtualBypasser(type);
 
     /// <summary>Set/Get 靠这个名字配对（实测写在 <c>widgets_values</c> 的第一个字符串上）。</summary>
     private static string VirtualLinkName(JsonObject node)
@@ -739,6 +793,32 @@ public static class ComfyUiWorkflowConversion
                 if (row.TargetId is null || IsBoundaryId(row.TargetId)) continue;
 
                 var origins = ResolveOrigins(nodeById, prefix, row.OriginId, row.OriginSlot);
+
+                // 把上面那种「哨兵」（输出其实来自容器自己的某个输入）换成真正的源头：
+                // 容器第 i 个输入的 `link` 指向外面那条线，顺着它再解一次。
+                if (origins.Any(item => item.NodeId.Length == 0))
+                {
+                    var expanded = new List<(string NodeId, int Slot)>();
+                    foreach (var origin in origins)
+                    {
+                        if (origin.NodeId.Length > 0)
+                        {
+                            expanded.Add(origin);
+                            continue;
+                        }
+
+                        if (!nodeById.TryGetValue(row.OriginId, out var containerNode)) continue;
+                        if (containerNode["inputs"] is not JsonArray containerInputs
+                            || origin.Slot < 0 || origin.Slot >= containerInputs.Count
+                            || containerInputs[origin.Slot] is not JsonObject inputSlot) continue;
+                        if (ReadLong(inputSlot["link"]) is not { } outerLink
+                            || !linkById.TryGetValue(outerLink, out var outer)) continue;
+                        expanded.AddRange(ResolveOrigins(nodeById, prefix, outer.OriginId, outer.OriginSlot));
+                    }
+
+                    origins = expanded;
+                }
+
                 var targets = ResolveTargets(nodeById, prefix, row.TargetId, row.TargetSlot);
                 foreach (var origin in origins)
                 foreach (var target in targets)
@@ -778,7 +858,16 @@ public static class ComfyUiWorkflowConversion
             foreach (var linkId in LinkIdsOf(output))
             {
                 if (!childLinks.TryGetValue(linkId, out var row)) continue;
-                if (IsBoundaryId(row.OriginId)) continue;   // 直通输入端的那种，接不出去
+                // 定义里 `-10 → -20` 这种（容器的输出其实是它自己某个输入接进来的）：值在**外面**
+                // 喂给容器那个输入的地方。这里先只记下「第几个输入」（空 id + 下标当哨兵），
+                // 交给调用方——它手里才有上一层 ——去接真正的源头。
+                // 实测 U10 的 `frame_rate`、D18 的 `image_1` 就是这么丢的。
+                if (IsBoundaryId(row.OriginId))
+                {
+                    if (ContainerInputIndexOf(def, linkId) is { } index) result.Add((string.Empty, index));
+                    continue;
+                }
+
                 result.AddRange(ResolveOrigins(childById, childPrefix, row.OriginId, row.OriginSlot));
             }
             return result;
@@ -823,6 +912,22 @@ public static class ComfyUiWorkflowConversion
             }
             return result;
         }
+    }
+
+    /// <summary>
+    /// 某条内部连线在定义里对应**第几个输入**。用在「容器的输出其实是它自己某个输入直通过来的」
+    /// 那种形状上（定义里 <c>-10 → -20</c> 一条线）：要知道值是从外面喂给第几个输入的，
+    /// 才能接着往上层找真正的源头。
+    /// </summary>
+    private static int? ContainerInputIndexOf(JsonObject def, long linkId)
+    {
+        if (def["inputs"] is not JsonArray inputs) return null;
+        for (var index = 0; index < inputs.Count; index++)
+        {
+            if (inputs[index] is not JsonObject input) continue;
+            if (LinkIdsOf(input).Contains(linkId)) return index;
+        }
+        return null;
     }
 
     /// <summary>子图定义里的 linkIds（对 -10 / -20 的边界伪节点来说就是这些内部连线的清单）。</summary>

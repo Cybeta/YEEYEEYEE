@@ -192,6 +192,8 @@ var tests = new (string Name, Action Run)[]
     ("出视频 · 写进去的到底是什么：帧数与比例照写、帧率一个字不动、没给就不许乱写", WorkflowBinderWritesLengthAspectAndSize),
     ("出视频 · 帧数是算出来的时候：认出那个收秒的常量（判据是表达式里带着帧率），写秒不写帧", WorkflowBinderFindsTheSecondsWhenFramesAreComputed),
     ("转换 · Set/Get 配对是转发不是丢弃：Get 的值接到同名 Set 的源头，两个都不进 API", WorkflowConversionFollowsSetGetPairs),
+    ("转换 · PrimitiveNode 的值内联进下游；Fast Bypasser 当直通跟到源头", ComfyUiConversionInlinesPrimitiveAndFollowsBypasser),
+    ("转换 · 子图「输入直通到输出」要接到外面喂给容器那个输入的地方", ComfyUiConversionWiresContainerPassThrough),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -14400,6 +14402,117 @@ static void WorkflowConversionFollowsSetGetPairs()
 
     Expect(converted.SkippedSummary.Contains("只转发的前端节点"),
         "跳过说明要说清它们是「只转发」而不是「被丢掉」：" + converted.SkippedSummary);
+}
+
+/// <summary>
+/// 钉住另外两种「不进 API 但要跟过去」的前端节点：
+/// · <c>PrimitiveNode</c>：纯前端的「裸值」节点，官方导出时**内联成消费者那个输入的值**；
+/// · <c>Fast Bypasser (rgthree)</c>：直通（输入接被旁路的节点，输出 OPT_CONNECTION 传下去）。
+///
+/// 实测代价：`JsonExtractString.key`（R03）、`VHS_LoadVideo.video`（Z04）、
+/// `TextEncodeAceStepAudio1.5.duration`（N05）三处因前者丢失，`SaveImage.images`（D20）因后者丢失。
+/// </summary>
+static void ComfyUiConversionInlinesPrimitiveAndFollowsBypasser()
+{
+    const string objectInfo = """
+    {
+      "JsonExtractString": {"input": {"required": {"json_string": ["STRING"], "key": ["STRING"]}}},
+      "VAELoader": {"input": {"required": {"vae_name": ["STRING"]}}},
+      "VAEDecode": {"input": {"required": {"samples": ["LATENT"], "vae": ["VAE"]}}}
+    }
+    """;
+
+    const string ui = """
+    {
+      "last_node_id": 32, "last_link_id": 52,
+      "nodes": [
+        {"id": 20, "type": "PrimitiveNode", "mode": 0, "inputs": [],
+         "outputs": [{"name":"STRING","type":"STRING","links":[50]}], "widgets_values": "Quality"},
+        {"id": 21, "type": "JsonExtractString", "mode": 0,
+         "inputs": [{"name":"json_string","type":"STRING","link":null}, {"name":"key","type":"STRING","link":50}],
+         "outputs": [{"name":"STRING","type":"STRING","links":[]}], "widgets_values": ["{}"]},
+        {"id": 30, "type": "VAELoader", "mode": 0, "inputs": [],
+         "outputs": [{"name":"VAE","type":"VAE","links":[51]}], "widgets_values": ["vae.safetensors"]},
+        {"id": 31, "type": "Fast Bypasser (rgthree)", "mode": 0,
+         "inputs": [{"name":"VAELoader","type":"*","link":51}, {"name":"","type":"","link":null}],
+         "outputs": [{"name":"OPT_CONNECTION","type":"*","links":[52]}], "widgets_values": []},
+        {"id": 32, "type": "VAEDecode", "mode": 0,
+         "inputs": [{"name":"samples","type":"LATENT","link":null}, {"name":"vae","type":"VAE","link":52}],
+         "outputs": [{"name":"IMAGE","type":"IMAGE","links":[]}], "widgets_values": []}
+      ],
+      "links": [
+        [50, 20, 0, 21, 1, "STRING"],
+        [51, 30, 0, 31, 0, "*"],
+        [52, 31, 0, 32, 1, "VAE"]
+      ],
+      "groups": [], "config": {}, "extra": {}, "version": 0.4
+    }
+    """;
+
+    var converted = ComfyUiWorkflowConversion.Convert(ui, objectInfo);
+    var api = converted.ApiWorkflow;
+
+    var key = api["21"]!["inputs"]!["key"];
+    Expect(key is JsonValue && key.GetValue<string>() == "Quality",
+        "PrimitiveNode 的值要内联成字面量（不是连线），实际 " + key?.ToJsonString());
+    Expect(!api.ContainsKey("20"), "PrimitiveNode 自己不该进 API");
+
+    var vae = api["32"]!["inputs"]!["vae"]!.AsArray();
+    Expect(vae.Count == 2 && vae[0]!.GetValue<string>() == "30",
+        "Fast Bypasser 是直通，要接到它输入那一侧的源头，实际 " + vae.ToJsonString());
+    Expect(!api.ContainsKey("31"), "Fast Bypasser 自己不该进 API");
+
+    Expect(converted.SkippedSummary.Contains("纯前端的值节点") && converted.SkippedSummary.Contains("只转发的前端节点"),
+        "两种跳过要说成两种话：" + converted.SkippedSummary);
+}
+
+/// <summary>
+/// 钉住子图的一种形状：**容器的输出其实是它自己某个输入直通过来的**——定义里就是 `-10 → -20` 一条线。
+/// 这时值在「外面喂给容器那个输入」的地方，要接着往上层找源头；只按「内部连线的起点」去找会落空，
+/// 那个输入就整项消失。（官方导出也是直接接过去，中间不留东西。）
+/// </summary>
+static void ComfyUiConversionWiresContainerPassThrough()
+{
+    const string objectInfo = """
+    {
+      "CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": ["STRING"]}}},
+      "KSampler": {"input": {"required": {"model": ["MODEL"], "seed": ["INT"]}}}
+    }
+    """;
+
+    const string ui = """
+    {
+      "last_node_id": 6, "last_link_id": 11,
+      "nodes": [
+        {"id": 1, "type": "CheckpointLoaderSimple", "mode": 0, "inputs": [],
+         "outputs": [{"name":"MODEL","type":"MODEL","links":[10]}], "widgets_values": ["a.safetensors"]},
+        {"id": 5, "type": "5f0e6b2c-0000-4000-8000-000000000001", "mode": 0,
+         "inputs": [{"name":"model","type":"MODEL","link":10}],
+         "outputs": [{"name":"MODEL","type":"MODEL","links":[11]}], "widgets_values": []},
+        {"id": 6, "type": "KSampler", "mode": 0,
+         "inputs": [{"name":"model","type":"MODEL","link":11}],
+         "outputs": [], "widgets_values": [1]}
+      ],
+      "links": [[10, 1, 0, 5, 0, "MODEL"], [11, 5, 0, 6, 0, "MODEL"]],
+      "definitions": {"subgraphs": [
+        {"id": "5f0e6b2c-0000-4000-8000-000000000001", "name": "直通",
+         "inputNode": {"id": -10}, "outputNode": {"id": -20},
+         "inputs": [{"name":"model","type":"MODEL","linkIds":[20]}],
+         "outputs": [{"name":"MODEL","type":"MODEL","linkIds":[20]}],
+         "nodes": [],
+         "links": [{"id":20,"origin_id":-10,"origin_slot":0,"target_id":-20,"target_slot":0,"type":"MODEL"}]}
+      ]},
+      "groups": [], "config": {}, "extra": {}, "version": 0.4
+    }
+    """;
+
+    var converted = ComfyUiWorkflowConversion.Convert(ui, objectInfo);
+    var api = converted.ApiWorkflow;
+
+    var model = api["6"]!["inputs"]!["model"]!.AsArray();
+    Expect(model.Count == 2 && model[0]!.GetValue<string>() == "1",
+        "容器直通的输出要接到外面喂给容器那个输入的地方，实际 " + model.ToJsonString());
+    Expect(!api.ContainsKey("5"), "容器本身不该进 API");
 }
 
 static class Sample
