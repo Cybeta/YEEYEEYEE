@@ -83,16 +83,11 @@ public sealed class ComfyUiWorkflowSlots
     /// **不按输入名猜**：`图片1` 这种中文序号只是那个包自己的习惯，同一种形状在别处可能叫别的。
     /// 空着的格子同样算入口——一个格子算不算入口由**节点自己的能力**决定，不由作者那一份用过没用过决定
     /// （`未选择` 是候选清单里的一个合法取值，往里写是改一个值，不是补一个缺的必填项）。
+    ///
+    /// 同一张表里**视频 / 音频**那两档并进 <see cref="VideoNodeIds"/> / <see cref="AudioNodeIds"/>
+    /// （同一种形状、同一条路），所以那两份清单里既有按类名认下的、也有声明的。
     /// </summary>
     public List<ComfyUiFileSlot> FileSlotImages { get; set; } = new();
-
-    /// <summary>
-    /// 同一张映射里**视频 / 音频**那两档的槽位。**这一轮只认出来、不往里写**：
-    /// 「写进去服务端认」（与图片同一种形状，已实测）与「写进去出来的东西对」是两件事，
-    /// 后者还没验过，所以先在说明里如实列出来，不拿没验过的判据去动用户的提交。
-    /// </summary>
-    public List<ComfyUiFileSlot> FileSlotVideos { get; set; } = new();
-    public List<ComfyUiFileSlot> FileSlotAudios { get; set; } = new();
 
     /// <summary>
     /// **「文件清单式」**的底图入口：一个多行文本框里放多行文件名（节点 id → 输入名）。
@@ -896,6 +891,9 @@ public static class ComfyUiWorkflowBinder
                 if (names.Count == 0) continue;
                 if (!names.All(item => extensions.Any(ext => item.EndsWith(ext, StringComparison.OrdinalIgnoreCase))))
                     continue;
+                // 值是**路径**的不算（`image_path` 这种）：我们写进去的只有文件名（文件先传到 input 目录），
+                // 往一个要路径的字段里写裸文件名，反而让它找不到文件。
+                if (names.Any(item => item.Contains('/') || item.Contains('\\'))) continue;
 
                 slots.ImageListInputs[pair.Key] = field.Key;
                 slots.ImageListCapacity = Math.Max(slots.ImageListCapacity, names.Count);
@@ -1000,38 +998,39 @@ public static class ComfyUiWorkflowBinder
     }
 
     /// <summary>
-    /// 声明式文件槽里**视频 / 音频**那两档：认出来、列在说明里，但**不往里写**。
+    /// 声明式文件槽里**视频 / 音频**那两档：并进 <see cref="VideoNodeIds"/> / <see cref="AudioNodeIds"/>
+    /// （与按类名认下的入口走**同一条路**——写入、说明、影子判据都不必再各写一份）。
     ///
-    /// 为什么不写：「写进去服务端会认」（与图片同一种形状，已实测）与「写进去之后出来的东西是对的」
-    /// 是两件事，后者没验过。没验过就不动用户的提交，只在说明里如实列出来。
+    /// 为什么并进去而不是另立一档：它们与那两种入口是**同一件事**（按文件名选、按顺序各收一段），
+    /// 分开只会多出一份要同步的账。已经按类名认下的那几格要排掉（`VHS_LoadVideo.video` 也在那张表里），
+    /// 否则同一格会被写两遍、还会在说明里被数两遍。
     /// </summary>
-    private static void NoteDeclaredMediaSlots(
+    private static void ResolveDeclaredMediaSlots(
         JsonObject graph, ComfyUiWorkflowSlots slots, IReadOnlyDictionary<string, string>? fileSlots)
     {
-        // 已经按类名认下、这次**真的会写**的那些格子要排掉：`VHS_LoadVideo.video` 也在那张表里，
-        // 不过滤就会对着一份正在正常喂源视频的工作流说「我认出来了但不写」——那是假话。
         var taken = new HashSet<string>(StringComparer.Ordinal);
         for (var index = 0; index < slots.VideoNodeIds.Count && index < slots.VideoInputs.Count; index++)
             taken.Add(slots.VideoNodeIds[index] + "." + slots.VideoInputs[index]);
         for (var index = 0; index < slots.AudioNodeIds.Count && index < slots.AudioInputs.Count; index++)
             taken.Add(slots.AudioNodeIds[index] + "." + slots.AudioInputs[index]);
 
-        slots.FileSlotVideos.AddRange(DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Video)
-            .Where(slot => !taken.Contains(slot.NodeId + "." + slot.Input)));
-        slots.FileSlotAudios.AddRange(DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Audio)
-            .Where(slot => !taken.Contains(slot.NodeId + "." + slot.Input)));
-        if (slots.FileSlotVideos.Count == 0 && slots.FileSlotAudios.Count == 0) return;
+        int Add(List<ComfyUiFileSlot> found, List<string> nodeIds, List<string> inputs)
+        {
+            var added = 0;
+            foreach (var slot in found)
+            {
+                if (!taken.Add(slot.NodeId + "." + slot.Input)) continue;
+                nodeIds.Add(slot.NodeId);
+                inputs.Add(slot.Input);
+                added++;
+            }
+            return added;
+        }
 
-        var parts = new List<string>();
-        if (slots.FileSlotVideos.Count > 0)
-            parts.Add($"{slots.FileSlotVideos.Count} 个源视频槽（"
-                + string.Join("、", slots.FileSlotVideos.Select(slot => $"{slot.NodeId}.{slot.Input}")) + "）");
-        if (slots.FileSlotAudios.Count > 0)
-            parts.Add($"{slots.FileSlotAudios.Count} 个源音频槽（"
-                + string.Join("、", slots.FileSlotAudios.Select(slot => $"{slot.NodeId}.{slot.Input}")) + "）");
-        slots.Notes.Add("这份工作流还有 " + string.Join("、", parts)
-            + "——它们是**按文件名选**的那种槽，我认出来了，但**这次不往里写**："
-            + "写进去服务端会收，可出来的东西对不对我还没验过。要喂源视频 / 源音频的话说一声，我验一次再接。");
+        Add(DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Video), slots.VideoNodeIds, slots.VideoInputs);
+        Add(DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Audio), slots.AudioNodeIds, slots.AudioInputs);
+        // 不加单独的说明：下面那两句「有几个源视频 / 源音频入口，按顺序各收一段」已经把行为说清了，
+        // 再补一句「这是声明式文件槽」只是实现细节，白占一行。
     }
 
     /// <summary>
@@ -1140,8 +1139,12 @@ public static class ComfyUiWorkflowBinder
             }
         }
 
+        // 声明式文件槽里视频 / 音频那两档并进入口清单：要在下面那两句「有几个源视频入口」**之前**做，
+        // 否则说明里的数会把它们漏掉。
+        ResolveDeclaredMediaSlots(graph, slots, fileSlots);
+
         if (slots.VideoNodeIds.Count > 1)
-            slots.Notes.Add($"这份工作流有 {slots.VideoNodeIds.Count} 个源视频入口（节点 {string.Join("、", slots.VideoNodeIds)}）："
+            slots.Notes.Add($"这份工作流有 {slots.VideoNodeIds.Count} 个源视频入口（节点 {string.Join("、", slots.VideoNodeIds.Distinct())}）："
                 + "按顺序各收一段片子（例如「主片 + 参考片」这种两张图的用法）。");
 
         // 音频也要说：两个音频口的工作流（双人对白那一类）**按顺序各收一段音**，
@@ -1149,9 +1152,6 @@ public static class ComfyUiWorkflowBinder
         if (slots.AudioNodeIds.Count > 1)
             slots.Notes.Add($"这份工作流有 {slots.AudioNodeIds.Count} 个源音频入口（节点 {string.Join("、", slots.AudioNodeIds)}）："
                 + "按顺序各收一段音（例如「双人对白」一人一段）；只给一段时，后面的入口还留着它自己的示例。");
-
-        // 声明式文件槽里视频 / 音频那两档：认出来、列在说明里，但这一轮不往里写（见那个方法自己的注释）。
-        NoteDeclaredMediaSlots(graph, slots, fileSlots);
 
         if (slots.CanTakeVideo || slots.CanTakeAudio) return;
 

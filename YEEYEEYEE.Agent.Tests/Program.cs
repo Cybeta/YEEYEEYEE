@@ -10754,6 +10754,7 @@ static void ComfyUiDeclaredFileSlotsBecomeEntries()
 	      "图片1": [["未选择", "a.png", "b.jpg", "c.png", "d.png", "e.png"]],
 	      "图片2": [["未选择", "a.png", "b.jpg", "c.png", "d.png", "e.png"]],
 	      "视频1": [["未选择", "clip.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4"]],
+	      "视频2": [["未选择", "clip.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4"]],
 	      "音频1": [["未选择", "voice.wav", "b.mp3", "c.mp3", "d.mp3", "e.mp3"]],
 	      "图片路径": [["C:/x/a.png", "C:/x/b.png", "C:/x/c.png", "C:/x/d.png", "C:/x/e.png"]],
 	      "视频VAE": [["v1.safetensors", "v2.safetensors", "v3.safetensors", "v4.safetensors"]]
@@ -10772,7 +10773,7 @@ static void ComfyUiDeclaredFileSlotsBecomeEntries()
 	const string payload = """
 	{
 	  "1": {"class_type": "NanFengMulti", "inputs": {"模型": "a.safetensors", "图片1": "作者那张.png",
-	    "图片2": "未选择", "视频1": "未选择", "音频1": "未选择", "图片路径": "C:/x/a.png"}},
+	    "图片2": "未选择", "视频1": "未选择", "视频2": "未选择", "音频1": "未选择", "图片路径": "C:/x/a.png"}},
 	  "2": {"class_type": "SaveVideo", "inputs": {"video": ["1", 0]}}
 	}
 	""";
@@ -10799,11 +10800,13 @@ static void ComfyUiDeclaredFileSlotsBecomeEntries()
 		"两格图槽，额度就是 2，实际 " + slots.FileSlotImages.Count + " / " + slots.ImageCapacity);
 	Expect(slots.FileSlotImages[0].Input == "图片1" && slots.FileSlotImages[1].Input == "图片2",
 		"要按声明顺序排：" + string.Join("、", slots.FileSlotImages.Select(slot => slot.Input)));
-	Expect(slots.FileSlotVideos.Count == 1 && slots.FileSlotAudios.Count == 1,
-		"视频 / 音频槽也要认出来（这一轮只认不写）：" + slots.Describe());
+	Expect(slots.VideoNodeIds.Count == 2 && slots.VideoInputs[0] == "视频1" && slots.VideoInputs[1] == "视频2"
+		&& slots.AudioNodeIds.Count == 1 && slots.AudioInputs[0] == "音频1",
+		"声明的视频 / 音频槽要并进入口清单（与按类名认下的走同一条路）：" + slots.Describe());
+	Expect(slots.CanTakeVideo && slots.CanTakeAudio, "能收一段片子的工作流要看得出这一点：" + slots.Describe());
 	Expect(slots.Notes.Any((string note) => note.Contains("文件选择槽")), "要在说明里讲清这类入口是什么");
-	Expect(slots.Notes.Any((string note) => note.Contains("源视频")),
-		"认出来但这一轮不写的影音槽也要如实说出来：" + string.Join("；", slots.Notes));
+	Expect(slots.Notes.Any((string note) => note.Contains("2 个源视频入口（节点 1）")),
+		"多个影音入口要在说明里说清怎么喂、且节点 id 不重复报：" + string.Join("；", slots.Notes));
 
 	// 给满两格。
 	var both = ComfyUiWorkflowBinder.Bind(payload, slots, new ComfyUiBindValues
@@ -10825,6 +10828,21 @@ static void ComfyUiDeclaredFileSlotsBecomeEntries()
 	var filled = ComfyUiWorkflowHealth.FilledMediaSlots(slots, 1, 0, 0);
 	Expect(filled.Count == 1 && filled[0] == "1.图片1",
 		"影子判据说「这次写满了哪几格」要与绑定一致：" + string.Join("、", filled));
+
+	// 源视频 / 源音频：给一段就写进声明的那一格（第二格没给，正文里本来就没有它，不许凭空造一个）。
+	var media = ComfyUiWorkflowBinder.Bind(payload, slots, new ComfyUiBindValues
+	{
+		Prompt = "两个人",
+		ImageName = "我的1.png",
+		VideoNames = new[] { "我的片.mp4" },
+		AudioNames = new[] { "我的音.wav" }
+	});
+	Expect(media["1"]!["inputs"]!["视频1"]!.GetValue<string>() == "我的片.mp4", "源视频要写进声明的那一格");
+	Expect(media["1"]!["inputs"]!["音频1"]!.GetValue<string>() == "我的音.wav", "源音频同理");
+	Expect(media["1"]!["inputs"]!["视频2"]!.GetValue<string>() == "未选择", "没给的那一格保持原样");
+	var mediaFilled = ComfyUiWorkflowHealth.FilledMediaSlots(slots, 1, 1, 1);
+	Expect(mediaFilled.Contains("1.视频1") && mediaFilled.Contains("1.音频1"),
+		"影子判据也要认这两格：" + string.Join("、", mediaFilled));
 
 	// 值是**连线**的那一格不算：那是图里喂过来的，不是让人选文件的地方（写进去会顶掉连线）。
 	const string wired = """
@@ -10857,9 +10875,49 @@ static void ComfyUiDeclaredFileSlotsBecomeEntries()
 	var videoSlots = ComfyUiWorkflowBinder.Detect(sourceVideo,
 		fileSlots: ComfyUiImportAuditor.CollectFileSlots(definitions,
 			new Dictionary<string, string>(StringComparer.Ordinal) { ["T/一份.json"] = sourceVideo }));
-	Expect(videoSlots.CanTakeVideo && videoSlots.FileSlotVideos.Count == 0
-		&& !videoSlots.Notes.Any((string note) => note.Contains("源视频槽")),
-		"这份正在正常喂源视频，不许对它说「我认出来了但不写」：" + string.Join("；", videoSlots.Notes));
+	Expect(videoSlots.CanTakeVideo && videoSlots.VideoNodeIds.Count == 1
+		&& !videoSlots.Notes.Any((string note) => note.Contains("服务器声明的「文件选择」")),
+		"这份正在正常喂源视频：那一格不许被数两遍、也不许冒出「声明槽」那句话：" + string.Join("；", videoSlots.Notes));
+
+	// 声明成 `STRING`、可**作者自己往里写的就是一个裸文件名**的那种真入口（实测 `first_frame`）。
+	// 三条都占才收：名字有素材字样、值是裸文件名（要路径的天然被挡）、后缀是那一类素材。
+	const string stringObjectInfo = """
+	{
+	  "MiniMaxH3IntegrationGH": {
+	    "input": {"optional": {
+	      "first_frame": ["STRING"],
+	      "filename_prefix": ["STRING"],
+	      "image_path": ["STRING"],
+	      "prompt": ["STRING"]
+	    }},
+	    "output": ["IMAGE"], "output_name": ["IMAGE"]
+	  }
+	}
+	""";
+	const string stringPayload = """
+	{"1": {"class_type": "MiniMaxH3IntegrationGH", "inputs": {
+	  "first_frame": "d4b54ce243945f24e83944dd8818bd94d23271a704637c824dc111281fd6ee6b.png",
+	  "filename_prefix": "out.png", "image_path": "C:/x/a.png", "prompt": "一只猫"}}}
+	""";
+	var stringMap = ComfyUiImportAuditor.CollectFileSlots(System.Text.Json.Nodes.JsonNode.Parse(stringObjectInfo)!.AsObject(),
+		new Dictionary<string, string>(StringComparer.Ordinal) { ["T/一份.json"] = stringPayload });
+	Expect(stringMap.TryGetValue("MiniMaxH3IntegrationGH.first_frame", out var frameKind) && frameKind == "image",
+		"`STRING` 声明的真入口也要认（值是裸图片文件名）：" + string.Join("、", stringMap.Keys));
+	Expect(!stringMap.ContainsKey("MiniMaxH3IntegrationGH.filename_prefix"),
+		"`filename_prefix` 不是素材槽（它存的是文件名的前缀，名字里也没有素材字样）");
+	Expect(!stringMap.ContainsKey("MiniMaxH3IntegrationGH.image_path"),
+		"值里带目录分隔符的不收：那是「要路径」的格子，我们按文件名引用，写路径反而找不到文件");
+	Expect(!stringMap.ContainsKey("MiniMaxH3IntegrationGH.prompt"), "提示词那种 `STRING` 当然不收");
+
+	var frameSlots = ComfyUiWorkflowBinder.Detect(stringPayload, fileSlots: stringMap);
+	Expect(frameSlots.FileSlotImages.Count == 1 && frameSlots.FileSlotImages[0].Input == "first_frame",
+		"它要当底图入口用：" + frameSlots.Describe());
+	var framed = ComfyUiWorkflowBinder.Bind(stringPayload, frameSlots,
+		new ComfyUiBindValues { Prompt = "两个人", ImageName = "我的首帧.png" });
+	Expect(framed["1"]!["inputs"]!["first_frame"]!.GetValue<string>() == "我的首帧.png",
+		"首帧要写得进去：" + framed.ToJsonString());
+	Expect(framed["1"]!["inputs"]!["filename_prefix"]!.GetValue<string>() == "out.png",
+		"不是素材槽的那几格一个字都不许动");
 }
 
 /// <summary>

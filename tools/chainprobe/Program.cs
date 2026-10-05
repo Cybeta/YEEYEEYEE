@@ -1089,8 +1089,11 @@ if (mode == "reimport")
         var slots = ComfyUiWorkflowBinder.Detect(payload, installed.OptionValues, installed.FileSlots);
         Console.WriteLine($"工作流 {workflow.Title}：收文字 {slots.CanTextToImage}｜底图 {slots.CanTakeImage}"
             + $"（{slots.FileSlotImages.Count} 格，额度 {slots.ImageCapacity}）"
-            + $"｜声明式影音槽 视频 {slots.FileSlotVideos.Count} / 音频 {slots.FileSlotAudios.Count}");
+            + $"｜源视频 {slots.VideoNodeIds.Count} 个 / 源音频 {slots.AudioNodeIds.Count} 个");
         Console.WriteLine("  图槽：" + string.Join("、", slots.FileSlotImages.Select(slot => slot.NodeId + "." + slot.Input)));
+        Console.WriteLine("  影音槽：" + string.Join("、",
+            slots.VideoNodeIds.Select((id, i) => id + "." + slots.VideoInputs[i])
+                .Concat(slots.AudioNodeIds.Select((id, i) => id + "." + slots.AudioInputs[i]))));
         foreach (var note in slots.Notes.Where(item => item.Contains("文件选择槽") || item.Contains("源视频")))
             Console.WriteLine("  · " + note);
     }

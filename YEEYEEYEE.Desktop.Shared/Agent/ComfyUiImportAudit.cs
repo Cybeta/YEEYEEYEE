@@ -190,6 +190,10 @@ public sealed record ComfyUiImportAuditReport(
             lines.Add($"· 另有 {missing} 处**引用的文件这台机器上没有**（正文结构一点毛病都没有，所以上面几类"
                 + "一个都查不出它来；可只要有产物依赖它，提交时就会被 ComfyUI 挡下）：其中 "
                 + string.Join("；其中 ", parts) + "。"
+                // 「没有」这句话要限定在**我们拿到的那份清单**上：`/object_info` 的候选清单是导入那一刻取的，
+                // 实测它**滞后于上传**（刚传上去的文件不在里面，而提交校验用的是含它的新清单）。
+                + "（这份清单是**导入那一刻**取的：之后新传到服务器上的文件可能还没进去，那时这一处会误报"
+                + "「文件没了」；反过来已经删掉的文件也可能还留着。重新导入一次会重算。）"
                 + (offChain > 0
                     ? $"（其中 {offChain} 处**没有任何产物靠它**，眼下不影响出片。）"
                     : string.Empty));
@@ -791,14 +795,66 @@ public static class ComfyUiImportAuditor
                 if (scopes[scope] is not JsonObject items) continue;
                 foreach (var item in items)
                 {
-                    if (FileOptions(definition, item.Key) is not { Count: > 0 } options) continue;
                     var sample = used.TryGetValue(classType + "." + item.Key, out var seen) ? seen : string.Empty;
-                    var kind = FileSlotKind(item.Key, sample, options);
-                    if (kind.Length > 0) slots[classType + "." + item.Key] = kind;
+
+                    // ① 固定选项、且候选主要是文件：`LoadImage.image` 与 `图片1` / `视频1` / `音频1` 那一族。
+                    if (FileOptions(definition, item.Key) is { Count: > 0 } options)
+                    {
+                        var kind = FileSlotKind(item.Key, sample, options);
+                        if (kind.Length > 0) slots[classType + "." + item.Key] = kind;
+                        continue;
+                    }
+
+                    // ② 声明成 `STRING`、但**作者自己往里写的就是一个裸文件名**的那种
+                    //    （实测 `MiniMaxH3IntegrationGH.first_frame`，tooltip 写着 Optional first frame）：
+                    //    没有候选清单可看，只能靠名字与他自己那一份的用法作证。
+                    var declared = item.Value is JsonArray spec && spec.Count > 0 && spec[0] is JsonValue typeNode
+                        && typeNode.TryGetValue<string>(out var declaredType)
+                        ? declaredType ?? string.Empty
+                        : string.Empty;
+                    if (!string.Equals(declared, "STRING", StringComparison.Ordinal)) continue;
+                    var stringKind = StringFileSlotKind(item.Key, sample);
+                    if (stringKind.Length > 0) slots[classType + "." + item.Key] = stringKind;
                 }
             }
         }
         return slots;
+    }
+
+    /// <summary>
+    /// 声明成 `STRING`、**可作者自己往里写的就是一个裸文件名**的那种入口
+    /// （实测 `MiniMaxH3IntegrationGH.first_frame`，tooltip 写着 Optional first frame）。
+    ///
+    /// 三条都占才收：
+    ///   ① 名字里有素材字样（图片 / 图像 / image / img / frame / 首帧 / 尾帧 / 参考图）；
+    ///   ② 现在放的值是**一个裸文件名**（没有目录分隔符、也不是多行）——「要路径 / URL」的那些天然被挡在外面，
+    ///      而作者自己那份的用法就是「这里放文件名」，那是我们能拿到的最硬的证据；
+    ///   ③ 后缀是那一类素材（图 / 视频 / 音频），而且与名字说的那一类一致。
+    ///
+    /// 为什么不收 `filename_prefix` 那种：它的名字里没有上面那些字样（存的也不是素材，是文件名的前缀）。
+    /// </summary>
+    private static string StringFileSlotKind(string name, string sample)
+    {
+        var text = name.ToLowerInvariant();
+        if (text.Contains("路径") || text.Contains("url") || text.Contains("path")) return string.Empty;
+
+        var byName = text.Contains("图") || text.Contains("image") || text.Contains("img")
+            || text.Contains("frame") || text.Contains("首帧") || text.Contains("尾帧")
+            ? ComfyUiFileSlotKinds.Image
+            : text.Contains("视频") || text.Contains("影片") || text.Contains("video") || text.Contains("movie")
+                ? ComfyUiFileSlotKinds.Video
+                : text.Contains("音频") || text.Contains("声音") || text.Contains("语音") || text.Contains("audio")
+                    || text.Contains("sound") || text.Contains("voice") || text.Contains("music")
+                    ? ComfyUiFileSlotKinds.Audio
+                    : string.Empty;
+        if (byName.Length == 0) return string.Empty;
+
+        var value = (sample ?? string.Empty).Trim();
+        if (value.Length == 0) return string.Empty;
+        if (value.Contains('/') || value.Contains('\\') || value.Contains('\n')) return string.Empty;
+
+        var kind = ComfyUiWorkflowBinder.MediaKindOfFileName(value);
+        return kind == byName ? byName : string.Empty;
     }
 
     /// <summary>
@@ -1270,7 +1326,7 @@ public static class ComfyUiWorkflowHealth
                 + ListDetails(workflow.UncertainInputDetails));
         if (workflow.MissingFiles > 0)
             lines.Add($"⚠ 这份工作流引用的文件里，有 {workflow.MissingFiles} 处**这台机器上没有**"
-                + "（拿服务器当前的候选清单核出来的，换台机器结论会变）：**有产物依赖它**的那几处，"
+                + "（拿**导入那一刻**那份候选清单核出来的，换台机器、或者之后新传了文件，结论都会变）：**有产物依赖它**的那几处，"
                 + "提交时会被 ComfyUI 当场挡下（实测 400）或者这一支拿不到结果；"
                 + "**在出片链上没人读**的那几处不影响出片，逐条都写着是哪一种。"
                 + "是**示例素材**的话，给上你的素材就能跑；是**模型/依赖**就得先把文件补到服务器上。"
@@ -1352,6 +1408,9 @@ public static class ComfyUiWorkflowHealth
         // 与 Bind 里那段循环**逐字对齐**（同一个顺序、同一个「给不满就少写」的口径）。
         for (var index = 0; index < slots.FileSlotImages.Count && index < images; index++)
             filled.Add(slots.FileSlotImages[index].NodeId + "." + slots.FileSlotImages[index].Input);
+
+        // 视频 / 音频那两档并进了 VideoNodeIds / AudioNodeIds（见 ComfyUiWorkflowSlots 的注释），
+        // 所以它们由下面那两个循环一并算，这里不再另写一份。
 
         for (var index = 0; index < slots.VideoNodeIds.Count && index < videos; index++)
             filled.Add(slots.VideoNodeIds[index] + "." + slots.VideoInputs[index]);
