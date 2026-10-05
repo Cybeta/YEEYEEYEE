@@ -74,6 +74,10 @@ public static class ComfyUiWorkflowConversion
         var nodes = ui["nodes"] as JsonArray
             ?? throw new InvalidOperationException("工作流里没有 nodes");
 
+        // ComfyUI 0.37 的子图：先把整份网页文档重写成等价的扁平文档（容器节点换成内部节点、
+        // 连线重编号），再把结果交给下面这条既有流水线——那条流水线一行都不用改。
+        nodes = ExpandSubgraphs(ui, nodes);
+
         var links = ResolvePassThroughs(ReadLinks(ui["links"] as JsonArray), IndexById(nodes));
 
         var output = new JsonObject();
@@ -461,6 +465,11 @@ public static class ComfyUiWorkflowConversion
             // Set/Get 配对里的 GetNode：值在同名的 SetNode 上，从那里继续往上走。
             if (IsVirtualGetter(TypeOf(node))) return ResolveSetSource(node, type, visited);
 
+            // 有的包里 Set 本身也当直通用：实测 `PlaySound|pysssss.any`、`ImageResizeKJv2.width`、
+            // `WanVideoEncode.image` 的源头写的就是一个 SetNode（mode=0）。它同样不进 API，
+            // 值就在它的输入上——和 Reroute 一样继续往上走，不跟的话下游那个输入就没了。
+            if (IsVirtualSetter(TypeOf(node))) return ResolveInput(nodeId, 0, type, visited);
+
             return (nodeId, slot);
         }
 
@@ -630,4 +639,250 @@ public static class ComfyUiWorkflowConversion
 
     private static List<string> DescribeSkips(Dictionary<string, int> counts)
         => counts.Select(pair => "跳过 " + pair.Value.ToString(CultureInfo.InvariantCulture) + " 个节点：" + pair.Key).ToList();
+
+    // ── 子图展开（ComfyUI 0.37 的 subgraph） ───────────────────────────────────
+    //
+    // 官方前端把子图当**容器节点**存在顶层：节点的 type 不是后端类名，而是
+    // definitions.subgraphs[] 里某个定义的 id。这种节点在 /object_info 里查不到，
+    // 既有的「查不到就跳过」会把它整段丢掉——它内部那些真正干活的节点、以及所有
+    // 从内部接进接出的连线，全都没了。实测 T12-k2深度自由迁移：39 个节点里有 9 处
+    // 必填输入因此消失（VAEDecode.vae / KSamplerAdvanced.model 之类）。
+    //
+    // 官方前端是在内存的图对象上把容器展开成内部节点的（graphToPrompt 之前的那步）。
+    // 这里照做，只是落在「读 JSON」这一层：把整份网页文档重写成一版**等价的扁平文档**——
+    // 容器节点消失、内部节点 id 变成「容器id:内部id」（嵌套再叠一层，如 105:200:17）、
+    // 所有连线重新编号保证唯一，然后既有流水线照常跑。规则：
+    //
+    //   1. 容器第 i 个输入的 link L → 顶层 links 里的起点 (O, slot)；该输入在定义里
+    //      对应的 inputs[i].linkIds 里，每条内部连线的**终点**就是要从外面接进来的内部
+    //      节点与槽位 → 建一条新连线 (O, slot) → (内部节点, 槽位)。
+    //      （定义里的输入按**名字**跟容器的输入对应，不靠下标——容器只暴露被提升的那几个，
+    //        定义里其余的输入由容器自己的 widgets_values 供给，位置对不上。）
+    //   2. 定义 outputs[j].linkIds 里每条内部连线的**起点**（跳过 -10 / -20 这两个边界
+    //      伪节点）就是要往外面送的内部节点与槽位；容器第 j 个输出被顶层连线们消费，
+    //      每条解出终点 (T, ts) → 把这些外部节点的那个输入接到内部节点+槽位。
+    //   3. 只在本层内部的连线照原样保留（id 重编号），跨层的一律按上面两条接线。
+    //   4. -10（inputNode）/ -20（outputNode）是边界伪节点，展开后丢弃。
+    //   5. 可嵌套：内部节点自己又是容器就递归，前缀叠加。
+    //   6. 没有 definitions.subgraphs（绝大多数工作流）时原样返回，一个字都不动。
+    //
+    // 注意：容器的 widgets_values 到内部控件值的覆盖不在这一步做（本步只处理连线）；
+    // 内部节点在定义里各自带着自己的 widgets_values，因此必填输入不会因缺值而消失。
+    private static JsonArray ExpandSubgraphs(JsonObject ui, JsonArray nodes)
+    {
+        if (ui["definitions"] is not JsonObject definitions) return nodes;
+        if (definitions["subgraphs"] is not JsonArray subgraphs || subgraphs.Count == 0) return nodes;
+
+        var defById = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var entry in subgraphs)
+        {
+            if (entry is JsonObject def && IdText(def["id"]) is { } defId) defById[defId] = def;
+        }
+        if (defById.Count == 0) return nodes;
+
+        // 顶层一个容器都没有就什么都不做——不能因为「带了 definitions」就把普通文档也重写一遍。
+        var hasContainer = false;
+        foreach (var entry in nodes)
+        {
+            if (entry is JsonObject node && defById.ContainsKey(TypeOf(node))) { hasContainer = true; break; }
+        }
+        if (!hasContainer) return nodes;
+
+        var flatNodes = new List<JsonNode?>();
+        var flatLinks = new List<JsonNode?>();
+        var cloned = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        var nextLinkId = 1L;
+
+        Walk(nodes, ui["links"] as JsonArray, string.Empty, new HashSet<string>(StringComparer.Ordinal));
+
+        var rebuilt = new JsonArray(flatNodes.ToArray());
+        ui["nodes"] = rebuilt;
+        ui["links"] = new JsonArray(flatLinks.ToArray());
+        return rebuilt;
+
+        // 处理「一层」：递归展开这一层里的容器，克隆其余节点，再按这一层的连线重接。
+        void Walk(JsonArray levelNodes, JsonArray? levelLinks, string prefix, HashSet<string> openDefs)
+        {
+            var nodeById = IndexById(levelNodes);
+            var linkById = ReadAnyLinks(levelLinks);
+
+            // 先递归 + 克隆，保证所有会被连到的内部节点都已就位。
+            foreach (var entry in levelNodes)
+            {
+                if (entry is not JsonObject node) continue;
+                if (IdText(node["id"]) is not { } plainId) continue;
+                var type = TypeOf(node);
+                var concreteId = prefix + plainId;
+
+                // 容器：展开它的定义，自己不产出节点。openDefs 防止坏文件里的自引用转不出来。
+                if (defById.TryGetValue(type, out var childDef) && openDefs.Add(type))
+                {
+                    Walk(childDef["nodes"] as JsonArray ?? new JsonArray(),
+                        childDef["links"] as JsonArray,
+                        concreteId + ":",
+                        openDefs);
+                    openDefs.Remove(type);
+                    continue;
+                }
+
+                var clone = (JsonObject)node.DeepClone();
+                clone["id"] = JsonValue.Create(concreteId);
+                ClearInputLinks(clone);   // 旧连线 id 一律作废，下面按新连线逐条写回
+                cloned[concreteId] = clone;
+                flatNodes.Add(clone);
+            }
+
+            // 再处理这一层的连线：边界伪节点的两类连线留给「父容器」去接，跳过。
+            foreach (var row in linkById.Values)
+            {
+                if (IsBoundaryId(row.OriginId)) continue;
+                if (row.TargetId is null || IsBoundaryId(row.TargetId)) continue;
+
+                var origins = ResolveOrigins(nodeById, prefix, row.OriginId, row.OriginSlot);
+                var targets = ResolveTargets(nodeById, prefix, row.TargetId, row.TargetSlot);
+                foreach (var origin in origins)
+                foreach (var target in targets)
+                {
+                    var newId = nextLinkId++;
+                    flatLinks.Add(new JsonArray(
+                        JsonValue.Create(newId),
+                        JsonValue.Create(origin.NodeId),
+                        JsonValue.Create((long)origin.Slot),   // 必须按 long 写：JsonValue.Create(int) 读不成 long
+                        JsonValue.Create(target.NodeId),
+                        JsonValue.Create((long)target.Slot),
+                        JsonValue.Create(string.Empty)));
+                    if (cloned.TryGetValue(target.NodeId, out var targetNode))
+                        SetInputLink(targetNode, target.Slot, newId);
+                }
+            }
+        }
+
+        // 一个输出端 (nodeId, slot) 最终来自哪里：普通节点就是自己，容器就顺着定义 outputs 内部的起点往下钻。
+        List<(string NodeId, int Slot)> ResolveOrigins(
+            IReadOnlyDictionary<string, JsonObject> nodeById, string prefix, string nodeId, int slot)
+        {
+            var result = new List<(string, int)>();
+            if (!nodeById.TryGetValue(nodeId, out var node)) return result;
+            if (!defById.TryGetValue(TypeOf(node), out var def))
+            {
+                result.Add((prefix + nodeId, slot));
+                return result;
+            }
+
+            if (def["outputs"] is not JsonArray outputs || slot < 0 || slot >= outputs.Count
+                || outputs[slot] is not JsonObject output) return result;
+            var childPrefix = prefix + nodeId + ":";
+            var childNodes = def["nodes"] as JsonArray ?? new JsonArray();
+            var childById = IndexById(childNodes);
+            var childLinks = ReadAnyLinks(def["links"] as JsonArray);
+            foreach (var linkId in LinkIdsOf(output))
+            {
+                if (!childLinks.TryGetValue(linkId, out var row)) continue;
+                if (IsBoundaryId(row.OriginId)) continue;   // 直通输入端的那种，接不出去
+                result.AddRange(ResolveOrigins(childById, childPrefix, row.OriginId, row.OriginSlot));
+            }
+            return result;
+        }
+
+        // 一个输入端 (nodeId, slot) 最终喂到哪里：普通节点就是自己，容器就顺着定义 inputs 内部
+        // 按名字对上号（对不上退回同下标），再取内部连线的终点往下钻。
+        List<(string NodeId, int Slot)> ResolveTargets(
+            IReadOnlyDictionary<string, JsonObject> nodeById, string prefix, string nodeId, int slot)
+        {
+            var result = new List<(string, int)>();
+            if (!nodeById.TryGetValue(nodeId, out var node)) return result;
+            if (!defById.TryGetValue(TypeOf(node), out var def))
+            {
+                result.Add((prefix + nodeId, slot));
+                return result;
+            }
+
+            var name = node["inputs"] is JsonArray containerInputs && slot >= 0 && slot < containerInputs.Count
+                       && containerInputs[slot] is JsonObject inputSpec
+                ? AsText(inputSpec["name"])
+                : null;
+            JsonObject? defInput = null;
+            if (def["inputs"] is JsonArray defInputs)
+            {
+                if (name is not null)
+                    defInput = defInputs.FirstOrDefault(item => item is JsonObject o && AsText(o["name"]) == name) as JsonObject;
+                if (defInput is null && slot >= 0 && slot < defInputs.Count)
+                    defInput = defInputs[slot] as JsonObject;
+            }
+            if (defInput is null) return result;
+
+            var childPrefix = prefix + nodeId + ":";
+            var childNodes = def["nodes"] as JsonArray ?? new JsonArray();
+            var childById = IndexById(childNodes);
+            var childLinks = ReadAnyLinks(def["links"] as JsonArray);
+            foreach (var linkId in LinkIdsOf(defInput))
+            {
+                if (!childLinks.TryGetValue(linkId, out var row)) continue;
+                if (row.TargetId is null || IsBoundaryId(row.TargetId)) continue;
+                result.AddRange(ResolveTargets(childById, childPrefix, row.TargetId, row.TargetSlot));
+            }
+            return result;
+        }
+    }
+
+    /// <summary>子图定义里的 linkIds（对 -10 / -20 的边界伪节点来说就是这些内部连线的清单）。</summary>
+    private static IEnumerable<long> LinkIdsOf(JsonObject spec)
+    {
+        if (spec["linkIds"] is not JsonArray ids) yield break;
+        foreach (var entry in ids)
+            if (ReadLong(entry) is { } id) yield return id;
+    }
+
+    /// <summary>
+    /// 读一张连线表，两种写法都认：
+    ///   · 顶层 <c>links</c> 是**数组行** <c>[id, 起点id, 起点槽, 终点id, 终点槽, 类型]</c>；
+    ///   · <c>definitions.subgraphs[].links</c> 是**对象** <c>{"id":…,"origin_id":…,"origin_slot":…,"target_id":…,"target_slot":…}</c>。
+    /// 只认数组行的那种读法会把子图内部连线整批漏掉（实测 T12 的 20 条全在对象里）。
+    /// </summary>
+    private static Dictionary<long, LinkRow> ReadAnyLinks(JsonArray? links)
+    {
+        var map = new Dictionary<long, LinkRow>();
+        if (links is null) return map;
+        foreach (var entry in links)
+        {
+            if (entry is JsonArray row)
+            {
+                if (row.Count < 3 || ReadLong(row[0]) is not { } rowId) continue;
+                if (IdText(row[1]) is not { } rowOrigin) continue;
+                map[rowId] = new LinkRow(
+                    rowOrigin,
+                    (int)(ReadLong(row[2]) ?? 0),
+                    row.Count > 3 ? IdText(row[3]) : null,
+                    row.Count > 4 ? (int)(ReadLong(row[4]) ?? 0) : 0);
+            }
+            else if (entry is JsonObject obj)
+            {
+                if (ReadLong(obj["id"]) is not { } objId) continue;
+                if (IdText(obj["origin_id"]) is not { } objOrigin) continue;
+                map[objId] = new LinkRow(
+                    objOrigin,
+                    (int)(ReadLong(obj["origin_slot"]) ?? 0),
+                    IdText(obj["target_id"]),
+                    (int)(ReadLong(obj["target_slot"]) ?? 0));
+            }
+        }
+        return map;
+    }
+
+    /// <summary>子图的边界伪节点：inputNode(-10) 与 outputNode(-20)，展开后丢弃。</summary>
+    private static bool IsBoundaryId(string id) => id is "-10" or "-20";
+
+    /// <summary>展开时把节点上所有旧连线引用清成 null，只留下面按新连线写回的那些。</summary>
+    private static void ClearInputLinks(JsonObject node)
+    {
+        if (node["inputs"] is not JsonArray inputs) return;
+        foreach (var entry in inputs)
+            if (entry is JsonObject input) input["link"] = null;
+    }
+
+    private static void SetInputLink(JsonObject node, int slot, long linkId)
+    {
+        if (node["inputs"] is not JsonArray inputs || slot < 0 || slot >= inputs.Count) return;
+        if (inputs[slot] is JsonObject input) input["link"] = JsonValue.Create(linkId);
+    }
 }

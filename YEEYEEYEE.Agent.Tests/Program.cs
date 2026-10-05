@@ -306,6 +306,8 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 转换：被绕过的节点要按类型顶上去，不能只删节点（否则必填项整项消失）", ComfyUiConversionFollowsBypassedNodes),
     ("ComfyUI 转换：被转成连线的控件仍按定义顺序对齐 widgets_values", ComfyUiConversionAlignsConvertedWidgetsByDefinition),
     ("ComfyUI 转换：动态下拉（SaveVideo.format）不能被当成连线槽位丢掉", ComfyUiConversionKeepsDynamicComboWidgets),
+    ("ComfyUI 转换：子图展开——容器换成内部节点、外部连线接进接出、内部连线保留并重编号", ComfyUiConversionExpandsSubgraphs),
+    ("ComfyUI 转换：嵌套子图 id 前缀叠加（1:5:7），两种连线写法都认", ComfyUiConversionExpandsNestedSubgraphs),
     ("对话用量：胶囊与明细的口径（命中率分母、没有就不给速率、缺失说成「不是 0」）", UsageReportFormatsWithoutLying),
     ("密钥框：脱敏显示不是密钥，存回去就是 401；新敲的、清空的、解不开的三条路各自分明", RedactedKeyDisplayIsNotAKey),
     ("技能参考图：ref:N 按槽位寻址，三视图角色不再把道具/场景的下标推后", SkillReferenceRefIndexAddressesSlotsNotFlattenedImages),
@@ -1933,6 +1935,114 @@ static void ComfyUiConversionKeepsDynamicComboWidgets()
         $"format 是必填的动态下拉，不能丢；实际 {inputs["format"]?.ToJsonString() ?? "（没这一项）"}");
     Expect(inputs["codec"]!.GetValue<string>() == "h264", $"codec 应取到 h264，实际 {inputs["codec"]}");
     Expect(inputs["filename_prefix"]!.GetValue<string>() == "video/MiniMax_H3", "filename_prefix 被挤掉了");
+}
+
+/// <summary>
+/// 钉住子图（ComfyUI 0.37 的 subgraph）展开：容器节点换成内部节点、外部连线接进接出、
+/// 内部连线保留并重编号、-10 / -20 边界伪节点丢弃。不展开就会把整段内部节点连同必填输入一起丢掉。
+/// </summary>
+static void ComfyUiConversionExpandsSubgraphs()
+{
+    const string defs = """
+        {"LoadModel":{"input":{"required":{}}},
+         "Sink":{"input":{"required":{"model":["MODEL",{}]}}},
+         "Inner":{"input":{"required":{"model":["MODEL",{}]}}},
+         "Mid":{"input":{"required":{"model":["MODEL",{}]}}}}
+        """;
+    const string ui = """
+        {"nodes":[
+          {"id":1,"type":"LoadModel","mode":0,"outputs":[{"name":"MODEL","type":"MODEL","links":[1]}]},
+          {"id":2,"type":"sg1","mode":0,
+           "inputs":[{"name":"model","type":"MODEL","link":1}],
+           "outputs":[{"name":"out","type":"MODEL","links":[2]}]},
+          {"id":3,"type":"Sink","mode":0,"inputs":[{"name":"model","type":"MODEL","link":2}]}
+        ],
+        "links":[[1,1,0,2,0,"MODEL"],[2,2,0,3,0,"MODEL"]],
+        "definitions":{"subgraphs":[
+          {"id":"sg1",
+           "inputNode":{"id":-10},"outputNode":{"id":-20},
+           "inputs":[{"name":"model","type":"MODEL","linkIds":[11]}],
+           "outputs":[{"name":"out","type":"MODEL","linkIds":[13]}],
+           "nodes":[
+             {"id":100,"type":"Inner","mode":0,"inputs":[{"name":"model","type":"MODEL","link":11}],"outputs":[{"name":"MODEL","type":"MODEL","links":[12]}]},
+             {"id":101,"type":"Mid","mode":0,"inputs":[{"name":"model","type":"MODEL","link":12}],"outputs":[{"name":"MODEL","type":"MODEL","links":[13]}]}
+           ],
+           "links":[
+             {"id":11,"origin_id":-10,"origin_slot":0,"target_id":100,"target_slot":0,"type":"MODEL"},
+             {"id":12,"origin_id":100,"origin_slot":0,"target_id":101,"target_slot":0,"type":"MODEL"},
+             {"id":13,"origin_id":101,"origin_slot":0,"target_id":-20,"target_slot":0,"type":"MODEL"}
+            ]}
+         ]}}
+        """;
+
+    var api = ComfyUiWorkflowConversion.Convert(ui, defs).ApiWorkflow;
+
+    // 容器(2)没了，内部节点按「容器id:内部id」出现：顶层 1、3 加两个内部节点，共 4 个。
+    Expect(api.Count == 4, "应转出 4 个节点，实际 " + api.Count + "：" + string.Join("、", api.Select(pair => pair.Key)));
+    Expect(!api.ContainsKey("2"), "容器节点本身不该进 API");
+    Expect(api.ContainsKey("2:100") && api.ContainsKey("2:101"), "内部节点 id 应加「容器id:」前缀");
+
+    // 外部 → 内部：顶层 LoadModel(1) 应接到内部第一个节点。
+    Expect(api["2:100"]!["inputs"]!["model"]!.ToJsonString() == """["1",0]""",
+        "容器输入应接进内部节点，实际 " + api["2:100"]!["inputs"]!["model"]!.ToJsonString());
+    // 内部 → 内部：照原样保留。
+    Expect(api["2:101"]!["inputs"]!["model"]!.ToJsonString() == """["2:100",0]""",
+        "内部连线应保留并重编号，实际 " + api["2:101"]!["inputs"]!["model"]!.ToJsonString());
+    // 内部 → 外部：内部最后一个节点应接到顶层 Sink(3)。
+    Expect(api["3"]!["inputs"]!["model"]!.ToJsonString() == """["2:101",0]""",
+        "容器输出应接回外部消费者，实际 " + api["3"]!["inputs"]!["model"]!.ToJsonString());
+
+    // 规则 8：没有子图时一个字都不动——注入空的 subgraphs 后结果必须与原件一模一样。
+    var fixtureDefs = ComfyUiNodeDefs();
+    var t01 = ComfyUiUiFixture("T01");
+    var plain = ComfyUiWorkflowConversion.Convert(t01, fixtureDefs).ApiWorkflow.ToJsonString();
+    var withEmpty = JsonNode.Parse(t01)!.AsObject();
+    withEmpty["definitions"] = new JsonObject { ["subgraphs"] = new JsonArray() };
+    var unchanged = ComfyUiWorkflowConversion.Convert(withEmpty.ToJsonString(), fixtureDefs).ApiWorkflow.ToJsonString();
+    Expect(plain == unchanged, "带空 subgraphs 的普通工作流必须原样转换");
+}
+
+/// <summary>
+/// 钉住嵌套子图：内部节点自己又是容器时递归展开，id 前缀叠加（1:5:7），跨两层的连线也要接通。
+/// 内层定义故意用数组形式的 links，顺带钉住两种连线写法都认。
+/// </summary>
+static void ComfyUiConversionExpandsNestedSubgraphs()
+{
+    const string defs = """
+        {"LoadModel":{"input":{"required":{}}},
+         "Sink":{"input":{"required":{"model":["MODEL",{}]}}},
+         "Inner":{"input":{"required":{"model":["MODEL",{}]}}}}
+        """;
+    const string ui = """
+        {"nodes":[
+          {"id":10,"type":"LoadModel","mode":0,"outputs":[{"name":"MODEL","type":"MODEL","links":[1]}]},
+          {"id":20,"type":"Sink","mode":0,"inputs":[{"name":"model","type":"MODEL","link":2}]},
+          {"id":1,"type":"outer","mode":0,
+           "inputs":[{"name":"model","type":"MODEL","link":1}],
+           "outputs":[{"name":"out","type":"MODEL","links":[2]}]}
+        ],
+        "links":[[1,10,0,1,0,"MODEL"],[2,1,0,20,0,"MODEL"]],
+        "definitions":{"subgraphs":[
+          {"id":"outer",
+           "inputs":[{"name":"model","type":"MODEL","linkIds":[51]}],
+           "outputs":[{"name":"out","type":"MODEL","linkIds":[52]}],
+           "nodes":[{"id":5,"type":"inner","mode":0,"inputs":[{"name":"model","type":"MODEL","link":51}],"outputs":[{"name":"out","type":"MODEL","links":[52]}]}],
+           "links":[{"id":51,"origin_id":-10,"origin_slot":0,"target_id":5,"target_slot":0,"type":"MODEL"},
+                    {"id":52,"origin_id":5,"origin_slot":0,"target_id":-20,"target_slot":0,"type":"MODEL"}]},
+          {"id":"inner",
+           "inputs":[{"name":"model","type":"MODEL","linkIds":[71]}],
+           "outputs":[{"name":"out","type":"MODEL","linkIds":[72]}],
+           "nodes":[{"id":7,"type":"Inner","mode":0,"inputs":[{"name":"model","type":"MODEL","link":71}],"outputs":[{"name":"MODEL","type":"MODEL","links":[72]}]}],
+           "links":[[71,-10,0,7,0,"MODEL"],[72,7,0,-20,0,"MODEL"]]}
+         ]}}
+        """;
+
+    var api = ComfyUiWorkflowConversion.Convert(ui, defs).ApiWorkflow;
+    Expect(api.Count == 3, "应转出 3 个节点，实际 " + api.Count + "：" + string.Join("、", api.Select(pair => pair.Key)));
+    Expect(api.ContainsKey("1:5:7"), "嵌套子图的 id 前缀应叠加（1:5:7），实际 " + string.Join("、", api.Select(pair => pair.Key)));
+    Expect(!api.ContainsKey("1") && !api.ContainsKey("1:5"), "两层容器节点都不该进 API");
+    Expect(api["1:5:7"]!["inputs"]!["model"]!.ToJsonString() == """["10",0]""", "外部输入应穿过两层接到最内层");
+    Expect(api["20"]!["inputs"]!["model"]!.ToJsonString() == """["1:5:7",0]""", "最内层输出应接回外部消费者");
 }
 
 /// <summary>
