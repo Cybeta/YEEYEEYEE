@@ -184,6 +184,12 @@ var tests = new (string Name, Action Run)[]
     ("出视频 · 候选清单：每个家族只出一条（推荐优先）并说清「能不能吃首帧」的依据", VideoRouteOptionsListOneWorkflowPerFamilyAndSayWhereTheAbilityCameFrom),
     ("出视频 · 记住一条：记的是稳定键（改名不失效），那条没了就回到问一句", VideoRoutePreferenceRemembersAStableKey),
     ("出视频 · 选了工作流却没配 ComfyUI：要点名那份工作流并说清缺什么", VideoProviderFactoryNamesWhatIsMissingForAChosenWorkflow),
+    ("出视频 · 比例与像素：9:16 算成 16 的倍数、比例不跑偏，认不出的写法不编尺寸", VideoShapeResolvesRatioIntoPixelSizes),
+    ("出视频 · 比例写成工作流认的写法：同比例不动、倒数交换它自己的数、读不懂就返回空", VideoShapeWritesAspectInTheWorkflowsOwnFormat),
+    ("出视频 · 时长换算：帧数贴到那份工作流自己的家族上（121 帧推出 8n+1），推不出来就如实说", VideoFrameMathSnapsToTheWorkflowsOwnFrameFamily),
+    ("出视频 · 认时长与比例槽位：只认生成侧，VHS_VideoCombine 的 frame_rate 不算", WorkflowBinderReadsLengthAndAspectSlots),
+    ("出视频 · 只吃首帧那一类（SVD）不再算成驱动不了，但要说清提示词没进工作流", WorkflowBinderTreatsFrameDrivenShapeAsUsable),
+    ("出视频 · 写进去的到底是什么：帧数与比例照写、帧率一个字不动、没给就不许乱写", WorkflowBinderWritesLengthAspectAndSize),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -13971,6 +13977,197 @@ static void SkillReferenceOutOfRangeIsReportedNotSilentlyDropped()
     Expect(!failed.Succeeded, "没有任何可用参考图时应如实失败");
     Expect(failed.Message.Contains("ref:4") && failed.Message.Contains("越界"),
         "失败原因要把越界说清楚，实际：" + failed.Message);
+}
+
+// ── 出视频的时长 / 比例 / 画幅：换算那一层（纯算术）──────────────────────────────────
+
+/// <summary>
+/// 钉住「9:16、1MP 到底算成多少像素」：宽高都要落在 16 的倍数上（视频模型大多有这个要求），
+/// 比例不能因为取整而跑偏太多，而且**要把这件事说出来**——用户看到 752×1328 而不是他心里的 750×1333 时，
+/// 得知道那 2 个像素是取整取的，不是算错了。
+/// </summary>
+static void VideoShapeResolvesRatioIntoPixelSizes()
+{
+    var portrait = VideoShape.Resolve("9:16", 1.0);
+    Expect(portrait.Width % VideoShape.SizeQuantum == 0 && portrait.Height % VideoShape.SizeQuantum == 0,
+        $"宽高都要落在 {VideoShape.SizeQuantum} 的倍数上，实际 {portrait.Width}×{portrait.Height}");
+    Expect(portrait.Height > portrait.Width, "9:16 是竖的，高要大于宽");
+    var portraitRatio = (double)portrait.Width / portrait.Height;
+    Expect(Math.Abs(portraitRatio - 9.0 / 16) < 0.02,
+        $"比例不能因为取整跑偏，实际 {portraitRatio:0.####}（目标 {9.0 / 16:0.####}）");
+    Expect(portrait.Note.Contains(portrait.Width.ToString()) && portrait.Note.Contains(portrait.Height.ToString()),
+        "说明里要写出算成了多少像素，实际「" + portrait.Note + "」");
+
+    var landscape = VideoShape.Resolve("16:9", 1.0);
+    Expect(landscape.Width > landscape.Height, "16:9 是横的，宽要大于高");
+
+    // 两倍像素：面积该翻倍（容差放宽，取整会吃掉一点）。
+    var double1 = VideoShape.Resolve("1:1", 2.0);
+    var single = VideoShape.Resolve("1:1", 1.0);
+    Expect(double1.Width > single.Width && double1.Height > single.Height,
+        "2MP 要比 1MP 大：2MP " + double1.Width + "×" + double1.Height + " / 1MP " + single.Width + "×" + single.Height);
+    Expect(Math.Abs((double)double1.Width * double1.Height / (single.Width * (double)single.Height) - 2) < 0.15,
+        "面积该大致翻倍");
+
+    // 认不出来的写法：不猜，如实说。
+    var unknown = VideoShape.Resolve("随便什么样的画面", 1.0);
+    Expect(unknown.Width == 0 && unknown.Height == 0, "认不出比例时不许编一个尺寸出来");
+    Expect(unknown.Note.Contains("认不出来"), "而且要说清为什么，实际「" + unknown.Note + "」");
+}
+
+/// <summary>
+/// 钉住「比例要照那份工作流自己的写法写」：合法选项在服务端，工作流里只有当前选中的那一个，
+/// 所以同比例就原样不动、是倒数就交换它自己的两个数（连量级一起保住：1920x1080 → 1080x1920），
+/// 两者都不是才用它的分隔符拼；写法读不出来（adaptive）就返回空，由界面如实说改不了。
+/// </summary>
+static void VideoShapeWritesAspectInTheWorkflowsOwnFormat()
+{
+    Expect(VideoShape.FormatAspect("16:9", "9:16") == "9:16", "冒号写法要沿用冒号");
+    Expect(VideoShape.FormatAspect("1920x1080", "9:16") == "1080x1920",
+        "是倒数就交换它自己的两个数，量级也要保住，实际 " + VideoShape.FormatAspect("1920x1080", "9:16"));
+    Expect(VideoShape.FormatAspect("16:9", "16:9") == "16:9", "同比例一个字都不该改");
+    Expect(VideoShape.FormatAspect("16:9", "1:1") == "1:1", "既不是同比例也不是倒数，就用它的分隔符拼");
+    Expect(VideoShape.FormatAspect("adaptive", "9:16").Length == 0, "写法读不出来要返回空，不许硬拼");
+    Expect(VideoShape.FormatAspect("16:9", "这不是比例").Length == 0, "比例本身读不出来也返回空");
+}
+
+/// <summary>
+/// 钉住「帧数要贴到那份工作流自己的家族上」：实测那份 Wan 工作流是 121 帧（= 8n+1），
+/// 直接写 15 秒 × 24 = 360 帧服务器可能拒收，所以要按它自己的值**推**出模数再贴过去。
+/// 推不出来（原值减一不被 4 整除）就按四舍五入写，并如实说明是哪种。
+/// </summary>
+static void VideoFrameMathSnapsToTheWorkflowsOwnFrameFamily()
+{
+    Expect(VideoFrameMath.TryFrames(15, 24, 121, out var fifteen, out var note15), "15 秒要能算出来");
+    Expect(fifteen == 361, $"15 秒 × 24fps = 360 帧，贴到 8n+1 上该是 361，实际 {fifteen}");
+    Expect(note15.Contains("8n+1") && note15.Contains("361"), "说明里要写清推出来的家族与实际帧数：" + note15);
+    Expect(note15.Contains("帧率本身没动"), "还要说明帧率没动过（改了它动作快慢也变）：" + note15);
+
+    Expect(VideoFrameMath.TryFrames(5, 24, 121, out var five, out _) && five == 121,
+        "5 秒 × 24 = 120 帧，贴回来就是它原本的 121 帧，实际 " + five);
+
+    Expect(VideoFrameMath.TryFrames(10, 24, 97, out var ten, out var note10) && ten == 225,
+        $"97 帧推出模数 32（96 能被 32 整除），10 秒 = 240 帧该贴成 225，实际 {ten}");
+    Expect(note10.Contains("32n+1"), "说明里要点出 32n+1：" + note10);
+
+    Expect(VideoFrameMath.TryFrames(5, 24, null, out var plain, out var notePlain) && plain == 120,
+        "没有原值可参照时按四舍五入写，实际 " + plain);
+    Expect(notePlain.Contains("没有原帧数可参照"), "并且要说清这一点：" + notePlain);
+
+    Expect(VideoFrameMath.TryFrames(5, 24, 100, out var odd, out _) && odd == 120,
+        "原值 100 减一不被 4 整除 → 推不出家族，按四舍五入写 120，实际 " + odd);
+
+    Expect(!VideoFrameMath.TryFrames(0, 24, 121, out _, out _), "没给秒数就什么都不做");
+    Expect(!VideoFrameMath.TryFrames(5, 0, 121, out _, out var noRate), "找不到帧率就算了");
+    Expect(noRate.Contains("找不到帧率"), "并且要说清是找不到帧率：" + noRate);
+}
+
+/// <summary>
+/// 钉住绑定器能认出**时长与比例**的槽位，而且**只认生成侧**：
+/// `VHS_VideoCombine.frame_rate` 决定的是播放速度、不是帧数，把它当帧率用会得出一个荒唐的秒数。
+/// </summary>
+static void WorkflowBinderReadsLengthAndAspectSlots()
+{
+    var slots = ComfyUiWorkflowBinder.Detect("""
+    {
+      "1": {"class_type":"SomeVideoSampler","inputs":{"positive":["5",0],"negative":["6",0],"latent_image":["7",0],"length":121,"frame_rate":24,"seed":1}},
+      "3": {"class_type":"VHS_VideoCombine","inputs":{"images":["1",0],"frame_rate":8}},
+      "5": {"class_type":"CLIPTextEncode","inputs":{"text":"a cat","clip":["9",0]}},
+      "6": {"class_type":"CLIPTextEncode","inputs":{"text":"blurry","clip":["9",0]}},
+      "7": {"class_type":"EmptyLatentImage","inputs":{"width":768,"height":1344,"batch_size":1}},
+      "8": {"class_type":"AspectPicker","inputs":{"aspect_ratio":"16:9"}},
+      "9": {"class_type":"CLIPLoader","inputs":{"clip_name":"umt5.safetensors"}}
+    }
+    """);
+
+    Expect(slots.CanSetLength, "该认得出帧数入口：" + slots.Describe());
+    Expect(slots.LengthNodeId == "1" && slots.LengthInput == "length",
+        $"帧数该认在生成侧节点 1 的 length 上，实际 {slots.LengthNodeId}.{slots.LengthInput}");
+    Expect(slots.LengthCurrent == 121, "要记住它当前是多少帧，实际 " + slots.LengthCurrent);
+    Expect(slots.FrameRateValue == 24,
+        $"帧率要取生成侧的 24，**不是**输出侧 VHS_VideoCombine 的 8，实际 {slots.FrameRateValue}");
+    Expect(slots.FrameRateSource.Contains("1"),
+        "还要说清这个帧率是从哪来的：" + slots.FrameRateSource);
+
+    Expect(slots.CanSetAspect, "该认得出比例输入：" + slots.Describe());
+    Expect(slots.AspectNodeId == "8" && slots.AspectInput == "aspect_ratio", "比例节点认错了");
+    Expect(slots.AspectCurrent == "16:9", "要记住它当前那个值，实际 " + slots.AspectCurrent);
+    Expect(slots.CanResize && slots.LatentNodeId == "7", "画幅仍认在空潜变量节点上");
+    Expect(slots.Describe().Contains("时长✓") && slots.Describe().Contains("比例✓"),
+        "Describe 要把这两项报出来：" + slots.Describe());
+}
+
+/// <summary>
+/// 钉住「只吃首帧」那一类**不再被算成驱动不了**：SVD / 动作迁移 / 人物替换都是这个形状
+/// （给一张图让它动起来，本来就不收文字）。它不是残次品，是一整类正当用法——
+/// 早先它和「真的什么都不认」混在一起被挡掉了（实测那台服务器上有 37 份是这一类）。
+/// </summary>
+static void WorkflowBinderTreatsFrameDrivenShapeAsUsable()
+{
+    var slots = ComfyUiWorkflowBinder.Detect("""
+    {
+      "1": {"class_type":"SVD_img2vid_Conditioning","inputs":{"width":1024,"height":576,"video_frames":25,"motion_bucket_id":127,"fps":6}},
+      "2": {"class_type":"KSampler","inputs":{"positive":["1",0],"negative":["1",1],"latent_image":["1",2],"seed":0}},
+      "4": {"class_type":"LoadImage","inputs":{"image":"first-frame.png"}},
+      "9": {"class_type":"SaveWEBM","inputs":{"images":["2",0],"frame_rate":24}}
+    }
+    """);
+
+    Expect(!slots.CanTextToImage, "它确实不收文字提示词");
+    Expect(slots.CanTakeImage, "但它有底图入口：" + slots.Describe());
+    Expect(slots.IsFrameDriven, "所以它是「只吃首帧」那一类，不该算成驱动不了");
+    Expect(!slots.Notes.Any(item => item.Contains("认不出收提示词")),
+        "也不该再报「认不出收提示词的节点」——那是对这类工作流的误判：" + string.Join("；", slots.Notes));
+    Expect(slots.Describe().Contains("只吃首帧"), "Describe 要写明这一点：" + slots.Describe());
+    Expect(slots.CanSetLength && slots.LengthCurrent == 25, "它的帧数也该认出来：" + slots.Describe());
+    Expect(slots.FrameRateValue == 6, "帧率取生成侧的 fps 6（不是 SaveWEBM 的 24），实际 " + slots.FrameRateValue);
+}
+
+/// <summary>
+/// 钉住「写进去的到底是什么」：帧数写进时长槽位、比例照它的写法写、宽高写进画幅节点，
+/// 而**帧率一个字不动**（改了它动作的快慢也跟着变——用户要的是「这么多秒的这段动」）。
+/// </summary>
+static void WorkflowBinderWritesLengthAspectAndSize()
+{
+    const string template = """
+    {
+      "1": {"class_type":"SomeVideoSampler","inputs":{"positive":["5",0],"negative":["6",0],"latent_image":["7",0],"length":121,"frame_rate":24,"seed":1}},
+      "3": {"class_type":"VHS_VideoCombine","inputs":{"images":["1",0],"frame_rate":8}},
+      "5": {"class_type":"CLIPTextEncode","inputs":{"text":"a cat","clip":["9",0]}},
+      "6": {"class_type":"CLIPTextEncode","inputs":{"text":"blurry","clip":["9",0]}},
+      "7": {"class_type":"EmptyLatentImage","inputs":{"width":768,"height":1344,"batch_size":1}},
+      "8": {"class_type":"AspectPicker","inputs":{"aspect_ratio":"16:9"}},
+      "9": {"class_type":"CLIPLoader","inputs":{"clip_name":"umt5.safetensors"}}
+    }
+    """;
+
+    var slots = ComfyUiWorkflowBinder.Detect(template);
+    var bound = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues
+    {
+        Prompt = "她推开门",
+        Width = 752,
+        Height = 1328,
+        Length = 361,
+        AspectRatio = "9:16"
+    });
+    var root = System.Text.Json.Nodes.JsonNode.Parse(bound.ToJsonString())!.AsObject();
+
+    Expect(root["1"]!["inputs"]!["length"]!.GetValue<int>() == 361,
+        "帧数要写进时长槽位，实际 " + root["1"]!["inputs"]!["length"]);
+    Expect(root["1"]!["inputs"]!["frame_rate"]!.GetValue<int>() == 24, "帧率不许动");
+    Expect(root["3"]!["inputs"]!["frame_rate"]!.GetValue<int>() == 8, "输出侧的帧率也不许动");
+    Expect(root["8"]!["inputs"]!["aspect_ratio"]!.GetValue<string>() == "9:16",
+        "比例要照它自己的写法写成 9:16，实际 " + root["8"]!["inputs"]!["aspect_ratio"]);
+    Expect(root["7"]!["inputs"]!["width"]!.GetValue<int>() == 752 && root["7"]!["inputs"]!["height"]!.GetValue<int>() == 1328,
+        "画幅要写进空潜变量节点");
+    Expect(root["5"]!["inputs"]!["text"]!.GetValue<string>() == "她推开门", "提示词照旧要写进去");
+
+    // 没给时长/比例时**不许乱写**：不写等于沿用工作流自己的设定，那是它的正路。
+    var untouched = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues { Prompt = "她推开门" });
+    var plain = System.Text.Json.Nodes.JsonNode.Parse(untouched.ToJsonString())!.AsObject();
+    Expect(plain["1"]!["inputs"]!["length"]!.GetValue<int>() == 121, "没给帧数就别动它");
+    Expect(plain["8"]!["inputs"]!["aspect_ratio"]!.GetValue<string>() == "16:9", "没给比例就别动它");
+    Expect(plain["7"]!["inputs"]!["width"]!.GetValue<int>() == 768, "没给画幅就别动它");
 }
 
 static class Sample

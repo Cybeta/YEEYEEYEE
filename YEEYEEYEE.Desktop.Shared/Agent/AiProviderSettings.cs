@@ -262,8 +262,20 @@ public sealed class AiProviderConfig
     public bool IsImageConfigured =>
         !string.IsNullOrWhiteSpace(ImageModel) && !string.IsNullOrWhiteSpace(EffectiveImageEndpoint);
 
-    public bool IsComfyUiConfigured =>
-        !string.IsNullOrWhiteSpace(ComfyUiBaseUrl) && !string.IsNullOrWhiteSpace(ComfyUiCheckpoint);
+    /// <summary>
+    /// 接了 ComfyUI 没有：**只看地址**。
+    ///
+    /// 为什么不再要求填 checkpoint：checkpoint 是「内置那把出图模板」才需要的东西，
+    /// 而走**用户自己选的工作流**时它一个字都不参与（Wan 用自己的 diffusion model、LTX 用自己的文本编码器，
+    /// 都不走 checkpoint）。早先把它当成开关，后果是「地址填好了、工作流也导进来了，
+    /// 可整条链就是启不来」——一个与用户实际要做的事无关的字段，挡住了他真正要做的事。
+    /// 需要 checkpoint 的那一条路改由 <see cref="CanUseBuiltInImageTemplate"/> 单独把关。
+    /// </summary>
+    public bool IsComfyUiConfigured => !string.IsNullOrWhiteSpace(ComfyUiBaseUrl);
+
+    /// <summary>能不能用内置的那把出图模板（它起头就是 CheckpointLoaderSimple，所以要底模）。</summary>
+    public bool CanUseBuiltInImageTemplate =>
+        IsComfyUiConfigured && !string.IsNullOrWhiteSpace(ComfyUiCheckpoint);
 
     public string EffectiveImageEndpoint =>
         string.IsNullOrWhiteSpace(ImageEndpoint) ? Endpoint : ImageEndpoint;

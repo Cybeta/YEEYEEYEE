@@ -294,7 +294,9 @@ public sealed class UnconfiguredImageProvider : IImageProvider
         {
             Status = ImageGenerationStatus.NotConfigured,
             Provider = Name,
-            Error = "尚未配置图像模型。请在“设置”中填写 ComfyUI 地址与 checkpoint，或填写图像模型名称。"
+            // ComfyUI 的「接上了没有」只看地址；checkpoint 只在内置模板出图时才需要，走工作流不看它。
+            Error = "尚未配置图像模型。请在“设置”中填写 ComfyUI 地址（地址填了就算接上了，"
+                + "走工作流不看 checkpoint；checkpoint 只在内置模板出图时要用），或填写图像模型名称。"
         });
 }
 
@@ -584,6 +586,14 @@ public sealed class ComfyUiImageProvider : IImageProvider
 
             slots = JsonSerializer.Serialize(detected);
         }
+
+        // 没选工作流就走内置模板，而内置模板是 CheckpointLoaderSimple 起头的：没填底模它跑不了。
+        // 早先这种情形根本走不到这里（配置门把整条链挡在外面），现在门放宽成「只看地址」，
+        // 所以这一句必须在这儿说清楚——否则用户会看到服务端一句「ckpt_name 找不到」。
+        if (template.Length == 0 && !config.CanUseBuiltInImageTemplate)
+            return Failed("这次没选工作流，走的是内置的出图模板，而它需要一个底模（checkpoint）："
+                + "到「设置 → 生图与生视频 → ComfyUI」里选一个（例如 SDXL/sd_xl_base_1.0.safetensors）；"
+                + "或者改选一份 ComfyUI 工作流——那条路不需要 checkpoint。");
 
         var inputs = new Dictionary<string, JsonElement>
         {

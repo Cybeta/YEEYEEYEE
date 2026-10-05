@@ -13,6 +13,8 @@ using Avalonia.VisualTree;
 // 第 127 轮起 AppPaths / ProjectContext 与其它共享类型同住 YEEYEEYEE.Desktop 命名空间
 // （原先它们在 YEEYEEYEE.Desktop.Core 下，靠一个转发壳访问），那个 using 已删除。
 using YEEYEEYEE.Desktop;
+// 工作流槽位（ComfyUiWorkflowSlots）在 Host 里：出视频对话框要用它来判断时长/比例/画幅改不改得动。
+using YEEYEEYEE.Host;
 
 namespace YEEYEEYEE.Desktop.Avalonia;
 
@@ -2590,8 +2592,18 @@ public partial class MainWindow : Window, IAgentSessionHost
         // ---------- ② 出视频 ----------
         if (request.WantsVideos)
         {
+            // 视频来源里选的可能就是 ComfyUI 的一份工作流：工厂必须**拿到它**，否则会退回接口站那条链，
+            // 出来的东西与用户选的那份不是一回事。选工作流时先把那一台设为当前用的那一台——
+            // 设置里的地址是站点文件的投影，与「运行技能」那条路同一套口径。
+            if (request.VideoSource?.Workflow is { } chosenWorkflow
+                && !ComfyUiSiteActivation.Activate(chosenWorkflow.Site, out var activationError))
+            {
+                StatusText.Text = "这次只补了图，视频没跑：" + activationError;
+                return;
+            }
+
             IVideoProvider provider;
-            try { provider = VideoProviderFactory.Create(); }
+            try { provider = VideoProviderFactory.Create(workflow: request.VideoSource?.Workflow); }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
             {
                 StatusText.Text = $"出视频链路创建不出来：{error.Message}";
@@ -2599,7 +2611,9 @@ public partial class MainWindow : Window, IAgentSessionHost
             }
             if (!provider.IsConfigured)
             {
-                StatusText.Text = "出视频链路没配好：请在「设置 → 生图与生视频 → 视频接口」里填上地址与模型。这次只补了图。";
+                StatusText.Text = request.VideoSource?.IsWorkflow == true
+                    ? "这次只补了图，视频没跑：这份 ComfyUI 工作流要的那台服务器地址还没填（地址填了就能走工作流）。"
+                    : "出视频链路没配好：请在「设置 → 生图与生视频 → 视频接口」里填上地址与模型。这次只补了图。";
                 return;
             }
 
@@ -2625,7 +2639,7 @@ public partial class MainWindow : Window, IAgentSessionHost
 
                 StatusText.Text = $"一键出视频 {step}/{total}：正在给「{target.Title}」出视频（异步任务，可能要等几分钟）…";
                 await RunVideoAsync(target, suggestion.Prompt, LatestImageAttachmentPath(target),
-                    request.Seconds, request.VideoSource, provider);
+                    request.Seconds, request.VideoSource, provider, request.AspectRatio, request.Megapixels);
                 if (currentCanvas != canvas) return;
 
                 if (target.Attachments.Any(attachment =>
@@ -2820,11 +2834,15 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
         if (!provider.IsConfigured)
         {
+            // ComfyUI 的「接上了没有」**只看地址**（IsComfyUiConfigured）：checkpoint 只在内置模板出图时才需要，
+            // 走工作流根本不看它。所以这里的说法不能再把 checkpoint 当成一道门。
             StatusText.Text = source is null
                 ? "出视频链路没配好：请在「设置 → 生图与生视频」里填上视频接口（地址与模型），"
-                  + "或者把 ComfyUI 配齐（地址与 checkpoint）。"
+                  + "或者在出视频时选一份 ComfyUI 的出视频工作流——ComfyUI 只看地址，"
+                  + "checkpoint 只在用内置模板出图时才要用。"
                 : source.IsWorkflow
-                    ? $"「{source.Label}」这条链跑不了：ComfyUI 的地址或 checkpoint 还没配好。"
+                    ? $"「{source.Label}」这条链跑不了：ComfyUI 的地址还没填。"
+                      + "地址填了就能走工作流；checkpoint 只在内置模板出图时要用，走工作流不看它。"
                     : $"「{source.Label}」这个池子缺地址或模型名，出不了视频。";
             return;
         }
@@ -2836,12 +2854,20 @@ public partial class MainWindow : Window, IAgentSessionHost
             ? workflow.Workflow.Title
             : source?.PoolItem?.Model ?? string.Empty;
 
+        // 走工作流时，先读一次它自己的正文：时长 / 比例 / 画幅改不改得动，答案只在那里。
+        // 读不到就如实说判断不了，绝不替它猜一个结论。
+        var workflowChoice = source?.Workflow;
+        ComfyUiWorkflowSlots? slots = null;
+        var slotsError = string.Empty;
+        if (workflowChoice is not null)
+            (slots, slotsError) = ComfyUiWorkflowInspector.Inspect(workflowChoice.Site, workflowChoice.Workflow);
+
         var prompt = new TextBox
         {
             Text = suggestion.Prompt,
             AcceptsReturn = true,
             TextWrapping = TextWrapping.Wrap,
-            Height = 190,
+            Height = 150,
             FontSize = 12
         };
 
@@ -2867,12 +2893,74 @@ public partial class MainWindow : Window, IAgentSessionHost
                       + "首帧不会被用上（它只能文生视频）。"
                     : $"首帧：节点上最新那张图（{Path.GetFileName(frame)}）——走图生视频，出来的是这一镜动起来的样子。",
             frame.Length > 0 && workflowTakesFrame != false ? AgentNoteLevel.Info : AgentNoteLevel.Warning));
+
+        // ---------- 时长 / 比例 / 目标像素 ----------
+        // 这三个是出视频的参数入口。**比例与目标像素只在走工作流时才有意义**：接口站那条路只发时长，
+        // 所以那一路把它们置灰，并在下面的说明里讲清为什么（不假装生效）。
+        var aspectBox = new ComboBox { Width = 108, FontSize = 12 };
+        foreach (var item in new[] { "跟随首帧", "9:16", "16:9", "1:1" }) aspectBox.Items.Add(item);
+        aspectBox.SelectedIndex = 0;
+        var megapixelsBox = new ComboBox { Width = 120, FontSize = 12 };
+        foreach (var item in new[] { "0.5 MP", "1.0 MP", "2.0 MP" }) megapixelsBox.Items.Add(item);
+        megapixelsBox.SelectedIndex = 1;
+        var secondsBox = new TextBox { Text = seconds > 0 ? seconds.ToString() : string.Empty, Width = 72, FontSize = 12 };
+        var workflowRoute = workflowChoice is not null;
+        aspectBox.IsEnabled = workflowRoute;
+        megapixelsBox.IsEnabled = workflowRoute;
+
+        string CurrentAspect() => aspectBox.SelectedIndex switch
+        {
+            1 => "9:16",
+            2 => "16:9",
+            3 => "1:1",
+            _ => string.Empty
+        };
+        double CurrentMegapixels() => megapixelsBox.SelectedIndex switch { 0 => 0.5, 2 => 2.0, _ => 1.0 };
+        int CurrentSeconds() => int.TryParse(secondsBox.Text, out var parsed) && parsed > 0 ? parsed : 0;
+        var shapeNote = AgentDialogUi.Note(string.Empty);
+
+        void SyncShapeNote()
+        {
+            if (workflowChoice is not null)
+            {
+                shapeNote.Text = slots is null
+                    ? $"这份工作流的正文读不到，改不改得动这三样判断不了：{slotsError}"
+                    : VideoShapeNotice.DescribeWorkflow(slots, CurrentAspect(), CurrentMegapixels(), CurrentSeconds());
+            }
+            else
+            {
+                shapeNote.Text = VideoShapeNotice.DescribePool(CurrentSeconds());
+            }
+        }
+
+        aspectBox.SelectionChanged += (_, _) => SyncShapeNote();
+        megapixelsBox.SelectionChanged += (_, _) => SyncShapeNote();
+        secondsBox.TextChanged += (_, _) => SyncShapeNote();
+        SyncShapeNote();
+
+        var settingsRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            Children =
+            {
+                new TextBlock { Text = "比例", FontSize = 11, Foreground = AgentDialogUi.Brush("DfInk2"), VerticalAlignment = VerticalAlignment.Center },
+                aspectBox,
+                new TextBlock { Text = "目标像素", FontSize = 11, Foreground = AgentDialogUi.Brush("DfInk2"), VerticalAlignment = VerticalAlignment.Center },
+                megapixelsBox,
+                new TextBlock { Text = "时长（秒）", FontSize = 11, Foreground = AgentDialogUi.Brush("DfInk2"), VerticalAlignment = VerticalAlignment.Center },
+                secondsBox
+            }
+        };
+        body.Children.Add(settingsRow);
+        body.Children.Add(shapeNote);
+
         body.Children.Add(AgentDialogUi.Note(
             $"模型：{(model.Length > 0 ? model : config.VideoModel.Length > 0 ? config.VideoModel : "（设置里没填）")}"
             + (source?.Label is { Length: > 0 } label ? $" · {label}" : string.Empty)
             + (source?.IsWorkflow == true
-                ? " · 时长：由那份工作流自己的帧数与帧率决定（我们只往里写提示词、负面词与首帧）"
-                : $" · 时长：{(seconds > 0 ? seconds + " 秒" : "由服务端决定")}")
+                ? " · 这一路会把你选的时长 / 比例 / 目标像素按那份工作流的入口写进去，能不能改看上面那句。"
+                : " · 这一路只发时长与首帧，比例与目标像素不会发出去（画幅由服务端按模型默认档位决定）。")
             + (source?.IsWorkflow == true
                 ? "\n说明：这是在 ComfyUI 上跑一张节点图，跑多久取决于那张图与那台机器的显卡，可能十几分钟；"
                   + "出好之前请别关窗口，进度会写在状态栏里。"
@@ -2888,7 +2976,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             Spacing = 6,
             Children = { cancel, go }
         };
-        var dialog = DialogShell.Create($"出视频 · {node.Title}", AgentDialogUi.Layout(body, AgentDialogUi.Footer(buttons)), 620, 540);
+        var dialog = DialogShell.Create($"出视频 · {node.Title}", AgentDialogUi.Layout(body, AgentDialogUi.Footer(buttons)), 640, 660);
         cancel.Click += (_, _) => dialog.Close();
         go.Click += (_, _) =>
         {
@@ -2899,7 +2987,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                 return;
             }
             dialog.Close();
-            _ = RunVideoAsync(node, text, frame, seconds, source, provider);
+            _ = RunVideoAsync(node, text, frame, CurrentSeconds(), source, provider, CurrentAspect(), CurrentMegapixels());
         };
         await dialog.ShowDialog(this);
     }
@@ -2911,7 +2999,8 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// 所以成功就挂上去；失败就如实说失败，不留下半个文件冒充产物。
     /// </summary>
     private async Task RunVideoAsync(
-        WorkflowNode node, string prompt, string frame, int seconds, ImageSourceChoice? source, IVideoProvider provider)
+        WorkflowNode node, string prompt, string frame, int seconds, ImageSourceChoice? source, IVideoProvider provider,
+        string aspectRatio = "", double megapixels = 0)
     {
         if (currentCanvas is null) return;
 
@@ -2949,6 +3038,10 @@ public partial class MainWindow : Window, IAgentSessionHost
             EndpointPath = pool?.Site.VideoPath ?? string.Empty,
             ApiKey = pool?.Site.ApiKey ?? string.Empty,
             Seconds = seconds,
+            // 比例与目标像素：走 ComfyUI 工作流时由 ComfyUiVideoProvider 按那份工作流的入口写进去
+            // （改不动会在结果 Note 里逐项说明）；走接口站池子时这两个值不会发出去，界面已经说明了这一点。
+            AspectRatio = aspectRatio,
+            Megapixels = megapixels,
             ReferenceImages = frames,
             // 走 ComfyUI 工作流时带这三个：站点 id + 正文文件名 + 工作流键（与出图那条路同一套口径）。
             // 三个都空 = 走接口站的视频池子。
@@ -3011,7 +3104,46 @@ public partial class MainWindow : Window, IAgentSessionHost
         RefreshOpenCenterView();
         MarkCanvasDirty();
         UpdateCanvasUi(currentCanvasPath ?? string.Empty);
+
+        // 出完了把「实际怎么落的」摆给用户核对：Note 里写着你要的 15 秒 / 9:16 实际出成了多少、
+        // 哪些项没写进去。只放状态栏会被下一条进度冲掉，而这句话正是这条链最该核对的东西。
+        if (result.Note.Length > 0)
+            await ShowVideoResultNoteAsync(node.Title, result.Note);
+
         StatusText.Text = referenceNote + $"已出视频并挂到「{node.Title}」：{Path.GetFileName(result.FilePath)} —— 记得点「保存修订」";
+    }
+
+    /// <summary>
+    /// 出完视频后把「实际写进去了什么、真实出成了什么」摆给用户核对。
+    ///
+    /// 为什么要单开一扇窗，而不是塞进状态栏：这句话是要**对着核**的（你要 15 秒，实际出成几秒），
+    /// 状态栏一行装不下、也容易被下一条进度冲掉。接口站那条路不产出这句（Note 为空）时不弹。
+    /// </summary>
+    private async Task ShowVideoResultNoteAsync(string nodeTitle, string note)
+    {
+        var body = new StackPanel { Margin = new Thickness(20), Spacing = 8 };
+        body.Children.Add(AgentDialogUi.Header("这一镜实际是怎么落的"));
+        body.Children.Add(AgentDialogUi.Note("对着你要的核一下：哪些写进去了、哪些没写进去，以及真实出成了多少。"));
+        body.Children.Add(new TextBlock
+        {
+            Text = note,
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = AgentDialogUi.Brush("DfInk")
+        });
+
+        var ok = AgentDialogUi.Primary("知道了");
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Spacing = 6,
+            Children = { ok }
+        };
+        var dialog = DialogShell.Create(
+            $"出视频结果核对 · {nodeTitle}", AgentDialogUi.Layout(body, AgentDialogUi.Footer(buttons)), 560, 420);
+        ok.Click += (_, _) => dialog.Close();
+        await dialog.ShowDialog(this);
     }
 
     /// <summary>

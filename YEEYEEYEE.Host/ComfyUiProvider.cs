@@ -45,12 +45,36 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
             "prompt",
             new ComfyUiPromptRequest { Prompt = workflowFactory(effective), ClientId = clientId },
             cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+
+        // **别用 EnsureSuccessStatusCode**：它只留一个状态码，而服务端的报错正文才是最有用的那一句话
+        // （它会点名哪个节点类型这台机器上没装、哪个必填输入缺了）。实测排查一次提交被拒时，
+        // 就是被「只有一个 404」拖住的——正文里其实写着原因。
+        if (!response.IsSuccessStatusCode)
+        {
+            var detail = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            if (detail.Length > 800) detail = detail[..800] + "…";
+            throw new InvalidOperationException(
+                $"ComfyUI 拒绝了这次提交（HTTP {(int)response.StatusCode}）："
+                + (detail.Trim().Length > 0 ? detail.Trim() : "服务端没有给正文")
+                + RejectionHint(response.StatusCode));
+        }
+
         var body = await response.Content.ReadFromJsonAsync<ComfyUiPromptResponse>(cancellationToken: cancellationToken).ConfigureAwait(false);
         if (body is null || string.IsNullOrWhiteSpace(body.PromptId))
             throw new InvalidOperationException("ComfyUI 未返回 prompt_id");
         return new ExecutionOutput { ExternalTaskId = body.PromptId, AwaitExternalCompletion = true };
     }
+
+    /// <summary>
+    /// 404 这一种要额外说一句：ComfyUI 本身没有「路由不存在」这种回答，
+    /// 所以 404 几乎总是**地址不对**或**那台机器上的 ComfyUI 没在跑**（云上的临时隧道尤其常见——
+    /// 每次重启地址都可能变）。不补这一句，用户只会看到一个光秃秃的 404。
+    /// </summary>
+    private static string RejectionHint(System.Net.HttpStatusCode status) =>
+        status == System.Net.HttpStatusCode.NotFound
+            ? "（404 通常意味着这个地址后面没有 ComfyUI：到「设置 → 生图与生视频 → ComfyUI」点一下「测试连接」，"
+              + "确认地址还是那台在跑的机器——云上临时隧道的地址每次重启都可能变）"
+            : string.Empty;
 
     /// <summary>
     /// 把本机参考图全部上传到 ComfyUI 的输入目录，LoadImage 节点才能按文件名引用它们。
@@ -115,7 +139,15 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
         form.Add(new StringContent("true"), "overwrite");
 
         var response = await http.PostAsync("upload/image", form, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            var detail = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            if (detail.Length > 800) detail = detail[..800] + "…";
+            throw new InvalidOperationException(
+                $"往 ComfyUI 传参考图被拒（HTTP {(int)response.StatusCode}）："
+                + (detail.Trim().Length > 0 ? detail.Trim() : "服务端没有给正文")
+                + RejectionHint(response.StatusCode));
+        }
         var uploaded = await response.Content.ReadFromJsonAsync<ComfyUiUploadResponse>(cancellationToken: cancellationToken).ConfigureAwait(false);
         if (uploaded is null || string.IsNullOrWhiteSpace(uploaded.Name))
             throw new InvalidOperationException("ComfyUI 未返回上传后的图片名");

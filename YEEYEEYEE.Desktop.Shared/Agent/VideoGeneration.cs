@@ -56,6 +56,19 @@ public sealed class VideoGenerationRequest
 
     public bool UsesWorkflow => WorkflowPayloadFile.Length > 0;
 
+    /// <summary>
+    /// 想要的比例，形如 <c>9:16</c>；空表示「跟随首帧」（图生视频时这是最稳的一种）。
+    /// 只有那份工作流认得出比例/画幅入口时才写得进去，写不进去会如实说明。
+    /// </summary>
+    public string AspectRatio { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 目标像素（百万像素），例如 1.0；0 表示不指定（按 1.0 算）。
+    /// ComfyUI 里没有统一的「百万像素」字段，所以它只用来**换算出具体的宽高**，
+    /// 再由工作流认哪个槽位决定写到哪儿。
+    /// </summary>
+    public double Megapixels { get; init; }
+
     public bool HasReferenceImages => ReferenceImages.Count > 0;
 }
 
@@ -74,6 +87,13 @@ public sealed class VideoGenerationResult
     /// 只是模型没画好。
     /// </summary>
     public string ReferenceNote { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 这次实际写进去了什么、哪些没写进去、为什么。**它是给人核对用的**，不是日志：
+    /// 「你要的 15 秒 / 9:16 到底生效了没有」只有这句能回答，而这件事不说清楚，
+    /// 用户会把「模型没按我要的出」当成模型的毛病，而不是「这份工作流改不了这一项」。
+    /// </summary>
+    public string Note { get; init; } = string.Empty;
 }
 
 public interface IVideoProvider
@@ -275,31 +295,116 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
             return Failed($"这份工作流的形状读不懂（{error.GetType().Name}）：{error.Message}");
         }
 
-        // 认不出收提示词的位置就**如实失败**：静默把提示词丢掉、跑出导出时那张图/那段视频，
-        // 是这里最坏的一种失败（界面说成功了，内容却是别人的）。
-        if (!detected.CanTextToImage)
-            return Failed("这份工作流收不到提示词，所以没提交：" + string.Join("；", detected.Notes));
+        // 认不出收提示词的位置要分两种情况，不能一锅端：
+        // ① 只吃首帧的那种（SVD / 动作迁移 / 人物替换）**是正当用法**——它按底图动起来，本来就不收文字。
+        //    这时不写提示词，但要把「你写的提示词没进工作流」说出来（不说的话，用户会以为画面是自己那句话决定的）。
+        // ② 既没有提示词入口、也没有底图入口，才是真的驱动不了。
+        if (!detected.CanTextToImage && !detected.IsFrameDriven)
+            return Failed("这份工作流既收不到提示词、也没有底图入口，所以没提交："
+                + string.Join("；", detected.Notes));
 
         var references = request.ReferenceImages
             .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
             .ToList();
         var useReference = references.Count > 0 && detected.CanTakeImage;
+        var promptBound = detected.CanTextToImage;
+
+        // ── 时长：把「要几秒」按那份工作流自己的帧率换算成帧数，并贴到它自己的帧数家族上 ──
+        // 换算不出来（它没有帧数入口、或找不到帧率）时**什么都不写**，并在说明里讲清是哪种情况。
+        var notes = new List<string>();
+        int? frames = null;
+        if (request.Seconds > 0)
+        {
+            if (!detected.CanSetLength)
+                notes.Add("这份工作流没有帧数入口，所以这次没能改时长：它出多少就是多少"
+                    + (detected.LengthCurrent is { } fixedFrames ? $"（当前设定 {fixedFrames} 帧）。" : "。"));
+            else if (VideoFrameMath.TryFrames(request.Seconds, detected.FrameRateValue ?? 0, detected.LengthCurrent,
+                         out var computed, out var frameNote))
+            {
+                frames = computed;
+                notes.Add(frameNote);
+            }
+            else
+            {
+                notes.Add(frameNote);
+            }
+        }
+
+        // ── 画幅与比例 ──
+        // 只给了目标像素而没给比例时**不写画幅**：那等于「按首帧的比例来」，
+        // 而首帧的比例是工作流照着输入图自己算的，我们再去写一个数反而会和它对不上。
+        var width = request.Width;
+        var height = request.Height;
+        var aspectRatio = request.AspectRatio;
+        if (width <= 0 || height <= 0)
+        {
+            if (aspectRatio.Length > 0 || request.Megapixels > 0)
+            {
+                var shape = aspectRatio.Length > 0
+                    ? VideoShape.Resolve(aspectRatio, request.Megapixels)
+                    : (Width: 0, Height: 0,
+                        Note: "只给了目标像素、没给比例：这种情况按**首帧的比例**走，画幅我们不动它"
+                              + "（要指定比例就选一个，例如 9:16）。");
+                if (shape.Width > 0)
+                {
+                    width = shape.Width;
+                    height = shape.Height;
+                    notes.Add(shape.Note);
+                }
+                else
+                {
+                    notes.Add(shape.Note);
+                }
+            }
+        }
+
+        var sizeApplied = width > 0 && height > 0 && detected.CanResize;
+        if (width > 0 && height > 0 && !detected.CanResize)
+            notes.Add($"这份工作流改不了画幅（尺寸来自它上游的节点或输入图），所以 {width}×{height} 没能写进去："
+                + "它出多大就是多大。要指定比例，最稳的办法是把首帧按那个比例出好再喂进来。");
+        else if (sizeApplied)
+            notes.Add($"画幅已写入：{width}×{height}（节点 {detected.LatentNodeId}）。");
+
+        if (aspectRatio.Length > 0 && detected.CanSetAspect && !sizeApplied)
+            notes.Add(detected.AspectCurrent.Length > 0
+                ? $"比例按这份工作流自己的写法写：{detected.AspectCurrent} → {aspectRatio}"
+                  + "（分辨率由它自己定，我们只改比例这一项）。"
+                : $"比例已写入：{aspectRatio}。");
+        else if (aspectRatio.Length > 0 && !detected.CanSetAspect && !sizeApplied)
+            notes.Add("这份工作流既没有可写的画幅、也没有比例选项，比例没能写进去。");
 
         var inputs = new Dictionary<string, JsonElement>
         {
-            ["prompt"] = JsonSerializer.SerializeToElement(request.Prompt),
+            ["prompt"] = JsonSerializer.SerializeToElement(promptBound ? request.Prompt : string.Empty),
             ["negativePrompt"] = JsonSerializer.SerializeToElement(request.NegativePrompt ?? string.Empty),
             ["workflowTemplate"] = JsonSerializer.SerializeToElement(template),
             ["workflowSlots"] = JsonSerializer.SerializeToElement(JsonSerializer.Serialize(detected))
         };
         // 画幅只在明确给了值时才写：写 0 会让某些工作流按 0×0 出图，而「不说」是让它用自己的默认值。
-        if (request.Width > 0) inputs["width"] = JsonSerializer.SerializeToElement(request.Width);
-        if (request.Height > 0) inputs["height"] = JsonSerializer.SerializeToElement(request.Height);
+        if (width > 0) inputs["width"] = JsonSerializer.SerializeToElement(width);
+        if (height > 0) inputs["height"] = JsonSerializer.SerializeToElement(height);
+        // 帧数是**已经换算并贴到它自己的家族上**的（见上面的 VideoFrameMath），这里原样交给 Host 写进那一个槽位。
+        if (frames is { } frameCount) inputs["videoFrames"] = JsonSerializer.SerializeToElement(frameCount);
+        if (aspectRatio.Length > 0) inputs["aspectRatio"] = JsonSerializer.SerializeToElement(aspectRatio);
         if (useReference)
         {
             inputs["referenceImages"] = JsonSerializer.SerializeToElement(references);
             inputs["referenceMode"] = JsonSerializer.SerializeToElement("img2vid");
         }
+
+        // 只吃首帧的那类工作流：不写提示词，但必须说出来——
+        // 不说的话，用户会以为画面是自己那句话决定的，出了偏差只会怪模型。
+        if (!promptBound && request.Prompt.Length > 0)
+            notes.Add("这份工作流不收文字提示词（它是靠首帧动起来的，SVD / 动作迁移 / 人物替换这一类）："
+                + "你写的提示词没有进工作流，画面由首帧与它自己的运动参数决定。");
+
+        // 「你想要的是什么」单独留一份：出完之后要和**量出来的真实结果**并排说出来，
+        // 不然「15 秒」变成 5 秒这件事没人会注意到。
+        var wanted = new List<string>();
+        if (request.Seconds > 0) wanted.Add($"{request.Seconds} 秒");
+        if (request.AspectRatio.Length > 0) wanted.Add(request.AspectRatio);
+        if (request.Megapixels > 0) wanted.Add($"{request.Megapixels:0.##}MP");
+        var wantedSummary = string.Join(" · ", wanted);
 
         var invocation = new Invocation
         {
@@ -340,7 +445,7 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
             }).ConfigureAwait(false);
 
             var result = await completion.Task.ConfigureAwait(false);
-            return MapResult(result, useReference, references.Count, detected);
+            return MapResult(result, useReference, references.Count, detected, notes, wantedSummary);
         }
         catch (OperationCanceledException) { return Failed("ComfyUI 出视频任务已取消。"); }
         catch (TimeoutException error) { return Failed(error.Message); }
@@ -362,7 +467,12 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         : (choice.Workflow.Key.Length > 0 ? choice.Workflow.Key : "站点工作流");
 
     private VideoGenerationResult MapResult(
-        ExecutionResult result, bool usedReference, int referenceCount, ComfyUiWorkflowSlots slots)
+        ExecutionResult result,
+        bool usedReference,
+        int referenceCount,
+        ComfyUiWorkflowSlots slots,
+        List<string> notes,
+        string wantedSummary)
     {
         if (result.State != JobState.Succeeded)
             return Failed(result.ErrorMessage ?? $"ComfyUI 任务状态为 {result.State}。");
@@ -393,13 +503,21 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
                 + "（只认 images / gifs / videos / audio 四种）。可能是这份工作流的末端节点不是存文件的"
                 + "（例如只输出到 Preview），也可能是它把文件存到了别处。");
 
+        // 出完了就**把真实结果量出来**再说一遍：用户要的是 15 秒 / 9:16，到底出成了什么，
+        // 只有量过才算数（帧率换算、模型自己的对齐要求都可能让实际值跟想要的不一样）。
+        var film = Mp4Concatenator.Probe(picked);
+        if (film.Readable)
+            notes.Add($"实际出的是：{film.Describe()}。"
+                + (wantedSummary.Length > 0 ? $"你要的是：{wantedSummary}。" : string.Empty));
+
         return new VideoGenerationResult
         {
             Status = VideoGenerationStatus.Succeeded,
             FilePath = picked,
             Provider = Name,
             Model = Label,
-            ReferenceNote = ReferenceNote(usedReference, referenceCount, slots)
+            ReferenceNote = ReferenceNote(usedReference, referenceCount, slots),
+            Note = string.Join("\n", notes)
         };
     }
 

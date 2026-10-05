@@ -150,6 +150,40 @@ internal static class GenerationAuditDialog
         };
         body.Children.Add(durationRow);
 
+        // 比例 / 目标像素：与时长并列的三个出视频选项。**只有走 ComfyUI 工作流时它们才可能生效**——
+        // 接口站那条路只发时长，这两项不适用，所以那一路会把它们置灰并说明为什么（不假装生效）。
+        var aspectBox = new ComboBox { Width = 108, FontSize = 12, Classes = { "panelCombo" } };
+        foreach (var item in new[] { "跟随首帧", "9:16", "16:9", "1:1" }) aspectBox.Items.Add(item);
+        aspectBox.SelectedIndex = 0;
+        var megapixelsBox = new ComboBox { Width = 120, FontSize = 12, Classes = { "panelCombo" } };
+        foreach (var item in new[] { "0.5 MP", "1.0 MP", "2.0 MP" }) megapixelsBox.Items.Add(item);
+        megapixelsBox.SelectedIndex = 1;
+        var shapeRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            Children =
+            {
+                new TextBlock { Text = "比例", FontSize = 11, Foreground = Brush("DfInk2"), VerticalAlignment = VerticalAlignment.Center },
+                aspectBox,
+                new TextBlock { Text = "目标像素", FontSize = 11, Foreground = Brush("DfInk2"), VerticalAlignment = VerticalAlignment.Center },
+                megapixelsBox
+            }
+        };
+        var shapeNote = Note(string.Empty);
+        shapeNote.TextWrapping = TextWrapping.Wrap;
+        body.Children.Add(shapeRow);
+        body.Children.Add(shapeNote);
+        // 选项值直接取自两个下拉当前选中的那一项（空串 = 跟随首帧；目标像素默认 1.0MP）。
+        string CurrentAspect() => aspectBox.SelectedIndex switch
+        {
+            1 => "9:16",
+            2 => "16:9",
+            3 => "1:1",
+            _ => string.Empty
+        };
+        double CurrentMegapixels() => megapixelsBox.SelectedIndex switch { 0 => 0.5, 2 => 2.0, _ => 1.0 };
+
         var costNote = Note(string.Empty);
         costNote.TextWrapping = TextWrapping.Wrap;
         body.Children.Add(costNote);
@@ -172,13 +206,17 @@ internal static class GenerationAuditDialog
             var images = checkedItems.Where(item => item.Stage is GenerationStage.SettingImage or GenerationStage.StoryboardImage).ToList();
             var videos = checkedItems.Where(item => item.Stage is GenerationStage.StoryboardVideo or GenerationStage.ProductVideo).ToList();
             var fill = intent == GenerationIntent.Images || fillImages.IsChecked == true;
-            return new OneClickRunRequest(intent, fill, images, videos, imagePool, videoPool, seconds);
+            // 比例 / 目标像素只有走 ComfyUI 工作流时才会被真正写进去（见 RunVideoAsync 与 ComfyUiVideoProvider）；
+            // 走池子时这两个值传下去也不会发出去，界面那一边已经把话说明白了。
+            return new OneClickRunRequest(
+                intent, fill, images, videos, imagePool, videoPool, seconds, CurrentAspect(), CurrentMegapixels());
         }
 
         void SyncTiers()
         {
             // 档位下拉只列视频池子清单里写明的那些秒数（没写就是空表，用户自己填）。
-            // 走 ComfyUI 工作流时没有「档位」这回事（时长由工作流自己的帧数决定），也不该装作有。
+            // 走 ComfyUI 工作流时没有「池子登记的档位」这回事（时长由那份工作流的帧数入口按秒换算），
+            // 也不该装作有。
             var tiers = (videoPool?.PoolItem?.Seconds ?? 0) > 0
                 ? new List<string> { $"{videoPool!.PoolItem!.Seconds}s（清单登记）" }
                 : new List<string>();
@@ -211,6 +249,36 @@ internal static class GenerationAuditDialog
             durationNote.Text = check.Note;
             durationNote.Foreground = Brush(check.Mismatch ? "DfWarning" : "DfInk3");
 
+            // 比例 / 目标像素 / 时长改不改得动：走工作流的答案只在它自己的正文里（Detect 出来的槽位），
+            // 走池子则这两项不适用。两条都**照实说**，界面不另判一套。
+            var chosenWorkflow = videoPool?.Workflow;
+            aspectBox.IsEnabled = chosenWorkflow is not null;
+            megapixelsBox.IsEnabled = chosenWorkflow is not null;
+            if (chosenWorkflow is not null)
+            {
+                var (slots, error) = ComfyUiWorkflowInspector.Inspect(chosenWorkflow.Site, chosenWorkflow.Workflow);
+                if (slots is null)
+                {
+                    shapeNote.Text = $"这份工作流的正文读不到，改不改得动这三样判断不了：{error}";
+                    shapeNote.Foreground = Brush("DfWarning");
+                    durationNote.Text = "时长：读不到工作流正文，判断不了。";
+                    durationNote.Foreground = Brush("DfWarning");
+                }
+                else
+                {
+                    shapeNote.Text = VideoShapeNotice.DescribeWorkflow(slots, CurrentAspect(), CurrentMegapixels(), seconds);
+                    shapeNote.Foreground = Brush("DfInk3");
+                    // 时长可改的工作流上，VideoDurationPolicy 那句「不会发出去」是错的：
+                    // 秒数现在真的会按它的帧率换算成帧写进去，所以这一行留给上面的说明去讲。
+                    durationNote.Text = string.Empty;
+                }
+            }
+            else
+            {
+                shapeNote.Text = VideoShapeNotice.DescribePool(seconds);
+                shapeNote.Foreground = Brush("DfInk3");
+            }
+
             var lines = OneClickCost.Describe(CurrentRun());
             costNote.Text = string.Join("\n", lines);
         }
@@ -239,6 +307,9 @@ internal static class GenerationAuditDialog
             RefreshLayers();
         };
         fillImages.IsCheckedChanged += (_, _) => SyncCost();
+        // 换了比例 / 目标像素，事前那句说明要跟着重算（它算的是「这样选会写成什么」）。
+        aspectBox.SelectionChanged += (_, _) => SyncCost();
+        megapixelsBox.SelectionChanged += (_, _) => SyncCost();
         durationBox.TextChanged += (_, _) =>
         {
             seconds = int.TryParse(durationBox.Text, out var parsed) && parsed > 0 ? parsed : 0;

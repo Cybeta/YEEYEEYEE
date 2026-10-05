@@ -251,12 +251,18 @@ internal static class SitePoolPicker
 
             var lines = new List<string>
             {
+                // Describe() 里就有「时长✓（121 帧 × 24fps）/ 比例✓ / 画幅✗」这类结论，以及
+                // 「提示词—（只吃首帧）」——挑的时候就该看出哪一份能改时长、哪一份只吃首帧。
                 $"这份工作流能收到：{slots.Describe()}",
                 workflow.Note.Length > 0 ? "转换时的说明：" + workflow.Note : "转换时没有被跳过的节点。"
             };
+            if (slots.IsFrameDriven)
+                lines.Add("这一份只吃首帧、不收文字提示词（SVD / 动作迁移 / 人物替换这一类，是正当用法）："
+                    + "画面由首帧与它自己的运动参数决定，你写的提示词不会进工作流。");
             foreach (var note in slots.Notes.Take(3)) lines.Add("· " + note);
-            if (slots.Notes.Count > 3) lines.Add($"· （另有 {slots.Notes.Count - 3} 条说明，出图时在状态区里能看到）");
-            lines.Add("工作流的底模、步数、时长由它自己决定：我们只往里写提示词、负面词、画幅与种子。");
+            if (slots.Notes.Count > 3) lines.Add($"· （另有 {slots.Notes.Count - 3} 条说明，出图 / 出视频时在结果里能看到）");
+            lines.Add("底模与步数由它自己决定；提示词、负面词、画幅、比例、时长与种子能收到哪几样，上面那一行已经写出来了——"
+                + "改不动的那几样，出视频时会在窗口里讲清为什么。");
             workflowDetail.Text = string.Join("\n", lines);
         }
 
@@ -330,7 +336,8 @@ internal static class SitePoolPicker
         if (video == true)
             note.Text += "\n出视频这一路两条链都在：接口站的视频池子是「一次 HTTP 调用」（提交 → 轮询 → 下载、按次计费），"
                 + "ComfyUI 的视频工作流是在那台服务器上跑一张节点图（烧本机显卡）。"
-                + "工作流的时长由它自己的帧数与帧率决定，我们只往里写提示词、负面词与首帧。";
+                + "工作流能不能改时长 / 比例 / 画幅，由那份工作流自己的正文决定——"
+                + "选到具体那一份时，上面的说明会写清哪几样改得动。";
 
         void ApplyChannel()
         {

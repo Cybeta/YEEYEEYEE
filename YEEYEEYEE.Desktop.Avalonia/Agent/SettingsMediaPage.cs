@@ -105,9 +105,10 @@ internal static class SettingsMediaPage
                     Note("流程：抓取该网页（抓不到就粘贴正文）→ 解析出接口与可用模型 → 建出「生图池1 1K」这类技能" +
                          "→ 写密钥与地址模型（加密落盘）→ 问一次要不要做一次最小测试以确认接口真的可用。" +
                          "本地规则解析不出来时，可以让已接入的大模型把正文整理成结构化 JSON。" +
-                         "\n贴的是 **ComfyUI 地址**时走另一条路：把地址与 checkpoint 写进设置，" +
+                         "\n贴的是 **ComfyUI 地址**时走另一条路：把地址写进设置（地址填了就算接上了），" +
                          "并把那台服务器 workflows 目录里的工作流整份拉下来、逐份转成 API 格式，登记成一个 ComfyUI 站点" +
-                         "（等价于在浏览器里一份一份右键「导出（API）」，但不用你点）。")
+                         "（等价于在浏览器里一份一份右键「导出（API）」，但不用你点）。" +
+                         "它顺便带回来的 checkpoint 只在内置模板出图时要用，走工作流不看它。")
                 }
             }
         });
@@ -253,22 +254,31 @@ internal static class SettingsMediaPage
             if (comfySites.Count == 0)
             {
                 comfyCurrent.Text = config.ComfyUiBaseUrl.Length > 0
-                    ? $"当前用的是手工填的地址：{config.ComfyUiBaseUrl}"
-                      + (config.ComfyUiCheckpoint.Length > 0 ? $"｜checkpoint {config.ComfyUiCheckpoint}" : "｜没填 checkpoint")
+                    ? $"当前用的是手工填的地址：{config.ComfyUiBaseUrl}\n"
+                      + "接上的口径：**只看地址**——地址填了就算接上了。\n"
+                      + (config.ComfyUiCheckpoint.Length > 0
+                          ? $"checkpoint：{config.ComfyUiCheckpoint}（只在内置模板出图时要用）"
+                          : "checkpoint：没填——内置模板出图不能用（它起头就是 CheckpointLoaderSimple），走工作流不受影响。")
                     : "还没有登记过 ComfyUI 站点。";
                 comfyNote.Text = config.ComfyUiBaseUrl.Length > 0
-                    ? "这个地址是早先手工填的，**没有对应的站点**：它下面没有工作流清单，出图只能走代码里内置的那个最小模板。"
+                    ? "这个地址是早先手工填的，**没有对应的站点**：没有工作流清单，所以这里还没有工作流可选"
+                      + "（走工作流不受 checkpoint 影响，但要先用下面的导入登记站点）。"
+                      + (config.CanUseBuiltInImageTemplate
+                          ? "内置模板出图可以走：地址与 checkpoint 都有。"
+                          : "内置模板出图用不了：它需要一个底模，而 checkpoint 这一栏没填。")
                       + "想要用那台服务器自己的工作流，就用上面的「智能导入」把地址贴一次——"
                       + "它会把整份工作流拉下来并登记成站点。"
-                    : "要用 ComfyUI 出图：用上面的「智能导入」把地址贴一次（例如 http://127.0.0.1:8188），"
-                      + "它会把那台服务器的工作流整份拉下来并登记成站点。";
+                    : "要用 ComfyUI：用上面的「智能导入」把地址贴一次（例如 http://127.0.0.1:8188）——"
+                      + "地址填了就算接上了，它会顺便把那台服务器的工作流整份拉下来并登记成站点。";
                 return;
             }
 
             var site = comfySites[Math.Clamp(index, 0, comfySites.Count - 1)];
             var recommended = site.Recommended(video: false);
             comfyCurrent.Text = $"当前这一台：{site.Label}\n地址：{site.BaseUrl}"
-                + (site.Checkpoint.Length > 0 ? $"\ncheckpoint：{site.Checkpoint}" : "\ncheckpoint：没填（用工作流自己声明的那个）")
+                + (site.Checkpoint.Length > 0
+                    ? $"\ncheckpoint：{site.Checkpoint}（只在内置模板出图时要用）"
+                    : "\ncheckpoint：没填——内置模板出图不能用，走工作流不受影响")
                 + $"\n工作流：图像 {site.ImageWorkflows.Count} 份、视频 {site.VideoWorkflows.Count} 份"
                 + (recommended is null ? string.Empty : $"\n图像那一侧默认推荐：{recommended.Title}（节点 {recommended.NodeCount} 个）");
             comfyNote.Text = "要换台 / 改地址 / 看这一台有哪些工作流：**设置 → 技能管理 → 站点与池子**"
@@ -375,7 +385,10 @@ internal static class SettingsMediaPage
             // 能读到就说明地址、端口、鉴权这三件事都对得上，读不到就把原文报出来。
             if (provider.Name == "ComfyUI" || config.IsComfyUiConfigured)
             {
-                report($"链路就绪：ComfyUI（checkpoint={config.ComfyUiCheckpoint}）。"
+                report($"链路就绪：ComfyUI（地址已填）。"
+                    + (config.ComfyUiCheckpoint.Length > 0
+                        ? $"checkpoint={config.ComfyUiCheckpoint}（只在内置模板出图时要用，走工作流不看它）。"
+                        : "checkpoint 没填——内置模板出图用不了，走工作流不受影响。")
                     + "本次只解析链路，没有提交生成任务。正在只读地读一次工作流清单以确认地址可达…",
                     YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Info);
                 var (ok, detail) = await ComfyUiLibrary.ProbeAsync(config.ComfyUiBaseUrl);
@@ -390,8 +403,9 @@ internal static class SettingsMediaPage
             }
 
             report(
-                $"还没配好 ComfyUI：先用上面的「智能导入」贴一个 ComfyUI 地址（例如 http://127.0.0.1:8188），"
-                + $"它会登记成站点并把工作流拉下来。当前解析到「{provider.Name}」。",
+                $"ComfyUI 地址还没填：接上的口径**只看地址**——先用上面的「智能导入」贴一个 ComfyUI 地址"
+                + $"（例如 http://127.0.0.1:8188），它会登记成站点并把工作流拉下来。"
+                + $"当前解析到「{provider.Name}」。",
                 YEEYEEYEE.Desktop.Avalonia.AgentNoteLevel.Warning);
         };
         root.Children.Add(testComfy);

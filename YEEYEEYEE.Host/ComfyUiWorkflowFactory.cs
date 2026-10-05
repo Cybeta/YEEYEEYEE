@@ -163,6 +163,10 @@ public sealed class ComfyUiWorkflowFactory
             Width = GetInt(invocation, "width", 0, 0, 8192),
             Height = GetInt(invocation, "height", 0, 0, 8192),
             Seed = TryGetSeed(invocation),
+            // 时长与比例：出视频那两条链会带。给了就写（帧数是**已经按帧率换算好**的），
+            // 没给（例如出图）就是不写——不写等于沿用工作流自己的设定，那是它的正路。
+            Length = TryGetFrames(invocation),
+            AspectRatio = GetString(invocation, "aspectRatio") ?? string.Empty,
             // 认不出底图入口时 Bind 不会写它，所以这里给不给都安全。
             ImageName = images.Count > 0 ? images[0] : string.Empty,
             // 整份列表一起给：一份工作流有多个底图入口时，按顺序各收一张
@@ -177,6 +181,18 @@ public sealed class ComfyUiWorkflowFactory
         invocation.Inputs.TryGetValue("seed", out var value) && value.ValueKind == JsonValueKind.Number
             ? value.GetInt64()
             : null;
+
+    /// <summary>
+    /// 这次要写的帧数。**上界放到 20000**：这不是「图片边长」那种量级的数，
+    /// 一段两分钟、24fps 的视频就是 2881 帧，砍到几百帧会让长视频那条路直接失效。
+    /// </summary>
+    private static int? TryGetFrames(Invocation invocation)
+    {
+        if (!invocation.Inputs.TryGetValue("videoFrames", out var value)) return null;
+        if (value.ValueKind != JsonValueKind.Number) return null;
+        var frames = value.GetInt32();
+        return frames > 1 ? Math.Min(frames, 20_000) : null;
+    }
 
     private static List<string> GetStringList(Invocation invocation, string name)
     {

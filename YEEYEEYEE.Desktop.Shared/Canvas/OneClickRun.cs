@@ -14,7 +14,11 @@ public sealed record OneClickRunRequest(
     IReadOnlyList<GenerationAuditItem> VideoItems,
     ImageSourceChoice? ImageSource,
     ImageSourceChoice? VideoSource,
-    int Seconds)
+    int Seconds,
+    // 出视频那三样里的另外两样：比例与目标像素。放在末尾并给默认值，既有调用点（含回归用例）不用改；
+    // 只有走 ComfyUI 工作流时才写进 <see cref="VideoGenerationRequest"/>——接口站那条路只发时长。
+    string AspectRatio = "",
+    double Megapixels = 0)
 {
     /// <summary>这一次要补几张图。**清单本身就是要做的事**，所以数量从它算出来，不另存一个数（免得两边对不上）。</summary>
     public int ImageCount => ImageItems.Count;
