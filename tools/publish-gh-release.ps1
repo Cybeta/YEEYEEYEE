@@ -19,8 +19,18 @@ $ErrorActionPreference = 'Stop'
 $notes = [System.IO.File]::ReadAllText($NotesPath, [System.Text.Encoding]::UTF8)
 
 $env:GIT_TERMINAL_PROMPT = '0'
-$line = @("protocol=https", "host=github.com", "", "") | git credential fill 2>$null |
+# Ask git for the stored token by redirecting a request FILE into `git credential fill`.
+# A PowerShell pipeline into the native command is not reliable here: piping a string may arrive
+# without the terminating blank line (git then fails with "missing protocol field"), and an array
+# loses its empty entries. A file redirection always delivers the exact bytes (measured).
+$requestFile = [System.IO.Path]::GetTempFileName()
+[System.IO.File]::WriteAllText($requestFile, "protocol=https`nhost=github.com`n`n")
+$strict = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$line = (cmd /c "git credential fill < `"$requestFile`"") 2>$null |
     Where-Object { $_ -like 'password=*' } | Select-Object -First 1
+$ErrorActionPreference = $strict
+Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue
 if (-not $line) { throw "no stored credential for github.com" }
 $token = $line.Substring('password='.Length)
 if ([string]::IsNullOrWhiteSpace($token)) { throw "stored credential has an empty token" }
