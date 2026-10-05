@@ -75,13 +75,19 @@ public sealed class ComfyUiWorkflowSlots
     /// <summary>
     /// 比例：工作流里那种「一串固定选项」的输入（`aspect_ratio` / `aspect` / `ratio`），值是字面量。
     ///
-    /// 为什么只记「当前值的写法」而不记选项清单：合法选项在**服务端的节点定义**里，
-    /// 工作流文件里只有当前选中的那一个。所以我们只能照它自己那个值的写法造一个新值
-    /// （`16:9` → `9:16`）。造不出来（写法不认识，例如 `adaptive`）就如实说改不了。
+    /// 只记「当前值的写法」是不够的：合法选项在**服务端的节点定义**里，工作流文件里只有当前选中的那一个。
+    /// 所以另配一张 <see cref="AspectOptions"/>——这台服务器上同一个节点类型 + 同一个输入名**真实用过的值**
+    /// （导入时全库扫出来），改比例时从那里挑；只有那里也没有同比例的值时，才退回「照它当前值的写法造一个」。
     /// </summary>
     public string AspectNodeId { get; set; } = string.Empty;
     public string AspectInput { get; set; } = string.Empty;
     public string AspectCurrent { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 这个比例控件见过的值（别的值都来自这份清单，写回去的一定是它认识的）。
+    /// 空表示：这份工作流没有比例控件，或库里还没有第二份用过同一个节点 + 同一个输入。
+    /// </summary>
+    public List<string> AspectOptions { get; set; } = new();
 
     /// <summary>
     /// 帧数：收「这一镜出多少帧」的输入（`length` / `num_frames` / `video_frames` 这类），**只认生成侧**。
@@ -215,14 +221,16 @@ public static class ComfyUiWorkflowBinder
     private static readonly string[] ConstantNames = { "value", "seconds", "duration", "int", "float", "number" };
 
     /// <summary>认槽位。工作流形状不对时不抛，只把「认不出什么」记进 Notes。</summary>
-    public static ComfyUiWorkflowSlots Detect(string apiWorkflowJson)
+    public static ComfyUiWorkflowSlots Detect(
+        string apiWorkflowJson, IReadOnlyDictionary<string, List<string>>? optionValues = null)
     {
         var root = JsonNode.Parse(apiWorkflowJson) as JsonObject
             ?? throw new InvalidOperationException("工作流不是 JSON 对象");
-        return Detect(root);
+        return Detect(root, optionValues);
     }
 
-    public static ComfyUiWorkflowSlots Detect(JsonObject apiWorkflow)
+    public static ComfyUiWorkflowSlots Detect(
+        JsonObject apiWorkflow, IReadOnlyDictionary<string, List<string>>? optionValues = null)
     {
         ArgumentNullException.ThrowIfNull(apiWorkflow);
         var slots = new ComfyUiWorkflowSlots();
@@ -231,6 +239,7 @@ public static class ComfyUiWorkflowBinder
         ResolvePrompt(apiWorkflow, NegativeNames, "负面词", positive: false, slots);
         ResolveSize(apiWorkflow, slots);
         ResolveAspect(apiWorkflow, slots);
+        AttachAspectOptions(apiWorkflow, slots, optionValues);
         ResolveSeeds(apiWorkflow, slots);
         ResolveImage(apiWorkflow, slots);
         ResolveLength(apiWorkflow, slots);
@@ -424,9 +433,9 @@ public static class ComfyUiWorkflowBinder
     /// <summary>
     /// 认比例：`aspect_ratio` / `aspect` / `ratio` 这类**固定选项**控件，值是字面量字符串。
     ///
-    /// 只取一个（按输入名的明确程度、再按节点 id），并且**记下它当前那个值**：
-    /// 合法选项清单在服务端，工作流里只有选中的那一个，所以我们只能照它的写法造新值。
-    /// 造不出来时（写法不认识）由 <see cref="VideoShape.FormatAspect"/> 返回空，界面那一刻如实说改不了。
+    /// 只取一个（按输入名的明确程度、再按节点 id），并记下它当前那个值。
+    /// 能不能真的改成别的比例由 <see cref="VideoShape.FormatAspect"/> 说了算：
+    /// 优先用 <see cref="ComfyUiWorkflowSlots.AspectOptions"/> 里见过的值，其次才照它当前的写法造。
     /// </summary>
     private static void ResolveAspect(JsonObject graph, ComfyUiWorkflowSlots slots)
     {
@@ -453,10 +462,33 @@ public static class ComfyUiWorkflowBinder
         slots.AspectNodeId = chosen.NodeId;
         slots.AspectInput = chosen.Input;
         slots.AspectCurrent = chosen.Value;
+    }
 
-        if (!VideoShape.TryParseRatio(chosen.Value, out _, out _))
-            slots.Notes.Add($"节点 {chosen.NodeId} 的 {chosen.Input} 是比例，但它的值「{chosen.Value}」不是 a:b 这种写法："
-                + "我们不认识它的选项格式，比例这一项改不了（要改请在那份工作流里改）。");
+    /// <summary>
+    /// 把「这个比例控件见过的值」贴上去（导入时全库扫出来的那张小表，键是 <c>节点类型.输入名</c>）。
+    ///
+    /// 顺带决定「认不出它当前这个写法」要不要报：库里有同一个节点 + 同一个输入用过的值，
+    /// 就意味着我们**知道**它的选项长什么样，直接照那里写就行——这时再报「改不了」是假问题。
+    /// </summary>
+    private static void AttachAspectOptions(
+        JsonObject graph, ComfyUiWorkflowSlots slots, IReadOnlyDictionary<string, List<string>>? optionValues)
+    {
+        if (!slots.CanSetAspect) return;
+
+        if (optionValues is not null
+            && graph[slots.AspectNodeId] is JsonObject node
+            && node["class_type"] is JsonValue classValue
+            && classValue.TryGetValue<string>(out var classType)
+            && classType.Length > 0
+            && optionValues.TryGetValue(classType + "." + slots.AspectInput, out var known))
+            slots.AspectOptions = new List<string>(known);
+
+        if (VideoShape.TryParseRatio(slots.AspectCurrent, out _, out _)) return;
+        if (slots.AspectOptions.Any(value => VideoShape.TryParseRatio(value, out _, out _))) return;
+
+        slots.Notes.Add($"节点 {slots.AspectNodeId} 的 {slots.AspectInput} 是比例，但它的值「{slots.AspectCurrent}」不是 a:b 这种写法，"
+            + "库里也没有第二份工作流在同一个节点上用过别的比例：我们不认识它的选项格式，"
+            + "这一项改不了（要改请在那份工作流里改）。");
     }
 
     /// <summary>
@@ -820,11 +852,11 @@ public static class ComfyUiWorkflowBinder
             // 出多张时 batch_size 交给工作流自己：它是模板作者的决定（有的工作流靠它一次出多张）。
         }
 
-        // 比例：只有那种「固定选项」的输入才写，而且**照它自己当前那个值的写法**造新值。
-        // 造不出来（"adaptive" 这种）就不写——写一个它不认识的字符串，换来的是服务端的一次报错。
+        // 比例：优先写「这台服务器上同一个节点 + 同一个输入用过的值」，其次才照它当前那个值的写法造新值。
+        // 都造不出来（"adaptive" 这种）就不写——写一个它不认识的字符串，换来的是服务端的一次报错。
         if (slots.AspectNodeId.Length > 0 && values.AspectRatio.Length > 0)
         {
-            var text = VideoShape.FormatAspect(slots.AspectCurrent, values.AspectRatio);
+            var text = VideoShape.FormatAspect(slots.AspectCurrent, values.AspectRatio, slots.AspectOptions);
             if (text.Length > 0) SetInput(graph, slots.AspectNodeId, slots.AspectInput, JsonValue.Create(text));
         }
 

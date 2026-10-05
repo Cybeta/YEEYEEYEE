@@ -56,21 +56,29 @@ internal static class VideoShapeNotice
                 : "· 时长✗：这份工作流没有帧数入口，时长由它自己决定。");
         }
 
-        // 比例：只有它的写法我们认得、能照它造出新值，才算改得动——造不出来就如实说改不了。
+        // 比例：先看「这台服务器上同一个节点用过的值」里有没有我们要的那一档（那是最稳的），
+        // 没有才退回「照它当前值的写法造一个」——造不出来就如实说改不了。
         if (!slots.CanSetAspect)
         {
             lines.Add("· 比例✗：这份工作流没有 aspect_ratio 这类比例选项，比例改不了。");
         }
         else if (aspectRatio.Length == 0)
         {
-            lines.Add($"· 比例✓：它当前是「{slots.AspectCurrent}」，选一个比例就会照它自己的写法写进去。");
+            lines.Add($"· 比例✓：它当前是「{slots.AspectCurrent}」，选一个比例就会写进去。");
         }
         else
         {
-            var written = VideoShape.FormatAspect(slots.AspectCurrent, aspectRatio);
-            lines.Add(written.Length > 0
-                ? $"· 比例：当前「{slots.AspectCurrent}」→ 会写成「{written}」（照它自己的写法，不是另造一个格式）。"
-                : $"· 比例✗：它的比例值「{slots.AspectCurrent}」不是我们能改的写法，比例改不了（要改请在那份工作流里改）。");
+            var written = VideoShape.FormatAspect(slots.AspectCurrent, aspectRatio, slots.AspectOptions);
+            if (written.Length == 0)
+                lines.Add($"· 比例✗：它的比例值「{slots.AspectCurrent}」不是我们能改的写法，比例改不了（要改请在那份工作流里改）。");
+            else if (string.Equals(written, slots.AspectCurrent, System.StringComparison.Ordinal))
+                lines.Add($"· 比例✓：它当前写的就是「{written}」，这一项不用动。");
+            else if (slots.AspectOptions.Contains(written))
+                lines.Add($"· 比例✓：当前「{slots.AspectCurrent}」→ 写成「{written}」"
+                    + $"（它在别的 {slots.AspectOptions.Count} 个值里，是这台服务器上真用过的写法）。");
+            else
+                lines.Add($"· 比例：当前「{slots.AspectCurrent}」→ 会写成「{written}」"
+                    + "（照它自己的分隔符拼的：这个值不一定在它的选项清单里，提交可能被服务端拒）。");
         }
 
         // 画幅：要先有可写的 width / height，比例与目标像素才落得成具体像素。

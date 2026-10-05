@@ -256,6 +256,19 @@ public sealed class SiteProfile
     /// <summary>ComfyUI 站点下的工作流清单（只有 <see cref="Backend"/> 为 comfyui 时有意义）。</summary>
     public List<SiteWorkflow> Workflows { get; set; } = new();
 
+    /// <summary>
+    /// 全库在「同一个节点类型 + 同一个输入名」下**真实用过的固定选项值**（比例这类），键形如
+    /// <c>ResolutionSelector.aspect_ratio</c>。导入时扫一遍全部正文得到，只有几十条短字符串。
+    ///
+    /// 为什么非得存它：这类控件的合法选项清单在服务端的 <c>object_info</c> 里（二十多 MB），
+    /// 每份正文只留着当前选中的那一个值；而「照着当前值的写法把数字换掉」会造出服务端不认的字符串——
+    /// 实测 `ResolutionSelector.aspect_ratio` 当前是 <c>16:9 (Widescreen)</c>，改成 9:16 时
+    /// 按数字替换得到 <c>9:16 (Widescreen)</c>，合法值却是 <c>9:16 (Portrait Widescreen)</c>
+    /// （括号里的朝向词不跟着数字走），提交被 400 拒。
+    /// 全库在同一个节点上出现过的值都是**这台机器上真跑得通的**，从那里面挑就不必猜。
+    /// </summary>
+    public Dictionary<string, List<string>> OptionValues { get; set; } = new();
+
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.Now;
 
     /// <summary>这个站点用哪把密钥：出图 / 出视频各自的字段（留空则沿用当前选中模型的密钥）。</summary>

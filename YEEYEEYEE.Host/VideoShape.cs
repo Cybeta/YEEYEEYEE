@@ -53,23 +53,42 @@ public static class VideoShape
     /// <summary>
     /// 把一个想要的比例写成**那份工作流认的写法**。做法不是自己造格式，而是：
     /// ① 想要的和它当前那个值同比例 → 原样不动；
-    /// ② 是它的**倒数**（16:9 对 9:16）→ 照它自己的数字量级与分隔符交换两个数（`1920x1080` → `1080x1920`）；
-    /// ③ 两者都不是（例如它写 16:9 而你要 1:1）→ 用它当前值的分隔符拼一个，并**在说明里讲清这是拼的**。
+    /// ② <paramref name="known"/> 里有同比例的值 → 直接用那个（见下）；
+    /// ③ 是它当前值的**倒数**（16:9 对 9:16）→ 照它自己的数字量级与分隔符交换两个数（`1920x1080` → `1080x1920`）；
+    /// ④ 都不是（例如它写 16:9 而你要 1:1）→ 用它当前值的分隔符拼一个。
     ///
-    /// 为什么这么绕：这个字段的合法选项清单在**服务端的节点定义**里，工作流文件里只有当前选中的那一个。
-    /// 沿用它的数字量级（1920/1080 而不是 16/9）能显著提高「拼出来的值真的在选项里」的概率。
-    /// 拼不出来（当前值里没有两个数，例如 `adaptive`）就返回空字符串，由调用方如实说改不了。
+    /// <paramref name="known"/> 是**这台服务器上同一个节点类型 + 同一个输入名真实用过的值**
+    /// （导入时全库扫出来，存在站点文件的 <c>OptionValues</c> 里）。
+    /// 为什么要它：合法选项清单只在服务端的 <c>object_info</c> 里，工作流文件里只有当前选中的那一个，
+    /// 而「把当前值里的数字换掉」会造出服务端不认的字符串——实测 `ResolutionSelector.aspect_ratio`
+    /// 当前是 `16:9 (Widescreen)`，改成 9:16 时按数字替换得到 `9:16 (Widescreen)`，
+    /// 合法值却是 `9:16 (Portrait Widescreen)`（括号里的朝向词并不跟着数字走），提交被 400 拒。
+    /// 库里见过的值就绕开了这件事：写回去的一定是它认识的。
+    ///
+    /// 拼不出来（当前值里没有两个数，例如 `adaptive`，而 known 里也没有同比例的）就返回空字符串，
+    /// 由调用方如实说改不了。
     /// </summary>
-    public static string FormatAspect(string current, string wanted)
+    public static string FormatAspect(
+        string current, string wanted, IReadOnlyCollection<string>? known = null)
     {
         if (wanted.Length == 0) return string.Empty;
         if (!TryParseRatio(wanted, out var wantFirst, out var wantSecond)) return string.Empty;
 
-        if (!TryParseRatio(current, out var haveFirst, out var haveSecond))
-            return string.Empty;
+        // 同比例：一个字都不用改（先判它，免得把一个已经正确的值换成清单里另一个同比例的写法）。
+        if (TryParseRatio(current, out var haveFirst, out var haveSecond)
+            && SameRatio(wantFirst, wantSecond, haveFirst, haveSecond))
+            return current;
 
-        // 同比例：一个字都不用改。
-        if (SameRatio(wantFirst, wantSecond, haveFirst, haveSecond)) return current;
+        if (known is not null)
+        {
+            foreach (var option in known)
+                if (TryParseRatio(option, out var optionFirst, out var optionSecond)
+                    && SameRatio(wantFirst, wantSecond, optionFirst, optionSecond))
+                    return option;
+        }
+
+        if (!TryParseRatio(current, out haveFirst, out haveSecond)) return string.Empty;
+
         // 倒数：交换它自己的两个数，连分隔符一起保留。
         if (SameRatio(wantFirst, wantSecond, haveSecond, haveFirst))
             return ReplaceNumbers(current, haveSecond, haveFirst);

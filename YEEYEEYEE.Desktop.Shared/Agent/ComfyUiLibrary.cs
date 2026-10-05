@@ -48,7 +48,8 @@ public static class ComfyUiWorkflowInspector
 
         try
         {
-            return (ComfyUiWorkflowBinder.Detect(payload), string.Empty);
+            // 把站点那张「见过的选项值」表一起带进去：改比例要靠它写出服务端认的值（见 SiteProfile.OptionValues）。
+            return (ComfyUiWorkflowBinder.Detect(payload, site.OptionValues), string.Empty);
         }
         catch (Exception error)
         {
@@ -260,7 +261,8 @@ public static class ComfyUiLibrary
             Backend = "comfyui",
             Checkpoint = checkpoint,
             ListSource = "ComfyUI 的 workflows 目录",
-            Workflows = new List<SiteWorkflow>()
+            Workflows = new List<SiteWorkflow>(),
+            OptionValues = CollectOptionValues(result.Payloads)
         };
 
         // 重新导入时保住用户自己的取舍：被标成「停用」的仍然停用，用户手工改过的推荐项仍然推荐。
@@ -299,6 +301,52 @@ public static class ComfyUiLibrary
 
         SiteCatalog.PrunePayloads(site);
         return (site, string.Empty);
+    }
+
+    /// <summary>
+    /// 扫一遍全部正文，把「固定选项」控件在同一个节点类型 + 同一个输入名上用过的值收成一张小表。
+    ///
+    /// 为什么在导入时做：合法选项清单只在服务端的 <c>object_info</c> 里（实测二十多 MB），
+    /// 而每份正文只留着当前选中的那一个值；把全库出现过的值收起来，改比例时就能从里面挑一个
+    /// **这台机器上真跑得通的**，而不必「照着当前值的写法把数字换掉」——那种做法会造出服务端不认的
+    /// 字符串（实测 `ResolutionSelector.aspect_ratio`：当前 `16:9 (Widescreen)` 想改成 9:16，
+    /// 按数字替换得到 `9:16 (Widescreen)`，合法值却是 `9:16 (Portrait Widescreen)`，提交被 400 拒）。
+    ///
+    /// 只收比例这三个名字：它们**一定**是这种固定选项控件（值是字面量字符串），不会误收别的输入。
+    /// </summary>
+    private static Dictionary<string, List<string>> CollectOptionValues(IReadOnlyDictionary<string, string> payloads)
+    {
+        var names = new[] { "aspect_ratio", "aspect", "ratio" };
+        var seen = new Dictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+
+        foreach (var payload in payloads.Values)
+        {
+            JsonNode? parsed;
+            try { parsed = JsonNode.Parse(payload); }
+            catch (JsonException) { continue; }
+            if (parsed is not JsonObject graph) continue;
+
+            foreach (var pair in graph)
+            {
+                if (pair.Value is not JsonObject node || node["inputs"] is not JsonObject inputs) continue;
+                if (node["class_type"] is not JsonValue classValue
+                    || !classValue.TryGetValue<string>(out var classType)
+                    || classType.Length == 0) continue;
+
+                foreach (var name in names)
+                {
+                    if (inputs[name] is not JsonValue value
+                        || !value.TryGetValue<string>(out var text)
+                        || text.Length == 0) continue;
+                    var key = classType + "." + name;
+                    if (!seen.TryGetValue(key, out var bucket))
+                        seen[key] = bucket = new SortedSet<string>(StringComparer.Ordinal);
+                    bucket.Add(text);
+                }
+            }
+        }
+
+        return seen.ToDictionary(pair => pair.Key, pair => pair.Value.ToList(), StringComparer.Ordinal);
     }
 
     /// <summary>

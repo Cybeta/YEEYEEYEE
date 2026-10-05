@@ -186,6 +186,8 @@ var tests = new (string Name, Action Run)[]
     ("出视频 · 选了工作流却没配 ComfyUI：要点名那份工作流并说清缺什么", VideoProviderFactoryNamesWhatIsMissingForAChosenWorkflow),
     ("出视频 · 比例与像素：9:16 算成 16 的倍数、比例不跑偏，认不出的写法不编尺寸", VideoShapeResolvesRatioIntoPixelSizes),
     ("出视频 · 比例写成工作流认的写法：同比例不动、倒数交换它自己的数、读不懂就返回空", VideoShapeWritesAspectInTheWorkflowsOwnFormat),
+    ("出视频 · 比例优先用这台服务器上真用过的那个值（避免拼出服务端不认的字符串）", VideoShapePrefersAnAspectValueTheServerHasAlreadyUsed),
+    ("出视频 · 比例那张表从站点贴到槽位、再写进图里（缺一环就又会拼错）", WorkflowBinderWritesAspectFromTheSitesSeenValues),
     ("出视频 · 时长换算：帧数贴到那份工作流自己的家族上（121 帧推出 8n+1），推不出来就如实说", VideoFrameMathSnapsToTheWorkflowsOwnFrameFamily),
     ("出视频 · 认时长与比例槽位：只认生成侧，VHS_VideoCombine 的 frame_rate 不算", WorkflowBinderReadsLengthAndAspectSlots),
     ("出视频 · 只吃首帧那一类（SVD）不再算成驱动不了，但要说清提示词没进工作流", WorkflowBinderTreatsFrameDrivenShapeAsUsable),
@@ -195,6 +197,7 @@ var tests = new (string Name, Action Run)[]
     ("转换 · PrimitiveNode 的值内联进下游；Fast Bypasser 当直通跟到源头", ComfyUiConversionInlinesPrimitiveAndFollowsBypasser),
     ("转换 · 子图「输入直通到输出」要接到外面喂给容器那个输入的地方", ComfyUiConversionWiresContainerPassThrough),
     ("转换 · 旁路判定要认逗号分隔的联合类型（FLOAT,INT,BOOLEAN 也算接得上）", ComfyUiConversionBypassesThroughUnionTypedInputs),
+    ("转换 · 固定选项的值是界面显示的写法（Ref2VA — …）要纠正成清单里的那个", ComfyUiConversionRepairsDecoratedComboValues),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -14147,6 +14150,71 @@ static void VideoShapeWritesAspectInTheWorkflowsOwnFormat()
 }
 
 /// <summary>
+/// 钉住「优先用这台服务器上真用过的那个值」这条：实测 U25 的 `ResolutionSelector.aspect_ratio`
+/// 当前是 `16:9 (Widescreen)`，合法值却是 `9:16 (Portrait Widescreen)`——
+/// 括号里的朝向词**不跟着数字走**，按数字替换会造出 `9:16 (Widescreen)`，提交被服务端 400 拒。
+/// TTResolutionSelector 那种把朝向写在末尾的（`1280x720 (16:9) (横屏)`）同样只有清单里的值才对。
+/// </summary>
+static void VideoShapePrefersAnAspectValueTheServerHasAlreadyUsed()
+{
+    var known = new[] { "1:1 (Square)", "9:16 (Portrait Widescreen)", "16:9 (Widescreen)" };
+
+    Expect(VideoShape.FormatAspect("16:9 (Widescreen)", "9:16", known) == "9:16 (Portrait Widescreen)",
+        "清单里有同比例的值就直接用它，实际 " + VideoShape.FormatAspect("16:9 (Widescreen)", "9:16", known));
+    Expect(VideoShape.FormatAspect("16:9 (Widescreen)", "9:16") == "9:16 (Widescreen)",
+        "没有清单时仍是老做法（拼出来的那个值是错的），这正是必须把清单带上的原因");
+    Expect(VideoShape.FormatAspect("16:9 (Widescreen)", "16:9", known) == "16:9 (Widescreen)",
+        "同比例一个字都不动：不许把它换成清单里另一个同比例的写法");
+    Expect(VideoShape.FormatAspect("16:9 (Widescreen)", "1:1", known) == "1:1 (Square)",
+        "不是倒数（16:9 对 1:1）也能靠清单写对，实际 " + VideoShape.FormatAspect("16:9 (Widescreen)", "1:1", known));
+    Expect(VideoShape.FormatAspect("adaptive", "9:16", known) == "9:16 (Portrait Widescreen)",
+        "连它当前的值都读不出来时，清单里有的照样写得对");
+
+    var portrait = new[] { "1280x720 (16:9) (横屏)", "720x1280 (9:16) (竖屏)" };
+    Expect(VideoShape.FormatAspect("1280x720 (16:9) (横屏)", "9:16", portrait) == "720x1280 (9:16) (竖屏)",
+        "朝向词写在末尾的写法只有清单里的值是对的，实际 "
+        + VideoShape.FormatAspect("1280x720 (16:9) (横屏)", "9:16", portrait));
+
+    // 清单里没有我们要的那一档：退回老做法（照当前值的写法拼），并允许调用方如实说「这是拼的」。
+    var limited = new[] { "16:9 (Widescreen)" };
+    var composed = VideoShape.FormatAspect("16:9 (Widescreen)", "9:16", limited);
+    Expect(composed == "9:16 (Widescreen)" && !limited.Contains(composed),
+        "清单里没有那一档时拼一个出来，并且调用方看得出它不是清单里的值，实际 " + composed);
+}
+
+/// <summary>
+/// 钉住这条链：站点那张「全库用过的固定选项值」表 → 槽位 → 真正写进图里的值。
+/// 少了任何一环，U25 那种工作流都会拿一个服务端不认的字符串去提交。
+/// </summary>
+static void WorkflowBinderWritesAspectFromTheSitesSeenValues()
+{
+    const string template = """
+    {
+      "1": {"class_type":"ResolutionSelector","inputs":{"aspect_ratio":"16:9 (Widescreen)"}}
+    }
+    """;
+    var optionValues = new Dictionary<string, List<string>>(StringComparer.Ordinal)
+    {
+        ["ResolutionSelector.aspect_ratio"] = new List<string>
+        {
+            "1:1 (Square)", "9:16 (Portrait Widescreen)", "16:9 (Widescreen)"
+        }
+    };
+
+    var slots = ComfyUiWorkflowBinder.Detect(template, optionValues);
+    Expect(slots.AspectCurrent == "16:9 (Widescreen)", "当前值照旧记下来，实际 " + slots.AspectCurrent);
+    Expect(slots.AspectOptions.Count == 3, "站点那张表要贴到槽位上，实际 " + slots.AspectOptions.Count);
+
+    var bound = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues { AspectRatio = "9:16" });
+    Expect(bound["1"]!["inputs"]!["aspect_ratio"]!.GetValue<string>() == "9:16 (Portrait Widescreen)",
+        "写进图里的是清单里那个值，实际 " + bound["1"]!["inputs"]!["aspect_ratio"]);
+
+    // 没有那张表时不许把「不知道对不对」当成对：仍然是老行为，槽位上的清单是空的。
+    var withoutTable = ComfyUiWorkflowBinder.Detect(template);
+    Expect(withoutTable.AspectOptions.Count == 0, "没给表时槽位上不该凭空多出值");
+}
+
+/// <summary>
 /// 钉住「帧数要贴到那份工作流自己的家族上」：实测那份 Wan 工作流是 121 帧（= 8n+1），
 /// 直接写 15 秒 × 24 = 360 帧服务器可能拒收，所以要按它自己的值**推**出模数再贴过去。
 /// 推不出来（原值减一不被 4 整除）就按四舍五入写，并如实说明是哪种。
@@ -14560,6 +14628,58 @@ static void ComfyUiConversionBypassesThroughUnionTypedInputs()
     Expect(frameRate is { Count: 2 } && frameRate[0]!.GetValue<string>() == "10",
         "联合类型（FLOAT,INT,BOOLEAN）里含有 FLOAT 就算接得上，要顶到上游 FloatSource(10)，实际 "
         + (frameRate?.ToJsonString() ?? "（整项被丢）"));
+}
+
+/// <summary>
+/// 钉住「固定选项的值是界面显示的写法时要纠正成清单里的那个」。
+/// 实测代价：`MiniMaxH3AudioConditioningT8.task_type` 在网页文件里存的是
+/// <c>Ref2VA — 参考生音视频</c>（选项 + 中文说明），而服务端的选项只有 <c>Ref2VA</c>——
+/// 提交就是 `value_not_in_list`（整条链在真机上就是这么被 400 拒的）。
+/// 判据要保守：**只有值以某个合法选项开头时**才纠正；文件引用那种「不在清单里」是正常的
+/// （清单说的是服务器 input 目录此刻有什么文件），一个字都不许动。
+/// </summary>
+static void ComfyUiConversionRepairsDecoratedComboValues()
+{
+    const string objectInfo = """
+    {
+      "MiniMaxH3AudioConditioningT8": {"input": {"required": {
+        "task_type": ["COMBO", {"default": "auto", "options": ["auto", "T2VA", "I2VA", "Ref2VA"]}]}}},
+      "LoadImage": {"input": {"required": {
+        "image": ["COMBO", {"default": "a.png", "options": ["a.png", "b.png"]}]}}},
+      "SaveImage": {"input": {"required": {"images": ["IMAGE"], "filename_prefix": ["STRING"]}}}
+    }
+    """;
+
+    const string ui = """
+    {
+      "last_node_id": 9, "last_link_id": 9,
+      "nodes": [
+        {"id": 5, "type": "MiniMaxH3AudioConditioningT8", "mode": 0, "inputs": [],
+         "outputs": [], "widgets_values": ["Ref2VA — 参考生音视频"]},
+        {"id": 6, "type": "LoadImage", "mode": 0, "inputs": [],
+         "outputs": [{"name":"IMAGE","type":"IMAGE","links":[8]}], "widgets_values": ["作者自己那张.png"]},
+        {"id": 7, "type": "SaveImage", "mode": 0,
+         "inputs": [{"name":"images","type":"IMAGE","link":8}],
+         "outputs": [], "widgets_values": ["yeeeyee"]}
+      ],
+      "links": [[8, 6, 0, 7, 0, "IMAGE"]],
+      "groups": [], "config": {}, "extra": {}, "version": 0.4
+    }
+    """;
+
+    var converted = ComfyUiWorkflowConversion.Convert(ui, objectInfo);
+    var api = converted.ApiWorkflow;
+
+    Expect(api["5"]!["inputs"]!["task_type"]!.GetValue<string>() == "Ref2VA",
+        "是「选项 + 说明」的写法就取那个选项，实际 " + api["5"]!["inputs"]!["task_type"]);
+    Expect(converted.SkippedSummary.Contains("组合框") || converted.SkippedSummary.Contains("固定选项"),
+        "改过值要说出来（原本写的是什么、提交的是什么）：" + converted.SkippedSummary);
+    Expect(converted.SkippedSummary.Contains("Ref2VA"),
+        "说明里要带上纠正前后的值：" + converted.SkippedSummary);
+
+    // 文件引用这类「不在清单里」是正常的：清单说的是服务器 input 目录此刻有什么文件。
+    Expect(api["6"]!["inputs"]!["image"]!.GetValue<string>() == "作者自己那张.png",
+        "文件名不是选项、也不是「选项 + 装饰」，一个字都不许动，实际 " + api["6"]!["inputs"]!["image"]);
 }
 
 static class Sample

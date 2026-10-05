@@ -288,7 +288,9 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         ComfyUiWorkflowSlots detected;
         try
         {
-            detected = ComfyUiWorkflowBinder.Detect(template);
+            // 站点那张「见过的选项值」表一起带上：比例这一项要写出服务端认的值就得靠它
+            //（见 SiteProfile.OptionValues；只照当前值的写法把数字换掉会造出它不认的字符串）。
+            detected = ComfyUiWorkflowBinder.Detect(template, OptionValuesOf(request.WorkflowSiteId));
         }
         catch (Exception error) when (error is System.Text.Json.JsonException or InvalidOperationException)
         {
@@ -378,10 +380,23 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
             notes.Add($"画幅已写入：{width}×{height}（节点 {detected.LatentNodeId}）。");
 
         if (aspectRatio.Length > 0 && detected.CanSetAspect && !sizeApplied)
-            notes.Add(detected.AspectCurrent.Length > 0
-                ? $"比例按这份工作流自己的写法写：{detected.AspectCurrent} → {aspectRatio}"
-                  + "（分辨率由它自己定，我们只改比例这一项）。"
-                : $"比例已写入：{aspectRatio}。");
+        {
+            // 说清**真正写进去的是哪个字符串**：这类控件的值是「一串固定选项」，
+            // 写错一个字符（例如把 `9:16 (Portrait Widescreen)` 写成 `9:16 (Widescreen)`）就是一次 400 拒收，
+            // 而两串人看着差不多，不说出来根本对不上账。
+            var written = VideoShape.FormatAspect(detected.AspectCurrent, aspectRatio, detected.AspectOptions);
+            if (written.Length == 0)
+                notes.Add($"比例这一项没能写进去：它的值「{detected.AspectCurrent}」我们造不出对应的写法"
+                    + "（要改请在那份工作流里改）。");
+            else if (string.Equals(written, detected.AspectCurrent, StringComparison.Ordinal))
+                notes.Add($"比例已经是 {aspectRatio}（它当前写的就是「{detected.AspectCurrent}」），这一项没动。");
+            else if (detected.AspectOptions.Contains(written))
+                notes.Add($"比例已写入：{detected.AspectCurrent} → {written}"
+                    + "（这是这台服务器上同一个节点用过的写法，不是我们拼的）。");
+            else
+                notes.Add($"比例已写入：{detected.AspectCurrent} → {written}"
+                    + "（照它自己的分隔符拼的：这个值不一定在它的选项清单里，提交可能被服务端拒）。");
+        }
         else if (aspectRatio.Length > 0 && !detected.CanSetAspect && !sizeApplied)
             notes.Add("这份工作流既没有可写的画幅、也没有比例选项，比例没能写进去。");
 
@@ -533,6 +548,25 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
             ReferenceNote = ReferenceNote(usedReference, referenceCount, slots),
             Note = string.Join("\n", notes)
         };
+    }
+
+    /// <summary>
+    /// 这个站点那张「全库用过的固定选项值」表（比例这一项靠它写出服务端认的值）。
+    /// 读不到就当没有——那种情况下退回到「照当前值的写法造一个」，与以前一样，不会因此不干活。
+    /// </summary>
+    private static IReadOnlyDictionary<string, List<string>>? OptionValuesOf(string siteId)
+    {
+        if (siteId.Length == 0) return null;
+        try
+        {
+            return SiteCatalog.Load().Sites.FirstOrDefault(item => item.Id == siteId)?.OptionValues;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.Text.Json.JsonException or InvalidOperationException or ArgumentException)
+        {
+            _ = error;
+            return null;
+        }
     }
 
     /// <summary>参考图的实际用法说明。**用不了就要说出来**：静默丢掉首帧，用户会以为是模型没画好。</summary>

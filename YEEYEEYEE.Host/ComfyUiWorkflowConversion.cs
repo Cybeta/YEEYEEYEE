@@ -85,6 +85,7 @@ public static class ComfyUiWorkflowConversion
         var output = new JsonObject();
         var skipped = new Dictionary<string, int>(StringComparer.Ordinal);
         var unnamedNotes = new List<string>();
+        var comboNotes = new List<string>();
 
         foreach (var entry in nodes)
         {
@@ -115,8 +116,16 @@ public static class ComfyUiWorkflowConversion
             var id = IdText(node["id"]);
             if (id is null) continue;
 
-            var (apiNode, unnamed) = BuildApiNode(node, def, type, links, primitives);
+            var repairs = new List<string>();
+            var (apiNode, unnamed) = BuildApiNode(node, def, type, links, primitives, repairs);
             output[id] = apiNode;
+            if (repairs.Count > 0)
+            {
+                // 值被改过就得说出来：改的是作者写下的东西，虽然改成了服务端认的那个，
+                // 但「这份工作流原本写的是 X，我们提交的是 Y」这件事只有说了才对得上账。
+                comboNotes.Add("把固定选项的值纠正成它认的那个：节点 " + id + "（" + type + "）的 "
+                    + string.Join("、", repairs) + "——网页文件里存的是界面上的写法，服务端只认清单里的值");
+            }
             if (unnamed > 0)
             {
                 // 节点类自己加的控件（如 pysssss ShowText 的 text_0、VHS 的 videopreview）在节点
@@ -129,13 +138,14 @@ public static class ComfyUiWorkflowConversion
 
         PruneDanglingLinks(output);
 
-        return new ComfyUiConversionResult(output, [.. DescribeSkips(skipped), .. unnamedNotes]);
+        return new ComfyUiConversionResult(output, [.. DescribeSkips(skipped), .. unnamedNotes, .. comboNotes]);
     }
 
     private static (JsonObject Node, int UnnamedWidgets) BuildApiNode(
         JsonObject node, JsonObject def, string type,
         IReadOnlyDictionary<long, (string OriginId, int OriginSlot)> links,
-        IReadOnlyDictionary<string, JsonNode?> primitives)
+        IReadOnlyDictionary<string, JsonNode?> primitives,
+        List<string> comboRepairs)
     {
         var inputs = new JsonObject();
 
@@ -187,6 +197,16 @@ public static class ComfyUiWorkflowConversion
 
             var value = Coerce(raw, spec.Type);
             if (value is null) continue;
+
+            // 固定选提取的是「选项 + 界面装饰」时纠正成那个选项（见 RepairComboValue）。
+            if (spec.Options is { Count: > 0 } choices
+                && value is JsonValue candidate && candidate.TryGetValue<string>(out var text)
+                && RepairComboValue(choices, text) is { } repaired)
+            {
+                comboRepairs.Add($"{spec.Name}「{text}」→「{repaired}」");
+                value = JsonValue.Create(repaired);
+            }
+
             inputs[spec.Name] = value;
         }
 
@@ -244,7 +264,26 @@ public static class ComfyUiWorkflowConversion
         return (apiNode, unnamed);
     }
 
-    private sealed record WidgetSpec(string Name, string Type, bool ControlAfterGenerate, JsonNode? Default);
+    private sealed record WidgetSpec(
+        string Name, string Type, bool ControlAfterGenerate, JsonNode? Default, IReadOnlyList<string>? Options = null);
+
+    /// <summary>
+    /// 固定选项（COMBO）的值必须**正好是清单里的一个**，否则服务端一次 <c>value_not_in_list</c> 就把它拒了。
+    /// 网页文件里存的值有时是「选项 + 界面上的装饰」，实测 `MiniMaxH3AudioConditioningT8.task_type`
+    /// 存的是 <c>Ref2VA — 参考生音视频</c>，而服务端的选项只有 <c>Ref2VA</c>（全库 13 处这种）。
+    /// 官方前端遇到不认的值会退回清单里的一个；我们做得更保守：**只有值以某个合法选项开头时**才纠正成那个选项
+    /// （取最长的那个前缀），其余情况一个字不动——文件引用这类「值不在清单里」是正常的，
+    /// 那说的是服务器 input 目录里此刻有什么文件，不是这份工作流写错了。
+    /// </summary>
+    private static string? RepairComboValue(IReadOnlyList<string> options, string text)
+    {
+        if (options.Any(option => string.Equals(option, text, StringComparison.Ordinal))) return null;
+        var match = options
+            .Where(option => option.Length > 0 && text.StartsWith(option, StringComparison.Ordinal))
+            .OrderByDescending(option => option.Length)
+            .FirstOrDefault();
+        return match;
+    }
 
     /// <summary>
     /// 取这个节点的控件清单，按「声明顺序」排列，来自两处的并集：
@@ -324,9 +363,25 @@ public static class ComfyUiWorkflowConversion
                 JsonNode? fallback = options?["default"]?.DeepClone();
                 if (fallback is null && first is JsonArray choices && choices.Count > 0) fallback = choices[0]?.DeepClone();
 
-                list.Add(new WidgetSpec(pair.Key, declared, control, fallback));
+                // 固定选项的候选清单：写成正文时要用它核对值（见 RepairComboValue）。
+                var choicesList = declared != "COMBO"
+                    ? null
+                    : (spec.Count > 1 ? options?["options"] as JsonArray : null) is { } declaredChoices
+                        ? TextList(declaredChoices)
+                        : first is JsonArray literalChoices ? TextList(literalChoices) : null;
+
+                list.Add(new WidgetSpec(pair.Key, declared, control, fallback, choicesList));
             }
         }
+        return list;
+    }
+
+    /// <summary>把候选清单（可能是字符串数组，也可能是对象数组）取成字符串清单。</summary>
+    private static List<string> TextList(JsonArray source)
+    {
+        var list = new List<string>(source.Count);
+        foreach (var item in source)
+            if (item is not null && item.ToString() is { Length: > 0 } text) list.Add(text);
         return list;
     }
 
