@@ -440,9 +440,9 @@ public static class ComfyUiWorkflowBinder
                 if (candidate.Value is JsonValue literal && literal.TryGetValue<string>(out var current)
                     && SectionNames(current) is { Count: >= 3 } sections)
                     slots.Notes.Add($"这一份的{label}是一段**结构化模板**（{string.Join(" / ", sections.Take(4))} "
-                        + "这几节）：按名字认出来了，所以这一镜的描述会**整段**替换掉它，那几节结构跟着没了。"
-                        + "这种模板往往正是**把 `<Picture 1>` 这些参考图点起来**的那一段——这份对格式敏感，"
-                        + "出来不像就回来说一声（可以改成只替换其中某几节）。");
+                        + "这几节）：写的时候**按节处理**——名字说的是画面 / 描述的那几节换成这一镜的描述；"
+                        + "内容里点了 `<Picture 1>` 这类素材的那几节**原样保留**（那正是它跟参考图之间的约定）；"
+                        + "音效 / 配乐那几节我们手里没这个信息，写成 `N/A`（不留作者那份示例里的内容）。");
                 NoteAmbiguity(slots, label, ordered, candidate);
                 return;
             }
@@ -568,6 +568,79 @@ public static class ComfyUiWorkflowBinder
         slots.Notes.Add($"{(positive ? "正向提示词" : "负面词")}写在节点 {left[0].NodeId} 的 {left[0].Input} 上："
             + "这一份的输入名分不出正负（就叫 `text`），是**顺着连线把另一路排掉之后只剩这一处**才定下来的。");
         return true;
+    }
+
+    /// <summary>这一格现在放的字面量文字（不是字面量、或者没有，就回空串）。</summary>
+    private static string CurrentText(JsonObject graph, string nodeId, string input)
+        => graph[nodeId]?["inputs"]?[input] is JsonValue value && value.TryGetValue<string>(out var text)
+            ? text ?? string.Empty
+            : string.Empty;
+
+    /// <summary>「这一节说的是画面 / 描述」的小节名（分节模板里要换成这一镜描述的那几节）。</summary>
+    private static readonly string[] SceneSectionNames =
+    {
+        "summary", "detailed_description", "description", "scene", "shot", "prompt", "content",
+        "描述", "画面", "场景", "分镜", "镜头", "摘要"
+    };
+
+    /// <summary>这一行是不是「单独成行的小节标题」（`subject_definitions:` 这种）。</summary>
+    private static bool IsSectionHeader(string trimmed) => SectionNames(trimmed).Count == 1;
+
+    /// <summary>
+    /// 往**分节模板**式提示词里写这一镜的描述（不是模板就原样替换，一个字都不绕）。
+    ///
+    /// 为什么不能整段替换：实测 H3 那族的 `提示词` 是六节模板，其中
+    /// `subject_definitions` / `retention_analysis` **正是把 `<Picture 1>` 这些参考图点起来**的那两段。
+    /// 整段换成一段白话描述，参考图在提示词里就没人点了——所以按节处理，三种走法各有依据：
+    ///   · 名字说的是**画面 / 描述**的那几节（`summary` / `detailed_description` / `描述` 这类）：
+    ///     换成这一镜的描述；
+    ///   · 内容里**点了素材**（出现 `<...>`）的那几节：**原样保留**（那是这份工作流与它参考图之间的约定）；
+    ///   · 其余（音效 / 配乐那类）：我们手里没有对应信息，就写成 `N/A` ——
+    ///     **不留作者那份示例里的内容**（留着会让人以为我们说过音频，其实那是他的示例场景）。
+    /// 首次出现这种模板就是这套走法，出来不像就把上面三条按实测再调。
+    /// </summary>
+    private static string MergeIntoPromptTemplate(string current, string prompt)
+    {
+        var lines = (current ?? string.Empty).Split('\n');
+        var sections = new List<(string Header, List<string> Body)>();
+        var prefix = new List<string>();
+        var index = 0;
+        while (index < lines.Length)
+        {
+            var trimmed = lines[index].Trim();
+            if (!IsSectionHeader(trimmed))
+            {
+                prefix.Add(lines[index]);
+                index++;
+                continue;
+            }
+
+            var body = new List<string>();
+            index++;
+            while (index < lines.Length && !IsSectionHeader(lines[index].Trim()))
+            {
+                body.Add(lines[index]);
+                index++;
+            }
+            sections.Add((trimmed, body));
+        }
+
+        if (sections.Count < 3) return prompt;
+
+        var output = new List<string>(prefix);
+        foreach (var (header, body) in sections)
+        {
+            output.Add(header);
+            var head = header.TrimEnd(':', '：').Trim();
+            if (!SceneSectionNames.Any(name => head.Contains(name, StringComparison.OrdinalIgnoreCase)))
+            {
+                output.AddRange(string.Join('\n', body).Contains('<') ? body : new List<string> { "N/A" });
+                continue;
+            }
+
+            output.AddRange(prompt.Split('\n'));
+        }
+        return string.Join('\n', output);
     }
 
     /// <summary>这一格是不是已经判给**另一路**了（一个输入不能既当正向又当负向）。</summary>
@@ -1503,7 +1576,8 @@ public static class ComfyUiWorkflowBinder
         var graph = apiWorkflow.DeepClone().AsObject();
 
         if (slots.PositiveNodeId.Length > 0 && values.Prompt.Length > 0)
-            SetInput(graph, slots.PositiveNodeId, slots.PositiveInput, JsonValue.Create(values.Prompt));
+            SetInput(graph, slots.PositiveNodeId, slots.PositiveInput, JsonValue.Create(
+                MergeIntoPromptTemplate(CurrentText(graph, slots.PositiveNodeId, slots.PositiveInput), values.Prompt)));
 
         if (slots.NegativeNodeId.Length > 0)
             SetInput(graph, slots.NegativeNodeId, slots.NegativeInput, JsonValue.Create(values.Negative));

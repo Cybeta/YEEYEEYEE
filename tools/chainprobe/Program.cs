@@ -1611,6 +1611,35 @@ if (mode == "prompts")
     return;
 }
 
+if (mode == "merge")
+{
+    // merge <工作流 Key>：**只读**地看一眼「往这份工作流的提示词格里写这一镜描述」会写成什么
+    //（模板式提示词是按节写的，这一眼就是核那件事）。不发任何提交请求。
+    var site = sites.First(item => item.IsComfyUi);
+    var workflow = site.VideoWorkflows.First(item => item.Key == args[1]);
+    var payload = SiteCatalog.LoadPayload(site.Id, workflow.PayloadFile) ?? string.Empty;
+    var slots = ComfyUiWorkflowBinder.Detect(payload, site.OptionValues, site.FileSlots);
+    var bound = ComfyUiWorkflowBinder.Bind(payload, slots, new ComfyUiBindValues
+    {
+        Prompt = "第三镜：她推开木门走进院子，午后的光从侧面切进来。",
+        ImageNames = new[] { "yeeeyee-check-a.png", "yeeeyee-check-b.png" },
+        VideoNames = new[] { "yeeeyee-check.mp4" }
+    });
+    Console.WriteLine($"工作流 {workflow.Title}｜正向 {slots.PositiveNodeId}.{slots.PositiveInput}"
+        + $"｜底图 {slots.FileSlotImages.Count} 格｜源视频 {slots.VideoNodeIds.Count}");
+    if (slots.PositiveNodeId.Length > 0)
+    {
+        var text = bound[slots.PositiveNodeId]?["inputs"]?[slots.PositiveInput]?.GetValue<string>() ?? string.Empty;
+        Console.WriteLine($"---- 写进去的提示词（{text.Length} 字）----");
+        Console.WriteLine(text);
+        Console.WriteLine("---- 完 ----");
+    }
+    foreach (var slot in slots.FileSlotImages.Take(3))
+        Console.WriteLine($"  图槽 {slot.NodeId}.{slot.Input} = "
+            + bound[slot.NodeId]?["inputs"]?[slot.Input]?.GetValue<string>());
+    return;
+}
+
 if (mode == "pull-archive")
 {
     // pull-archive [地址] [目录]：把一台 ComfyUI 上的**全部原稿**与节点定义留档到本地。

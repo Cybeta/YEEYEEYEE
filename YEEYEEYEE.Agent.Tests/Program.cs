@@ -10949,12 +10949,26 @@ static void ComfyUiPromptSlotsFallBackToTheGraph()
 
 	// ①b 那一格放的若是**结构化模板**（H3 那族的六节），要**说出来**会整段被替换（不是拦着不写）。
 	const string templated = """
-	{"1": {"class_type": "NanFengMulti", "inputs": {"提示词": "段1\nsubject_definitions:\n<Subject 1> is the character referenced from <Picture 1>.\n\nsummary:\n[reference generation] 作者那份的示例场景。\n\nretention_analysis:\n<Subject 1> fully_preserved.\n\ndetailed_description:\n作者写的分镜描述。\n"}}}
+	{"1": {"class_type": "NanFengMulti", "inputs": {"提示词": "段1\nsubject_definitions:\n<Subject 1> is the character referenced from <Picture 1>.\n\nsummary:\n[reference generation] 作者那份的示例场景。\n\nretention_analysis:\n<Subject 1> fully_preserved.\n\ndetailed_description:\n作者写的分镜描述。\n\noverall_soundscape:\n作者那份示例里的火焰声。\n"}}}
 	""";
 	var templatedSlots = ComfyUiWorkflowBinder.Detect(templated);
 	Expect(templatedSlots.PositiveInput == "提示词"
 		&& templatedSlots.Notes.Any((string note) => note.Contains("结构化模板")),
 		"模板式提示词要认出来并把「整段会被替换」说出来：" + string.Join("；", templatedSlots.Notes));
+
+	// ①c 写进去要**按节**：画面描述那几节换成我们的描述、点了素材的那几节原样保留、其余写 N/A。
+	var merged = ComfyUiWorkflowBinder.Bind(templated, templatedSlots,
+		new ComfyUiBindValues { Prompt = "第三镜：她推开木门走进院子" });
+	var mergedText = merged["1"]!["inputs"]!["提示词"]!.GetValue<string>();
+	Expect(mergedText.Contains("第三镜：她推开木门走进院子"), "我们的描述要写进去");
+	Expect(mergedText.Contains("<Subject 1> is the character referenced from <Picture 1>"),
+		"点了 `<Picture 1>` 的那一节要原样保留（那是它跟参考图之间的约定）：\n" + mergedText);
+	Expect(mergedText.Contains("<Subject 1> fully_preserved"), "引用素材的 retention_analysis 也要留着");
+	Expect(!mergedText.Contains("作者写的分镜描述"), "作者示例里的画面描述要被换掉，不留着");
+	Expect(mergedText.Contains("overall_soundscape:\nN/A") || mergedText.Contains("overall_soundscape:\nN/A\n"),
+		"我们没音频信息的那一节要写成 N/A，不留作者的示例内容：\n" + mergedText);
+	Expect(mergedText.Contains("subject_definitions:") && mergedText.Contains("detailed_description:"),
+		"结构（小节标题）要保住：\n" + mergedText);
 
 	// ② 正负两路指到同一格 → 不许重复占，另一路宁可说没找到。
 	const string sameSlot = """
