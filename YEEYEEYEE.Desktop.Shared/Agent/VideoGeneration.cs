@@ -354,6 +354,14 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         {
             var health = ComfyUiWorkflowHealth.Describe(picked);
             if (health.Length > 0) notes.Add(health);
+
+            // 还没按下去就先挡一次：这次**没给满**的素材槽位，如果它自己留着的示例早就不在服务器上了，
+            // 提交就是一次 400（实测 B02 的 `Invalid image file: 33.jpg`）。在这儿说清差的是哪个入口，
+            // 比让用户对着那条 400 猜强——那几路产物反正是拿不到东西的。
+            var unfilled = ComfyUiWorkflowHealth.FilledMediaSlots(
+                detected, references.Count, sourceVideos.Count, sourceAudios.Count);
+            if (ComfyUiWorkflowHealth.DescribeUnfilledStaleMedia(picked, unfilled) is { } blocked)
+                return Failed(blocked);
         }
 
         // ── 源视频 / 源音频 ──
@@ -364,7 +372,8 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
             notes.Add(sourceVideos.Count == 0
                 ? $"这份工作流要吃一段**源视频**（节点 {string.Join("、", detected.VideoNodeIds)}），这次没给："
                   + "它会拿它自己示例里的那段片子跑，出来的内容与你的素材无关。"
-                : $"源视频已写入：节点 {string.Join("、", detected.VideoNodeIds.Take(sourceVideos.Count))}。");
+                : $"源视频已写入：节点 {string.Join("、", detected.VideoNodeIds.Take(sourceVideos.Count))}。"
+                  + OverflowNote("源视频", sourceVideos.Count, detected.VideoNodeIds.Count));
         }
         else if (sourceVideos.Count > 0)
         {
@@ -373,7 +382,8 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         }
 
         if (detected.CanTakeAudio && sourceAudios.Count > 0)
-            notes.Add($"源音频已写入：节点 {string.Join("、", detected.AudioNodeIds.Take(sourceAudios.Count))}。");
+            notes.Add($"源音频已写入：节点 {string.Join("、", detected.AudioNodeIds.Take(sourceAudios.Count))}。"
+                + OverflowNote("源音频", sourceAudios.Count, detected.AudioNodeIds.Count));
         else if (!detected.CanTakeAudio && sourceAudios.Count > 0)
             notes.Add("这次给了源音频，但这份工作流没有音频入口（LoadAudio 这类），它用不上。");
         int? frames = null;
@@ -555,6 +565,10 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
     /// <summary>
     /// 进度那几句往哪儿说。设置它的人（界面）负责显示；没设置就什么都不说——
     /// 出视频要等十几分钟，一句「已提交」是这条路上唯一能让人安心等下去的话。
+    ///
+    /// **回调可能在非 UI 线程上被调**（库里的 await 带 <c>ConfigureAwait(false)</c>）。界面侧要先用
+    /// <c>Dispatcher.UIThread.Post</c> 兜一层再写控件——直接写 TextBlock 会抛「Call from invalid thread」
+    /// 把应用带走（同一个口径在导入那边就踩成了必崩）。
     /// </summary>
     public Action<string>? Status { get; set; }
 
@@ -651,6 +665,15 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
                 + "（多出来的没有去处）。要带上设定图得换一份底图入口更多的工作流。";
         return string.Empty;
     }
+
+    /// <summary>
+    /// 给多了要说清「多出来的没有去处」。与参考图那条容量规矩同一个口径：
+    /// 素材喂进去却没落地，从结果上完全看不出来——不说就等于骗人。
+    /// </summary>
+    private static string OverflowNote(string label, int given, int capacity) =>
+        given <= capacity
+            ? string.Empty
+            : $"喂了 {given} 份{label}，但这份工作流只有 {capacity} 个入口，多出来的 {given - capacity} 份没有去处。";
 
     private VideoGenerationResult Failed(string error) => new()
     {

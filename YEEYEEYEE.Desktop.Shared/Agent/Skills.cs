@@ -488,6 +488,9 @@ public static class SkillRunner
         {
             var step = skill.Steps[index];
             cancellationToken.ThrowIfCancellationRequested();
+            // 注意：从第 2 步起这里**已经不在调用方的线程上**了——上一轮的 await 带 ConfigureAwait(false)，
+            // 续体落在工作线程上。界面侧要先用 Dispatcher.UIThread.Post 兜一层再写控件，否则会抛
+            // 「Call from invalid thread」（同一个口径在导入那边的「让大模型认一认」上踩成过必崩）。
             progress?.Invoke($"[{index + 1}/{skill.Steps.Count}] {step.Name}");
 
             if (!Enum.TryParse<Capability>(step.Capability, ignoreCase: true, out var capability))

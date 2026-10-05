@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    联调 / 验收工具：打的是**产品那套代码**（ComfyUiLibrary、ComfyUiExecutor、ComfyUiVideoProvider…），
+    不是另写一套，否则测过的不是会跑的那个。
+
+    它能干两类事，都不需要真机：
+      · 导入链：拉清单 → 转换 → 体检 → 让大模型认节点 → 重转 → 落盘；
+      · 出片链：提交 → 轮询 → 收产物 → 量结果。
+    靠的是自带的一个**本地假 ComfyUI**（LocalComfyStub），数据用本地留档的原稿与节点定义。
+
+    为什么放在仓库里：它原本躺在临时目录，被清一次就没了——而「不依赖真机也能验」正是它最大的价值。
+    登记在 YEEYEEYEE.slnx 里，所以「解决方案构建通过」也包含它编得过。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ChainProbe</RootNamespace>
+    <NoWarn>$(NoWarn);CS0618</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\YEEYEEYEE.Desktop.Shared\YEEYEEYEE.Desktop.Shared.csproj" />
+  </ItemGroup>
+
+</Project>

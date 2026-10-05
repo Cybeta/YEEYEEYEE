@@ -637,6 +637,17 @@ public sealed class ComfyUiImageProvider : IImageProvider
             inputs["referenceMode"] = JsonSerializer.SerializeToElement(profile.Id);
             inputs["denoise"] = JsonSerializer.SerializeToElement(request.Denoise ?? 0.6);
         }
+
+        // 还没按下去就先挡一次：这次**没给满**的素材槽位，如果它自己留着的示例早就不在服务器上了，
+        // 提交就是一次 400（实测 B02 的 `Invalid image file: 33.jpg`）——说清差哪个入口比让人猜强。
+        if (detected is { } shape && request.WorkflowKey.Length > 0
+            && ComfyUiWorkflowHealth.Find(request.WorkflowSiteId, request.WorkflowKey) is { } checkedWorkflow)
+        {
+            var unfilled = ComfyUiWorkflowHealth.FilledMediaSlots(shape, references.Count, 0, 0);
+            if (ComfyUiWorkflowHealth.DescribeUnfilledStaleMedia(checkedWorkflow, unfilled) is { } blocked)
+                return Failed(blocked);
+        }
+
         var invocation = new Invocation
         {
             Tool = useReference ? "image-to-image" : "text-to-image",

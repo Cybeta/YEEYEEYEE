@@ -65,6 +65,11 @@ public static class ComfyUiVirtualNodeLearner
         "你在帮我们把一份 ComfyUI 的「网页格式」工作流转成 API 格式。只输出一个 JSON 对象，"
         + "不要解释、不要 Markdown 代码块、不要多余文字。";
 
+    /// <param name="progress">
+    /// 过程怎么说给用户听。**可能在非 UI 线程上被调**：本方法内部有带 <c>ConfigureAwait(false)</c> 的 await，
+    /// 之后那几句就落在工作线程上。界面侧必须先 Post 回 UI 线程再写控件——这里踩过，点「让大模型认一认」
+    /// 直接把整个应用带走（InvalidOperationException: Call from invalid thread）。
+    /// </param>
     public static async Task<ComfyUiRuleLearningResult> LearnAsync(
         ComfyUiLibraryResult library,
         IAiJsonCompleter completer,
@@ -227,7 +232,7 @@ public static class ComfyUiVirtualNodeLearner
         var shape = ComfyUiImportAuditor.DescribeForModel(rawDraft, candidate.Type, objectInfo);
         return $$"""
             我们不认识这个前端节点类型。它不在服务端的节点定义里，所以转换时被跳过了，
-            于是它下游的必填输入整项消失（服务端往往不报错，只是那一步不产出）。
+            于是它下游的必填输入整项消失（缺必填输入，提交会被 ComfyUI 拒收）。
 
             类型：{{candidate.Type}}
             它出现在：{{candidate.SampleWorkflowTitle}}

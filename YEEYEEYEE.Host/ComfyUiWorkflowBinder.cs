@@ -54,14 +54,41 @@ public sealed class ComfyUiWorkflowSlots
     public List<List<string>> ImageGroups { get; set; } = new();
 
     /// <summary>
+    /// **「文件清单式」**的底图入口：一个多行文本框里放多行文件名（节点 id → 输入名）。
+    ///
+    /// 为什么要单列：`MultiImageLoader.image_paths` 这种入口既不是 `LoadImage` 家族（类名里没有它），
+    /// 也不是「候选清单」形态——它是 `STRING`，值里存的是**换行分隔的文件名**，所以按前两条规则都会
+    /// 整类漏掉。实测 316 份里 4 份是这样（`H22`/`H23` 首尾帧、`H25` 单图、`H42` 多图参考），
+    /// 它们会被误报成「用不了参考图」——而首尾帧那一类**只靠这个入口**。
+    ///
+    /// 一个字段就装得下全部参考图，所以写入时把名字按行拼起来；
+    /// 行与文件名**一一对应**（首行是首帧、末行是末帧），给几张就写几行。
+    /// </summary>
+    public Dictionary<string, string> ImageListInputs { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// 「文件清单式」入口原本列了几个文件名——**那就是它期望的图数**（首尾帧是 2 行）。
+    /// 给不满时按行少写，条数由 <see cref="ImageCapacity"/> 报给用户。
+    /// </summary>
+    public int ImageListCapacity { get; set; }
+
+    /// <summary>
     /// 这一次**最多能喂几张**参考图（按组填时，取最大那一组的槽数）。
     ///
     /// 不能用 <see cref="ImageNodeIds"/>.Count：合集型的份里那个数是各组的**总和**
     /// （B03 是 6），而没有任何一组收得下 6 张——拿它当上限会算出一个虚高的额度。
+    /// 清单式入口另算：它一个字段能吃下全部，额度取它原本列的行数。
     /// </summary>
-    public int ImageCapacity => ImageGroups.Count > 0
-        ? ImageGroups.Max(group => group.Count)
-        : ImageNodeId.Length > 0 ? 1 : 0;
+    public int ImageCapacity
+    {
+        get
+        {
+            var byNodes = ImageGroups.Count > 0
+                ? ImageGroups.Max(group => group.Count)
+                : ImageNodeId.Length > 0 ? 1 : 0;
+            return Math.Max(byNodes, ImageListCapacity);
+        }
+    }
 
     /// <summary>
     /// 这份工作流**故意**不要负面词（negative 指向 ConditioningZeroOut 这类显式置空节点）。
@@ -122,7 +149,7 @@ public sealed class ComfyUiWorkflowSlots
     public bool CanResize => LatentNodeId.Length > 0;
 
     /// <summary>能不能吃参考图。</summary>
-    public bool CanTakeImage => ImageNodeId.Length > 0;
+    public bool CanTakeImage => ImageNodeId.Length > 0 || ImageListInputs.Count > 0;
 
     /// <summary>
     /// 只吃首帧、不收文字：SVD 那种「给一张图让它动起来」的工作流就是这种形状。
@@ -708,9 +735,13 @@ public static class ComfyUiWorkflowBinder
 
         if (loaders.Count == 0)
         {
+            // 没有 LoadImage 家族，先看是不是「文件清单式」入口（MultiImageLoader.image_paths 那种）。
+            ResolveImageList(graph, slots);
+            if (slots.ImageListInputs.Count > 0) return;
+
             slots.Notes.Add(slots.CanTakeVideo
-                ? "没有底图入口（LoadImage）：这份工作流吃的是**一段片子**（源视频入口），不吃参考图。"
-                : "没找到底图入口（LoadImage）：这份工作流用不了参考图，只能文生图。");
+                ? "没有底图入口（LoadImage / 文件清单）：这份工作流吃的是**一段片子**（源视频入口），不吃参考图。"
+                : "没找到底图入口（LoadImage / 文件清单）：这份工作流用不了参考图，只能文生图。");
             return;
         }
 
@@ -727,6 +758,52 @@ public static class ComfyUiWorkflowBinder
                 + string.Join("；", slots.ImageGroups.Select(group => "[" + string.Join("、", group) + "]"))
                 + "。参考图**按组填**：每组各取「角色 → 道具 → 场景」的前几张（前面那组少拿几张），"
                 + "不再按节点顺序把图平铺到前几个入口上——那样会喂错组。");
+    }
+
+    /// <summary>
+    /// 认**「文件清单式」**的底图入口：一个多行文本框里放多行文件名（`MultiImageLoader.image_paths`）。
+    ///
+    /// 判据（不猜类名、也不维护一张输入名清单）：输入名以 `image` 开头、值是**字面量字符串**，
+    /// 且按换行拆开后**每一项都以图片扩展名结尾**。三条都占才认。
+    ///
+    /// 空字段**不算**：空着说明那份工作流自己也没用它，这时宁可照旧报「没有底图入口」——
+    /// 往一个我们没把握的字段里塞文件名，比不塞更坏（用户会以为喂进去了）。
+    /// </summary>
+    private static void ResolveImageList(JsonObject graph, ComfyUiWorkflowSlots slots)
+    {
+        var extensions = new[] { ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif" };
+        foreach (var pair in graph.OrderBy(pair => pair.Key, NodeIdComparer.Instance))
+        {
+            if (pair.Value?["inputs"] is not JsonObject inputs) continue;
+            foreach (var field in inputs)
+            {
+                if (!field.Key.StartsWith("image", StringComparison.OrdinalIgnoreCase)) continue;
+                if (field.Value is not JsonValue value || !value.TryGetValue<string>(out var text)) continue;
+
+                var names = text
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(item => item.Trim().Trim('"'))
+                    .Where(item => item.Length > 0)
+                    .ToList();
+                if (names.Count == 0) continue;
+                if (!names.All(item => extensions.Any(ext => item.EndsWith(ext, StringComparison.OrdinalIgnoreCase))))
+                    continue;
+
+                slots.ImageListInputs[pair.Key] = field.Key;
+                slots.ImageListCapacity = Math.Max(slots.ImageListCapacity, names.Count);
+                if (slots.ImageNodeId.Length == 0)
+                {
+                    slots.ImageNodeId = pair.Key;
+                    slots.ImageInput = field.Key;
+                }
+            }
+        }
+
+        if (slots.ImageListInputs.Count > 0)
+            slots.Notes.Add($"底图入口是**文件清单式**的（节点 {string.Join("、", slots.ImageListInputs.Keys)} 上的 "
+                + $"{string.Join("、", slots.ImageListInputs.Values)}）：那是一个多行文本框，一行一个文件名，"
+                + $"行与图**按顺序对应**（首行是首帧、末行是末帧），这份现在列了 {slots.ImageListCapacity} 行。"
+                + "喂进来的参考图会按行写进去。");
     }
 
     /// <summary>
@@ -773,6 +850,12 @@ public static class ComfyUiWorkflowBinder
         if (slots.VideoNodeIds.Count > 1)
             slots.Notes.Add($"这份工作流有 {slots.VideoNodeIds.Count} 个源视频入口（节点 {string.Join("、", slots.VideoNodeIds)}）："
                 + "按顺序各收一段片子（例如「主片 + 参考片」这种两张图的用法）。");
+
+        // 音频也要说：两个音频口的工作流（双人对白那一类）**按顺序各收一段音**，
+        // 只给一段的话第二个入口会留着它自己的示例——那样出来的对话说的还是例子里的内容。
+        if (slots.AudioNodeIds.Count > 1)
+            slots.Notes.Add($"这份工作流有 {slots.AudioNodeIds.Count} 个源音频入口（节点 {string.Join("、", slots.AudioNodeIds)}）："
+                + "按顺序各收一段音（例如「双人对白」一人一段）；只给一段时，后面的入口还留着它自己的示例。");
     }
 
     /// <summary>
@@ -999,10 +1082,33 @@ public static class ComfyUiWorkflowBinder
         for (var index = 0; index < imageSlots.Count && index < imageNames.Count; index++)
         {
             if (imageNames[index].Length == 0) continue;
+            // 清单式入口一个字段装全部（见下），不走这里一槽一张。
+            if (slots.ImageListInputs.ContainsKey(imageSlots[index])) continue;
             SetInput(graph, imageSlots[index], imageInput, JsonValue.Create(imageNames[index]));
         }
 
+        // 「文件清单式」入口：按行装下参考图，行与图一一对应。
+        // 给不满时**保留它原来的后几行**：首尾帧那一类工作流的末行是「末帧」，我们给不出就替它留着，
+        // 不拿首帧去凑数（与槽位给不满时「多余的入口保持示例图」同一个口径）。
+        foreach (var (listNodeId, listInput) in slots.ImageListInputs)
+        {
+            var given = imageNames.Where(name => name.Length > 0).ToList();
+            if (given.Count == 0) continue;
+            var kept = ReadImageListLines(graph, listNodeId, listInput).Skip(given.Count);
+            var lines = given.Concat(kept).Where(line => line.Length > 0).ToList();
+            SetInput(graph, listNodeId, listInput, JsonValue.Create(string.Join('\n', lines)));
+        }
+
         return graph;
+    }
+
+    /// <summary>读出「文件清单式」入口现在列的那几行（按换行拆开、去掉空行）。</summary>
+    private static IEnumerable<string> ReadImageListLines(JsonObject graph, string nodeId, string inputName)
+    {
+        if (graph[nodeId]?["inputs"] is not JsonObject inputs) yield break;
+        if (inputs[inputName] is not JsonValue value || !value.TryGetValue<string>(out var text)) yield break;
+        foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            yield return line;
     }
 
     /// <summary>

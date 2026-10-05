@@ -9,7 +9,7 @@
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <!-- 版本号的唯一来源：界面标题栏、左栏底部与设置页都读这里（见 AppVersion）。
          改这一行就是改版本号，不需要再去 XAML 里找写死的字符串。 -->
-    <Version>0.1.1</Version>
+    <Version>0.1.2</Version>
     <Product>YEEYEEYEE</Product>
     <AssemblyTitle>YEEYEEYEE</AssemblyTitle>
   </PropertyGroup>
@@ -39,9 +39,11 @@
   <!-- 每个厂家一张「形象」（开奖许愿那一拍用，见 ProviderAvatar）。放在仓库根目录的 provider-art/ 下，
        构建时拷进输出目录，程序就从**程序目录旁的 provider-art/** 读到它们；用户配置目录里那一份优先，
        所以用户自己换的图不会被版本更新覆盖掉。
-       CopyToOutputDirectory 用 PreserveNewest：重复构建不会每次重拷这几 MB。 -->
+       CopyToOutputDirectory 用 PreserveNewest：重复构建不会每次重拷这几 MB。
+       **只拷图、不拷那底下别的东西**：那个目录里还留着出图管线自己写的记录（`_generation.json`，
+       里面是生成时的模型/池子与提示词），它是旁产物，不该跟着发布包走。 -->
   <ItemGroup>
-    <None Include="..\provider-art\**\*"
+    <None Include="..\provider-art\**\*.png;..\provider-art\**\*.jpg;..\provider-art\**\*.jpeg;..\provider-art\**\*.svg;..\provider-art\**\*.webp"
           Link="provider-art\%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest"
           Visible="false" />

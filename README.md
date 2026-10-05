@@ -1,6 +1,8 @@
 # YEEYEEYEE
 
-> 版本 0.1.1 · 基线 2026-10-04 · YES 工程师 · YES 艺术家
+> 版本 0.1.2 · 基线 2026-10-05 · YES 工程师 · YES 艺术家
+>
+> 这一版改了什么（含被真机推翻的旧说法）：[发布说明](docs/发布说明.md)
 
 [![构建与测试](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/build.yml/badge.svg)](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/build.yml)
 

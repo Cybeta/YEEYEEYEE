@@ -8,6 +8,11 @@
   <Project Path="YEEYEEYEE.Web/YEEYEEYEE.Web.csproj" />
   <Project Path="YEEYEEYEE.Mcp/YEEYEEYEE.Mcp.csproj" />
 
+  <!-- 联调 / 验收工具：不随产品发布，但装进来才不会被悄悄改坏。
+       tools/chainprobe 自带一个本地假 ComfyUI，没有真机也能把两条链真跑一遍——
+       「导入 → 体检 → 让大模型认节点 → 重转 → 落盘」与「提交 → 轮询 → 收产物 → 量结果」。 -->
+  <Project Path="tools/chainprobe/chainprobe.csproj" />
+
   <!-- 测试项目也装进来：装进来之后「解决方案构建通过」才等于「连测试一起编得过」。
        此前它们不在里面，第 132 轮改共享层时测试项目编译失败而解决方案构建照样通过——
        那个坑就是「构建通过」这四个字被读成了「什么都没坏」。

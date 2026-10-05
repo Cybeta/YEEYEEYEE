@@ -348,6 +348,18 @@ public partial class MainWindow : Window, IAgentSessionHost
         else StatusText.Text = message;
     }
 
+    /// <summary>
+    /// 在 UI 线程上执行。**凡是库的回调写进界面的一律过这里**：库里那些进度回调不保证落在 UI 线程上
+    /// ——`ComfyUiVirtualNodeLearner.LearnAsync` 里带 `ConfigureAwait(false)` 的 await 之后，回调就落在
+    /// 工作线程上，直接写 TextBlock 会抛「Call from invalid thread」把整个应用带走（实测点导入弹窗里的
+    /// 「让大模型认一认」必崩）。已经在 UI 线程上就直接跑，免得每次更新都被推迟一拍。
+    /// </summary>
+    private static void OnUiThread(Action action)
+    {
+        if (Dispatcher.UIThread.CheckAccess()) action();
+        else Dispatcher.UIThread.Post(action);
+    }
+
     private async Task CreateProjectAsync(string? name)
     {
         try
@@ -2904,24 +2916,34 @@ public partial class MainWindow : Window, IAgentSessionHost
         var sourceVideoPaths = new List<string>();
         var sourceAudioPaths = new List<string>();
 
-        StackPanel SourceMediaRow(string label, string pickTitle, string[] patterns, List<string> sink, string hint)
+        StackPanel SourceMediaRow(string label, string pickTitle, string[] patterns, List<string> sink, string hint, int capacity)
         {
             var box = new TextBox { Width = 300, FontSize = 12, IsReadOnly = true, Watermark = "还没选" };
             var pick = AgentDialogUi.Secondary("选文件…");
             var clear = AgentDialogUi.Secondary("清空");
+            // 这份工作流有几个入口就收几份，按顺序填进前几个槽位。
+            // 只收一份、却照样报「源音频已写入：节点 136、137」是不诚实的——所以这里跟着入口数走。
+            var multiple = capacity > 1;
             pick.Click += async (_, _) =>
             {
                 var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
                 {
-                    Title = pickTitle,
-                    AllowMultiple = false,
+                    Title = multiple ? $"{pickTitle}（最多 {capacity} 份）" : pickTitle,
+                    AllowMultiple = multiple,
                     FileTypeFilter = new[] { new FilePickerFileType(label) { Patterns = patterns } }
                 });
-                var path = files.FirstOrDefault()?.TryGetLocalPath();
-                if (string.IsNullOrWhiteSpace(path)) return;
+                var picked = files
+                    .Select(item => item.TryGetLocalPath())
+                    .Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Take(capacity)
+                    .Select(path => path!)
+                    .ToList();
+                if (picked.Count == 0) return;
                 sink.Clear();
-                sink.Add(path);
-                box.Text = path;
+                sink.AddRange(picked);
+                box.Text = picked.Count == 1
+                    ? picked[0]
+                    : $"已选 {picked.Count} 份：" + string.Join("、", picked.Select(Path.GetFileName));
             };
             clear.Click += (_, _) =>
             {
@@ -2948,18 +2970,25 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         if (slots?.CanTakeVideo == true)
         {
+            var videoSlots = slots.VideoNodeIds.Count;
             SourceMediaRow(
                 "源视频", "选一段要处理的视频", new[] { "*.mp4", "*.mov", "*.webm", "*.mkv", "*.gif" }, sourceVideoPaths,
-                $"这份工作流吃的是**一段片子**（节点 {string.Join("、", slots.VideoNodeIds)}）：选一段本机视频，"
-                + "它会被先传到那台 ComfyUI 上再写进这些入口。不选的话它会拿它自己示例里的片段跑——"
-                + "出来的内容与你的素材无关，而且从结果上看不出来。");
+                $"这份工作流吃的是**一段片子**（节点 {string.Join("、", slots.VideoNodeIds)}，共 {videoSlots} 个入口）："
+                + (videoSlots > 1 ? "可以一次选多段，按顺序填进这些口；" : string.Empty)
+                + "选好的会先传到那台 ComfyUI 上再写进去。不选的话它会拿它自己示例里的片段跑——"
+                + "出来的内容与你的素材无关，而且从结果上看不出来。",
+                videoSlots);
         }
 
         if (slots?.CanTakeAudio == true)
         {
+            var audioSlots = slots.AudioNodeIds.Count;
             SourceMediaRow(
                 "源音频", "选一段音（对口型 / 配乐）", new[] { "*.mp3", "*.wav", "*.flac", "*.m4a", "*.ogg" }, sourceAudioPaths,
-                $"这份工作流还要一段音（节点 {string.Join("、", slots.AudioNodeIds)}）：不选就沿用它自己示例里的那一段。");
+                $"这份工作流还要音（节点 {string.Join("、", slots.AudioNodeIds)}，共 {audioSlots} 个入口）："
+                + (audioSlots > 1 ? "可以一次选多段（例如双人对白各一段），按顺序填进这些口；" : string.Empty)
+                + "不选就沿用它自己示例里的那一段。",
+                audioSlots);
         }
 
         // ---------- 时长 / 比例 / 目标像素 ----------
@@ -3136,8 +3165,10 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         // ComfyUI 那条链要等十几分钟，所以把「已提交」这类进度接到状态栏上——
         // 没有这句话，用户在十几分钟里看到的是一个不动的窗口。
+        // 走 OnUiThread：这条回调的口径是「任何线程都可能来」，而它今天恰好发生在自己的 await 之前
+        // 只是运气，不该被依赖（同一个口径在导入那边就踩成了必崩）。
         if (provider is ComfyUiVideoProvider comfyVideo)
-            comfyVideo.Status = message => StatusText.Text = message;
+            comfyVideo.Status = message => OnUiThread(() => StatusText.Text = message);
 
         VideoGenerationResult result;
         try

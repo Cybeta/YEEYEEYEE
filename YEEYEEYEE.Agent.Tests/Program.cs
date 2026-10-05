@@ -141,6 +141,11 @@ var tests = new (string Name, Action Run)[]
     ("参考图手动指定：按实体+变体点名、先筛再裁、一张不勾要说成「你没勾」", ReferenceImagePlanHonoursHandPickedKeys),
     ("ComfyUI 绑定：每个底图入口按顺序各收一张参考图，给不满不拿同一张凑数", BinderFillsEveryImageSlotInOrder),
     ("ComfyUI 绑定：合集型工作流（几组各自带输出）要按组填，不能把图平铺到前几个入口", BinderFillsImageGroupsInsteadOfFlattening),
+    ("ComfyUI 绑定：「文件清单式」底图入口（多行文本框）要按行装全部参考图，空字段不算入口", ComfyUiImageListEntriesTakeEveryReference),
+    ("ComfyUI 体检：引用的文件这台机器上没有要报出来（哨兵值不算文件），但不该触发让大模型认一认", ComfyUiAuditReportsFilesMissingFromTheServer),
+    ("ComfyUI 出片前：没给满的槽位留着失效的示例要挡住提交（影子判据与绑定必须逐字对齐）", ComfyUiBlocksUnfilledStaleMedia),
+    ("ComfyUI 多路音源：两个音频口按顺序各收一段，只给一段时后面的入口保持它自己的示例", ComfyUiFeedsEveryAudioEntryInOrder),
+    ("ComfyUI 体检：源头那个节点的类型这台服务器上没有时，不能说成「是我们转换丢的」", ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
     ("AI 建实体：内容同时落到核心设定与默认变体，引用卡不再空白", AgentEntityContentReachesVariantAndCard),
@@ -10367,6 +10372,322 @@ static void BinderFillsImageGroupsInsteadOfFlattening()
 }
 
 /// <summary>
+/// 钉住「文件清单式」底图入口（`MultiImageLoader.image_paths` 那种多行文本框）。
+/// 按类名（含 LoadImage）认不出它、按候选清单也认不出它，整类漏掉会让首尾帧那一支被误报成「用不了参考图」。
+/// </summary>
+static void ComfyUiImageListEntriesTakeEveryReference()
+{
+	const string template = """
+	{
+	  "1": {"class_type": "MultiImageLoader", "inputs": {"image_paths": "first.png\nlast.png"}},
+	  "2": {"class_type": "EmptyLTXVLatentVideo", "inputs": {"width": 512, "height": 512, "length": 97}},
+	  "11": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["12", 0], "negative": ["13", 0], "latent_image": ["2", 0]}},
+	  "12": {"class_type": "CLIPTextEncode", "inputs": {"text": "她推开门", "clip": ["14", 0]}},
+	  "13": {"class_type": "CLIPTextEncode", "inputs": {"text": "模糊", "clip": ["14", 0]}},
+	  "14": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "m.safetensors"}},
+	  "90": {"class_type": "SaveImage", "inputs": {"images": ["11", 0], "filename_prefix": "a"}}
+	}
+	""";
+
+	ComfyUiWorkflowSlots slots = ComfyUiWorkflowBinder.Detect(template);
+	Expect(slots.CanTakeImage, "多行文本框式的入口也要认得出底图：" + slots.Describe());
+	Expect(slots.ImageCapacity == 2, "它现在列了两行（首帧 / 末帧），额度就该是 2，实际 " + slots.ImageCapacity);
+	Expect(slots.Notes.Any((string note) => note.Contains("文件清单式")), "要如实说这是文件清单式的入口");
+
+	JsonObject two = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues
+	{
+		Prompt = "她推开门",
+		Negative = "模糊",
+		Width = 512,
+		Height = 512,
+		ImageNames = new[] { "mine-first.png", "mine-last.png" }
+	});
+	Expect(two["1"]!["inputs"]!["image_paths"]!.GetValue<string>() == "mine-first.png\nmine-last.png",
+		"两张参考图要按行写进那一个字段，实际 " + two["1"]!["inputs"]!["image_paths"]!.GetValue<string>());
+
+	// 只给一张：首行换成我们的，**它原来的末帧替它留着**——不拿首帧去凑末帧（与槽位同一个口径）。
+	JsonObject one = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues
+	{
+		Prompt = "她推开门",
+		ImageName = "mine-first.png"
+	});
+	Expect(one["1"]!["inputs"]!["image_paths"]!.GetValue<string>() == "mine-first.png\nlast.png",
+		"只给一张时首行换掉、它原来的后几行保留，实际 " + one["1"]!["inputs"]!["image_paths"]!.GetValue<string>());
+
+	// 空着的字段不算入口：那份工作流自己都没用过，宁可照旧报「没有底图入口」，
+	// 也别往一个我们没把握的字段里塞文件名（用户会以为喂进去了）。
+	const string blank = """
+	{
+	  "1": {"class_type": "MultiImageLoader", "inputs": {"image_paths": ""}},
+	  "90": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "a"}}
+	}
+	""";
+	Expect(!ComfyUiWorkflowBinder.Detect(blank).CanTakeImage, "空着的清单式字段不该被当成底图入口");
+}
+
+/// <summary>
+/// 钉住「引用的文件在这台机器上还有没有」这一类：正文结构一点毛病都没有，所以「我们丢了 / 自己断线」
+/// 两栏永远看不见它——提交时 ComfyUI 也不会挡下（实测 200 收下、排进队列），是**跑到那一步才失败**
+/// （`LoadImage` 那档 `node_errors` 甚至是空的，回的是 `execution_error`；模型那档才在 `node_errors`
+/// 里点名 `value_not_in_list`）。判据是 COMBO 型输入的候选清单（= 服务器当前的文件列表）。
+/// </summary>
+static void ComfyUiAuditReportsFilesMissingFromTheServer()
+{
+	const string objectInfo = """
+	{
+	  "LoadImage": {
+	    "input": {"required": {"image": [["present.png", "other.png"], {"image_upload": true}]}},
+	    "output": ["IMAGE", "MASK"], "output_name": ["IMAGE", "MASK"], "output_node": false
+	  },
+	  "CheckpointLoaderSimple": {
+	    "input": {"required": {"ckpt_name": [["a.safetensors"], {}]}},
+	    "output": ["MODEL", "CLIP", "VAE"], "output_name": ["MODEL", "CLIP", "VAE"], "output_node": false
+	  },
+	  "SomeLoader": {
+	    "input": {"required": {"file_or_mode": [["a.safetensors", "b.gguf"], {}]}},
+	    "output": ["STRING"], "output_name": ["STRING"], "output_node": false
+	  },
+	  "KreaLoader": {
+	    "input": {"required": {"unet_name": [["krea/a.safetensors"], {}]}},
+	    "output": ["MODEL"], "output_name": ["MODEL"], "output_node": false
+	  },
+	  "ModelSink": {
+	    "input": {"required": {}},
+	    "output": [], "output_name": [], "output_node": true
+	  },
+	  "SaveImage": {
+	    "input": {"required": {"images": ["IMAGE", {}]}},
+	    "output": [], "output_name": [], "output_node": true
+	  }
+	}
+	""";
+
+	const string payload = """
+	{
+	  "1": {"class_type": "LoadImage", "inputs": {"image": "gone.png"}},
+	  "2": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "gone.safetensors"}},
+	  "3": {"class_type": "SomeLoader", "inputs": {"file_or_mode": "randomize"}},
+	  "4": {"class_type": "LoadImage", "inputs": {"image": "present.png"}},
+	  "5": {"class_type": "SomeLoader", "inputs": {"file_or_mode": "阿里云/model.v2"}},
+	  "6": {"class_type": "LoadImage", "inputs": {"image": "x.png [input]"}},
+	  "7": {"class_type": "KreaLoader", "inputs": {"unet_name": "krea\\a.safetensors"}},
+	  "9": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+	  "10": {"class_type": "ModelSink", "inputs": {"model": ["2", 0]}}
+	}
+	""";
+
+	var objectInfoNode = System.Text.Json.Nodes.JsonNode.Parse(objectInfo)!.AsObject();
+	var audit = ComfyUiImportAuditor.Inspect(
+		new Dictionary<string, string>(StringComparer.Ordinal) { ["T/缺文件.json"] = """{"nodes": [], "links": []}""" },
+		new Dictionary<string, string>(StringComparer.Ordinal) { ["T/缺文件.json"] = payload },
+		objectInfoNode);
+
+	Expect(audit.Count(ComfyUiFindingKind.MissingOnServer) == 4,
+		"只该报四条：`gone.png`、`gone.safetensors`、`x.png [input]` 与 `krea\\a.safetensors` 不在清单里；"
+		+ "`randomize` 没有扩展名不算文件，"
+		+ "`阿里云/model.v2` 带点又全字母数字、可清单里根本没有 `.v2` 这种文件（这台机器上的这一类文件里没有它），"
+		+ "`present.png` 在清单里。实际 " + audit.Count(ComfyUiFindingKind.MissingOnServer) + "：" + audit.Describe());
+	Expect(!audit.NeedsAttention, "缺文件不该触发「让大模型认一认」那个弹窗——模型补不了一个文件");
+	Expect(audit.Describe().Contains("这台机器上没有"), "总账里要说出来：" + audit.Describe());
+
+	var sample = audit.Findings.First(item => item.Kind == ComfyUiFindingKind.MissingOnServer && item.NodeId == "1");
+	var resource = audit.Findings.First(item => item.Kind == ComfyUiFindingKind.MissingOnServer && item.NodeId == "2");
+	Expect(sample.Detail.Contains("给了就能跑") && sample.MissingFileFlavor == ComfyUiMissingFileFlavor.Sample
+		&& sample.OnExecutionChain && sample.Detail.Contains("custom_validation_failed"),
+		"示例素材那条要说清「给了就能跑」、标成素材，而且它在链上（SaveImage 读它）就是提交当场 400"
+		+ "（实测 B02 的 `custom_validation_failed`）：" + sample.Detail);
+	// 模型那档**不会**当场被挡下（实测 T12 回的是 200 + `node_errors`）：写成「提交就被拒」会被真机推翻。
+	Expect(!resource.Detail.Contains("给了就能跑") && resource.MissingFileFlavor == ComfyUiMissingFileFlavor.Resource
+		&& resource.OnExecutionChain && resource.Detail.Contains("value_not_in_list")
+		&& !resource.Detail.Contains("拒收") && !resource.Detail.Contains("挡下"),
+		"模型那条不能说「给了就能跑」「提交被拒」，要说清是 200 + `node_errors` 里点名（实测 T12）：" + resource.Detail);
+
+	// 素材槽位不走「像不像文件」那道护栏：出片时那个槽位本来就会被换掉，值按定义就是文件名。
+	// 实测被漏过的两个（`xxx.png [input]`，前端在文件名后面缀了标注）必须报得出来。
+	// 它同时在**死节点**上（没人读它）：那就不该按「出不了片」说，得说清眼下不影响出片。
+	var annotated = audit.Findings.First(item => item.Kind == ComfyUiFindingKind.MissingOnServer && item.NodeId == "6");
+	Expect(annotated.MissingFileFlavor == ComfyUiMissingFileFlavor.Sample && !annotated.OnExecutionChain
+		&& annotated.Detail.Contains("不影响出片"),
+		"被缀了标注的文件名也要算素材缺了，且在链外就要说清不影响出片：" + annotated.Detail);
+
+	// 文件其实在、只是分隔符写法不同（正文写 `krea\a`、这台机器上叫 `krea/a`）：必须单独说成「重挑一次就好」。
+	// 混进「模型没装」那一档，用户会去下载一个本来就在的几十 GB 文件。
+	var renamed = audit.Findings.First(item => item.Kind == ComfyUiFindingKind.MissingOnServer && item.NodeId == "7");
+	Expect(renamed.MissingFileFlavor == ComfyUiMissingFileFlavor.SeparatorMismatch
+		&& renamed.Detail.Contains("其实有这个文件") && renamed.Detail.Contains("krea/a.safetensors")
+		&& !renamed.OnExecutionChain && renamed.Detail.Contains("重挑一次"),
+		"分隔符不同那一档要说清文件其实在：" + renamed.MissingFileFlavor + " / " + renamed.Detail);
+
+	// 总账要把「没人读那几处眼下不影响出片」说出来——不然用户会去为不影响他的事白忙。
+	Expect(audit.Describe().Contains("没有任何产物靠它"), "总账要说清链外那几处：" + audit.Describe());
+
+	// 「撑着几路产物」要真的数出来：节点 1 被一个 SaveImage 读（1 路），节点 6/7 没有任何产物靠它。
+	Expect(sample.DependentOutputs == 1 && resource.DependentOutputs == 1
+		&& annotated.DependentOutputs == 0 && renamed.DependentOutputs == 0,
+		"撑着的产物路数要数对：1=" + sample.DependentOutputs + " 2=" + resource.DependentOutputs
+		+ " 6=" + annotated.DependentOutputs + " 7=" + renamed.DependentOutputs);
+
+	var workflows = new List<SiteWorkflow> { new() { Key = "T/缺文件.json", Title = "缺文件" } };
+	audit.ApplyTo(workflows);
+	Expect(workflows[0].MissingFiles == 4 && workflows[0].MissingFileDetails.Count == 4,
+		"账要落到工作流上（含逐条清单），实际 " + workflows[0].MissingFiles + "/" + workflows[0].MissingFileDetails.Count);
+	Expect(ComfyUiWorkflowHealth.Describe(workflows[0]).Contains("这台机器上没有"),
+		"出片前那份说明里要看得出来：" + ComfyUiWorkflowHealth.Describe(workflows[0]));
+	Expect(ComfyUiWorkflowHealth.ShortMark(workflows[0]).Contains("引用文件缺"),
+		"选择器那一行的记号也要有：" + ComfyUiWorkflowHealth.ShortMark(workflows[0]));
+}
+
+/// <summary>
+/// 钉住出片前那道挡：**这次没给满的素材槽位，它自己留着的示例是不是早就不在服务器上了**。
+/// 实测代价：B02 那份「单双三图」用户给一张、另外两个入口留着自己的 `33.jpg`，那张图服务器上早没了，
+/// 提交回 400 `custom_validation_failed`（点名 `Invalid image file: 33.jpg`），连队列都进不去。
+///
+/// 另一半是**影子判据必须与绑定对齐**：`FilledMediaSlots` 说的是「这次会写满哪几个槽位」，
+/// 它要跟 `ComfyUiWorkflowBinder.Bind` 真正改动的槽位逐字一致——两处各说各话，挡就会挡错
+/// （该挡的没挡、不该挡的挡住）。判据各说各话吃过一次亏，这里用绑定自己当尺子。
+/// </summary>
+static void ComfyUiBlocksUnfilledStaleMedia()
+{
+	var workflow = new SiteWorkflow
+	{
+		Key = "T/多图.json",
+		Title = "多图",
+		MissingMedia = new List<ComfyUiMissingMedia>
+		{
+			new("262", "LoadImage", "image", "33.jpg", 6),
+			new("136", "VHS_LoadAudioUpload", "audio", "uploaded_1774766971411.WAV", 2)
+		}
+	};
+
+	Expect(ComfyUiWorkflowHealth.DescribeUnfilledStaleMedia(workflow, new[] { "262.image", "136.audio" }) is null,
+		"两个槽位都给满了就不该挡");
+	Expect(ComfyUiWorkflowHealth.DescribeUnfilledStaleMedia(
+			new SiteWorkflow { Key = "T/干净.json", Title = "干净" }, new[] { "262.image" }) is null,
+		"没有「失效示例」的工作流不该被挡");
+
+	var byAudio = ComfyUiWorkflowHealth.DescribeUnfilledStaleMedia(workflow, new[] { "262.image" });
+	Expect(byAudio is not null && byAudio.Contains("136") && byAudio.Contains("uploaded_1774766971411.WAV")
+		&& byAudio.Contains("音频") && byAudio.Contains("2 路产物"),
+		"没给音频那一路要单独点出来（哪个入口、缺的是什么、靠着几路产物）：" + byAudio);
+
+	var all = ComfyUiWorkflowHealth.DescribeUnfilledStaleMedia(workflow, Array.Empty<string>());
+	Expect(all is not null && all.Contains("33.jpg") && all.Contains("图") && all.Contains("6 路产物")
+		&& all.Contains("400"),
+		"一张都没给时两条都要报出来，并说清提交会被 400 挡：" + all);
+
+	// 影子判据 vs 绑定：三个底图入口（两个普通 + 一个清单式）只给一张图。
+	const string template = """
+	{
+	  "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+	  "2": {"class_type": "LoadImage", "inputs": {"image": "b.png"}},
+	  "3": {"class_type": "MultiImageLoader", "inputs": {"image_paths": "c.png\nd.png"}},
+	  "9": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}}
+	}
+	""";
+	var slots = ComfyUiWorkflowBinder.Detect(template);
+	var bound = ComfyUiWorkflowBinder.Bind(System.Text.Json.Nodes.JsonNode.Parse(template)!.AsObject(), slots,
+		new ComfyUiBindValues { ImageNames = new[] { "given.png" } });
+
+	// 绑定真正改动过的槽位（写成「节点.输入」）。
+	var changed = new List<string>();
+	foreach (var node in bound)
+		foreach (var input in (node.Value?["inputs"] as System.Text.Json.Nodes.JsonObject) ?? new System.Text.Json.Nodes.JsonObject())
+			if (input.Value is System.Text.Json.Nodes.JsonValue value
+				&& value.TryGetValue<string>(out var text)
+				&& (text.Contains("given.png") || text == "given.png"))
+				changed.Add(node.Key + "." + input.Key);
+
+	var predicted = ComfyUiWorkflowHealth.FilledMediaSlots(slots, 1, 0, 0);
+	Expect(predicted.Count > 0 && predicted.OrderBy(item => item, StringComparer.Ordinal)
+			.SequenceEqual(changed.OrderBy(item => item, StringComparer.Ordinal)),
+		"影子判据要跟绑定改动的槽位逐字一致：预测 [" + string.Join("、", predicted)
+		+ "]，绑定真改了 [" + string.Join("、", changed) + "]");
+}
+
+/// <summary>
+/// 钉住「源头那个节点的类型这台服务器上有没有」这句分岔：链子走到尽头那个节点，如果它的类型
+/// 这台机器上根本没有（自定义节点没装、或它本来就是纯前端件），链子是从那儿断的——
+/// 说成一句「源头是个活着的后端节点」，用户会以为是我们转换得不对，去重导一遍，而真正该做的是
+/// 换一份、或者给这台机器装上那个节点。这是唯一一处我们会把「不是我们的错」说成「我们的错」。
+/// </summary>
+static void ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer()
+{
+	const string objectInfo = """
+	{
+	  "SaveImage": {"input": {"required": {"images": ["IMAGE", {}]}}, "output": [], "output_name": [], "output_node": true},
+	  "LoadImage": {"input": {"required": {"image": [["a.png"], {}]}}, "output": ["IMAGE"], "output_name": ["IMAGE"], "output_node": false}
+	}
+	""";
+
+	// 原稿：源头节点的类型是 `MysteryBridge`（这台服务器上没有），它喂给 SaveImage.images。
+	string Draft(string sourceType) => $$"""
+	{
+	  "last_node_id": 9, "last_link_id": 8,
+	  "nodes": [
+	    {"id": 5, "type": "{{sourceType}}", "mode": 0, "inputs": [],
+	     "outputs": [{"name":"IMAGE","type":"IMAGE","links":[8]}], "widgets_values": []},
+	    {"id": 9, "type": "SaveImage", "mode": 0,
+	     "inputs": [{"name":"images","type":"IMAGE","link":8}], "outputs": [], "widgets_values": ["x"]}
+	  ],
+	  "links": [[8, 5, 0, 9, 0, "IMAGE"]],
+	  "groups": [], "config": {}, "extra": {}, "version": 0.4
+	}
+	""";
+
+	// 转换结果里那个必填输入没了（我们不认识那个类型，节点整条被跳过）——正是要被定性的那种场合。
+	const string payload = """{"9": {"class_type": "SaveImage", "inputs": {}}}""";
+	var objectInfoNode = System.Text.Json.Nodes.JsonNode.Parse(objectInfo)!.AsObject();
+
+	ComfyUiImportFinding Finding(string sourceType) => ComfyUiImportAuditor.Inspect(
+		new Dictionary<string, string>(StringComparer.Ordinal) { ["T/缺节点.json"] = Draft(sourceType) },
+		new Dictionary<string, string>(StringComparer.Ordinal) { ["T/缺节点.json"] = payload },
+		objectInfoNode).Findings.First();
+
+	var unknown = Finding("MysteryBridge");
+	Expect(unknown.Kind == ComfyUiFindingKind.DroppedByConversion && unknown.Detail.Contains("MysteryBridge")
+		&& unknown.Detail.Contains("这台服务器上没有"),
+		"服务器没这个类型时要说明白（是哪一类、以及链子是从那儿断的）：" + unknown.Detail);
+
+	var known = Finding("LoadImage");
+	Expect(known.Kind == ComfyUiFindingKind.DroppedByConversion
+		&& known.Detail == "源头是个活着的后端节点",
+		"类型在服务器上就照旧说「源头是个活着的后端节点」：" + known.Detail);
+}
+
+/// <summary>
+/// 钉住多路音源：两个音频口的工作流**按顺序各收一段音**（双人对白那一类），
+/// 只给一段时后面的入口保持它自己的示例——那条路出来的人声还是例子里的，从结果上完全看不出来。
+/// 且发现两路时要在 Notes 里说出来（用户才知道「这一段音不够」）。
+/// </summary>
+static void ComfyUiFeedsEveryAudioEntryInOrder()
+{
+	const string template = """
+	{
+	  "1": {"class_type": "LoadAudio", "inputs": {"audio": "a.wav"}},
+	  "2": {"class_type": "VHS_LoadAudioUpload", "inputs": {"audio": "b.wav"}},
+	  "9": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}}
+	}
+	""";
+	var slots = ComfyUiWorkflowBinder.Detect(template);
+	Expect(slots.AudioNodeIds.Count == 2 && slots.AudioNodeIds[0] == "1" && slots.AudioNodeIds[1] == "2",
+		"两个音频口都要认出来（按节点号顺序）：" + string.Join("、", slots.AudioNodeIds));
+	Expect(slots.Notes.Any(note => note.Contains("2 个源音频入口")),
+		"发现两路音频要说出来：" + string.Join("；", slots.Notes));
+
+	JsonObject Bind(params string[] audios) =>
+		ComfyUiWorkflowBinder.Bind(System.Text.Json.Nodes.JsonNode.Parse(template)!.AsObject(), slots,
+			new ComfyUiBindValues { AudioNames = audios });
+
+	var both = Bind("x.wav", "y.wav");
+	Expect(both["1"]?["inputs"]?["audio"]?.ToString() == "x.wav" && both["2"]?["inputs"]?["audio"]?.ToString() == "y.wav",
+		"两段音要按顺序各进一个口：" + both.ToJsonString());
+
+	var one = Bind("x.wav");
+	Expect(one["1"]?["inputs"]?["audio"]?.ToString() == "x.wav" && one["2"]?["inputs"]?["audio"]?.ToString() == "b.wav",
+		"只给一段时，第二个入口要保持它自己的示例（不拿同一段去凑数）：" + one.ToJsonString());
+}
+
+/// <summary>
 /// 钉住参考图上限从设置、池子、工作流三处取小，「0」与「没声明」不能混，note 要说对是谁定的。取错会让请求超限或被无故砍图。
 /// </summary>
 static void ReferenceCapResolverPicksTheTightestLimit()
@@ -14702,7 +15023,7 @@ static void ComfyUiConversionBypassesThroughUnionTypedInputs()
 /// 钉住「固定选项的值是界面显示的写法时要纠正成清单里的那个」。
 /// 实测代价：`MiniMaxH3AudioConditioningT8.task_type` 在网页文件里存的是
 /// <c>Ref2VA — 参考生音视频</c>（选项 + 中文说明），而服务端的选项只有 <c>Ref2VA</c>——
-/// 提交就是 `value_not_in_list`（整条链在真机上就是这么被 400 拒的）。
+/// 提交就是 `value_not_in_list`（实测那一次整条链没出片来）。
 /// 判据要保守：**只有值以某个合法选项开头时**才纠正；文件引用那种「不在清单里」是正常的
 /// （清单说的是服务器 input 目录此刻有什么文件），一个字都不许动。
 /// </summary>

@@ -5,6 +5,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Avalonia.Threading;
 using YEEYEEYEE.Core;
 using YEEYEEYEE.Desktop;
 using YEEYEEYEE.Host;
@@ -564,6 +565,11 @@ internal sealed class SettingsApiImportDialog
             // ---------- 体检：拉到就查，查完当场说 ----------
             // 体检要的三样（原稿、转换结果、这台的节点定义）在拉取时都拿到了，判断全是本地读 JSON。
             // 有「我们丢了的输入」才值得打扰用户；那几类正常的（静音/绕过、原稿自己断线）只报不催。
+            //
+            // 另外：模型那一步的结论要**留到最后的报告里**。它是用户花钱做的决定，只闪在状态区一下
+            // 就被后面的落盘报告冲掉，等于花完钱没留凭据（实测演示里就是这样）。
+            var repairSummary = string.Empty;
+
             var audit = fetched.Audit;
             if (audit is { NeedsAttention: true })
             {
@@ -584,6 +590,7 @@ internal sealed class SettingsApiImportDialog
                             message => SetStatus(message));
                         // 只采用**验证过**的规则（照它重转之后「我们丢了」真的变少、且没多出判断不了的）。
                         fetched = ComfyUiLibrary.Reconvert(fetched, learning.Accepted);
+                        repairSummary = learning.Describe();
                         SetStatus(learning.Describe() + Environment.NewLine + Environment.NewLine
                             + (fetched.Audit?.Describe() ?? string.Empty));
                         break;
@@ -628,6 +635,13 @@ internal sealed class SettingsApiImportDialog
             if (fetched.Failed > 0)
                 lines.Add($"· **{fetched.Failed} 份没能转换**：原因逐份记在站点文件里，不影响其它工作流");
             foreach (var note in fetched.Notes) lines.Add("· " + note);
+            // 模型那一步说了什么、有没有被采用——留在这里，用户关掉之后还查得到。
+            if (repairSummary.Length > 0)
+            {
+                lines.Add("· 让大模型认过之后：");
+                foreach (var line in repairSummary.Split(Environment.NewLine))
+                    lines.Add("    " + line);
+            }
             // 体检结论留在这一步的结论里：用户点「完成」之后把结论收走，之后想回看就只能重新导入一次。
             if (fetched.Audit is { } finalAudit)
             {
@@ -1388,14 +1402,26 @@ internal sealed class SettingsApiImportDialog
 
     // ---------- 小零件 ----------
 
-    private void SetStatus(string text) => statusText.Text = text;
+    /// <summary>
+    /// 状态区写一行。
+    ///
+    /// **必须能跨线程调用**：库那边的进度回调不保证落在 UI 线程上——`ComfyUiVirtualNodeLearner.LearnAsync`
+    /// 内部的 await 带 `ConfigureAwait(false)`，于是它在工作线程上调回调。直接写 TextBlock 会抛
+    /// 「Call from invalid thread」，**把整个应用带走**（实测：点「让大模型认一认」必崩；而无头测试
+    /// 看不见这个，因为探针那条路的回调写的是 Console）。所以这里统一兜一层：不在 UI 线程就 Post 回去写。
+    /// </summary>
+    private void SetStatus(string text) => OnUiThread(() => statusText.Text = text);
 
     /// <summary>往状态区追加一行（保留已有内容，便于看到完整过程）。</summary>
-    private void AppendStatus(string line)
+    private void AppendStatus(string line) => OnUiThread(() => statusText.Text = statusText.Text.Length == 0
+        ? line
+        : statusText.Text + Environment.NewLine + line);
+
+    /// <summary>在 UI 线程上执行；已经在上面就直接跑，免得每次进度更新都被推迟一拍。</summary>
+    private static void OnUiThread(Action action)
     {
-        statusText.Text = statusText.Text.Length == 0
-            ? line
-            : statusText.Text + Environment.NewLine + line;
+        if (Dispatcher.UIThread.CheckAccess()) action();
+        else Dispatcher.UIThread.Post(action);
     }
 
     private static string Trim(string text, int length) =>
