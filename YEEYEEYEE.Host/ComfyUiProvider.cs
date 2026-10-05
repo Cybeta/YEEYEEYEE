@@ -243,7 +243,10 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
                     State = ExternalTaskState.Failed,
                     ProgressPercent = 100,
                     ErrorCode = "COMFYUI_TASK_FAILED",
-                    ErrorMessage = "ComfyUI 工作流执行失败"
+                    // **把服务端说的那句话带出来**：`status.messages` 里写着是哪个节点、
+                    // 什么异常、缺哪个文件——这才是用户要的答案。只回一句「工作流执行失败」，
+                    // 用户手里一点线索都没有：是模型没装？是显存不够？还是提示词写坏了？
+                    ErrorMessage = "ComfyUI 工作流执行失败" + DescribeHistoryError(status)
                 };
             }
         }
@@ -300,6 +303,56 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
             ExternalTaskId = externalTaskId,
             State = ExternalTaskState.Running,
             ProgressPercent = 50
+        };
+    }
+
+    /// <summary>
+    /// 从 history 的 <c>status.messages</c> 里挑出**真正有用的那一句**。
+    ///
+    /// 形状是 <c>[["execution_start",{…}],["execution_error",{"node_id":"5","node_type":"KSampler","exception_message":"…"}]]</c>。
+    /// 找不到就给空串——宁可只说「执行失败」，也不要编一句原因出来。
+    /// </summary>
+    private static string DescribeHistoryError(JsonElement status)
+    {
+        if (!status.TryGetProperty("messages", out var messages) || messages.ValueKind != JsonValueKind.Array)
+            return string.Empty;
+
+        foreach (var message in messages.EnumerateArray())
+        {
+            if (message.ValueKind != JsonValueKind.Array || message.GetArrayLength() < 2) continue;
+            var kind = message[0].ValueKind == JsonValueKind.String ? message[0].GetString() : null;
+            if (!string.Equals(kind, "execution_error", StringComparison.OrdinalIgnoreCase)) continue;
+
+            var detail = message[1];
+            if (detail.ValueKind != JsonValueKind.Object) continue;
+
+            var nodeId = ReadText(detail, "node_id") ?? string.Empty;
+            var nodeType = ReadText(detail, "node_type") ?? string.Empty;
+            var exception = ReadText(detail, "exception_message") ?? ReadText(detail, "exception_type")
+                ?? string.Empty;
+            var where = nodeId.Length > 0 && nodeType.Length > 0
+                ? $"节点 {nodeId}（{nodeType}）"
+                : nodeId.Length > 0 ? $"节点 {nodeId}" : string.Empty;
+
+            if (where.Length == 0 && exception.Length == 0) continue;
+            if (where.Length == 0) return $"：{exception}";
+            return exception.Length == 0
+                ? $"：{where}报错（服务端没给原因）"
+                : $"：{where}报「{exception}」";
+        }
+
+        return string.Empty;
+    }
+
+    /// <summary>读一个可能是字符串、也可能是数字的字段（ComfyUI 的 <c>node_id</c> 两种都出现过）。</summary>
+    private static string? ReadText(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var value)) return null;
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.ToString(),
+            _ => null
         };
     }
 

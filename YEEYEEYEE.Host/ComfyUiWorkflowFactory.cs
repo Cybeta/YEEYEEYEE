@@ -166,6 +166,7 @@ public sealed class ComfyUiWorkflowFactory
             // 时长与比例：出视频那两条链会带。给了就写（帧数是**已经按帧率换算好**的），
             // 没给（例如出图）就是不写——不写等于沿用工作流自己的设定，那是它的正路。
             Length = TryGetFrames(invocation),
+            Seconds = TryGetSeconds(invocation),
             AspectRatio = GetString(invocation, "aspectRatio") ?? string.Empty,
             // 认不出底图入口时 Bind 不会写它，所以这里给不给都安全。
             ImageName = images.Count > 0 ? images[0] : string.Empty,
@@ -192,6 +193,15 @@ public sealed class ComfyUiWorkflowFactory
         if (value.ValueKind != JsonValueKind.Number) return null;
         var frames = value.GetInt32();
         return frames > 1 ? Math.Min(frames, 20_000) : null;
+    }
+
+    /// <summary>这次要写的**秒数**（帧数由那份工作流自己的表达式折出来时用）。</summary>
+    private static double? TryGetSeconds(Invocation invocation)
+    {
+        if (!invocation.Inputs.TryGetValue("videoSeconds", out var value)) return null;
+        if (value.ValueKind != JsonValueKind.Number) return null;
+        var seconds = value.GetDouble();
+        return seconds > 0 ? Math.Min(seconds, 600) : null;
     }
 
     private static List<string> GetStringList(Invocation invocation, string name)

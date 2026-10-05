@@ -124,8 +124,27 @@ public sealed class ComfyUiWorkflowSlots
     /// </summary>
     public bool IsFrameDriven => PositiveNodeId.Length == 0 && CanTakeImage;
 
+    /// <summary>
+    /// 秒数写在哪：当「帧数」不是字面量、而是由一个表达式从**秒数**折出来的时候用它。
+    ///
+    /// 实测形状（`U02-minimax_h3_图生视频基础版`）：`MiniMaxH3ImageToVideo.length` ←
+    /// 一个数学表达式节点 `max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17`，
+    /// 而 `a` 来自一个 `PrimitiveFloat`，`value = 5`，**节点标题就叫「Float (duration)」**。
+    ///
+    /// 这种工作流的正确改法是写**秒**、让它自己的表达式去折帧数与对齐（那个 `% 17` 是它要对齐的家族）——
+    /// 直接写帧等于绕过它自己的规则，写错一个数就会被服务端拒。
+    /// </summary>
+    public string SecondsNodeId { get; set; } = string.Empty;
+    public string SecondsInput { get; set; } = string.Empty;
+
+    /// <summary>这个结论是怎么来的（要显示给人看：为什么我们认为那个常量就是秒数）。</summary>
+    public string SecondsChain { get; set; } = string.Empty;
+
     /// <summary>能不能改这一镜的时长（要有帧数入口）。</summary>
     public bool CanSetLength => LengthNodeId.Length > 0;
+
+    /// <summary>能不能改时长——但写法是「写秒」而不是「写帧」（帧数由它自己的表达式折出来）。</summary>
+    public bool CanSetSeconds => SecondsNodeId.Length > 0;
 
     /// <summary>能不能改比例（要有那种固定选项的比例输入，且它的写法我们认得）。</summary>
     public bool CanSetAspect => AspectNodeId.Length > 0;
@@ -137,7 +156,9 @@ public sealed class ComfyUiWorkflowSlots
         parts.Add(NegativeNodeId.Length > 0 ? "负面词✓" : "负面词✗");
         parts.Add(CanResize ? "画幅✓" : "画幅✗");
         parts.Add(CanSetAspect ? "比例✓" : "比例✗");
-        parts.Add(CanSetLength ? $"时长✓（{LengthCurrent} 帧 × {FrameRateValue:0.##}fps）" : "时长✗");
+        parts.Add(CanSetLength
+            ? $"时长✓（{LengthCurrent} 帧 × {FrameRateValue:0.##}fps）"
+            : CanSetSeconds ? "时长✓（写秒数，帧数由它自己折）" : "时长✗");
         parts.Add(SeedNodeIds.Count > 0 ? "种子✓" : "种子✗");
         parts.Add(CanTakeImage ? "底图✓" : "底图✗");
         return string.Join(" ", parts);
@@ -189,6 +210,9 @@ public static class ComfyUiWorkflowBinder
 
     /// <summary>比例的输入名。这三个都是**一串固定选项**那种控件，值一定是字面量字符串。</summary>
     private static readonly string[] AspectNames = { "aspect_ratio", "aspect", "ratio" };
+
+    /// <summary>认「秒数常量」时，常量节点上可能用的输入名。</summary>
+    private static readonly string[] ConstantNames = { "value", "seconds", "duration", "int", "float", "number" };
 
     /// <summary>认槽位。工作流形状不对时不抛，只把「认不出什么」记进 Notes。</summary>
     public static ComfyUiWorkflowSlots Detect(string apiWorkflowJson)
@@ -518,9 +542,75 @@ public static class ComfyUiWorkflowBinder
                 + $"（现在是 {slots.LengthCurrent} 帧），换算用"
                 + (slots.FrameRateValue is { } rate ? $"{rate:0.##}fps（{slots.FrameRateSource}）" : "不到帧率")
                 + "。帧率本身不动：改了它动作的快慢也跟着变。");
-        else if (lengths.Count == 0)
-            slots.Notes.Add("这份工作流里找不到帧数入口（生成侧的 length / num_frames 这类）："
-                + "它出多少帧就是多少帧，时长改不了。");
+        else
+        {
+            // 帧数不是字面量时，可能是**算出来的**——那就去找那个真正收秒的常量。
+            ResolveSeconds(graph, slots);
+            if (slots.CanSetSeconds)
+                slots.Notes.Add("时长可以改（写秒数）：" + slots.SecondsChain);
+            else if (lengths.Count == 0)
+                slots.Notes.Add("这份工作流里找不到帧数入口（生成侧的 length / num_frames 这类）："
+                    + "它出多少帧就是多少帧，时长改不了。");
+        }
+    }
+
+    /// <summary>
+    /// 认「秒数」：帧数是算出来的时候，找出那个真正收秒的常量。
+    ///
+    /// 判据要**三条都成立**才认，少一条就放弃（宁可说「不懂」，也不要写到一个无关的数上）：
+    /// ① 帧数入口是连线，且它指向的节点带一个 <c>expression</c> 字面量（是个算数节点）；
+    /// ② 表达式里出现了这份工作流的帧率（说明那个自变量是**秒**而不是别的量）；
+    /// ③ 顺着算数节点的变量输入再走一跳，落在一个带数字字面量的常量节点上。
+    ///
+    /// 为什么这么谨慎：写错一个数不会有任何报错，只会安静地出一段时长不对的视频——
+    /// 而那比「改不了」难查得多。
+    /// </summary>
+    private static void ResolveSeconds(JsonObject graph, ComfyUiWorkflowSlots slots)
+    {
+        if (slots.FrameRateValue is not { } fps || fps <= 0) return;
+        var fpsText = fps.ToString("0.##", CultureInfo.InvariantCulture);
+
+        foreach (var pair in graph)
+        {
+            if (pair.Value is not JsonObject node || node["inputs"] is not JsonObject inputs) continue;
+            if (IsOutputSideNode(ClassTypeOf(node))) continue;
+
+            string? lengthKey = null;
+            foreach (var name in LengthNames)
+            {
+                if (inputs[name] is JsonArray) { lengthKey = name; break; }
+            }
+            if (lengthKey is null) continue;
+            if (ReadLink(inputs, lengthKey) is not { } framesFrom) continue;
+            if (graph[framesFrom.NodeId] is not JsonObject math || math["inputs"] is not JsonObject mathInputs) continue;
+            if (mathInputs["expression"] is not JsonValue expressionValue
+                || !expressionValue.TryGetValue<string>(out var expression)
+                || expression.Length == 0) continue;
+            if (!expression.Contains(fpsText, StringComparison.Ordinal)) continue;   // ②
+
+            foreach (var mathInput in mathInputs)
+            {
+                if (mathInput.Key == "expression") continue;
+                if (mathInput.Value is not JsonArray) continue;                      // 只跟连线走
+                if (ReadLink(mathInputs, mathInput.Key) is not { } variableFrom) continue;
+                if (graph[variableFrom.NodeId] is not JsonObject constant
+                    || constant["inputs"] is not JsonObject constantInputs) continue;
+
+                foreach (var candidate in ConstantNames)
+                {
+                    if (constantInputs[candidate] is not JsonValue value) continue;
+                    if (!value.TryGetValue<double>(out var seconds) || seconds <= 0) continue;
+
+                    slots.SecondsNodeId = variableFrom.NodeId;
+                    slots.SecondsInput = candidate;
+                    slots.SecondsChain = $"帧数由节点 {framesFrom.NodeId}（{ClassTypeOf(math)}）按表达式「{expression}」算出来，"
+                        + $"其中 {mathInput.Key} 来自节点 {variableFrom.NodeId}（{ClassTypeOf(constant)}）的 {candidate}"
+                        + $"（现在是 {seconds:0.##}）——表达式里带着帧率 {fpsText}，所以那个量是**秒**。"
+                        + "写秒数，帧数与对齐由它自己折。";
+                    return;
+                }
+            }
+        }
     }
 
     /// <summary>认种子：类型像采样器、并且 seed 是字面量的那些节点。</summary>
@@ -743,6 +833,10 @@ public static class ComfyUiWorkflowBinder
         if (slots.LengthNodeId.Length > 0 && values.Length is { } frames && frames > 1)
             SetInput(graph, slots.LengthNodeId, slots.LengthInput, JsonValue.Create(frames));
 
+        // 帧数是算出来的那种：写**秒**，让那份工作流自己的表达式去折帧数与对齐。
+        if (slots.SecondsNodeId.Length > 0 && values.Seconds is { } seconds && seconds > 0)
+            SetInput(graph, slots.SecondsNodeId, slots.SecondsInput, JsonValue.Create(seconds));
+
         if (values.Seed is { } seed)
             foreach (var seedNodeId in slots.SeedNodeIds)
                 SetInput(graph, seedNodeId, "seed", JsonValue.Create(seed));
@@ -859,6 +953,9 @@ public sealed record ComfyUiBindValues
 
     /// <summary>要写进去的帧数（已按帧率由秒换算好）；null 表示这次不改时长。</summary>
     public int? Length { get; init; }
+
+    /// <summary>要写进去的**秒数**：帧数由那份工作流自己的表达式折出来时用这一项。</summary>
+    public double? Seconds { get; init; }
 
     /// <summary>想要的比例，形如 <c>9:16</c>；空表示不改（沿用工作流自己的）。</summary>
     public string AspectRatio { get; init; } = string.Empty;

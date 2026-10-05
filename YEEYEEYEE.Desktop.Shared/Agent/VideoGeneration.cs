@@ -313,20 +313,32 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         // 换算不出来（它没有帧数入口、或找不到帧率）时**什么都不写**，并在说明里讲清是哪种情况。
         var notes = new List<string>();
         int? frames = null;
+        double? secondsToWrite = null;
         if (request.Seconds > 0)
         {
-            if (!detected.CanSetLength)
-                notes.Add("这份工作流没有帧数入口，所以这次没能改时长：它出多少就是多少"
-                    + (detected.LengthCurrent is { } fixedFrames ? $"（当前设定 {fixedFrames} 帧）。" : "。"));
-            else if (VideoFrameMath.TryFrames(request.Seconds, detected.FrameRateValue ?? 0, detected.LengthCurrent,
-                         out var computed, out var frameNote))
+            if (detected.CanSetLength)
             {
-                frames = computed;
-                notes.Add(frameNote);
+                if (VideoFrameMath.TryFrames(request.Seconds, detected.FrameRateValue ?? 0, detected.LengthCurrent,
+                        out var computed, out var frameNote))
+                {
+                    frames = computed;
+                    notes.Add(frameNote);
+                }
+                else
+                {
+                    notes.Add(frameNote);
+                }
+            }
+            else if (detected.CanSetSeconds)
+            {
+                // 帧数是算出来的那种：写**秒**，让那份工作流自己的表达式去折帧数与对齐。
+                secondsToWrite = request.Seconds;
+                notes.Add($"时长按**秒数**写（{request.Seconds} 秒）：" + detected.SecondsChain);
             }
             else
             {
-                notes.Add(frameNote);
+                notes.Add("这份工作流没有帧数入口，所以这次没能改时长：它出多少就是多少"
+                    + (detected.LengthCurrent is { } fixedFrames ? $"（当前设定 {fixedFrames} 帧）。" : "。"));
             }
         }
 
@@ -385,6 +397,8 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         if (height > 0) inputs["height"] = JsonSerializer.SerializeToElement(height);
         // 帧数是**已经换算并贴到它自己的家族上**的（见上面的 VideoFrameMath），这里原样交给 Host 写进那一个槽位。
         if (frames is { } frameCount) inputs["videoFrames"] = JsonSerializer.SerializeToElement(frameCount);
+        // 另一种写法：给**秒数**，由那份工作流自己的表达式折帧数（见 ComfyUiWorkflowSlots.CanSetSeconds）。
+        if (secondsToWrite is { } secondsValue) inputs["videoSeconds"] = JsonSerializer.SerializeToElement(secondsValue);
         if (aspectRatio.Length > 0) inputs["aspectRatio"] = JsonSerializer.SerializeToElement(aspectRatio);
         if (useReference)
         {

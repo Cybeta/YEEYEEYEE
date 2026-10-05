@@ -190,6 +190,7 @@ var tests = new (string Name, Action Run)[]
     ("出视频 · 认时长与比例槽位：只认生成侧，VHS_VideoCombine 的 frame_rate 不算", WorkflowBinderReadsLengthAndAspectSlots),
     ("出视频 · 只吃首帧那一类（SVD）不再算成驱动不了，但要说清提示词没进工作流", WorkflowBinderTreatsFrameDrivenShapeAsUsable),
     ("出视频 · 写进去的到底是什么：帧数与比例照写、帧率一个字不动、没给就不许乱写", WorkflowBinderWritesLengthAspectAndSize),
+    ("出视频 · 帧数是算出来的时候：认出那个收秒的常量（判据是表达式里带着帧率），写秒不写帧", WorkflowBinderFindsTheSecondsWhenFramesAreComputed),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -14168,6 +14169,49 @@ static void WorkflowBinderWritesLengthAspectAndSize()
     Expect(plain["1"]!["inputs"]!["length"]!.GetValue<int>() == 121, "没给帧数就别动它");
     Expect(plain["8"]!["inputs"]!["aspect_ratio"]!.GetValue<string>() == "16:9", "没给比例就别动它");
     Expect(plain["7"]!["inputs"]!["width"]!.GetValue<int>() == 768, "没给画幅就别动它");
+}
+
+/// <summary>
+/// 钉住「帧数是**算出来**的时候，写的是秒数」：实测 `U02-minimax_h3_图生视频基础版` 是
+/// `length ← 数学表达式 max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17 ← PrimitiveFloat(value=5，标题「Float (duration)」)`。
+///
+/// 这种工作流的正确改法是**写秒**（帧数与它的 `% 17` 对齐由它自己的表达式折），直接写帧等于绕过它的规矩；
+/// 而判据要求表达式里出现这份工作流的帧率——不然宁可认不出来，也不写到一个无关的数上。
+/// </summary>
+static void WorkflowBinderFindsTheSecondsWhenFramesAreComputed()
+{
+    const string template = """
+    {
+      "1": {"class_type":"MiniMaxH3ImageToVideo","inputs":{"prompt":["5",0],"width":["8",1],"height":["8",2],"length":["9",1],"first_frame":["7",0]}},
+      "3": {"class_type":"CreateVideo","inputs":{"fps":24.0,"images":["1",0]}},
+      "5": {"class_type":"CLIPTextEncode","inputs":{"text":"a cat","clip":["4",0]}},
+      "6": {"class_type":"PrimitiveFloat","inputs":{"value":5}},
+      "7": {"class_type":"LoadImage","inputs":{"image":"first.png"}},
+      "8": {"class_type":"WJILatentPreset","inputs":{"自定义宽":768,"自定义高":1344}},
+      "9": {"class_type":"ComfyMathExpression","inputs":{"expression":"max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17","values.a":["6",0]}}
+    }
+    """;
+
+    var slots = ComfyUiWorkflowBinder.Detect(template);
+    Expect(!slots.CanSetLength, "它的帧数不是字面量，所以「直接写帧」这条路认不出来");
+    Expect(slots.CanSetSeconds, "但该认得出秒数写在哪儿：" + slots.Describe());
+    Expect(slots.SecondsNodeId == "6" && slots.SecondsInput == "value",
+        $"秒数该认在节点 6 的 value 上，实际 {slots.SecondsNodeId}.{slots.SecondsInput}");
+    Expect(slots.SecondsChain.Contains("24") && slots.SecondsChain.Contains("秒"),
+        "说明里要写清「表达式里带着帧率，所以那个量是秒」：" + slots.SecondsChain);
+    Expect(slots.Describe().Contains("时长✓"), "Describe 也要说它能改：" + slots.Describe());
+
+    var bound = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues { Prompt = "她推开门", Seconds = 8 });
+    var root = System.Text.Json.Nodes.JsonNode.Parse(bound.ToJsonString())!.AsObject();
+    Expect(root["6"]!["inputs"]!["value"]!.GetValue<double>() == 8,
+        "8 秒要写进那个常量，实际 " + root["6"]!["inputs"]!["value"]);
+    Expect(root["9"]!["inputs"]!["expression"]!.GetValue<string>().Contains("24"),
+        "表达式本身一个字都不许动");
+
+    // 没给秒数时不许动它。
+    var untouched = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues { Prompt = "她推开门" });
+    var plain = System.Text.Json.Nodes.JsonNode.Parse(untouched.ToJsonString())!.AsObject();
+    Expect(plain["6"]!["inputs"]!["value"]!.GetValue<double>() == 5, "没给秒数就别动它");
 }
 
 static class Sample

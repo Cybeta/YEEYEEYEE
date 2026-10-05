@@ -29,25 +29,31 @@ internal static class VideoShapeNotice
         var lines = new List<string> { "这份工作流能收到：" + slots.Describe() };
 
         // 时长：改不动就当面说清是哪一种「改不动」；改得动就把这次要写的帧数真算出来。
-        if (!slots.CanSetLength)
+        if (slots.CanSetLength)
+        {
+            if (seconds > 0)
+                lines.Add(VideoFrameMath.TryFrames(seconds, slots.FrameRateValue ?? 0, slots.LengthCurrent,
+                        out _, out var frameNote)
+                    ? "· 时长：" + frameNote
+                    : "· 时长✗：" + frameNote);
+            else
+                lines.Add(slots.LengthCurrent is { } current
+                    ? $"· 时长：这次不指定秒数，沿用它的 {current} 帧。"
+                    : "· 时长：这次不指定秒数，沿用它的帧数设置。");
+        }
+        else if (slots.CanSetSeconds)
+        {
+            // 帧数是算出来的那种：写的是**秒**，帧数与对齐由它自己的表达式折。
+            lines.Add(seconds > 0
+                ? $"· 时长：写 {seconds} 秒（这份工作流的帧数是**算出来**的，不是写死的）：" + slots.SecondsChain
+                : "· 时长：这次不指定秒数，沿用它的默认值；要改的话这里写的是**秒数**（帧数由它自己的表达式折）。");
+        }
+        else
         {
             lines.Add(slots.LengthCurrent is { } fixedFrames
                 ? $"· 时长✗：这份工作流没有帧数入口（生成侧的 length / num_frames 这类），这次改不了时长——"
                   + $"它出多少就是多少（当前设定 {fixedFrames} 帧）。"
                 : "· 时长✗：这份工作流没有帧数入口，时长由它自己决定。");
-        }
-        else if (seconds > 0)
-        {
-            lines.Add(VideoFrameMath.TryFrames(seconds, slots.FrameRateValue ?? 0, slots.LengthCurrent,
-                    out _, out var frameNote)
-                ? "· 时长：" + frameNote
-                : "· 时长✗：" + frameNote);
-        }
-        else
-        {
-            lines.Add(slots.LengthCurrent is { } current
-                ? $"· 时长：这次不指定秒数，沿用它的 {current} 帧。"
-                : "· 时长：这次不指定秒数，沿用它的帧数设置。");
         }
 
         // 比例：只有它的写法我们认得、能照它造出新值，才算改得动——造不出来就如实说改不了。
