@@ -345,6 +345,19 @@ public sealed class SiteProfile
     /// </summary>
     public Dictionary<string, List<string>> OptionValues { get; set; } = new();
 
+    /// <summary>
+    /// 「**文件选择槽**」：`类名.输入名` → 收哪一类素材（`image` / `video` / `audio`）。
+    ///
+    /// 为什么要有这一份：有一类自定义节点的底图入口**既不在 `LoadImage` 家族里、输入名也不以 `image` 开头**
+    /// （实测 `NanFengH3MultiReferenceGeneratorV10` 的 `图片1`…`图片9`），它按候选清单看其实就是
+    /// 「服务器 input 目录的文件选择」，与 `LoadImage.image` 同一种形状。判据在**服务端的节点定义**里，
+    /// 而生成时手上只有工作流正文——所以导入时（那时有节点定义）算好存这儿，生成时由 binder 读。
+    ///
+    /// 只存**这个站点用到的类**，所以很小。看不到这份表时，binder 只认老的那几种入口，
+    /// 其余照旧如实说「我没认出来」——不会因为缺表就说错话。
+    /// </summary>
+    public Dictionary<string, string> FileSlots { get; set; } = new();
+
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.Now;
 
     /// <summary>这个站点用哪把密钥：出图 / 出视频各自的字段（留空则沿用当前选中模型的密钥）。</summary>

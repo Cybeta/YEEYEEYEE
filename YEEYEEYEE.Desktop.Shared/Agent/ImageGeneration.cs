@@ -588,7 +588,10 @@ public sealed class ComfyUiImageProvider : IImageProvider
 
             try
             {
-                detected = ComfyUiWorkflowBinder.Detect(template);
+                // 「文件选择槽」表一起带上：那类底图入口（`图片1`…`图片9`）的判据只在服务端定义里，
+                // 导入时算好存在站点文件上（见 SiteProfile.FileSlots）；缺了它只会少认几处。
+                var workflowSite = SiteCatalog.Load().Sites.FirstOrDefault(item => item.Id == request.WorkflowSiteId);
+                detected = ComfyUiWorkflowBinder.Detect(template, workflowSite?.OptionValues, workflowSite?.FileSlots);
             }
             catch (Exception error)
             {

@@ -72,7 +72,7 @@ if (mode == "audit")
             if (string.IsNullOrWhiteSpace(payload)) { unreadable++; continue; }
 
             ComfyUiWorkflowSlots slots;
-            try { slots = ComfyUiWorkflowBinder.Detect(payload); }
+            try { slots = ComfyUiWorkflowBinder.Detect(payload, site.OptionValues, site.FileSlots); }
             catch (Exception error) { unreadable++; _ = error; continue; }
 
             if (!slots.CanTextToImage)
@@ -208,7 +208,7 @@ if (mode == "stale")
             var payload = SiteCatalog.LoadPayload(site.Id, workflow.PayloadFile);
             if (string.IsNullOrWhiteSpace(payload)) continue;
 
-            var slots = ComfyUiWorkflowBinder.Detect(payload!);
+            var slots = ComfyUiWorkflowBinder.Detect(payload!, site.OptionValues, site.FileSlots);
             var filled = ComfyUiWorkflowHealth.FilledMediaSlots(slots, images, 0, 0);
             var message = ComfyUiWorkflowHealth.DescribeUnfilledStaleMedia(workflow, filled);
             if (message is null) continue;
@@ -622,7 +622,7 @@ if (mode == "slots")
     var site = sites.First(item => item.IsComfyUi);
     var workflow = site.VideoWorkflows.First(item => item.Key == args[1]);
     var payload = SiteCatalog.LoadPayload(site.Id, workflow.PayloadFile) ?? string.Empty;
-    var slots = ComfyUiWorkflowBinder.Detect(payload);
+    var slots = ComfyUiWorkflowBinder.Detect(payload, site.OptionValues, site.FileSlots);
     Console.WriteLine($"工作流 {workflow.Title}（{workflow.NodeCount} 节点）");
     Console.WriteLine($"  收文字 {slots.CanTextToImage}｜底图 {slots.CanTakeImage}（容量 {slots.ImageCapacity}）｜只吃首帧 {slots.IsFrameDriven}");
     Console.WriteLine($"  画幅 {slots.CanResize}｜时长(帧数) {slots.CanSetLength}｜时长(写秒) {slots.CanSetSeconds}｜比例 {slots.CanSetAspect}");
@@ -1071,6 +1071,29 @@ if (mode == "reimport")
     Console.WriteLine(error.Length > 0
         ? "安装失败：" + error
         : $"已安装：{installed!.Workflows.Count} 份（推荐项 {installed.Workflows.Count(w => w.Recommended)}）");
+    if (installed is null) return;
+
+    // 导入时新算出来的那张「文件选择槽」表（判据只在服务端的节点定义里，生成时读不到，所以落在这儿）。
+    Console.WriteLine($"「文件选择槽」表 {installed.FileSlots.Count} 条");
+    foreach (var kind in new[] { ComfyUiFileSlotKinds.Image, ComfyUiFileSlotKinds.Video, ComfyUiFileSlotKinds.Audio })
+    {
+        var group = installed.FileSlots.Where(pair => pair.Value == kind).Select(pair => pair.Key).OrderBy(item => item).ToList();
+        Console.WriteLine($"  {kind}：{group.Count} 条" + (kind == ComfyUiFileSlotKinds.Image
+            ? "　" + string.Join("、", group) : string.Empty));
+    }
+
+    // 拿那份多参工作流实地看一眼：认出来几格、额度几、说明里怎么说。
+    foreach (var workflow in installed.Workflows.Where(item => item.Title.StartsWith("U23-", StringComparison.Ordinal)))
+    {
+        var payload = SiteCatalog.LoadPayload(installed.Id, workflow.PayloadFile) ?? string.Empty;
+        var slots = ComfyUiWorkflowBinder.Detect(payload, installed.OptionValues, installed.FileSlots);
+        Console.WriteLine($"工作流 {workflow.Title}：收文字 {slots.CanTextToImage}｜底图 {slots.CanTakeImage}"
+            + $"（{slots.FileSlotImages.Count} 格，额度 {slots.ImageCapacity}）"
+            + $"｜声明式影音槽 视频 {slots.FileSlotVideos.Count} / 音频 {slots.FileSlotAudios.Count}");
+        Console.WriteLine("  图槽：" + string.Join("、", slots.FileSlotImages.Select(slot => slot.NodeId + "." + slot.Input)));
+        foreach (var note in slots.Notes.Where(item => item.Contains("文件选择槽") || item.Contains("源视频")))
+            Console.WriteLine("  · " + note);
+    }
     return;
 }
 
@@ -1273,7 +1296,7 @@ if (mode == "sweep")
     var wanted = args.Length > 2
         ? args.Skip(2).ToList()
         : site.VideoWorkflows
-            .Where(w => ComfyUiWorkflowBinder.Detect(SiteCatalog.LoadPayload(site.Id, w.PayloadFile) ?? "{}").CanSetLength)
+            .Where(w => ComfyUiWorkflowBinder.Detect(SiteCatalog.LoadPayload(site.Id, w.PayloadFile) ?? "{}", site.OptionValues, site.FileSlots).CanSetLength)
             .Select(w => w.Key)
             .ToList();
 
@@ -1284,7 +1307,7 @@ if (mode == "sweep")
         var workflow = site.VideoWorkflows.FirstOrDefault(item => item.Key == key);
         if (workflow is null) { Console.WriteLine($"[跳过] 找不到 {key}"); continue; }
         var template = SiteCatalog.LoadPayload(site.Id, workflow.PayloadFile) ?? string.Empty;
-        var slots = ComfyUiWorkflowBinder.Detect(template);
+        var slots = ComfyUiWorkflowBinder.Detect(template, site.OptionValues, site.FileSlots);
         var inputs = new Dictionary<string, JsonElement>
         {
             ["prompt"] = JsonSerializer.SerializeToElement(slots.CanTextToImage ? "一位红发少女站在雪中，电影质感" : string.Empty),

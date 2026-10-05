@@ -67,7 +67,8 @@ public static class ComfyUiWorkflowInspector
         try
         {
             // 把站点那张「见过的选项值」表一起带进去：改比例要靠它写出服务端认的值（见 SiteProfile.OptionValues）。
-            return (ComfyUiWorkflowBinder.Detect(payload, site.OptionValues), string.Empty);
+            // 「文件选择槽」表也一样带进去：那类底图入口（`图片1`…`图片9`）的判据只在服务端定义里。
+            return (ComfyUiWorkflowBinder.Detect(payload, site.OptionValues, site.FileSlots), string.Empty);
         }
         catch (Exception error)
         {
@@ -306,6 +307,11 @@ public static class ComfyUiLibrary
             ListSource = "ComfyUI 的 workflows 目录",
             Workflows = new List<SiteWorkflow>(),
             OptionValues = CollectOptionValues(result.Payloads),
+            // 「文件选择槽」表：判据在**服务端的节点定义**里，而生成时读不到那二十多 MB；导入时算一次存这儿。
+            // 定义拉不到时留空——binder 那边缺了这张表只会少认几处（照旧说「我没认出来」），不会说错话。
+            FileSlots = result.ObjectInfo is { } definitions
+                ? ComfyUiImportAuditor.CollectFileSlots(definitions, result.Payloads)
+                : new Dictionary<string, string>(StringComparer.Ordinal),
             // 这次实际用上的前端节点规则（含上次学到的、以及用户刚同意让模型认的）：落到站点上，
             // 下次导入自动接着用——同一台机器不必每导一次就再认一遍。
             VirtualNodeRules = result.AppliedRules.ToList()

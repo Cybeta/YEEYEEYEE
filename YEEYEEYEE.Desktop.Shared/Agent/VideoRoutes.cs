@@ -182,7 +182,7 @@ public static class VideoRouteOptions
                 var payload = SiteCatalog.LoadPayload(site.Id, workflow.PayloadFile);
                 if (!string.IsNullOrWhiteSpace(payload))
                 {
-                    var slots = ComfyUiWorkflowBinder.Detect(payload);
+                    var slots = ComfyUiWorkflowBinder.Detect(payload, site.OptionValues, site.FileSlots);
                     return (slots.CanTakeImage, "读了工作流正文：它" + (slots.CanTakeImage ? "有" : "没有") + "底图入口");
                 }
                 return (null, "工作流正文没落盘，读不到");

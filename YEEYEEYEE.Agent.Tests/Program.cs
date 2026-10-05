@@ -147,6 +147,7 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 出片前：没给满的槽位留着失效的示例要挡住提交（影子判据与绑定必须逐字对齐）", ComfyUiBlocksUnfilledStaleMedia),
     ("ComfyUI 多路音源：两个音频口按顺序各收一段，只给一段时后面的入口保持它自己的示例", ComfyUiFeedsEveryAudioEntryInOrder),
     ("ComfyUI 认入口：认不出就说「我没认出来，请指给我」，不许说成「用不了」", ComfyUiBinderSaysWhatItCouldNotRecognize),
+    ("ComfyUI 认入口：服务器声明为文件选择的槽也算底图入口（空着的那几格照样算）", ComfyUiDeclaredFileSlotsBecomeEntries),
     ("ComfyUI 体检：服务器上没有那个类型时只能说「判断不了」，不能说成「是我们转换丢的」", ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
@@ -10727,6 +10728,138 @@ static void ComfyUiFeedsEveryAudioEntryInOrder()
 	var one = Bind("x.wav");
 	Expect(one["1"]?["inputs"]?["audio"]?.ToString() == "x.wav" && one["2"]?["inputs"]?["audio"]?.ToString() == "b.wav",
 		"只给一段时，第二个入口要保持它自己的示例（不拿同一段去凑数）：" + one.ToJsonString());
+}
+
+/// <summary>
+/// 钉住「服务器声明为文件选择的槽」也能当底图入口用（第三种形状：一个节点上并排几格、每格自己的输入名）。
+///
+/// 真机上的由头：`NanFengH3MultiReferenceGeneratorV10` 的 `图片1`…`图片9`——类名里没有 `LoadImage`、
+/// 输入名也不以 `image` 开头，于是整类漏掉：一份能收九张参考图的工作流在选择器里成了「只能文生视频」。
+///
+/// 两面都要钉住，因为它们各自都会走偏：
+///   · **空着的格子也算入口**（作者只放了 `图片1`，其余是 `未选择`）：一格算不算入口由**节点的能力**决定，
+///     不由作者那一份用过没用过决定——`未选择` 是候选清单里的一个合法取值，往里写只是改一个值。
+///   · 种类先看**名字**（`图片1` / `视频1` / `音频1` 是作者给这一格起的名字）：这一族三档的候选清单
+///     **是同一份**（input 目录的全量文件列表）、值又可能是空的，只有名字说得出这一格收什么。
+///     要「路径 / URL」的名字一律不收；`.safetensors` 那种候选不是素材的也不收。
+/// </summary>
+static void ComfyUiDeclaredFileSlotsBecomeEntries()
+{
+	// 节点定义：两格图片槽（值可能是 未选择）+ 视频 / 音频各一格 + 一个模型选择 + 一个要路径的。
+	const string objectInfo = """
+	{
+	  "NanFengMulti": {
+	    "input": {"required": {
+	      "模型": [["a.safetensors", "b.safetensors"]],
+	      "图片1": [["未选择", "a.png", "b.jpg", "c.png", "d.png", "e.png"]],
+	      "图片2": [["未选择", "a.png", "b.jpg", "c.png", "d.png", "e.png"]],
+	      "视频1": [["未选择", "clip.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4"]],
+	      "音频1": [["未选择", "voice.wav", "b.mp3", "c.mp3", "d.mp3", "e.mp3"]],
+	      "图片路径": [["C:/x/a.png", "C:/x/b.png", "C:/x/c.png", "C:/x/d.png", "C:/x/e.png"]],
+	      "视频VAE": [["v1.safetensors", "v2.safetensors", "v3.safetensors", "v4.safetensors"]]
+	    }},
+	    "output": ["IMAGE"], "output_name": ["图像"]
+	  },
+	  "SaveVideo": {"input": {"required": {"video": ["VIDEO"]}}, "output": [], "output_name": []},
+	  "LoadImage": {"input": {"required": {"image": [["a.png", "b.jpg", "c.png", "d.png"]]}},
+	    "output": ["IMAGE"], "output_name": ["IMAGE"]},
+	  "VHS_LoadVideo": {"input": {"required": {"video": [["a.mp4", "b.mp4", "c.mp4", "d.mp4"]]}},
+	    "output": ["IMAGE"], "output_name": ["IMAGE"]}
+	}
+	""";
+
+	// 正文：只有 图片1 有值，其余是 未选择（真机上那份就是这样）。
+	const string payload = """
+	{
+	  "1": {"class_type": "NanFengMulti", "inputs": {"模型": "a.safetensors", "图片1": "作者那张.png",
+	    "图片2": "未选择", "视频1": "未选择", "音频1": "未选择", "图片路径": "C:/x/a.png"}},
+	  "2": {"class_type": "SaveVideo", "inputs": {"video": ["1", 0]}}
+	}
+	""";
+
+	var definitions = System.Text.Json.Nodes.JsonNode.Parse(objectInfo)!.AsObject();
+	var map = ComfyUiImportAuditor.CollectFileSlots(definitions,
+		new Dictionary<string, string>(StringComparer.Ordinal) { ["T/一份.json"] = payload });
+
+	Expect(map.TryGetValue("NanFengMulti.图片1", out var first) && first == "image",
+		"图片1 要按服务器声明认成图片槽：" + string.Join("、", map.Select(pair => pair.Key + "=" + pair.Value)));
+	Expect(map.ContainsKey("NanFengMulti.图片2"), "**空着的那一格同样要认**：作者没用过不等于它不收");
+	Expect(map.TryGetValue("NanFengMulti.视频1", out var video) && video == "video", "视频1 是视频槽");
+	Expect(map.TryGetValue("NanFengMulti.音频1", out var audio) && audio == "audio", "音频1 是音频槽");
+	Expect(!map.ContainsKey("NanFengMulti.模型"), "模型那种候选不是素材槽，不许收进来");
+	Expect(!map.ContainsKey("NanFengMulti.图片路径"),
+		"名字说要「路径」的不收——我们按文件名引用，写路径进去反而找不到文件");
+	Expect(!map.ContainsKey("NanFengMulti.视频VAE"),
+		"名字里带「视频」**不等于**是源视频槽：`视频VAE` 是选模型的格子（候选全是 .safetensors）——"
+		+ "只看名字会把它当片源报给用户，真往里写一个 mp4 就是提交被拒。实际收了：" + string.Join("、", map.Keys));
+
+	var slots = ComfyUiWorkflowBinder.Detect(payload, fileSlots: map);
+	Expect(slots.CanTakeImage, "这份该认得出底图入口：" + slots.Describe());
+	Expect(slots.FileSlotImages.Count == 2 && slots.ImageCapacity == 2,
+		"两格图槽，额度就是 2，实际 " + slots.FileSlotImages.Count + " / " + slots.ImageCapacity);
+	Expect(slots.FileSlotImages[0].Input == "图片1" && slots.FileSlotImages[1].Input == "图片2",
+		"要按声明顺序排：" + string.Join("、", slots.FileSlotImages.Select(slot => slot.Input)));
+	Expect(slots.FileSlotVideos.Count == 1 && slots.FileSlotAudios.Count == 1,
+		"视频 / 音频槽也要认出来（这一轮只认不写）：" + slots.Describe());
+	Expect(slots.Notes.Any((string note) => note.Contains("文件选择槽")), "要在说明里讲清这类入口是什么");
+	Expect(slots.Notes.Any((string note) => note.Contains("源视频")),
+		"认出来但这一轮不写的影音槽也要如实说出来：" + string.Join("；", slots.Notes));
+
+	// 给满两格。
+	var both = ComfyUiWorkflowBinder.Bind(payload, slots, new ComfyUiBindValues
+	{
+		Prompt = "两个人",
+		ImageName = "我的1.png",
+		ImageNames = new[] { "我的1.png", "我的2.png" }
+	});
+	Expect(both["1"]!["inputs"]!["图片1"]!.GetValue<string>() == "我的1.png", "第 1 格收第 1 张");
+	Expect(both["1"]!["inputs"]!["图片2"]!.GetValue<string>() == "我的2.png", "第 2 格收第 2 张");
+
+	// 只给一张：第 2 格保持它原来的「未选择」，不许拿第 1 张去顶。
+	var only = ComfyUiWorkflowBinder.Bind(payload, slots,
+		new ComfyUiBindValues { Prompt = "两个人", ImageName = "我的1.png" });
+	Expect(only["1"]!["inputs"]!["图片1"]!.GetValue<string>() == "我的1.png", "给一张时写第 1 格");
+	Expect(only["1"]!["inputs"]!["图片2"]!.GetValue<string>() == "未选择", "第 2 格保持原样，不拿同一张凑数");
+
+	// 影子判据（出片前挡「没给满 + 示例已失效」用的那个）必须与绑定对齐。
+	var filled = ComfyUiWorkflowHealth.FilledMediaSlots(slots, 1, 0, 0);
+	Expect(filled.Count == 1 && filled[0] == "1.图片1",
+		"影子判据说「这次写满了哪几格」要与绑定一致：" + string.Join("、", filled));
+
+	// 值是**连线**的那一格不算：那是图里喂过来的，不是让人选文件的地方（写进去会顶掉连线）。
+	const string wired = """
+	{
+	  "1": {"class_type": "NanFengMulti", "inputs": {"模型": "a.safetensors", "图片1": ["9", 0],
+	    "图片2": "未选择", "视频1": "未选择", "音频1": "未选择", "图片路径": ""}},
+	  "9": {"class_type": "SomethingElse", "inputs": {}}
+	}
+	""";
+	var wiredSlots = ComfyUiWorkflowBinder.Detect(wired,
+		fileSlots: ComfyUiImportAuditor.CollectFileSlots(definitions,
+			new Dictionary<string, string>(StringComparer.Ordinal) { ["T/一份.json"] = wired }));
+	Expect(wiredSlots.FileSlotImages.Count == 1 && wiredSlots.FileSlotImages[0].Input == "图片2",
+		"接了连线的那一格不许当文件槽，实际 " + string.Join("、", wiredSlots.FileSlotImages.Select(slot => slot.Input)));
+
+	// 按类名**已经认下**的那几格不许再被当成「另一种入口」——`LoadImage.image` 与 `VHS_LoadVideo.video`
+	// 本身也在那张表里：不过滤的话，208 份 LoadImage 工作流会各挂一句假的「混着两种入口」，
+	// 而正常喂着源视频的那几份会被告知「我认出来了但不写」。
+	var plainSlots = ComfyUiWorkflowBinder.Detect("""{"1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}}}""",
+		fileSlots: ComfyUiImportAuditor.CollectFileSlots(definitions,
+			new Dictionary<string, string>(StringComparer.Ordinal)
+			{
+				["T/一份.json"] = """{"1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}}}"""
+			}));
+	Expect(plainSlots.ImageNodeIds.Count == 1
+		&& !plainSlots.Notes.Any((string note) => note.Contains("既有")),
+		"已经按类名认下的入口不许再被当成「另一种」：" + string.Join("；", plainSlots.Notes));
+
+	const string sourceVideo = """{"1": {"class_type": "VHS_LoadVideo", "inputs": {"video": "a.mp4"}}}""";
+	var videoSlots = ComfyUiWorkflowBinder.Detect(sourceVideo,
+		fileSlots: ComfyUiImportAuditor.CollectFileSlots(definitions,
+			new Dictionary<string, string>(StringComparer.Ordinal) { ["T/一份.json"] = sourceVideo }));
+	Expect(videoSlots.CanTakeVideo && videoSlots.FileSlotVideos.Count == 0
+		&& !videoSlots.Notes.Any((string note) => note.Contains("源视频槽")),
+		"这份正在正常喂源视频，不许对它说「我认出来了但不写」：" + string.Join("；", videoSlots.Notes));
 }
 
 /// <summary>

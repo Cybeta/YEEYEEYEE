@@ -271,7 +271,9 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         try
         {
             var payload = SiteCatalog.LoadPayload(choice.Site.Id, choice.Workflow.PayloadFile);
-            return string.IsNullOrWhiteSpace(payload) ? null : ComfyUiWorkflowBinder.Detect(payload);
+            return string.IsNullOrWhiteSpace(payload)
+                ? null
+                : ComfyUiWorkflowBinder.Detect(payload, choice.Site.OptionValues, choice.Site.FileSlots);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException
             or System.Text.Json.JsonException or InvalidOperationException or ArgumentException)
@@ -309,7 +311,8 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         {
             // 站点那张「见过的选项值」表一起带上：比例这一项要写出服务端认的值就得靠它
             //（见 SiteProfile.OptionValues；只照当前值的写法把数字换掉会造出它不认的字符串）。
-            detected = ComfyUiWorkflowBinder.Detect(template, site?.OptionValues);
+            // 「文件选择槽」表也一起带上：那类底图入口（`图片1`…`图片9`）的判据只在服务端定义里。
+            detected = ComfyUiWorkflowBinder.Detect(template, site?.OptionValues, site?.FileSlots);
         }
         catch (Exception error) when (error is System.Text.Json.JsonException or InvalidOperationException)
         {

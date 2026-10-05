@@ -333,6 +333,10 @@ public static class ComfyUiImportAuditor
         var nodeTotal = 0;
         var unreadable = 0;
 
+        // 「文件选择槽」表：整批算一次（看的是**服务器给的节点定义**，与逐份正文无关），
+        // 交给每个类里那几处判据用——认出声明式的底图入口、给缺文件的说法分档都要它。
+        var fileSlots = CollectFileSlots(objectInfo, payloads);
+
         foreach (var pair in rawDrafts)
         {
             var title = Path.GetFileNameWithoutExtension(pair.Key);
@@ -412,7 +416,7 @@ public static class ComfyUiImportAuditor
 
             // 正文结构查完了，再查一件正文结构查不出的事：**它引用的文件这台机器上还有没有**。
             // 正文里写着一个不存在的文件名，照样「必填输入都在」——只有拿服务器当前的候选清单去对才看得出。
-            var media = MediaInputs(api);
+            var media = MediaInputs(api, fileSlots);
             unreadable += CountUnreadableSlots(api, objectInfo);
             foreach (var node in api)
             {
@@ -708,17 +712,138 @@ public static class ComfyUiImportAuditor
     /// 这份正文里「我们出片时会喂素材」的那些输入（写成「节点.输入」）。用来把两类问题分开说：
     /// 落在这些输入上的是**示例素材**（给了就能跑），落在别处的是**模型/依赖**（得先补文件）。
     /// </summary>
-    private static HashSet<string> MediaInputs(JsonObject api)
+    private static HashSet<string> MediaInputs(JsonObject api, IReadOnlyDictionary<string, string> fileSlots)
     {
-        var slots = ComfyUiWorkflowBinder.Detect(api.ToJsonString());
+        var slots = ComfyUiWorkflowBinder.Detect(api.ToJsonString(), fileSlots: fileSlots);
         var set = new HashSet<string>(StringComparer.Ordinal);
         foreach (var id in slots.ImageNodeIds) set.Add(id + "." + slots.ImageInput);
         foreach (var pair in slots.ImageListInputs) set.Add(pair.Key + "." + pair.Value);
+        // 声明式文件槽（服务器声明为「文件选择」的那些格子）：它们同样是「我们会替换」的素材槽——
+        // 不列进来的话，`图片1` 里那份示例图一旦不在服务器上，会被说成「模型/依赖，得先把文件补上」，
+        // 而它其实只要用户给一张自己的参考图就能跑（那是两件不同的事，说法也不同）。
+        foreach (var slot in slots.FileSlotImages) set.Add(slot.NodeId + "." + slot.Input);
         for (var index = 0; index < slots.VideoNodeIds.Count && index < slots.VideoInputs.Count; index++)
             set.Add(slots.VideoNodeIds[index] + "." + slots.VideoInputs[index]);
         for (var index = 0; index < slots.AudioNodeIds.Count && index < slots.AudioInputs.Count; index++)
             set.Add(slots.AudioNodeIds[index] + "." + slots.AudioInputs[index]);
         return set;
+    }
+
+    /// <summary>
+    /// 从节点定义里读出「**文件选择槽**」：哪些输入是**服务器上的文件选择**（候选清单就是 input 目录的文件），
+    /// 以及它收哪一类素材。按 `类名.输入名` 建表，存进站点文件（<c>SiteProfile.FileSlots</c>）。
+    ///
+    /// 为什么在导入时算一次存下来：合法的候选清单只在服务端那二十多 MB 的 <c>object_info</c> 里，
+    /// 而生成时手上只有工作流正文。这张表很小（只覆盖这个站点用到的类）。
+    ///
+    /// 判据两步，都不是猜的：
+    ///   ① 这个输入是**固定选项**、且候选清单**主要是文件**（<see cref="FileOptions"/>，与「缺文件」那条判据同一份）；
+    ///   ② 哪一类素材：先看**输入名**里的字样（`图片1` / `视频1` / `音频1` —— 那是作者给这一格起的名字），
+    ///      名字看不出来时退回看**这一格现在的值**是什么后缀。两步都看不出种类就不收：
+    ///      宁可不认，也不把一格不知是什么的东西当参考图槽。
+    ///
+    /// 为什么名字优先于值：实测 `NanFengH3MultiReferenceGeneratorV10` 的 `图片1`/`视频1`/`音频1` 三档候选清单
+    /// **是同一份**（input 目录的全量文件列表），值也可能是空的（`未选择`）——只有名字说得出这一格收什么。
+    /// 要「路径 / URL」的那些名字一律不收（我们按文件名引用，写路径进去反而找不到文件）。
+    /// </summary>
+    public static Dictionary<string, string> CollectFileSlots(
+        JsonObject objectInfo, IReadOnlyDictionary<string, string> payloads)
+    {
+        ArgumentNullException.ThrowIfNull(objectInfo);
+        ArgumentNullException.ThrowIfNull(payloads);
+
+        // 先扫一遍正文：这个站点用过哪些类，以及每一格现在放着什么（给「名字看不出种类」时兜底）。
+        var classes = new SortedSet<string>(StringComparer.Ordinal);
+        var used = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var payload in payloads.Values)
+        {
+            if (string.IsNullOrWhiteSpace(payload)) continue;
+            JsonObject api;
+            try
+            {
+                api = JsonNode.Parse(payload) as JsonObject ?? new JsonObject();
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                continue;
+            }
+
+            foreach (var node in api)
+            {
+                if (node.Value is not JsonObject body) continue;
+                var classType = body["class_type"]?.GetValue<string>() ?? string.Empty;
+                if (classType.Length == 0) continue;
+                classes.Add(classType);
+                if (body["inputs"] is not JsonObject inputs) continue;
+                foreach (var field in inputs)
+                    if (field.Value is JsonValue value && value.TryGetValue<string>(out var text) && text.Length > 0)
+                        used.TryAdd(classType + "." + field.Key, text);
+            }
+        }
+
+        var slots = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var classType in classes)
+        {
+            if (objectInfo[classType] is not JsonObject definition) continue;
+            if (definition["input"] is not JsonObject scopes) continue;
+            foreach (var scope in new[] { "required", "optional" })
+            {
+                if (scopes[scope] is not JsonObject items) continue;
+                foreach (var item in items)
+                {
+                    if (FileOptions(definition, item.Key) is not { Count: > 0 } options) continue;
+                    var sample = used.TryGetValue(classType + "." + item.Key, out var seen) ? seen : string.Empty;
+                    var kind = FileSlotKind(item.Key, sample, options);
+                    if (kind.Length > 0) slots[classType + "." + item.Key] = kind;
+                }
+            }
+        }
+        return slots;
+    }
+
+    /// <summary>
+    /// 这一格收哪一类素材。名字与文件**都要对得上**才算，两边各挡一类错。
+    ///
+    /// 名字那一半挡的是：**名字里带「视频」的不一定是片源**——实测这台机器上 `视频VAE`、`音频VAE`、
+    /// `FeiHouEasyH3Loader.video_vae`、`MMAudioModelLoader.mmaudio_model`、`TRT视频编码引擎` 全是
+    /// **选模型**的格子（候选一堆 `.safetensors`）。只看名字会把它们当源视频槽报给用户，
+    /// 真往里写一个 mp4 就是提交被拒、或者跑出莫名其妙的结果。
+    ///
+    /// 文件那一半挡的是相反的错：`图片1` / `视频1` / `音频1` 三档的候选清单**是同一份**
+    /// （input 目录的全量文件列表，图最多），按「哪类多」判会把源视频/源音频槽判成图槽。
+    /// 所以只问「清单里**有没有**这一类文件」——有就算它，不问多少。
+    ///
+    /// 要「路径 / URL」的名字一律不收：我们按**文件名**引用（先把文件传到 input 目录），
+    /// 写一个路径进去反而让服务端找不到文件——与 `ResolveMedia` 里「故意不收 video_path」同一条道理。
+    /// </summary>
+    private static string FileSlotKind(string name, string sample, IReadOnlyList<string> options)
+    {
+        var text = name.ToLowerInvariant();
+        if (text.Contains("路径") || text.Contains("url") || text.Contains("path")) return string.Empty;
+
+        var byName = text.Contains("图") || text.Contains("image") || text.Contains("img")
+            ? ComfyUiFileSlotKinds.Image
+            : text.Contains("视频") || text.Contains("影片") || text.Contains("video")
+                || text.Contains("movie") || text.Contains("film")
+                ? ComfyUiFileSlotKinds.Video
+                : text.Contains("音频") || text.Contains("声音") || text.Contains("语音") || text.Contains("audio")
+                    || text.Contains("sound") || text.Contains("voice") || text.Contains("music")
+                    ? ComfyUiFileSlotKinds.Audio
+                    : string.Empty;
+
+        var fromValue = ComfyUiWorkflowBinder.MediaKindOfFileName(sample);
+
+        // 名字没说什么（`file` / `ref` 这种）：**只认「现在放着的就是一个素材文件」**这一条。
+        // 不去数候选里哪一类多——那些清单常常是全量文件列表，按多数猜会把片源槽猜成图槽。
+        if (byName.Length == 0) return fromValue;
+
+        // 值已经是那一类文件：两类对得上就收。
+        if (fromValue.Length > 0) return byName == fromValue ? byName : string.Empty;
+
+        // 空着（`未选择` 这类哨兵）：清单里**真有那一类文件**才算。
+        return options.Any(option => ComfyUiWorkflowBinder.MediaKindOfFileName(option) == byName)
+            ? byName
+            : string.Empty;
     }
 
     /// <summary>
@@ -1222,6 +1347,11 @@ public static class ComfyUiWorkflowHealth
         if (images > 0)
             foreach (var (listNodeId, listInput) in slots.ImageListInputs)
                 filled.Add(listNodeId + "." + listInput);
+
+        // 声明式文件槽：一格一个自己的输入名，按顺序对号入座、给不满就只写前几个。
+        // 与 Bind 里那段循环**逐字对齐**（同一个顺序、同一个「给不满就少写」的口径）。
+        for (var index = 0; index < slots.FileSlotImages.Count && index < images; index++)
+            filled.Add(slots.FileSlotImages[index].NodeId + "." + slots.FileSlotImages[index].Input);
 
         for (var index = 0; index < slots.VideoNodeIds.Count && index < videos; index++)
             filled.Add(slots.VideoNodeIds[index] + "." + slots.VideoInputs[index]);

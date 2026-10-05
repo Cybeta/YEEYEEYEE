@@ -5,6 +5,24 @@ using System.Text.Json.Nodes;
 namespace YEEYEEYEE.Host;
 
 /// <summary>
+/// 一格里的一处素材槽：哪个节点的哪个输入。用于「服务器声明为文件选择」的那类槽
+/// （见 <see cref="ComfyUiWorkflowSlots.FileSlotImages"/>）——它们**各自有自己的输入名**，
+/// 不能像 `LoadImage` 家族那样所有入口共用一个 `image`。
+/// </summary>
+public sealed record ComfyUiFileSlot(string NodeId, string Input);
+
+/// <summary>
+/// 「文件选择槽」是收哪一类素材。判据来自服务器的节点定义（导入时算出来，见 <c>SiteProfile.FileSlots</c>），
+/// 值就是这三个字符串。
+/// </summary>
+public static class ComfyUiFileSlotKinds
+{
+    public const string Image = "image";
+    public const string Video = "video";
+    public const string Audio = "audio";
+}
+
+/// <summary>
 /// 一份 ComfyUI 工作流里「参数该往哪儿放」的答案。
 ///
 /// 为什么需要它：从网页导出的 API 格式工作流是**那一刻的快照**——提示词、负面词、尺寸、种子
@@ -54,6 +72,29 @@ public sealed class ComfyUiWorkflowSlots
     public List<List<string>> ImageGroups { get; set; } = new();
 
     /// <summary>
+    /// **服务器声明为「文件选择」的图片槽**，按声明顺序：每项 = 哪个节点的哪个输入收了这一张。
+    ///
+    /// 与前面几种入口的区别（这是第三种形状）：`LoadImage` 家族是「每个节点一格、输入同叫 `image`」；
+    /// 文件清单式是「一个字段装下全部、换行分隔」；而这一种是**一个节点上并排九格、每格一个自己的输入名**
+    /// （实测 `NanFengH3MultiReferenceGeneratorV10`：`图片1`…`图片9`，候选清单就是服务器 input 目录的
+    /// 文件列表，与 `LoadImage.image` 同一种形状；作者那份只在 `图片1` 放了一张，其余八格是 `未选择`）。
+    ///
+    /// 判据来自**服务器的节点定义**（导入时算好、存在站点文件里，见 `SiteProfile.FileSlots`），
+    /// **不按输入名猜**：`图片1` 这种中文序号只是那个包自己的习惯，同一种形状在别处可能叫别的。
+    /// 空着的格子同样算入口——一个格子算不算入口由**节点自己的能力**决定，不由作者那一份用过没用过决定
+    /// （`未选择` 是候选清单里的一个合法取值，往里写是改一个值，不是补一个缺的必填项）。
+    /// </summary>
+    public List<ComfyUiFileSlot> FileSlotImages { get; set; } = new();
+
+    /// <summary>
+    /// 同一张映射里**视频 / 音频**那两档的槽位。**这一轮只认出来、不往里写**：
+    /// 「写进去服务端认」（与图片同一种形状，已实测）与「写进去出来的东西对」是两件事，
+    /// 后者还没验过，所以先在说明里如实列出来，不拿没验过的判据去动用户的提交。
+    /// </summary>
+    public List<ComfyUiFileSlot> FileSlotVideos { get; set; } = new();
+    public List<ComfyUiFileSlot> FileSlotAudios { get; set; } = new();
+
+    /// <summary>
     /// **「文件清单式」**的底图入口：一个多行文本框里放多行文件名（节点 id → 输入名）。
     ///
     /// 为什么要单列：`MultiImageLoader.image_paths` 这种入口既不是 `LoadImage` 家族（类名里没有它），
@@ -78,6 +119,7 @@ public sealed class ComfyUiWorkflowSlots
     /// 不能用 <see cref="ImageNodeIds"/>.Count：合集型的份里那个数是各组的**总和**
     /// （B03 是 6），而没有任何一组收得下 6 张——拿它当上限会算出一个虚高的额度。
     /// 清单式入口另算：它一个字段能吃下全部，额度取它原本列的行数。
+    /// 声明式文件槽（<see cref="FileSlotImages"/>）也算：那类槽一个节点上可能有九格，各收一张。
     /// </summary>
     public int ImageCapacity
     {
@@ -86,7 +128,7 @@ public sealed class ComfyUiWorkflowSlots
             var byNodes = ImageGroups.Count > 0
                 ? ImageGroups.Max(group => group.Count)
                 : ImageNodeId.Length > 0 ? 1 : 0;
-            return Math.Max(byNodes, ImageListCapacity);
+            return Math.Max(Math.Max(byNodes, ImageListCapacity), FileSlotImages.Count);
         }
     }
 
@@ -149,7 +191,7 @@ public sealed class ComfyUiWorkflowSlots
     public bool CanResize => LatentNodeId.Length > 0;
 
     /// <summary>能不能吃参考图。</summary>
-    public bool CanTakeImage => ImageNodeId.Length > 0 || ImageListInputs.Count > 0;
+    public bool CanTakeImage => ImageNodeId.Length > 0 || ImageListInputs.Count > 0 || FileSlotImages.Count > 0;
 
     /// <summary>
     /// 只吃首帧、不收文字：SVD 那种「给一张图让它动起来」的工作流就是这种形状。
@@ -296,16 +338,26 @@ public static class ComfyUiWorkflowBinder
     private static readonly string[] ConstantNames = { "value", "seconds", "duration", "int", "float", "number" };
 
     /// <summary>认槽位。工作流形状不对时不抛，只把「认不出什么」记进 Notes。</summary>
+    /// <param name="optionValues">这台服务器上「固定选项」控件见过的值（见 <c>SiteProfile.OptionValues</c>）。</param>
+    /// <param name="fileSlots">
+    /// 「文件选择槽」表：`类名.输入名` → <see cref="ComfyUiFileSlotKinds"/> 里的一个值。
+    /// **判据来自服务器的节点定义**（导入时算出来存在站点文件里，见 <c>SiteProfile.FileSlots</c>），
+    /// 不是我们按输入名猜的。缺了它，只有 `LoadImage` 家族与「文件清单式」两种入口会被认出来。
+    /// </param>
     public static ComfyUiWorkflowSlots Detect(
-        string apiWorkflowJson, IReadOnlyDictionary<string, List<string>>? optionValues = null)
+        string apiWorkflowJson,
+        IReadOnlyDictionary<string, List<string>>? optionValues = null,
+        IReadOnlyDictionary<string, string>? fileSlots = null)
     {
         var root = JsonNode.Parse(apiWorkflowJson) as JsonObject
             ?? throw new InvalidOperationException("工作流不是 JSON 对象");
-        return Detect(root, optionValues);
+        return Detect(root, optionValues, fileSlots);
     }
 
     public static ComfyUiWorkflowSlots Detect(
-        JsonObject apiWorkflow, IReadOnlyDictionary<string, List<string>>? optionValues = null)
+        JsonObject apiWorkflow,
+        IReadOnlyDictionary<string, List<string>>? optionValues = null,
+        IReadOnlyDictionary<string, string>? fileSlots = null)
     {
         ArgumentNullException.ThrowIfNull(apiWorkflow);
         var slots = new ComfyUiWorkflowSlots();
@@ -318,8 +370,8 @@ public static class ComfyUiWorkflowBinder
         ResolveSeeds(apiWorkflow, slots);
         // 先认影音入口再认底图：底图「没找到」时那句说明要能分辨
         // 「这份工作流只能文生图」和「它吃的是片子、不吃图」——那是两回事。
-        ResolveMedia(apiWorkflow, slots);
-        ResolveImage(apiWorkflow, slots);
+        ResolveMedia(apiWorkflow, slots, fileSlots);
+        ResolveImage(apiWorkflow, slots, fileSlots);
         ResolveLength(apiWorkflow, slots);
 
         if (!slots.CanTextToImage && !slots.IsFrameDriven && !slots.IsSourceDriven)
@@ -750,7 +802,8 @@ public static class ComfyUiWorkflowBinder
     }
 
     /// <summary>认底图入口：全部都认，按节点 id 稳定排序。</summary>
-    private static void ResolveImage(JsonObject graph, ComfyUiWorkflowSlots slots)
+    private static void ResolveImage(
+        JsonObject graph, ComfyUiWorkflowSlots slots, IReadOnlyDictionary<string, string>? fileSlots)
     {
         var loaders = graph
             .Where(pair => pair.Value is JsonObject loader
@@ -765,6 +818,10 @@ public static class ComfyUiWorkflowBinder
             // 没有 LoadImage 家族，先看是不是「文件清单式」入口（MultiImageLoader.image_paths 那种）。
             ResolveImageList(graph, slots);
             if (slots.ImageListInputs.Count > 0) return;
+
+            // 再看**服务器声明为「文件选择」**的图片槽（`图片1`…`图片9` 那种）。它一直没被认出来，
+            // 因为类名里既没有 `LoadImage`、输入名也不以 `image` 开头——判据只能看服务器的声明。
+            if (ResolveDeclaredImageSlots(graph, slots, fileSlots)) return;
 
             CollectUnrecognizedImageSlots(graph, slots);
 
@@ -789,6 +846,17 @@ public static class ComfyUiWorkflowBinder
         slots.ImageInput = "image";
         slots.ImageNodeIds.AddRange(loaders.Select(pair => pair.Key));
         slots.ImageGroups.AddRange(GroupByOutput(graph, slots, slots.ImageNodeIds));
+        // 两种入口同时出现在一份里，是我**没设计过**的形状（这台机器 316 份里一份都没有）：
+        // 排序怎么排、额度怎么算都没定，所以只用 LoadImage 那条，并把这件事说出来——
+        // 不猜，也不悄悄丢掉一边。**已经按类名认下的那几格不算「另一边的入口」**
+        // （`LoadImage.image` 本身也在那张表里，不过滤的话每份 LoadImage 工作流都会冒出一句假的）。
+        var mixedDeclared = DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Image)
+            .Where(slot => !slots.ImageNodeIds.Contains(slot.NodeId) && !slots.ImageListInputs.ContainsKey(slot.NodeId))
+            .ToList();
+        if (mixedDeclared.Count > 0)
+            slots.Notes.Add("这份工作流**既有** LoadImage 那样的入口、**又有**服务器声明为文件选择的图片槽（"
+                + string.Join("、", mixedDeclared.Select(slot => $"{slot.NodeId}.{slot.Input}"))
+                + "）：混着两种该怎么排、额度怎么算我没设计过，所以这次只按 LoadImage 那几格填，文件槽保持原样。");
         if (loaders.Count > 1)
             slots.Notes.Add($"这份工作流有 {loaders.Count} 个底图入口（节点 {string.Join("、", slots.ImageNodeIds)}）："
                 + "按顺序各收一张参考图——「角色 + 道具 + 场景」一起喂就走这里。"
@@ -849,11 +917,122 @@ public static class ComfyUiWorkflowBinder
     /// <summary>图片文件名的后缀（认「像图的字面量」用；文件清单式入口与「认不出的入口」共用一份）。</summary>
     private static readonly string[] ImageExtensions = { ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif" };
 
-    /// <summary>影音文件名的后缀。</summary>
-    private static readonly string[] MediaExtensions =
+    /// <summary>视频文件名的后缀。</summary>
+    private static readonly string[] VideoExtensions = { ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv" };
+
+    /// <summary>音频文件名的后缀。</summary>
+    private static readonly string[] AudioExtensions =
+        { ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma" };
+
+    /// <summary>影音文件名的后缀（视频 + 音频）。</summary>
+    private static readonly string[] MediaExtensions = VideoExtensions.Concat(AudioExtensions).ToArray();
+
+    /// <summary>
+    /// 这个文件名收的是哪一类素材（<see cref="ComfyUiFileSlotKinds"/> 里那三个值之一）；认不出返回空串。
+    ///
+    /// 判据只有一条：**后缀**。只写一份、上下游共用——导入时给「文件选择槽」定种类、生成时认「像片源的地方」，
+    /// 两处各写一份的话早晚会说岔（多行值取第一行）。
+    /// </summary>
+    public static string MediaKindOfFileName(string? text)
     {
-        ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"
-    };
+        var first = (text ?? string.Empty)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault() ?? string.Empty;
+        var name = first.ToLowerInvariant();
+        if (name.Length == 0) return string.Empty;
+        if (ImageExtensions.Any(ext => name.EndsWith(ext, StringComparison.Ordinal))) return ComfyUiFileSlotKinds.Image;
+        if (VideoExtensions.Any(ext => name.EndsWith(ext, StringComparison.Ordinal))) return ComfyUiFileSlotKinds.Video;
+        if (AudioExtensions.Any(ext => name.EndsWith(ext, StringComparison.Ordinal))) return ComfyUiFileSlotKinds.Audio;
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// 从「文件选择槽」表里挑出这份正文中属于某一类的那些格子：哪个节点的哪个输入。
+    ///
+    /// 只认**字面量字符串**那种输入：值是连线（数组）说明这一格是**图里喂过来的**，
+    /// 不是让人选文件的地方——往那儿写文件名会把它原来的连线顶掉。
+    /// </summary>
+    private static List<ComfyUiFileSlot> DeclaredSlots(
+        JsonObject graph, IReadOnlyDictionary<string, string>? fileSlots, string kind)
+    {
+        var found = new List<ComfyUiFileSlot>();
+        if (fileSlots is null || fileSlots.Count == 0) return found;
+
+        foreach (var pair in graph.OrderBy(pair => pair.Key, NodeIdComparer.Instance))
+        {
+            if (pair.Value is not JsonObject node || node["inputs"] is not JsonObject inputs) continue;
+            var classType = ClassTypeOf(node);
+            foreach (var field in inputs)
+            {
+                if (field.Value is not JsonValue value || !value.TryGetValue<string>(out _)) continue;
+                if (fileSlots.TryGetValue(classType + "." + field.Key, out var declared) && declared == kind)
+                    found.Add(new ComfyUiFileSlot(pair.Key, field.Key));
+            }
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// 认**服务器声明为「文件选择」**的图片槽：一个节点上并排几格、每格有自己输入名的那种
+    /// （实测 `NanFengH3MultiReferenceGeneratorV10` 的 `图片1`…`图片9`）。
+    ///
+    /// 凭什么认：这张表**导入时从节点定义算出来的**（存在站点文件的 `FileSlots` 里）——那个输入的
+    /// 候选清单就是服务器 input 目录的文件列表（与 `LoadImage.image` 同一种形状），并且素材种类是图。
+    /// **空着的格子照样算入口**：一个格子算不算入口由**节点自己的能力**决定，不由作者那一份用过没用过
+    /// 决定；`未选择` 是候选清单里的一个合法取值，往里写只是改一个值，不是补一个缺的必填项。
+    ///
+    /// 只在这份**没有别的底图入口**时才走这条（调用点是那两条路都没认到之后）。
+    /// </summary>
+    private static bool ResolveDeclaredImageSlots(
+        JsonObject graph, ComfyUiWorkflowSlots slots, IReadOnlyDictionary<string, string>? fileSlots)
+    {
+        var found = DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Image);
+        if (found.Count == 0) return false;
+
+        slots.FileSlotImages.AddRange(found);
+        var groups = slots.FileSlotImages
+            .GroupBy(slot => slot.NodeId, StringComparer.Ordinal)
+            .Select(group => $"{group.Key}（{string.Join("、", group.Select(slot => slot.Input))}）");
+        slots.Notes.Add("底图入口是**文件选择槽**式的（节点 " + string.Join("；", groups) + "）：一共 "
+            + $"{slots.FileSlotImages.Count} 格，**每格各收一张**参考图，按顺序填；"
+            + "给不满时剩下那几格保持它们原来的选择（缺省是「未选择」，那不是缺文件）。");
+        return true;
+    }
+
+    /// <summary>
+    /// 声明式文件槽里**视频 / 音频**那两档：认出来、列在说明里，但**不往里写**。
+    ///
+    /// 为什么不写：「写进去服务端会认」（与图片同一种形状，已实测）与「写进去之后出来的东西是对的」
+    /// 是两件事，后者没验过。没验过就不动用户的提交，只在说明里如实列出来。
+    /// </summary>
+    private static void NoteDeclaredMediaSlots(
+        JsonObject graph, ComfyUiWorkflowSlots slots, IReadOnlyDictionary<string, string>? fileSlots)
+    {
+        // 已经按类名认下、这次**真的会写**的那些格子要排掉：`VHS_LoadVideo.video` 也在那张表里，
+        // 不过滤就会对着一份正在正常喂源视频的工作流说「我认出来了但不写」——那是假话。
+        var taken = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < slots.VideoNodeIds.Count && index < slots.VideoInputs.Count; index++)
+            taken.Add(slots.VideoNodeIds[index] + "." + slots.VideoInputs[index]);
+        for (var index = 0; index < slots.AudioNodeIds.Count && index < slots.AudioInputs.Count; index++)
+            taken.Add(slots.AudioNodeIds[index] + "." + slots.AudioInputs[index]);
+
+        slots.FileSlotVideos.AddRange(DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Video)
+            .Where(slot => !taken.Contains(slot.NodeId + "." + slot.Input)));
+        slots.FileSlotAudios.AddRange(DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Audio)
+            .Where(slot => !taken.Contains(slot.NodeId + "." + slot.Input)));
+        if (slots.FileSlotVideos.Count == 0 && slots.FileSlotAudios.Count == 0) return;
+
+        var parts = new List<string>();
+        if (slots.FileSlotVideos.Count > 0)
+            parts.Add($"{slots.FileSlotVideos.Count} 个源视频槽（"
+                + string.Join("、", slots.FileSlotVideos.Select(slot => $"{slot.NodeId}.{slot.Input}")) + "）");
+        if (slots.FileSlotAudios.Count > 0)
+            parts.Add($"{slots.FileSlotAudios.Count} 个源音频槽（"
+                + string.Join("、", slots.FileSlotAudios.Select(slot => $"{slot.NodeId}.{slot.Input}")) + "）");
+        slots.Notes.Add("这份工作流还有 " + string.Join("、", parts)
+            + "——它们是**按文件名选**的那种槽，我认出来了，但**这次不往里写**："
+            + "写进去服务端会收，可出来的东西对不对我还没验过。要喂源视频 / 源音频的话说一声，我验一次再接。");
+    }
 
     /// <summary>
     /// 找「像底图入口、可我不认识」的地方，填进 <see cref="ComfyUiWorkflowSlots.UnrecognizedImageSlots"/>。
@@ -932,7 +1111,8 @@ public static class ComfyUiWorkflowBinder
     ///    那种槽位要的是服务器上的**绝对路径**，而我们是把本机文件传到 input 目录、按**文件名**引用，
     ///    写进去只会让服务端找不到文件。
     /// </summary>
-    private static void ResolveMedia(JsonObject graph, ComfyUiWorkflowSlots slots)
+    private static void ResolveMedia(
+        JsonObject graph, ComfyUiWorkflowSlots slots, IReadOnlyDictionary<string, string>? fileSlots)
     {
         foreach (var pair in graph.OrderBy(pair => pair.Key, NodeIdComparer.Instance))
         {
@@ -969,6 +1149,9 @@ public static class ComfyUiWorkflowBinder
         if (slots.AudioNodeIds.Count > 1)
             slots.Notes.Add($"这份工作流有 {slots.AudioNodeIds.Count} 个源音频入口（节点 {string.Join("、", slots.AudioNodeIds)}）："
                 + "按顺序各收一段音（例如「双人对白」一人一段）；只给一段时，后面的入口还留着它自己的示例。");
+
+        // 声明式文件槽里视频 / 音频那两档：认出来、列在说明里，但这一轮不往里写（见那个方法自己的注释）。
+        NoteDeclaredMediaSlots(graph, slots, fileSlots);
 
         if (slots.CanTakeVideo || slots.CanTakeAudio) return;
 
@@ -1239,6 +1422,17 @@ public static class ComfyUiWorkflowBinder
             var kept = ReadImageListLines(graph, listNodeId, listInput).Skip(given.Count);
             var lines = given.Concat(kept).Where(line => line.Length > 0).ToList();
             SetInput(graph, listNodeId, listInput, JsonValue.Create(string.Join('\n', lines)));
+        }
+
+        // 声明式文件槽（服务器声明为「文件选择」的图片槽，见 ComfyUiWorkflowSlots.FileSlotImages）：
+        // 一格有**自己的输入名**，所以不能借用上面那个 imageInput（那是「所有入口同名」那条路的写法）。
+        // 同样按顺序对号入座、给不满就只写前几个，剩下那几格保持它们原来的选择（通常是「未选择」）——
+        // 不拿同一张图去凑数，也不去动没给的那几格。
+        for (var index = 0; index < slots.FileSlotImages.Count && index < imageNames.Count; index++)
+        {
+            if (imageNames[index].Length == 0) continue;
+            SetInput(graph, slots.FileSlotImages[index].NodeId, slots.FileSlotImages[index].Input,
+                JsonValue.Create(imageNames[index]));
         }
 
         return graph;
