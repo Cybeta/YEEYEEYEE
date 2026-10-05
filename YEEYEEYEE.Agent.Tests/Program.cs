@@ -289,6 +289,7 @@ var tests = new (string Name, Action Run)[]
     ("返工 G6-T2：发布结果区分「真落库」与「本地内容」，本地实体不谎报已保存", PublishOutcomeDistinguishesLocalAndShared),
     ("解决方案覆盖了仓库里每一个 csproj（新增项目忘了加会红）", SolutionCoversEveryProject),
     ("形象提示词只有一份：表里的设计说明与 provider-art 记录的出图原话逐条对账", ProviderAvatarPromptsMatchTheRecordedBatch),
+    ("更新链路要认代理：环境变量（HTTPS_PROXY）里的代理优先被采纳", UpdateProxyPrefersEnvironment),
     ("资源库：开跑前核验只动标记不动内容（不许抹掉未保存的编辑）", AuthorityRecheckOnlyTouchesMarks),
     ("资源库：打开画布时按库对齐（刷新 / 补入引用到的 / 标缺失）", MergeIntoAlignsSharedEntitiesOnOpen),
     ("引用：查不到的变体 ID 要报失效，不悄悄换成第一个变体", ReferenceWithUnknownVariantFailsInsteadOfSwitching),
@@ -10652,6 +10653,40 @@ static void ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer()
 	Expect(known.Kind == ComfyUiFindingKind.DroppedByConversion
 		&& known.Detail == "源头是个活着的后端节点",
 		"类型在服务器上就照旧说「源头是个活着的后端节点」：" + known.Detail);
+}
+
+/// <summary>
+/// 钉住更新链路认代理：`YEEYEEYEE_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` 给了就用。
+///
+/// 为什么这条必须有：查发行版与下包都落在 GitHub 上，而**国内拉 GitHub 基本都要走代理**，
+/// 很多机器上代理只配在 git 里（`https.proxy`）——应用默认只认系统设置，于是出现
+/// 「git 能推代码、应用下不了更新包」。实测就是这么卡住的（报「网络请求失败」），
+/// 一路查到 git 配置里那个 `127.0.0.1:10809`。环境变量那一档是确定性最好验的，先钉住它。
+/// </summary>
+static void UpdateProxyPrefersEnvironment()
+{
+    var previous = Environment.GetEnvironmentVariable("HTTPS_PROXY");
+    var previousCustom = Environment.GetEnvironmentVariable("YEEYEEYEE_PROXY");
+    try
+    {
+        Environment.SetEnvironmentVariable("YEEYEEYEE_PROXY", null);
+        Environment.SetEnvironmentVariable("HTTPS_PROXY", "http://127.0.0.1:18099");
+        var fromEnvironment = UpdateService.ResolveProxy();
+        Expect(fromEnvironment is WebProxy { Address: { } environmentAddress }
+            && environmentAddress.Host == "127.0.0.1" && environmentAddress.Port == 18099,
+            "HTTPS_PROXY 里的代理要被认出来，实际 " + (fromEnvironment?.ToString() ?? "null"));
+
+        // 我们自己的那个变量优先于通用约定：排查时想临时指到别处，不该被机器上的 HTTPS_PROXY 挡回去。
+        Environment.SetEnvironmentVariable("YEEYEEYEE_PROXY", "http://127.0.0.1:18098");
+        var fromCustom = UpdateService.ResolveProxy();
+        Expect(fromCustom is WebProxy { Address: { } customAddress } && customAddress.Port == 18098,
+            "YEEYEEYEE_PROXY 要盖过 HTTPS_PROXY，实际 " + (fromCustom?.ToString() ?? "null"));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("HTTPS_PROXY", previous);
+        Environment.SetEnvironmentVariable("YEEYEEYEE_PROXY", previousCustom);
+    }
 }
 
 /// <summary>
