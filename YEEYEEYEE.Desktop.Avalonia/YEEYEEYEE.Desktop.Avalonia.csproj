@@ -9,7 +9,7 @@
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <!-- 版本号的唯一来源：界面标题栏、左栏底部与设置页都读这里（见 AppVersion）。
          改这一行就是改版本号，不需要再去 XAML 里找写死的字符串。 -->
-    <Version>0.1.2</Version>
+    <Version>0.1.3</Version>
     <Product>YEEYEEYEE</Product>
     <AssemblyTitle>YEEYEEYEE</AssemblyTitle>
   </PropertyGroup>
