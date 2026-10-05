@@ -255,7 +255,11 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         ? new ReferenceCapacity(0, $"读不到工作流「{choice.Workflow.Title}」的正文，无从判断它能收几张参考图。")
         : slots.CanTakeImage
             ? new ReferenceCapacity(1, "图生视频这份工作流收一张底图（= 这一镜的首帧）。")
-            : new ReferenceCapacity(0, "这份工作流没有底图入口，只能文生视频——首帧不会生效。");
+            : new ReferenceCapacity(0, slots.CanTakeVideo
+                // 「没有底图入口」有两种截然不同的原因：只能文生视频，或者它吃的是**一段片子**。
+                // 混成一句话会让人以为这类工作流驱动不了，其实它要的是源视频（见 IsSourceDriven）。
+                ? "这份工作流没有底图入口：它吃的是**一段片子**（源视频入口），首帧不会生效。"
+                : "这份工作流没有底图入口，只能文生视频——首帧不会生效。");
 
     private static ComfyUiWorkflowSlots? ReadSlots(SiteWorkflowChoice choice)
     {
@@ -630,7 +634,9 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         if (referenceCount == 0) return string.Empty;
         if (!slots.CanTakeImage)
             return $"这份工作流没有底图入口，所以首帧（以及另外 {referenceCount - 1} 张设定图）没有被使用"
-                + "——它只能文生视频。要按首帧出视频得换一份带 LoadImage 的工作流。";
+                + (slots.CanTakeVideo
+                    ? "——它吃的是**源视频**（一段片子），不吃参考图。"
+                    : "——它只能文生视频。要按首帧出视频得换一份带 LoadImage 的工作流。");
         if (referenceCount > slots.ImageCapacity)
             return $"这份工作流有 {slots.ImageCapacity} 个底图入口，喂进去 {referenceCount} 张，只用了前 {slots.ImageCapacity} 张"
                 + "（多出来的没有去处）。要带上设定图得换一份底图入口更多的工作流。";
