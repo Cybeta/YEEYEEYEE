@@ -264,6 +264,11 @@ internal static class SitePoolPicker
             if (slots.IsFrameDriven)
                 lines.Add("这一份只吃首帧、不收文字提示词（SVD / 动作迁移 / 人物替换这一类，是正当用法）："
                     + "画面由首帧与它自己的运动参数决定，你写的提示词不会进工作流。");
+            // 「这份要几张图」在这一刻就要答——选之前答了，用户才知道要不要先去把参考图备够。
+            // 只在真的不止一格时才多说这一句：一格的那种人人默认，单占一行反而把要看的那几行挤下去。
+            if (slots.ImageCapacity > 1)
+                lines.Add($"这一份能同时收 {slots.ImageCapacity} 张底图（多图参考）：给几张就按顺序填前面几格，"
+                    + "没给满的格子保持原样。");
             foreach (var note in slots.Notes.Take(3)) lines.Add("· " + note);
             if (slots.Notes.Count > 3) lines.Add($"· （另有 {slots.Notes.Count - 3} 条说明，出图 / 出视频时在结果里能看到）");
             lines.Add("底模与步数由它自己决定；提示词、负面词、画幅、比例、时长与种子能收到哪几样，上面那一行已经写出来了——"

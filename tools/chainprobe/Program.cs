@@ -27,7 +27,13 @@ var appOutput = Path.Combine(repoRoot, "YEEYEEYEE.Desktop.Avalonia", "bin", "Rel
 var project = Env("CHAINPROBE_PROJECT", NewestProjectUnder(Path.Combine(appOutput, "Projects")));
 // 默认落回本机默认端口，不指向任何具体机器：地址是私事，不该跟着仓库走。
 var baseUrl = Env("CHAINPROBE_COMFY", "http://127.0.0.1:8188");
-var archiveDir = Env("CHAINPROBE_ARCHIVE", Path.Combine(Path.GetTempPath(), "chainprobe-archive"));
+// 离线留档（316 份原稿 + 那份 20.8 MB 的节点定义）落在**固定目录**，不再用 %TEMP%：
+// 系统清临时目录时，「不依赖真机也能跑一遍权威体检」这条能力会跟着一起没。
+// 换地方就设 CHAINPROBE_HOME（或单独设 CHAINPROBE_ARCHIVE）。
+var home = Env("CHAINPROBE_HOME", Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "YEEYEEYEE", "chainprobe"));
+Directory.CreateDirectory(home);
+var archiveDir = Env("CHAINPROBE_ARCHIVE", Path.Combine(home, "archive"));
 var checkpoint = "SDXL/sd_xl_base_1.0.safetensors";
 var work = Path.Combine(Path.GetTempPath(), "chainprobe-" + Guid.NewGuid().ToString("N")[..6]);
 Directory.CreateDirectory(work);
@@ -156,7 +162,7 @@ if (mode == "apply-audit")
     // 就用本地留档的原稿 + 已落盘的正文算同一次，让选择器与出片那一刻马上能看到警告）。
     // 所有 ComfyUI 站点都过一遍：一台机器一个站点文件，只处理第一个会让别的站点留着旧账。
     var d = args.Length > 1 ? args[1] : archiveDir;
-    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(Path.GetTempPath(), "object_info.json")))!.AsObject();
+    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(home, "object_info.json")))!.AsObject();
 
     // 原稿按**标题**找（留档文件名是标题），站点的键是服务器上的相对路径——对不上的那份计数保持 0。
     var draftsByTitle = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -232,7 +238,7 @@ if (mode == "repair")
     // 数据一律来自产品体检（ComfyUiImportAuditor），这里只排版。
     var output = args.Length > 1 ? args[1] : Path.Combine(FindRepoRoot(), "待修清单.md");
     var d = archiveDir;
-    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(Path.GetTempPath(), "object_info.json")))!.AsObject();
+    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(home, "object_info.json")))!.AsObject();
 
     var draftsByTitle = new Dictionary<string, string>(StringComparer.Ordinal);
     foreach (var file in Directory.GetFiles(d, "*.json"))
@@ -334,7 +340,7 @@ if (mode == "audit-import")
     // 目的是确认「这台机器导入时会不会弹窗打扰用户」——按现在的结论它应当**不弹**（我们丢了 0 处）。
     var d = args.Length > 1 ? args[1] : archiveDir;
     var site = sites.First(item => item.IsComfyUi);
-    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(Path.GetTempPath(), "object_info.json")))!.AsObject();
+    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(home, "object_info.json")))!.AsObject();
 
     var raws = new Dictionary<string, string>(StringComparer.Ordinal);
     foreach (var file in Directory.GetFiles(d, "*.json"))
@@ -435,7 +441,7 @@ if (mode == "picker")
 {
     // 全库扫「从服务器文件里挑一个」的输入：它的候选清单是文件（按扩展名认）。
     // 目的是拿到**这一类输入到底叫什么名字、出现在哪些节点上**——要写视频/音频进去就得先有这份账。
-    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(Path.GetTempPath(), "object_info.json")))!.AsObject();
+    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(home, "object_info.json")))!.AsObject();
     var video = new[] { ".mp4", ".webm", ".mov", ".mkv", ".gif", ".avi" };
     var audio = new[] { ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac" };
     var hits = new Dictionary<string, (string Kind, string Sample)>(StringComparer.Ordinal);
@@ -482,7 +488,7 @@ if (mode == "combocheck")
     // 拿本地那份 object_info，逐份正文核对：**固定选项（COMBO）的输入值在不在它的选项清单里**。
     // 实测 U25 的 MiniMaxH3AudioConditioningT8.task_type 存的是显示用的标签
     // 「Ref2VA — 参考生音视频」，而服务端的选项只有 Ref2VA —— 提交就是一次 400。
-    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(Path.GetTempPath(), "object_info.json")))!.AsObject();
+    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(home, "object_info.json")))!.AsObject();
     var site = sites.First(item => item.IsComfyUi);
     var bad = new List<string>();
     var badTotal = 0;
@@ -624,6 +630,7 @@ if (mode == "slots")
     var payload = SiteCatalog.LoadPayload(site.Id, workflow.PayloadFile) ?? string.Empty;
     var slots = ComfyUiWorkflowBinder.Detect(payload, site.OptionValues, site.FileSlots);
     Console.WriteLine($"工作流 {workflow.Title}（{workflow.NodeCount} 节点）");
+    Console.WriteLine($"  能收到：{slots.Describe()}");
     Console.WriteLine($"  收文字 {slots.CanTextToImage}｜底图 {slots.CanTakeImage}（容量 {slots.ImageCapacity}）｜只吃首帧 {slots.IsFrameDriven}");
     Console.WriteLine($"  画幅 {slots.CanResize}｜时长(帧数) {slots.CanSetLength}｜时长(写秒) {slots.CanSetSeconds}｜比例 {slots.CanSetAspect}");
     foreach (var note in slots.Notes) Console.WriteLine("  · " + note);
@@ -718,7 +725,7 @@ if (mode == "verify")
     //   ② 源头节点被静音(2)/绕过(4)         → 官方语义就是「接不上就删掉」，正常
     //   ③ 源头是正常节点(mode=0)            → **我们丢了**，这才是缺陷
     //   ④ 原稿里找不到那个节点（子图内部）  → 判不了，单列
-    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(Path.GetTempPath(), "object_info.json")))!.AsObject();
+    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(home, "object_info.json")))!.AsObject();
     var listText = await http.GetStringAsync("userdata?dir=workflows&recurse=true&full_info=true");
     var paths = new List<string>();
     foreach (var entry in JsonDocument.Parse(listText).RootElement.EnumerateArray())
@@ -812,7 +819,7 @@ if (mode == "verifydir")
 {
     // 和 verify 同一套分类，但原稿从本地目录读（服务器没开也能跑）。
     var dir = args.Length > 1 ? args[1] : archiveDir;
-    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(Path.GetTempPath(), "object_info.json")))!.AsObject();
+    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(home, "object_info.json")))!.AsObject();
     var files = Directory.GetFiles(dir, "*.json").OrderBy(item => item, StringComparer.Ordinal).ToList();
 
     Console.WriteLine($"原稿 {files.Count} 份，逐份转换并分类…");
@@ -1105,7 +1112,7 @@ if (mode == "lint-ui")
     // 拿服务器上那份**网页格式原稿**跑一遍转换，再核转换结果的必填输入——
     // 比核存量正文更硬：存量正文是旧转换器留下的，改了转换器它不会自己变好。
     var uiPath = args[1];
-    var objectInfoPath = args.Length > 2 ? args[2] : Path.Combine(Path.GetTempPath(), "object_info.json");
+    var objectInfoPath = args.Length > 2 ? args[2] : Path.Combine(home, "object_info.json");
     var objectInfoJson = File.ReadAllText(objectInfoPath);
     var objectInfoNode = JsonNode.Parse(objectInfoJson)!.AsObject();
 
@@ -1154,7 +1161,7 @@ if (mode == "lint")
     // 少了它，提交时就是 required_input_missing（实测 G09 的 WanVideoEmptyEmbeds 就是这样被拒的）。
     var objectInfoPath = args.Length > 1
         ? args[1]
-        : Path.Combine(Path.GetTempPath(), "object_info.json");
+        : Path.Combine(home, "object_info.json");
     using var objectInfo = JsonDocument.Parse(File.ReadAllBytes(objectInfoPath));
     var site = sites.First(item => item.IsComfyUi);
 
@@ -1387,7 +1394,7 @@ if (mode is "serve" or "demolocal")
     // 本地假 ComfyUI：真机不在手边（或真机时段已到）时，也能把
     // 「导入 → 体检 → 让大模型认节点 → 重转 → 落盘」这条链**整条**演一遍。
     //
-    // 数据全用真东西：节点定义是那台机器的 /object_info 留档（%TEMP%\object_info.json，20.8 MB），
+    // 数据全用真东西：节点定义是那台机器的 /object_info 留档（本机留档目录里的 object_info.json，20.8 MB），
     // 工作流正文是 316 份原稿的本地留档（raw-wf\）。另外可选塞一份**故意留了缺口**的原稿——
     // 中间夹着一段我们不认识的纯前端节点，它下游那个必填输入会整项消失。真机上「我们丢了 0 处」，
     // 弹窗根本不会出现，所以不造这一份就演不了「有问题」的那个分支。
@@ -1396,7 +1403,7 @@ if (mode is "serve" or "demolocal")
     //   demolocal<端口> [crafted]  起服务器并**就地**把导入整链跑一遍（用真模型），跑完退出。
     var port = args.Length > 1 ? int.Parse(args[1]) : 8188;
     var crafted = args.Length > 2 && args[2] == "crafted";
-    var (drafts, objectInfoText) = LocalComfyStub.Load(archiveDir, crafted);
+    var (drafts, objectInfoText) = LocalComfyStub.Load(archiveDir, Path.Combine(home, "object_info.json"), crafted);
     LocalComfyStub.Start(port, drafts, objectInfoText, Console.WriteLine);
     var localUrl = $"http://127.0.0.1:{port}";
     Console.WriteLine($"工作流 {drafts.Count} 份" + (crafted ? "（含 1 份**故意留缺口**的演示原稿）" : "（全是真原稿）"));
@@ -1472,7 +1479,7 @@ if (mode == "demogen")
     var artifact = FindArchivedMp4();
     if (artifact is null) { Console.WriteLine("本机留档里找不到可当产物的 mp4。"); return; }
 
-    var (genDrafts, genObjectInfo) = LocalComfyStub.Load(archiveDir, false);
+    var (genDrafts, genObjectInfo) = LocalComfyStub.Load(archiveDir, Path.Combine(home, "object_info.json"), false);
     LocalComfyStub.Start(port, genDrafts, genObjectInfo, Console.WriteLine, artifact, logRequests: true);
 
     var demoConfig = new AiProviderConfig
@@ -1525,7 +1532,7 @@ if (mode == "stubtest")
     // 最小直连：把出片链要的那几个请求**逐个**打给假服务器，每步的异常原样打出来。
     // 用来把「假服务器答得对不对」和「产品那条链用得对不对」分开。
     var port = args.Length > 1 ? int.Parse(args[1]) : 8192;
-    var (probeDrafts, probeObjectInfo) = LocalComfyStub.Load(archiveDir, false);
+    var (probeDrafts, probeObjectInfo) = LocalComfyStub.Load(archiveDir, Path.Combine(home, "object_info.json"), false);
     LocalComfyStub.Start(port, probeDrafts, probeObjectInfo, Console.WriteLine, FindArchivedMp4(), logRequests: true);
 
     using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/"), Timeout = TimeSpan.FromSeconds(30) };
@@ -1654,7 +1661,7 @@ if (mode == "pull-archive")
     foreach (var pair in pulled.RawDrafts)
         await File.WriteAllTextAsync(Path.Combine(target, Path.GetFileName(pair.Key)), pair.Value);
 
-    var objectInfoPath = Path.Combine(Path.GetTempPath(), "object_info.json");
+    var objectInfoPath = Path.Combine(home, "object_info.json");
     await File.WriteAllTextAsync(objectInfoPath, pulled.ObjectInfo!.ToJsonString());
     Console.WriteLine($"留档 {pulled.RawDrafts.Count} 份原稿 → {target}");
     Console.WriteLine($"节点定义 → {objectInfoPath}（{pulled.ObjectInfo.Count} 种节点）");
@@ -1686,7 +1693,7 @@ if (mode == "needed")
     // 判据与产品共用一份：`ComfyUiImportAuditor.ExecutedNodes`（从节点定义里标了 `output_node`
     // 的产物出口反向走；拿「没有下游」当出口会把悬空死节点也算活，判据就永远报「全是活的」）。
     var needle = args.Length > 1 ? args[1] : string.Empty;
-    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(Path.GetTempPath(), "object_info.json")))!.AsObject();
+    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(home, "object_info.json")))!.AsObject();
 
     var draftsByTitle = new Dictionary<string, string>(StringComparer.Ordinal);
     foreach (var file in Directory.GetFiles(archiveDir, "*.json"))
@@ -1762,7 +1769,7 @@ if (mode == "imageloaders")
     // 底图入口是**按类名**认的（类名含 LoadImage 才算）。这里把「有 image 输入、但类名不含 LoadImage」
     // 的类型挑出来，并数一数有多少份工作流在用——那正是会被整类漏掉的底图入口。
     // 起因：H22 明明是「首尾帧图生视频」，我们却报「能收首帧 = False」，因为它用的是 MultiImageLoader。
-    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(Path.GetTempPath(), "object_info.json")))!.AsObject();
+    var objectInfoNode = JsonNode.Parse(File.ReadAllText(Path.Combine(home, "object_info.json")))!.AsObject();
 
     var imageExtensions = new[] { ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif" };
     var acceptsImage = new List<string>();
@@ -1939,13 +1946,17 @@ static class LocalComfyStub
     /// <summary>把每个请求打出来（排「到底卡在哪一跳」时用；正常跑库导入那几百份时会很吵，默认关）。</summary>
     private static Action<string>? logger;
 
-    public static (Dictionary<string, string> Drafts, string ObjectInfo) Load(string archiveDir, bool crafted)
+    // objectInfoPath 由调用方给：留档换过地方（CHAINPROBE_HOME），类里看不见顶级语句的 home。
+    public static (Dictionary<string, string> Drafts, string ObjectInfo) Load(
+        string archiveDir,
+        string objectInfoPath,
+        bool crafted)
     {
         var drafts = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var file in Directory.GetFiles(archiveDir, "*.json"))
             drafts[Path.GetFileName(file)] = File.ReadAllText(file);
         if (crafted) drafts["T-本地演示/一份带缺口的工作流.json"] = CraftedDraft;
-        var objectInfo = File.ReadAllText(Path.Combine(Path.GetTempPath(), "object_info.json"));
+        var objectInfo = File.ReadAllText(objectInfoPath);
         return (drafts, objectInfo);
     }
 

@@ -274,7 +274,10 @@ public sealed class ComfyUiWorkflowSlots
             ? $"时长✓（{LengthCurrent} 帧 × {FrameRateValue:0.##}fps）"
             : CanSetSeconds ? "时长✓（写秒数，帧数由它自己折）" : "时长✗");
         parts.Add(SeedNodeIds.Count > 0 ? "种子✓" : "种子✗");
-        parts.Add(CanTakeImage ? "底图✓" : "底图✗");
+        // 底图这里带上**能收几张**：「能收」和「能收九张」是两种用法（多图参考 / 九宫格），
+        // 只看 ✓ 的话，用户要等喂进去才从结果里发现这份其实只认第一张。条数取 ImageCapacity
+        // （最大那一组的槽数），不是入口总数——合集型的份里那是各组之和，没有一组收得下。
+        parts.Add(CanTakeImage ? $"底图✓（{ImageCapacity} 格）" : "底图✗");
         // 源视频 / 源音频只在**这份工作流确实有**的时候出现：绝大多数工作流没有，
         // 每行都挂两个 ✗ 只会把真正要看的那几项淹掉。
         if (CanTakeVideo) parts.Add($"源视频✓（{VideoNodeIds.Count} 个入口）");
@@ -1253,7 +1256,7 @@ public static class ComfyUiWorkflowBinder
     /// 分开只会多出一份要同步的账。已经按类名认下的那几格要排掉（`VHS_LoadVideo.video` 也在那张表里），
     /// 否则同一格会被写两遍、还会在说明里被数两遍。
     /// </summary>
-    private static void ResolveDeclaredMediaSlots(
+    private static (int Video, int Audio) ResolveDeclaredMediaSlots(
         JsonObject graph, ComfyUiWorkflowSlots slots, IReadOnlyDictionary<string, string>? fileSlots)
     {
         var taken = new HashSet<string>(StringComparer.Ordinal);
@@ -1275,10 +1278,11 @@ public static class ComfyUiWorkflowBinder
             return added;
         }
 
-        Add(DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Video), slots.VideoNodeIds, slots.VideoInputs);
-        Add(DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Audio), slots.AudioNodeIds, slots.AudioInputs);
-        // 不加单独的说明：下面那两句「有几个源视频 / 源音频入口，按顺序各收一段」已经把行为说清了，
-        // 再补一句「这是声明式文件槽」只是实现细节，白占一行。
+        var video = Add(DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Video), slots.VideoNodeIds, slots.VideoInputs);
+        var audio = Add(DeclaredSlots(graph, fileSlots, ComfyUiFileSlotKinds.Audio), slots.AudioNodeIds, slots.AudioInputs);
+        // **两档分开报**：合起来报一个数会让视频那句写出「有 3 个源视频入口…（其中 6 个是…）」——
+        // 6 里有一半是音频的，用户按那句话去核对只会对不上。
+        return (video, audio);
     }
 
     /// <summary>
@@ -1389,17 +1393,31 @@ public static class ComfyUiWorkflowBinder
 
         // 声明式文件槽里视频 / 音频那两档并进入口清单：要在下面那两句「有几个源视频入口」**之前**做，
         // 否则说明里的数会把它们漏掉。
-        ResolveDeclaredMediaSlots(graph, slots, fileSlots);
+        var (declaredVideo, declaredAudio) = ResolveDeclaredMediaSlots(graph, slots, fileSlots);
+        // 「写进去会收」与「这份到底用不用它」是两件事。这台机器上实测过一份（`U23-V10`）：把一段真片
+        // 写进它的 `视频1`，产物**结构一模一样**（时长 / 帧数 / 音轨样本数都相同）、只有编码字节不同，
+        // 肉眼看不出差别。所以那句话只说到「会被读」，**不替这份工作流保证「喂了就会照着来」**。
+        var caveatOf = (int count) => count == 0
+            ? string.Empty
+            : $"（其中 {count} 个是服务器声明的**按文件名选**的槽：写进去服务端会收；"
+                + "这台机器上实测过一份，画面看不出差别——这份到底用不用它，我暂时判断不了。）";
+        var declaredVideoCaveat = caveatOf(declaredVideo);
+        var declaredAudioCaveat = caveatOf(declaredAudio);
 
         if (slots.VideoNodeIds.Count > 1)
             slots.Notes.Add($"这份工作流有 {slots.VideoNodeIds.Count} 个源视频入口（节点 {string.Join("、", slots.VideoNodeIds.Distinct())}）："
-                + "按顺序各收一段片子（例如「主片 + 参考片」这种两张图的用法）。");
+                + "按顺序各收一段片子（例如「主片 + 参考片」这种两张图的用法）。" + declaredVideoCaveat);
 
         // 音频也要说：两个音频口的工作流（双人对白那一类）**按顺序各收一段音**，
         // 只给一段的话第二个入口会留着它自己的示例——那样出来的对话说的还是例子里的内容。
         if (slots.AudioNodeIds.Count > 1)
             slots.Notes.Add($"这份工作流有 {slots.AudioNodeIds.Count} 个源音频入口（节点 {string.Join("、", slots.AudioNodeIds)}）："
-                + "按顺序各收一段音（例如「双人对白」一人一段）；只给一段时，后面的入口还留着它自己的示例。");
+                + "按顺序各收一段音（例如「双人对白」一人一段）；只给一段时，后面的入口还留着它自己的示例。"
+                + declaredAudioCaveat);
+        else if (declaredVideo + declaredAudio > 0 && slots.VideoNodeIds.Count <= 1)
+            // 入口个数不够多、上面那两句都没轮到说话时，这句实测口径也得说出来。
+            slots.Notes.Add("这份工作流的源视频 / 源音频入口是服务器声明的**按文件名选**的那种槽。"
+                + "写进去服务端会收；这台机器上实测过一份，画面看不出差别——这份到底用不用它，我暂时判断不了。");
 
         if (slots.CanTakeVideo || slots.CanTakeAudio) return;
 
