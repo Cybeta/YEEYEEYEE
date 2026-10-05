@@ -194,6 +194,7 @@ var tests = new (string Name, Action Run)[]
     ("转换 · Set/Get 配对是转发不是丢弃：Get 的值接到同名 Set 的源头，两个都不进 API", WorkflowConversionFollowsSetGetPairs),
     ("转换 · PrimitiveNode 的值内联进下游；Fast Bypasser 当直通跟到源头", ComfyUiConversionInlinesPrimitiveAndFollowsBypasser),
     ("转换 · 子图「输入直通到输出」要接到外面喂给容器那个输入的地方", ComfyUiConversionWiresContainerPassThrough),
+    ("转换 · 旁路判定要认逗号分隔的联合类型（FLOAT,INT,BOOLEAN 也算接得上）", ComfyUiConversionBypassesThroughUnionTypedInputs),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -14513,6 +14514,52 @@ static void ComfyUiConversionWiresContainerPassThrough()
     Expect(model.Count == 2 && model[0]!.GetValue<string>() == "1",
         "容器直通的输出要接到外面喂给容器那个输入的地方，实际 " + model.ToJsonString());
     Expect(!api.ContainsKey("5"), "容器本身不该进 API");
+}
+
+/// <summary>
+/// 钉住旁路判定里的「类型兼容」要认**逗号分隔的联合类型**。
+/// 官方把 <c>NUMBER</c> 写成 <c>"FLOAT,INT"</c>、<c>PRIMITIVE</c> 写成 <c>"STRING,FLOAT,INT,BOOLEAN"</c>
+/// （见 <c>comfy/comfy_types</c>），真实文件里 <c>ComfyMathExpression.values.a</c> 就是这种类型，
+/// 而且它确实被上游连上了。只按整串比会判成「穿不过去」，下游那个输入整项消失——
+/// U10 的 <c>DaSiWa_EnhancedVideoCombine.frame_rate</c> 就是这么丢的。
+/// </summary>
+static void ComfyUiConversionBypassesThroughUnionTypedInputs()
+{
+    const string defs = """
+    {
+      "FloatSource": {"input": {"required": {"value": ["FLOAT", {"default": 24}]}}, "output": ["FLOAT"], "output_name": ["FLOAT"]},
+      "ComfyMathExpression": {"input": {"required": {"values.a": ["FLOAT,INT,BOOLEAN"]}},
+        "output": ["FLOAT", "INT", "BOOLEAN"], "output_name": ["FLOAT", "INT", "BOOLEAN"]},
+      "VideoCombine": {"input": {"required": {"frame_rate": ["FLOAT"]}}, "output": [], "output_name": []}
+    }
+    """;
+
+    const string ui = """
+    {
+      "nodes": [
+        {"id": 10, "type": "FloatSource", "mode": 0, "inputs": [],
+         "outputs": [{"name":"FLOAT","type":"FLOAT","links":[500]}], "widgets_values": [24]},
+        {"id": 11, "type": "ComfyMathExpression", "mode": 4,
+         "inputs": [{"name":"values.a","type":"FLOAT,INT,BOOLEAN","link":500}],
+         "outputs": [{"name":"FLOAT","type":"FLOAT","links":[501]},
+                     {"name":"INT","type":"INT","links":[]},
+                     {"name":"BOOLEAN","type":"BOOLEAN","links":[]}],
+         "widgets_values": []},
+        {"id": 12, "type": "VideoCombine", "mode": 0,
+         "inputs": [{"name":"frame_rate","type":"FLOAT","link":501}],
+         "outputs": [], "widgets_values": []}
+      ],
+      "links": [[500, 10, 0, 11, 0, "FLOAT"], [501, 11, 0, 12, 0, "FLOAT"]]
+    }
+    """;
+
+    var api = ComfyUiWorkflowConversion.Convert(ui, defs).ApiWorkflow;
+
+    Expect(api["11"] is null, "被绕过的节点自己不该出现在 API 里");
+    var frameRate = api["12"]!["inputs"]!["frame_rate"]?.AsArray();
+    Expect(frameRate is { Count: 2 } && frameRate[0]!.GetValue<string>() == "10",
+        "联合类型（FLOAT,INT,BOOLEAN）里含有 FLOAT 就算接得上，要顶到上游 FloatSource(10)，实际 "
+        + (frameRate?.ToJsonString() ?? "（整项被丢）"));
 }
 
 static class Sample

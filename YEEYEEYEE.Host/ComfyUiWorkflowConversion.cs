@@ -558,12 +558,25 @@ public static class ComfyUiWorkflowConversion
         return -1;
     }
 
-    /// <summary>官方 <c>LiteGraph.isValidConnection</c>：任一端是空或 <c>*</c> 就通融，否则要求类型相同。</summary>
+    /// <summary>
+    /// 官方 <c>LiteGraph.isValidConnection</c>：任一端是空或 <c>*</c> 就通融，否则要求类型相同。
+    /// **逗号分隔的联合类型要当成集合看**：官方把 <c>NUMBER</c> 写成 <c>"FLOAT,INT"</c>、
+    /// <c>PRIMITIVE</c> 写成 <c>"STRING,FLOAT,INT,BOOLEAN"</c>（见 <c>comfy/comfy_types</c> 的文档），
+    /// 任一项相同就算连得上。判据不只是文档——真实文件里 <c>ComfyMathExpression.values.a</c> 就是这种
+    /// 类型，而它确实被上游连上了（U10 的 link 5954）：只比整串会让旁路判定误判成「穿不过去」，
+    /// 于是那个输入整项消失。
+    /// </summary>
     private static bool Connects(string a, string b)
     {
         if (a.Length == 0 || b.Length == 0) return true;
         if (a == "*" || b == "*") return true;
-        return string.Equals(a, b, StringComparison.Ordinal);
+        if (string.Equals(a, b, StringComparison.Ordinal)) return true;
+
+        foreach (var left in a.Split(','))
+        foreach (var right in b.Split(','))
+            if (left.Length > 0 && string.Equals(left, right, StringComparison.Ordinal)) return true;
+
+        return false;
     }
 
     private static string? InputTypeAt(JsonObject node, int slot)
