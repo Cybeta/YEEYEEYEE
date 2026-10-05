@@ -708,8 +708,13 @@ public sealed class ComfyUiImageProvider : IImageProvider
     {
         if (referenceCount == 0) return string.Empty;
         if (slots is { CanTakeImage: false })
-            return $"这份工作流没有底图入口，这 {referenceCount} 张参考图没有被使用（它只能文生图）。"
-                + "要按参考图出图得换一份带 LoadImage 的工作流。";
+            // 「我没认出来」不能说成「它没有」：说错了，用户会去换一份本来就在、本来就能吃参考图的工作流。
+            return slots.HasUnrecognizedImageSlot
+                ? $"这份工作流的底图入口**我没认出来**（{string.Join("、", slots.UnrecognizedImageSlots)}）——"
+                  + $"这 {referenceCount} 张参考图这次没有被使用。请把这几处指给我：哪一处是收参考图的，"
+                  + "认出来之后这类工作流就能吃参考图了。"
+                : $"这份工作流没有底图入口，这 {referenceCount} 张参考图没有被使用（它只能文生图）。"
+                  + "要按参考图出图得换一份带 LoadImage 的工作流。";
         if (referenceCount > 1)
             return slots is null
                 ? $"当前 img2img 工作流只支持单张底图，已使用第 1 张，忽略其余 {referenceCount - 1} 张。" +

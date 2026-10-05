@@ -185,8 +185,9 @@ if (mode == "apply-audit")
         Console.WriteLine($"站点「{site.DisplayName}」：{site.Workflows.Count} 份里有 {warned} 份带上了体检记号"
             + $"（没有原稿留档、计数按 0 的：{missing} 份）");
         foreach (var item in site.Workflows.Where(entry => ComfyUiWorkflowHealth.ShortMark(entry).Length > 0)
-            .OrderByDescending(entry => entry.BrokenInputs + entry.DroppedInputs).Take(5))
-            Console.WriteLine($"    {item.Title}{ComfyUiWorkflowHealth.ShortMark(item)}（丢 {item.DroppedInputs} / 断 {item.BrokenInputs}）");
+            .OrderByDescending(entry => entry.BrokenInputs + entry.DroppedInputs + entry.UncertainInputs).Take(5))
+            Console.WriteLine($"    {item.Title}{ComfyUiWorkflowHealth.ShortMark(item)}"
+                + $"（丢 {item.DroppedInputs} / 断 {item.BrokenInputs} / 判不了 {item.UncertainInputs}）");
     }
     return;
 }
@@ -356,6 +357,17 @@ if (mode == "audit-import")
     Console.WriteLine("=== 我们丢了的（前 10）===");
     foreach (var finding in report.Findings.Where(item => item.Kind == ComfyUiFindingKind.DroppedByConversion).Take(10))
         Console.WriteLine("  " + finding.Label);
+
+    // 「判断不了」：链子停在一个我担保不了的类型上（这台服务器的节点定义里没有它，或者它本来就是纯前端件）。
+    // 单列出来：它**不是「我们丢了」**（原先就是误报在这一档），但也别当成没事——真缺了必填输入照样被拒收。
+    var uncertain = report.Findings.Where(item => item.Kind == ComfyUiFindingKind.Unclassified).ToList();
+    Console.WriteLine();
+    Console.WriteLine($"=== 判断不了（{uncertain.Count} 处，前 10）===");
+    foreach (var finding in uncertain.Take(10))
+        Console.WriteLine("  " + finding.Label);
+    if (report.UnknownTypes.Count > 0)
+        Console.WriteLine("  链子上那些我不担保的类型（「让大模型认一认」的清单）："
+            + string.Join("、", report.UnknownTypes.Select(item => $"{item.Type}×{item.Count}")));
 
     // 「原稿自己断线」影响多少份：这些工作流选它出片会缺东西，而用户在选择器上看不出来。
     var broken = report.Findings.Where(item => item.Kind == ComfyUiFindingKind.BrokenInSource).ToList();
@@ -1412,6 +1424,7 @@ if (mode is "serve" or "demolocal")
     Console.WriteLine(installError.Length > 0
         ? "落盘失败：" + installError
         : $"已落盘：{site!.Workflows.Count} 份（其中 {site.Workflows.Count(w => w.DroppedInputs > 0)} 份带「我们丢过」记号、"
+          + $"{site.Workflows.Count(w => w.UncertainInputs > 0)} 份带「判断不了」记号、"
           + $"{site.Workflows.Count(w => w.BrokenInputs > 0)} 份带「自有断线」记号；学到的前端节点规则 {site.VirtualNodeRules.Count} 条）");
     return;
 }
@@ -1551,7 +1564,7 @@ if (mode == "health")
         foreach (var workflow in site.Workflows.Where(item => ComfyUiWorkflowHealth.ShortMark(item).Length > 0))
         {
             if (needle.Length > 0 && !workflow.Title.Contains(needle, StringComparison.OrdinalIgnoreCase)) continue;
-            Console.WriteLine($"== [{site.Id}] {workflow.Title}（丢 {workflow.DroppedInputs} / 断 {workflow.BrokenInputs}）==");
+            Console.WriteLine($"== [{site.Id}] {workflow.Title}（丢 {workflow.DroppedInputs} / 断 {workflow.BrokenInputs} / 判不了 {workflow.UncertainInputs}）==");
             Console.WriteLine(ComfyUiWorkflowHealth.Describe(workflow));
             Console.WriteLine();
             if (++shown >= 3) return;

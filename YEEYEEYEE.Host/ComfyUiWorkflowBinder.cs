@@ -207,6 +207,25 @@ public sealed class ComfyUiWorkflowSlots
 
     public bool CanTakeAudio => AudioNodeIds.Count > 0;
 
+    /// <summary>
+    /// **像底图入口、可我不认识**的地方（写法「类名.输入（节点 id）」）。
+    ///
+    /// 为什么要记：认不出入口时**不许断言「这份工作流用不了参考图」**——那句话的前提是「图入口我都认全了」，
+    /// 而这一步恰恰是「我没认出来」。把「我没认出来」说成「它没有」，用户拿着这句话只会去找另一份工作流，
+    /// 不会想到「指给我看」这条路。实测底图入口的类名并不都含 `LoadImage`（`ImageLoader` 那类一 `Contains` 就漏）。
+    /// </summary>
+    public List<string> UnrecognizedImageSlots { get; set; } = new();
+
+    public bool HasUnrecognizedImageSlot => UnrecognizedImageSlots.Count > 0;
+
+    /// <summary>
+    /// **像源视频/源音频入口、可我不认识**的地方。<see cref="UnrecognizedImageSlots"/> 的同一条道理：
+    /// 认不出的那一刻只能说自己没认出来，不能说这份吃不了片子。
+    /// </summary>
+    public List<string> UnrecognizedMediaSlots { get; set; } = new();
+
+    public bool HasUnrecognizedMediaSlot => UnrecognizedMediaSlots.Count > 0;
+
     public string Describe()
     {
         var parts = new List<string>();
@@ -365,11 +384,15 @@ public static class ComfyUiWorkflowBinder
 
             // 「这份工作流不要这一路」的正规写法（ConditioningZeroOut）。
             // 算成缺陷的话，界面上会留一个用户既改不了、也不需要改的假问题。
+            // 「显式置空」这件事是从类名里的一截字（`ZeroOut`）认出来的，名字对不上就认不出。
+            // 认出来了也**别把话说到「这份工作流不需要它」那么满**——照我看到的说：这一路接的是
+            // 显式置空的节点，我们不往里写。夸大说成「不需要」，用户就没法判断是不是我们要错了地方。
             if (IsDeliberatelyEmpty(type))
             {
                 if (!positive) slots.NegativeDeliberatelyEmpty = true;
-                slots.Notes.Add($"{(positive ? "正向提示词" : "负面词")}这一路是显式置空的（{type}，节点 {link.NodeId}）："
-                    + "这份工作流不需要它，填什么都不生效。");
+                slots.Notes.Add($"{(positive ? "正向提示词" : "负面词")}这一路接的是一个**显式置空**的节点"
+                    + $"（{type}，节点 {link.NodeId}，按类名认的）：那是有意不要这一路，所以我们不往里写，"
+                    + "写了也不生效。");
                 return;
             }
 
@@ -716,7 +739,11 @@ public static class ComfyUiWorkflowBinder
         }
 
         if (slots.SeedNodeIds.Count == 0)
-            slots.Notes.Add("没找到种子输入：多张之间可能出一模一样的几张，得靠服务端自己决定。");
+            // 认不出就**退回保守行为**（什么都不写、保持原样），并且把「这是我按类名没认出来」说清楚——
+            // 说成「没有种子输入」是假的，用户会以为这份工作流本来就不带种子。
+            slots.Notes.Add("**没认出种子**：我是按「类名里带 Sampler、且 seed 是字面量」找的，"
+                + "这份可能用的是别的写法——所以**不往任何地方乱写**（保持原样），"
+                + "代价是同一批的多张可能出一模一样的几张，只能靠服务端自己决定。");
         else if (slots.SeedNodeIds.Count > 1)
             slots.Notes.Add($"这份工作流有 {slots.SeedNodeIds.Count} 段采样（节点 {string.Join("、", slots.SeedNodeIds)}）："
                 + "同一张图会往每一段写同一个种子。");
@@ -739,6 +766,19 @@ public static class ComfyUiWorkflowBinder
             ResolveImageList(graph, slots);
             if (slots.ImageListInputs.Count > 0) return;
 
+            CollectUnrecognizedImageSlots(graph, slots);
+
+            // 「我不认识」和「它没有」是两回事。这份里放着图片、而那个节点类型我不认识时，
+            // 只能如实说自己没认出来，并把地方指出来请用户认领——
+            // 说成「用不了参考图」是假话，用户拿着它只会去找另一份本来就在的工作流。
+            if (slots.HasUnrecognizedImageSlot)
+            {
+                slots.Notes.Add("**没认出底图入口**：这份工作流里有几处放着图片文件名，可它们的节点类型我不认识——"
+                    + string.Join("、", slots.UnrecognizedImageSlots)
+                    + "。**请指给我**哪一处是收参考图的（是的话我下次就按那里走；都不是就照旧只文生图）。");
+                return;
+            }
+
             slots.Notes.Add(slots.CanTakeVideo
                 ? "没有底图入口（LoadImage / 文件清单）：这份工作流吃的是**一段片子**（源视频入口），不吃参考图。"
                 : "没找到底图入口（LoadImage / 文件清单）：这份工作流用不了参考图，只能文生图。");
@@ -748,7 +788,7 @@ public static class ComfyUiWorkflowBinder
         slots.ImageNodeId = loaders[0].Key;
         slots.ImageInput = "image";
         slots.ImageNodeIds.AddRange(loaders.Select(pair => pair.Key));
-        slots.ImageGroups.AddRange(GroupByOutput(graph, slots.ImageNodeIds));
+        slots.ImageGroups.AddRange(GroupByOutput(graph, slots, slots.ImageNodeIds));
         if (loaders.Count > 1)
             slots.Notes.Add($"这份工作流有 {loaders.Count} 个底图入口（节点 {string.Join("、", slots.ImageNodeIds)}）："
                 + "按顺序各收一张参考图——「角色 + 道具 + 场景」一起喂就走这里。"
@@ -771,7 +811,7 @@ public static class ComfyUiWorkflowBinder
     /// </summary>
     private static void ResolveImageList(JsonObject graph, ComfyUiWorkflowSlots slots)
     {
-        var extensions = new[] { ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif" };
+        var extensions = ImageExtensions;
         foreach (var pair in graph.OrderBy(pair => pair.Key, NodeIdComparer.Instance))
         {
             if (pair.Value?["inputs"] is not JsonObject inputs) continue;
@@ -804,6 +844,79 @@ public static class ComfyUiWorkflowBinder
                 + $"{string.Join("、", slots.ImageListInputs.Values)}）：那是一个多行文本框，一行一个文件名，"
                 + $"行与图**按顺序对应**（首行是首帧、末行是末帧），这份现在列了 {slots.ImageListCapacity} 行。"
                 + "喂进来的参考图会按行写进去。");
+    }
+
+    /// <summary>图片文件名的后缀（认「像图的字面量」用；文件清单式入口与「认不出的入口」共用一份）。</summary>
+    private static readonly string[] ImageExtensions = { ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif" };
+
+    /// <summary>影音文件名的后缀。</summary>
+    private static readonly string[] MediaExtensions =
+    {
+        ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"
+    };
+
+    /// <summary>
+    /// 找「像底图入口、可我不认识」的地方，填进 <see cref="ComfyUiWorkflowSlots.UnrecognizedImageSlots"/>。
+    ///
+    /// 判据**只看事实，不猜类名**：某个输入是**字面量字符串**、拆行后至少有一行以图片后缀结尾，
+    /// 而它既不是认下的 `LoadImage.image`、也不是认下的「文件清单式」入口（那两种走到这一步之前都已经被认走了），
+    /// 且不在提示词节点上（提示词里恰好写着一行 `.png` 那种不该被算进来），也不在输出侧节点上
+    /// （保存类的 `filename_prefix` 决定的是存下来的名字，不是入口）。
+    ///
+    /// 为什么是「至少有一行像图」而不是「每一行都像」：认成文件清单那一步更严（每一行都得是图片后缀），
+    /// 这里要的恰恰相反——**宁可多报一处请人认领**，也不能把「我没认出来」说成「它没有」。
+    /// </summary>
+    private static void CollectUnrecognizedImageSlots(JsonObject graph, ComfyUiWorkflowSlots slots)
+    {
+        foreach (var pair in graph.OrderBy(pair => pair.Key, NodeIdComparer.Instance))
+        {
+            if (pair.Key == slots.PositiveNodeId || pair.Key == slots.NegativeNodeId) continue;
+            if (pair.Value is not JsonObject node || node["inputs"] is not JsonObject inputs) continue;
+            var classType = ClassTypeOf(node);
+            if (IsOutputSideNode(classType)) continue;
+            foreach (var field in inputs)
+            {
+                if (slots.ImageListInputs.TryGetValue(pair.Key, out var claimed) && claimed == field.Key) continue;
+                if (field.Value is not JsonValue value || !value.TryGetValue<string>(out var text)) continue;
+                if (text.Length == 0) continue;
+                var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (lines.Length == 0) continue;
+                if (!lines.Any(line => ImageExtensions.Any(ext => line.EndsWith(ext, StringComparison.OrdinalIgnoreCase))))
+                    continue;
+                slots.UnrecognizedImageSlots.Add($"{classType}.{field.Key}（节点 {pair.Key}）");
+            }
+        }
+    }
+
+    /// <summary>
+    /// 找「像源视频 / 源音频入口、可我不认识」的地方。与
+    /// <see cref="CollectUnrecognizedImageSlots"/> **同一套判据**（这里只看值，不看名字）：
+    /// 某个输入是字面量字符串、拆行后至少有一行以影音后缀结尾，且它不在输出侧节点上。
+    ///
+    /// 为什么不按名字判（第一版就是那么写的，实测当场打脸）：这台机器上 `MiniMaxH3Director.shift_video`、
+    /// `FeiHouEasyH3Loader.video_vae`、`FeiHouEasyH3.audio_duration_auto` 这些**参数**名字里都带
+    /// `video` / `audio`，可它们一个文件都不放——照着名字报，就是拿三处噪音去请用户认领，
+    /// 「请指给我」立刻变成骚扰。**入口的判据只能是「那里真的放着一个影音文件名」。**
+    /// </summary>
+    private static void CollectUnrecognizedMediaSlots(JsonObject graph, ComfyUiWorkflowSlots slots)
+    {
+        foreach (var pair in graph.OrderBy(pair => pair.Key, NodeIdComparer.Instance))
+        {
+            if (pair.Value is not JsonObject node || node["inputs"] is not JsonObject inputs) continue;
+            var classType = ClassTypeOf(node);
+            if (IsOutputSideNode(classType)) continue;
+            foreach (var field in inputs)
+            {
+                if (field.Value is not JsonValue value || !value.TryGetValue<string>(out var text)) continue;
+                if (text.Length == 0) continue;
+                var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (lines.Length == 0) continue;
+                if (!MediaExtensions.Any(ext =>
+                    lines.Any(line => line.EndsWith(ext, StringComparison.OrdinalIgnoreCase)))) continue;
+
+                slots.UnrecognizedMediaSlots.Add($"{classType}.{field.Key}（节点 {pair.Key}）");
+            }
+        }
     }
 
     /// <summary>
@@ -856,6 +969,20 @@ public static class ComfyUiWorkflowBinder
         if (slots.AudioNodeIds.Count > 1)
             slots.Notes.Add($"这份工作流有 {slots.AudioNodeIds.Count} 个源音频入口（节点 {string.Join("、", slots.AudioNodeIds)}）："
                 + "按顺序各收一段音（例如「双人对白」一人一段）；只给一段时，后面的入口还留着它自己的示例。");
+
+        if (slots.CanTakeVideo || slots.CanTakeAudio) return;
+
+        CollectUnrecognizedMediaSlots(graph, slots);
+
+        // 一个源视频/源音频入口都没认出来时，**不许把话说成「这份吃不了片子」**：
+        // 「我不认识这个类型」不等于「它没有」。把像片源的地方指出来请用户认领，
+        // 并说清有一类槽位我是**故意不写**的——要服务器绝对路径那些（`video_path` 那种），
+        // 我们按文件名引用，写进去服务端反而找不到文件。
+        if (slots.HasUnrecognizedMediaSlot)
+            slots.Notes.Add("**没认出源视频 / 源音频入口**：这份工作流里有几处像片源的地方，"
+                + "可它们的节点类型（或输入名）我不认识——" + string.Join("、", slots.UnrecognizedMediaSlots)
+                + "。**请指给我**哪一处是收片子 / 收声音的（要服务器上**绝对路径**的那种我不写："
+                + "我们是把文件传到 input 目录、按文件名引用，写绝对路径反而找不到文件）。");
     }
 
     /// <summary>
@@ -866,11 +993,26 @@ public static class ComfyUiWorkflowBinder
     ///
     /// **分不清就退回一整组**（等于原先的平铺行为），不硬分：只要有一个入口走不到任何保存节点，
     /// 说明这份的图没接进产出、或输出节点不是保存类，这时分组没有依据。
+    ///
+    /// 退回时**要说出来**（只在真的有两个以上入口、分组本来有用的时候）：`IsSaveNode` 是按类名里的
+    /// `SaveImage` / `VideoCombine` 这类字眼认的，换台装了别的保存节点的服务器就认不出——
+    /// 那时分组会悄悄失效、回到平铺，用户看到的是「按顺序喂」的结果，却以为自己在按组喂。
     /// </summary>
-    private static List<List<string>> GroupByOutput(JsonObject graph, IReadOnlyList<string> entries)
+    private static List<List<string>> GroupByOutput(JsonObject graph, ComfyUiWorkflowSlots slots, IReadOnlyList<string> entries)
     {
         var sinks = entries.ToDictionary(entry => entry, entry => SaveNodesUnder(graph, entry), StringComparer.Ordinal);
-        if (sinks.Values.Any(set => set.Count == 0)) return new List<List<string>> { entries.ToList() };
+        if (sinks.Values.Any(set => set.Count == 0))
+        {
+            if (entries.Count > 1)
+            {
+                var orphaned = entries.Where(entry => sinks[entry].Count == 0).ToList();
+                slots.Notes.Add("这份工作流有多个底图入口（节点 " + string.Join("、", entries)
+                    + "），可**我分不出组**：其中有入口（节点 " + string.Join("、", orphaned)
+                    + "）走不到任何我认得的保存类输出——它的保存节点可能是我没见过的写法。"
+                    + "所以参考图**按节点顺序平铺**（老办法），不按组填。");
+            }
+            return new List<List<string>> { entries.ToList() };
+        }
 
         var parent = entries.ToDictionary(entry => entry, entry => entry, StringComparer.Ordinal);
         string Find(string id)

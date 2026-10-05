@@ -160,6 +160,19 @@ public sealed class SiteWorkflow
     public List<string> BrokenInputDetails { get; set; } = new();
 
     /// <summary>
+    /// 这份工作流有**几处必填输入我判断不了**（链子停在一个我不担保的类型上：服务器的节点定义里没有它，
+    /// 或者它本来就是纯前端件——两者在 JSON 里长得一样）。
+    ///
+    /// 为什么既不算「我们丢了」、也不能不记：算成「我们丢了」是把「我不认识」说成「我们弄丢了」，
+    /// 用户会照它去重导、去改一份本来没毛病的工作流；可不记下来，他在选择器里看到的就是一份
+    /// 没有任何记号的好工作流，点下去却收 400。**所以照实说「判断不了」，并且照样挂记号。**
+    /// </summary>
+    public int UncertainInputs { get; set; }
+
+    /// <summary>判断不了的那几处，逐条写清节点、输入与我凭什么判断不了。</summary>
+    public List<string> UncertainInputDetails { get; set; } = new();
+
+    /// <summary>
     /// 这份工作流引用的文件里，**这台机器上没有**的有几处（示例素材、模型、依赖）。
     ///
     /// 为什么要单列：正文结构一点毛病都没有，所以「我们丢了 / 自己断线」两栏永远看不见它——

@@ -146,7 +146,8 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 体检：引用的文件这台机器上没有要报出来（哨兵值不算文件），但不该触发让大模型认一认", ComfyUiAuditReportsFilesMissingFromTheServer),
     ("ComfyUI 出片前：没给满的槽位留着失效的示例要挡住提交（影子判据与绑定必须逐字对齐）", ComfyUiBlocksUnfilledStaleMedia),
     ("ComfyUI 多路音源：两个音频口按顺序各收一段，只给一段时后面的入口保持它自己的示例", ComfyUiFeedsEveryAudioEntryInOrder),
-    ("ComfyUI 体检：源头那个节点的类型这台服务器上没有时，不能说成「是我们转换丢的」", ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer),
+    ("ComfyUI 认入口：认不出就说「我没认出来，请指给我」，不许说成「用不了」", ComfyUiBinderSaysWhatItCouldNotRecognize),
+    ("ComfyUI 体检：服务器上没有那个类型时只能说「判断不了」，不能说成「是我们转换丢的」", ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
     ("AI 建实体：内容同时落到核心设定与默认变体，引用卡不再空白", AgentEntityContentReachesVariantAndCard),
@@ -205,7 +206,7 @@ var tests = new (string Name, Action Run)[]
     ("转换 · 子图「输入直通到输出」要接到外面喂给容器那个输入的地方", ComfyUiConversionWiresContainerPassThrough),
     ("转换 · 旁路判定要认逗号分隔的联合类型（FLOAT,INT,BOOLEAN 也算接得上）", ComfyUiConversionBypassesThroughUnionTypedInputs),
     ("转换 · 固定选项的值是界面写法（Ref2VA — …）或数字下标时要纠正成它认的那个", ComfyUiConversionRepairsDecoratedComboValues),
-    ("ComfyUI 导入体检：把我们丢掉的输入指到具体哪一份哪一处，并分清不是我们丢的那几类", ComfyUiImportAuditNamesWhatWeDropped),
+    ("ComfyUI 导入体检：判断不了的那几处指名道姓，并分清「我们丢了 / 它自己断线 / 我不认识」", ComfyUiImportAuditNamesWhatWeDropped),
     ("ComfyUI 导入体检：大模型说它是直通/界面件，都要照它重转核对过才采用", ComfyUiImportAuditOnlyKeepsVerifiedModelRules),
     ("ComfyUI 导入整链：拉取→体检→让模型认→重转→落盘（真实 HTTP 与磁盘）", ComfyUiImportRepairsThroughTheWholeChain),
     ("ComfyUI 站点标识：同一主机不同端口不撞车，同一台重新导入沿用原 id", ComfyUiSiteIdsDoNotCollideAcrossPorts),
@@ -10623,10 +10624,15 @@ static void ComfyUiBlocksUnfilledStaleMedia()
 }
 
 /// <summary>
-/// 钉住「源头那个节点的类型这台服务器上有没有」这句分岔：链子走到尽头那个节点，如果它的类型
-/// 这台机器上根本没有（自定义节点没装、或它本来就是纯前端件），链子是从那儿断的——
-/// 说成一句「源头是个活着的后端节点」，用户会以为是我们转换得不对，去重导一遍，而真正该做的是
-/// 换一份、或者给这台机器装上那个节点。这是唯一一处我们会把「不是我们的错」说成「我们的错」。
+/// 钉住「链子尽头那个类型我担保得了吗」这句分岔：`live` 的门槛是**这台服务器的节点定义里真有它**。
+///
+/// 为什么门槛必须落在「查得动的事实」上，而不是那张写死的前端节点表：表里那几个名字是我们在见过的那几台
+/// 机器上攒的。换台装了别的 Set/Get、别的 bypasser 的服务器，它们的类型既不在表里、也不在 `object_info` 里，
+/// 原先就会一路走到「源头是个活着的后端节点」→ 判成「是我们丢的」——把「我不认识」说成「我们弄丢了」，
+/// 用户会照它去重导、去改一份本来没毛病的工作流。所以要降一档：如实说「判断不了」。
+///
+/// 但降档**不是扔下不管**：它照样要进「让大模型认一认」的清单（否则那条路就断了），
+/// 而服务器上真有的类型一个都不许进那张清单（否则会教出一条针对 `CheckpointLoaderSimple` 的胡说规则）。
 /// </summary>
 static void ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer()
 {
@@ -10656,20 +10662,38 @@ static void ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer()
 	const string payload = """{"9": {"class_type": "SaveImage", "inputs": {}}}""";
 	var objectInfoNode = System.Text.Json.Nodes.JsonNode.Parse(objectInfo)!.AsObject();
 
-	ComfyUiImportFinding Finding(string sourceType) => ComfyUiImportAuditor.Inspect(
+	ComfyUiImportAuditReport Inspect(string sourceType) => ComfyUiImportAuditor.Inspect(
 		new Dictionary<string, string>(StringComparer.Ordinal) { ["T/缺节点.json"] = Draft(sourceType) },
 		new Dictionary<string, string>(StringComparer.Ordinal) { ["T/缺节点.json"] = payload },
-		objectInfoNode).Findings.First();
+		objectInfoNode);
 
-	var unknown = Finding("MysteryBridge");
-	Expect(unknown.Kind == ComfyUiFindingKind.DroppedByConversion && unknown.Detail.Contains("MysteryBridge")
-		&& unknown.Detail.Contains("这台服务器上没有"),
-		"服务器没这个类型时要说明白（是哪一类、以及链子是从那儿断的）：" + unknown.Detail);
+	// 这台服务器上没有那个类型：**不能算成「是我们丢的」**——「我不认识」不等于「我们弄丢了」。
+	// 这正是换台装了别的 Set/Get、别的 bypasser 的服务器时会误报的那一类。
+	var unknown = Inspect("MysteryBridge");
+	Expect(unknown.Count(ComfyUiFindingKind.DroppedByConversion) == 0 && !unknown.NeedsAttention,
+		"服务器没这个类型时不许判成「我们丢了」：" + unknown.Describe());
+	Expect(unknown.Count(ComfyUiFindingKind.Unclassified) == 1
+		&& unknown.Findings[0].Detail.Contains("MysteryBridge")
+		&& unknown.Findings[0].Detail.Contains("判断不了这一项是不是我们丢的"),
+		"要如实说自己判断不了，并说清是哪个类型：" + unknown.Findings[0].Detail);
+	Expect(unknown.UnknownTypes.Count == 1 && unknown.UnknownTypes[0].Type == "MysteryBridge",
+		"降级之后**照样**要进「让大模型认一认」的清单，否则那条路就断了："
+		+ string.Join("/", unknown.UnknownTypes.Select(item => item.Type)));
 
-	var known = Finding("LoadImage");
-	Expect(known.Kind == ComfyUiFindingKind.DroppedByConversion
-		&& known.Detail == "源头是个活着的后端节点",
-		"类型在服务器上就照旧说「源头是个活着的后端节点」：" + known.Detail);
+	var known = Inspect("LoadImage");
+	Expect(known.Count(ComfyUiFindingKind.DroppedByConversion) == 1
+		&& known.Findings[0].Detail == "源头是个活着的后端节点",
+		"类型在服务器上就照旧说「源头是个活着的后端节点」：" + known.Findings[0].Detail);
+	Expect(known.UnknownTypes.Count == 0,
+		"服务器上真有的类型不许拿去问模型——那会教出一条针对正经节点的胡说规则："
+		+ string.Join("/", known.UnknownTypes.Select(item => item.Type)));
+
+	// 我们认得的纯前端件（`PrimitiveNode` 这种）：既不是「我们丢了」，也没法说它「服务器上没有」。
+	var frontend = Inspect("PrimitiveNode");
+	Expect(frontend.Count(ComfyUiFindingKind.Unclassified) == 1
+		&& frontend.Findings[0].Detail.Contains("纯前端节点")
+		&& frontend.Findings[0].Detail.Contains("不是我们丢的"),
+		"认得出的纯前端件要直说「不是我丢的」，别让人去重导一遍：" + frontend.Findings[0].Detail);
 }
 
 /// <summary>
@@ -10703,6 +10727,81 @@ static void ComfyUiFeedsEveryAudioEntryInOrder()
 	var one = Bind("x.wav");
 	Expect(one["1"]?["inputs"]?["audio"]?.ToString() == "x.wav" && one["2"]?["inputs"]?["audio"]?.ToString() == "b.wav",
 		"只给一段时，第二个入口要保持它自己的示例（不拿同一段去凑数）：" + one.ToJsonString());
+}
+
+/// <summary>
+/// 钉住「认不出入口」和「它没有入口」是两回事：**不许把「我没认出来」说成「用不了」**。
+///
+/// 真机上的由头：`NanFengH3MultiReferenceGeneratorV10.图片1` 里放着一张参考图，可它的类名里没有
+/// `LoadImage`、输入名也不是 `image*`，于是整类漏掉——选择器里就成了一份「只能文生图」的好工作流。
+/// 反面同样要钉：`shift_video` / `video_vae` / `audio_duration_auto` 这类**名字里带 video/audio 的参数**
+/// 一个文件都不放，不许拿来当「像片源的地方」报给用户（第一版按名字判，真机上当场报了 3 处噪音）。
+///
+/// 还钉住「保存节点认不出时分组悄悄失效」那一条：退回平铺是对的（保守），**但要说出来**——
+/// 不说的结果是用户以为自己按「组」喂了，实际喂的是「按顺序」。
+/// </summary>
+static void ComfyUiBinderSaysWhatItCouldNotRecognize()
+{
+	// ① 认不出的底图入口：类名与输入名都不是我们认的那几种，可那里**真的放着图片文件名**。
+	const string hiddenEntry = """
+	{
+	  "1": {"class_type": "NanFengH3MultiReferenceGeneratorV10", "inputs": {"图片1": "33.jpg", "width": 1024}},
+	  "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out.png"}}
+	}
+	""";
+	var hidden = ComfyUiWorkflowBinder.Detect(hiddenEntry);
+	Expect(!hidden.CanTakeImage && hidden.HasUnrecognizedImageSlot,
+		"认不出就说「没认出来」（并把地方指出来），不能当成「它没有」：" + hidden.Describe());
+	Expect(hidden.UnrecognizedImageSlots.Contains("NanFengH3MultiReferenceGeneratorV10.图片1（节点 1）"),
+		"要指名道姓说清是哪一处：" + string.Join("、", hidden.UnrecognizedImageSlots));
+	Expect(hidden.Notes.Any(note => note.Contains("请指给我")),
+		"要说「请指给我」：" + string.Join("；", hidden.Notes));
+	Expect(!hidden.Notes.Any(note => note.Contains("用不了参考图")),
+		"不许断言「用不了参考图」——那是把「我没认出来」说成「它没有」：" + string.Join("；", hidden.Notes));
+	Expect(!hidden.UnrecognizedImageSlots.Any(item => item.Contains("filename_prefix")),
+		"保存在节点的 filename_prefix 不是入口（它决定的是存下来的名字）："
+		+ string.Join("、", hidden.UnrecognizedImageSlots));
+
+	// ② 反面：名字里带 video / audio 的**参数**一个文件都不放，不是入口。
+	const string parametersOnly = """
+	{
+	  "1": {"class_type": "MiniMaxH3Director", "inputs": {"shift_video": "0.5", "shift_audio": "0.5", "prompt": "一只猫"}},
+	  "2": {"class_type": "FeiHouEasyH3Loader", "inputs": {"video_vae": "wan_2.1_vae.safetensors", "audio_duration_auto": "true"}},
+	  "3": {"class_type": "SaveVideo", "inputs": {"video": ["1", 0], "filename_prefix": "out"}}
+	}
+	""";
+	var parameters = ComfyUiWorkflowBinder.Detect(parametersOnly);
+	Expect(!parameters.HasUnrecognizedMediaSlot,
+		"参数名里带 video/audio 而已，不是入口——照名字报就是拿噪音去请用户认领："
+		+ string.Join("、", parameters.UnrecognizedMediaSlots));
+
+	// ③ 真的像片源（值就是一个影音文件名）才报。
+	const string realEntry = """
+	{
+	  "1": {"class_type": "某家自写视频加载器", "inputs": {"video": "clip.mp4"}},
+	  "2": {"class_type": "SaveVideo", "inputs": {"video": ["1", 0], "filename_prefix": "out"}}
+	}
+	""";
+	var real = ComfyUiWorkflowBinder.Detect(realEntry);
+	Expect(!real.CanTakeVideo && real.HasUnrecognizedMediaSlot,
+		"认不出的片源入口要说出来：" + real.Describe());
+	Expect(real.Notes.Any(note => note.Contains("请指给我")),
+		"要说「请指给我」：" + string.Join("；", real.Notes));
+
+	// ④ 保存节点是我不认识的写法时：分组没有依据 → 退回平铺（保守），**并且说出来**。
+	const string unknownSaver = """
+	{
+	  "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+	  "2": {"class_type": "LoadImage", "inputs": {"image": "b.png"}},
+	  "3": {"class_type": "LocalSink", "inputs": {"images": ["1", 0]}},
+	  "4": {"class_type": "LocalSink", "inputs": {"images": ["2", 0]}}
+	}
+	""";
+	var ungrouped = ComfyUiWorkflowBinder.Detect(unknownSaver);
+	Expect(ungrouped.ImageGroups.Count == 1 && ungrouped.ImageGroups[0].Count == 2,
+		"分不清就退回一整组（平铺），不硬分：" + ungrouped.Describe());
+	Expect(ungrouped.Notes.Any(note => note.Contains("分不出组")),
+		"退回平铺这件事要说出来——不然用户以为自己在按组喂：" + string.Join("；", ungrouped.Notes));
 }
 
 /// <summary>
@@ -15108,7 +15207,8 @@ static void ComfyUiConversionRepairsDecoratedComboValues()
 
 /// <summary>
 /// 钉住「导入前的体检」：拿原稿 + 转换结果 + 这台的节点定义，把「必填输入缺了」逐处定性。
-/// 只有「源头是个活着的后端节点」才算我们丢了；静音/绕过、原稿自己断线都不算。
+/// 只有「源头是这台服务器上真有的后端节点」才算我们丢了；静音/绕过、原稿自己断线都不算，
+/// 而**链子停在一个我不担保的类型上**算「判断不了」——那是第三档，既不说「是我们丢的」，也不说「没事」。
 ///
 /// 实测动机：认不出的前端节点会被跳过，**下游必填输入整项消失**，而服务端往往还回 success，
 /// 只是那一步不产出——那种错最难看出来。所以要在导入那一刻就说出来。
@@ -15158,15 +15258,17 @@ static void ComfyUiImportAuditNamesWhatWeDropped()
     };
 
     var audit = ComfyUiImportAuditor.Inspect(raws, payloads, objectInfoNode);
-    Expect(audit.NeedsAttention, "必须有「要处理」的结论");
-    Expect(audit.Count(ComfyUiFindingKind.DroppedByConversion) == 1,
-        "恰好一处是我们丢的，实际 " + audit.Count(ComfyUiFindingKind.DroppedByConversion));
-    Expect(audit.AffectedWorkflows == 1, "影响 1 份，实际 " + audit.AffectedWorkflows);
+    // FancyBridge 这台服务器上没有 → 结论是「判断不了」，**不是**「我们丢的」。
+    Expect(!audit.NeedsAttention && audit.Count(ComfyUiFindingKind.DroppedByConversion) == 0,
+        "服务器上没有的类型不许判成「我们丢了」：" + audit.Describe());
+    Expect(audit.Count(ComfyUiFindingKind.Unclassified) == 1,
+        "恰好一处判断不了，实际 " + audit.Count(ComfyUiFindingKind.Unclassified));
+    Expect(audit.AffectedWorkflows == 0, "判断不了的算不上「要处理」，实际 " + audit.AffectedWorkflows);
     Expect(audit.UnknownTypes.Count == 1 && audit.UnknownTypes[0].Type == "FancyBridge",
-        "要把链子上不认识的前端节点报出来（那是让模型认的清单），实际 "
+        "要把链子上我不担保的类型报出来（那是让模型认的清单），实际 "
         + string.Join("/", audit.UnknownTypes.Select(item => item.Type)));
-    Expect(audit.Describe().Contains("VAEDecode.samples") || audit.Describe().Contains("我们转换时丢的"),
-        "总账里要说清是什么问题：" + audit.Describe());
+    Expect(audit.Describe().Contains("判断不了"),
+        "总账里要说清是「判断不了」：" + audit.Describe());
 
     // 原稿自己断线那种**不算我们的问题**，也不该催用户修：换成「输入没接线的 Reroute」。
     const string brokenRaw = """
@@ -15239,7 +15341,7 @@ static void ComfyUiImportAuditOnlyKeepsVerifiedModelRules()
     };
     var baseline = ComfyUiImportAuditor.Inspect(library.RawDrafts, library.Payloads, objectInfoNode);
     library = library with { Audit = baseline };
-    Expect(baseline.Count(ComfyUiFindingKind.DroppedByConversion) == 1, "起点是一处丢掉");
+    Expect(baseline.Count(ComfyUiFindingKind.Unclassified) == 1, "起点是一处判断不了（服务器上没有 FancyBridge）");
 
     // 模型说它是「直通，走第 0 个输入」——这是对的，验证应当通过。
     var good = ComfyUiVirtualNodeLearner.ProposalFromModelJson(
@@ -15249,8 +15351,9 @@ static void ComfyUiImportAuditOnlyKeepsVerifiedModelRules()
     Expect(good!.Source.Contains("拉长"), "理由要留着，好让人核对：" + good.Source);
 
     var trial = ComfyUiVirtualNodeLearner.TryRule(library, baseline, Array.Empty<ComfyUiVirtualNodeRule>(), good);
-    Expect(trial.Accepted, "这条规则确实把丢掉的输入接回来了，应当采用：" + trial.Reason);
-    Expect(trial.Audit.Count(ComfyUiFindingKind.DroppedByConversion) == 0, "采用之后应当一处不剩");
+    Expect(trial.Accepted, "这条规则确实把判断不了的那处接回来了，应当采用：" + trial.Reason);
+    Expect(trial.Audit.Count(ComfyUiFindingKind.Unclassified) == 0, "采用之后判断不了的一处不剩");
+    Expect(trial.Audit.Count(ComfyUiFindingKind.DroppedByConversion) == 0, "采用之后也不该冒出新的「我们丢了」");
     var samples = System.Text.Json.Nodes.JsonNode.Parse(trial.Library.Payloads["T/一份.json"])!["3"]!["inputs"]!["samples"]!.AsArray();
     Expect(samples[0]!.GetValue<string>() == "4",
         "接回来的线要指向真正的源头（节点 4），实际 " + samples[0]);
@@ -15258,7 +15361,7 @@ static void ComfyUiImportAuditOnlyKeepsVerifiedModelRules()
     // 模型说它是「纯界面件」——照它改一处都不会少，验证必须拦住。
     var wrong = ComfyUiVirtualNodeLearner.ProposalFromModelJson("FancyBridge", "{\"kind\":\"discard\"}", out _)!;
     var rejected = ComfyUiVirtualNodeLearner.TryRule(library, baseline, Array.Empty<ComfyUiVirtualNodeRule>(), wrong);
-    Expect(!rejected.Accepted && rejected.Reason.Contains("一处都没少"),
+    Expect(!rejected.Accepted && rejected.Reason.Contains("一处都没变确定"),
         "认错的规则不能采用，并且要说清为什么：" + rejected.Reason);
     Expect(ReferenceEquals(rejected.Library, library), "没采用就不能把试错的结果留下来");
 
@@ -15314,8 +15417,12 @@ static void ComfyUiImportRepairsThroughTheWholeChain()
 
     var fetched = ComfyUiLibrary.FetchAsync("http://127.0.0.1:8188", http).GetAwaiter().GetResult();
     var audit = fetched.Audit!;
-    Expect(audit.NeedsAttention && audit.Count(ComfyUiFindingKind.DroppedByConversion) == 1,
-        "拉下来就该查出那一处被丢掉的输入：" + audit.Describe());
+    Expect(audit.Count(ComfyUiFindingKind.Unclassified) == 1 && !audit.NeedsAttention,
+        "拉下来就该查出那处**判断不了**的（这台服务器上没有 FancyBridge），而不是判成「我们丢了」："
+        + audit.Describe());
+    Expect(audit.UnknownTypes.Count == 1 && audit.UnknownTypes[0].Type == "FancyBridge",
+        "「让大模型认一认」的清单要靠它，不然那条路没得问："
+        + string.Join("/", audit.UnknownTypes.Select(item => item.Type)));
     Expect(fetched.RawDrafts.Count == 1 && fetched.ObjectInfo is not null,
         "原稿与节点定义要留在结果里——体检与「让模型认一认」都要用，不该事后再拉一遍");
 
@@ -15323,9 +15430,14 @@ static void ComfyUiImportRepairsThroughTheWholeChain()
     var (asIs, asIsError) = ComfyUiLibrary.Install(fetched, "假服务器", string.Empty, null);
     Expect(asIs is not null && asIsError.Length == 0, "先这样导入也要落盘：" + asIsError);
     var plain = asIs!.Workflows.First(item => item.Key == "T/一份.json");
-    Expect(plain.DroppedInputs == 1, "这份的结论要记在条目上，实际 " + plain.DroppedInputs);
-    Expect(ComfyUiWorkflowHealth.Describe(plain).Contains("我们转换时丢掉的"),
-        "选择器那一行要说人话：" + ComfyUiWorkflowHealth.Describe(plain));
+    Expect(plain.DroppedInputs == 0 && plain.UncertainInputs == 1,
+        "判断不了的要落进**自己那一栏**（不能算成「我们丢的」）：丢 " + plain.DroppedInputs
+        + " / 判断不了 " + plain.UncertainInputs);
+    Expect(ComfyUiWorkflowHealth.Describe(plain).Contains("判断不了"),
+        "选择器那一行要如实说「判断不了」：" + ComfyUiWorkflowHealth.Describe(plain));
+    Expect(ComfyUiWorkflowHealth.Describe(plain).Contains("400"),
+        "「判断不了」不等于「没事」——提交会被拒收这件事必须一并说出来："
+        + ComfyUiWorkflowHealth.Describe(plain));
     Expect(ComfyUiWorkflowHealth.ShortMark(plain).Contains("⚠"), "列表里也要挂记号：" + ComfyUiWorkflowHealth.ShortMark(plain));
 
     // 用户改选「让大模型认一认」：模型说它是直通，照它重转之后账要清掉。
@@ -15343,8 +15455,9 @@ static void ComfyUiImportRepairsThroughTheWholeChain()
     var (fixedSite, fixedError) = ComfyUiLibrary.Install(repaired, "假服务器", string.Empty, asIs);
     Expect(fixedSite is not null && fixedError.Length == 0, "重转之后要能落盘：" + fixedError);
     var healed = fixedSite!.Workflows.First(item => item.Key == "T/一份.json");
-    Expect(healed.DroppedInputs == 0 && ComfyUiWorkflowHealth.Describe(healed).Length == 0,
-        "修好之后结论要清掉（不能留着上一次的警告）");
+    Expect(healed.DroppedInputs == 0 && healed.UncertainInputs == 0
+        && ComfyUiWorkflowHealth.Describe(healed).Length == 0,
+        "修好之后结论要清掉（不能留着上一次的警告）：" + ComfyUiWorkflowHealth.Describe(healed));
     Expect(fixedSite.VirtualNodeRules.Count == 1 && fixedSite.VirtualNodeRules[0].Type == "FancyBridge",
         "学到的规则要落在站点上，下次导入自动接着用");
 

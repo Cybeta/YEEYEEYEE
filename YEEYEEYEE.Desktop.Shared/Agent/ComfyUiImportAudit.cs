@@ -37,7 +37,20 @@ public enum ComfyUiFindingKind
     /// </summary>
     MissingOnServer,
 
-    /// <summary>在原稿里找不到对应的节点/输入，判断不了（正常情况下应当是 0）。</summary>
+    /// <summary>
+    /// **判断不了**：链子走到尽头那个类型，我担保不了它是「活着的后端节点」——要么这台服务器的
+    /// 节点定义（`/object_info`）里没有它，要么它本来就是纯前端件（两者在 JSON 里长得一样）；
+    /// 另一种成因是在原稿里找不到对应的节点/输入。
+    ///
+    /// 为什么非要单列这一档、而不能归到 <see cref="DroppedByConversion"/>：那是把「我不认识」
+    /// 说成了「我们弄丢了」。换台装了别的 Set/Get、别的 bypasser 的服务器，原稿本来一点毛病没有，
+    /// 也会被判成「我们丢了输入」——错的归因比不说更坏，用户会照它去重导、去改那份好端端的工作流。
+    ///
+    /// 这一档同时是「让大模型认一认」的入口：链子上那个不认识的具体类型记在
+    /// <see cref="ComfyUiImportAuditReport.UnknownTypes"/> 里。
+    ///
+    /// 但它**不等于「没事」**：真缺了必填输入，提交照样会被 ComfyUI 拒收，所以选择器里仍然要挂记号。
+    /// </summary>
     Unclassified
 }
 
@@ -153,7 +166,9 @@ public sealed record ComfyUiImportAuditReport(
 
         var unknown = Count(ComfyUiFindingKind.Unclassified);
         if (unknown > 0)
-            lines.Add($"· 另有 {unknown} 处判断不了（在原稿里找不到对应节点），已如实记下。");
+            lines.Add($"· 另有 {unknown} 处**判断不了**：链子停在一个我担保不了的类型上（要么服务器的节点定义里"
+                + "没有它、要么它本来就是纯前端件），或者原稿里找不到那个节点。这两种都**不下「是我们丢的」这个结论**"
+                + "——但「判断不了」不等于「没事」：真缺了必填输入，提交照样会被拒收。");
 
         var missing = Count(ComfyUiFindingKind.MissingOnServer);
         if (missing > 0)
@@ -186,8 +201,9 @@ public sealed record ComfyUiImportAuditReport(
                 + "别看上面「引用的文件这台机器上没有」是 0 就以为文件都在——那一条在这里是查不了的。");
 
         if (UnknownTypes.Count > 0)
-            lines.Add("· 丢掉的输入，链子上经过这些**我们不认识的前端节点**："
-                + string.Join("、", UnknownTypes.Select(item => $"{item.Type}×{item.Count}")));
+            lines.Add("· 判断不了的里面，链子停在**这些我不认识的类型**上："
+                + string.Join("、", UnknownTypes.Select(item => $"{item.Type}×{item.Count}"))
+                + "——重新导入时选「让大模型认一认」，认下来它们就变成明确的结论了。");
 
         return string.Join(Environment.NewLine, lines);
     }
@@ -208,7 +224,8 @@ public sealed record ComfyUiImportAuditReport(
         var relevant = Findings
             .Where(item => item.Kind is ComfyUiFindingKind.DroppedByConversion
                 or ComfyUiFindingKind.BrokenInSource
-                or ComfyUiFindingKind.MissingOnServer)
+                or ComfyUiFindingKind.MissingOnServer
+                or ComfyUiFindingKind.Unclassified)
             .GroupBy(item => item.WorkflowKey, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
 
@@ -217,6 +234,7 @@ public sealed record ComfyUiImportAuditReport(
             // 先清零再写：这次没有的结论不能留着上一次的数（重转之后问题可能已经没了）。
             workflow.DroppedInputDetails = new List<string>();
             workflow.BrokenInputDetails = new List<string>();
+            workflow.UncertainInputDetails = new List<string>();
             workflow.MissingFileDetails = new List<string>();
             workflow.MissingMedia = new List<ComfyUiMissingMedia>();
             if (relevant.TryGetValue(workflow.Key, out var found))
@@ -227,6 +245,13 @@ public sealed record ComfyUiImportAuditReport(
                     .ToList();
                 workflow.BrokenInputDetails = found
                     .Where(item => item.Kind == ComfyUiFindingKind.BrokenInSource)
+                    .Select(item => item.ShortLabel)
+                    .ToList();
+                // 「判断不了」也要落在条目上：它**不代表这份没问题**（真缺了必填输入照样被拒收），
+                // 只是我不敢把话说成「是我们丢的」。不落下来，用户就会在选择器里看到一个没有记号的
+                // 好工作流，点下去却收 400——那才是真正的坑。
+                workflow.UncertainInputDetails = found
+                    .Where(item => item.Kind == ComfyUiFindingKind.Unclassified)
                     .Select(item => item.ShortLabel)
                     .ToList();
                 workflow.MissingFileDetails = found
@@ -246,6 +271,7 @@ public sealed record ComfyUiImportAuditReport(
             // 计数以清单为准：两处写同一个数，就不会出现「说有 3 处、只列了 2 条」。
             workflow.DroppedInputs = workflow.DroppedInputDetails.Count;
             workflow.BrokenInputs = workflow.BrokenInputDetails.Count;
+            workflow.UncertainInputs = workflow.UncertainInputDetails.Count;
             workflow.MissingFiles = workflow.MissingFileDetails.Count;
         }
     }
@@ -264,8 +290,8 @@ public sealed record ComfyUiMissingMedia(string NodeId, string ClassType, string
 }
 
 /// <summary>
-/// 一个我们不认识的前端节点类型（<c>/object_info</c> 里没有、内置表里也没有）。
-/// 这既是「为什么丢了输入」的解释，也是**可以让大模型认一认**的清单。
+/// 一个我担保不了的类型（<c>/object_info</c> 里没有、内置表里也没有）。这既是「为什么这几处判断不了」
+/// 的解释，也是**可以让大模型认一认**的清单。
 /// </summary>
 public sealed record ComfyUiUnknownType(string Type, int Count, string SampleWorkflowKey, string SampleWorkflowTitle);
 
@@ -277,10 +303,12 @@ public sealed record ComfyUiUnknownType(string Type, int Count, string SampleWor
 /// 判断「这一项是我们丢的，还是原稿本来就没有」只需本地读 JSON，**不发任何请求**。
 /// 事后再查就得重新把原稿拉一遍。
 ///
-/// 归因三条（与离线体检同一套判据）：
+/// 归因四条（与离线体检同一套判据）：
 ///   · 源头是活着的后端节点 → <see cref="ComfyUiFindingKind.DroppedByConversion"/>（要处理）；
 ///   · 源头静音/绕过 → <see cref="ComfyUiFindingKind.MutedOrBypassed"/>（正常）；
-///   · 链子在原稿里就断着 → <see cref="ComfyUiFindingKind.BrokenInSource"/>（工作流自身）。
+///   · 链子在原稿里就断着 → <see cref="ComfyUiFindingKind.BrokenInSource"/>（工作流自身）；
+///   · 走不到一个我担保的后端节点 → <see cref="ComfyUiFindingKind.Unclassified"/>（判断不了，
+///     既不说「是我们丢的」也不说「没事」——换台服务器时这条最要紧）。
 /// </summary>
 public static class ComfyUiImportAuditor
 {
@@ -371,8 +399,10 @@ public static class ComfyUiImportAuditor
                     finding = finding with { DependentOutputs = Depends(node.Key) };
                     findings.Add(finding);
 
-                    // 链子上的「不认识的前端节点」就是让大模型认的清单。
-                    if (finding.Kind == ComfyUiFindingKind.DroppedByConversion && where.Origin is { } origin)
+                    // 链子上「我不认识的类型」就是让大模型认的清单。判断不了的也要收：
+                    // 那正是**最需要认**的一批，只收「我们丢了」的话，一降级就没人问了。
+                    if (finding.Kind is ComfyUiFindingKind.DroppedByConversion or ComfyUiFindingKind.Unclassified
+                        && where.Origin is { } origin)
                         foreach (var type in shape.UnknownTypesOnPath(origin.NodeKey))
                             unknown[type] = unknown.TryGetValue(type, out var seen)
                                 ? (seen.Count + 1, seen.Key, seen.Title)
@@ -810,29 +840,52 @@ public static class ComfyUiImportAuditor
             return verdict switch
             {
                 "live" => new ComfyUiImportFinding(ComfyUiFindingKind.DroppedByConversion, string.Empty, string.Empty,
-                    string.Empty, string.Empty, string.Empty, LiveCause(originKey)),
+                    string.Empty, string.Empty, string.Empty, LiveCause()),
                 "muted" => new ComfyUiImportFinding(ComfyUiFindingKind.MutedOrBypassed, string.Empty, string.Empty,
                     originKey, string.Empty, string.Empty, "源头被静音或绕过"),
+                // 担保不了的那个类型：**降一档如实说「判断不了」**，不硬归成「我们丢了」。
+                "unknown" => new ComfyUiImportFinding(ComfyUiFindingKind.Unclassified, string.Empty, string.Empty,
+                    originKey, string.Empty, string.Empty, UnknownCause(originKey)),
                 _ => new ComfyUiImportFinding(ComfyUiFindingKind.BrokenInSource, string.Empty, string.Empty,
                     originKey, string.Empty, string.Empty, "链子在这份原稿里就断着")
             };
         }
 
         /// <summary>
-        /// 链子走到尽头那个节点，到底为什么接不过去。**不能说成一句「源头是个活着的后端节点」就完事**：
-        /// 那个类型这台机器上根本没有时（自定义节点没装、或它本来就是纯前端件），链子是从那儿断的，
-        /// 与转换得对不对无关——用户该做的是换一份/装那个节点，不是去重导一遍。
+        /// 链子走到尽头那个节点，为什么接得过去。走到这里说明那个类型**是这台服务器上真有的后端节点**
+        /// （见 <see cref="LooksLikeBackendNode"/>）——那就照实说。
+        ///
+        /// 早先这一句还负责分「类型这台机器上没有」那一档；现在那种情况根本走不进 live，
+        /// 由 <see cref="UnknownCause"/> 去说，免得同一个事实在两条路上各说一遍、早晚说岔。
         /// </summary>
-        private string LiveCause(string originKey)
+        private static string LiveCause() => "源头是个活着的后端节点";
+
+        /// <summary>
+        /// 链子停在一个我**担保不了**的类型上（这台服务器的节点定义里没有它，或者它本来就是纯前端件）。
+        /// 「我不认识」不等于「我们弄丢了」——要说清楚我是凭什么判断不了的，并给出下一步：
+        /// 那个类型名本身就是「让大模型认一认」的入口。
+        /// </summary>
+        private string UnknownCause(string originKey)
+        {
+            var type = SourceTypeOf(originKey);
+            if (type.Length == 0)
+                return "链子走到尽头的那个节点在原稿里找不到，判断不了这一项是不是我们丢的";
+            // 走到这里只可能是这两种：我们认得的纯前端件（要断就断在这儿），或者这台机器上没有它。
+            return IsKnownFrontendType(type)
+                ? $"链子停在一个**纯前端节点**（{type}）上：那一类节点转成 API 格式时本来就不保留，"
+                  + "所以这一项**不是我们丢的**（也不用去改这份工作流）"
+                : $"链子停在一个**我不认识的类型**（{type}）上：这台服务器的节点定义里没有它，"
+                  + "判断不了这一项是不是我们丢的——**新装的节点和纯前端件在 JSON 里长得一样**。"
+                  + "重新导入时选「让大模型认一认」可以把它认下来。";
+        }
+
+        /// <summary>链子尽头那个节点的类型（顺着只转发的节点往上找）。</summary>
+        private string SourceTypeOf(string originKey)
         {
             var source = LiveSourceKey(originKey);
-            var type = source.Length > 0 && nodes.TryGetValue(source, out var node)
+            return source.Length > 0 && nodes.TryGetValue(source, out var node)
                 ? node["type"]?.ToString() ?? string.Empty
                 : string.Empty;
-            if (type.Length > 0 && objectInfo is { } definitions && !definitions.ContainsKey(type))
-                return $"源头是个活着的节点，可它的类型（{type}）**这台服务器上没有**——"
-                    + "链子是从那儿断的，跟转换得对不对无关（要让它跑得先给这台机器装上/认出这个节点）";
-            return "源头是个活着的后端节点";
         }
 
         /// <summary>顺着「只转发」的节点往上，第一个「不是转发」的节点就是链子真正的源头。</summary>
@@ -850,25 +903,26 @@ public static class ComfyUiImportAuditor
             return string.Empty;
         }
 
-        /// <summary>链子上经过的、我们不认识的前端节点类型（给大模型认的清单）。</summary>
+        /// <summary>
+        /// 链子上**我不担保**的类型（给大模型认的清单）。
+        ///
+        /// 只报「这台服务器的节点定义里没有、我也不认得」的那一个：`object_info` 里真有它的类型
+        /// 是这台机器上的正经节点（`CheckpointLoaderSimple` 这种），拿去问模型只会教出一条胡说八道的规则。
+        /// </summary>
         public IReadOnlyList<string> UnknownTypesOnPath(string originKey)
         {
-            var found = new List<string>();
-            var current = originKey;
-            for (var guard = 0; guard < 64; guard++)
-            {
-                if (!nodes.TryGetValue(current, out var node)) break;
-                var type = node["type"]?.ToString() ?? string.Empty;
-                if (!IsKnownFrontendType(type) && !IsForwardingType(type)) found.Add(type);
-                if (!IsForwardingType(type)) break;
-                var next = NextUpstream(current, node);
-                if (next is null) break;
-                current = next.Value.NodeKey;
-            }
-            return found;
+            var type = SourceTypeOf(originKey);
+            if (type.Length == 0 || IsKnownFrontendType(type)) return Array.Empty<string>();
+            if (objectInfo is { } definitions && definitions.ContainsKey(type)) return Array.Empty<string>();
+            return new[] { type };
         }
 
-        /// <summary>顺「只转发」的节点往上找真正的源头：live / muted / dead。</summary>
+        /// <summary>
+        /// 顺「只转发」的节点往上找真正的源头：live / muted / dead / unknown。
+        ///
+        /// `live` 的门槛是「那个类型**够格算是活着的后端节点**」——见 <see cref="LooksLikeBackendNode"/>。
+        /// 担保不了就返回 `unknown`，让上层如实说「判断不了」，而不是把「我不认识」说成「我们丢了」。
+        /// </summary>
         private string Walk(string nodeKey, int guard)
         {
             if (guard > 64) return "dead";
@@ -877,7 +931,7 @@ public static class ComfyUiImportAuditor
             var mode = node["mode"]?.ToString() ?? "0";
             if (mode == ModeNever || mode == ModeBypass) return "muted";
             var type = node["type"]?.ToString() ?? string.Empty;
-            if (!IsForwardingType(type)) return "live";
+            if (!IsForwardingType(type)) return LooksLikeBackendNode(type) ? "live" : "unknown";
 
             var next = NextUpstream(nodeKey, node);
             if (next is null) return "dead";
@@ -885,6 +939,22 @@ public static class ComfyUiImportAuditor
                 return WalkThroughContainer(nodeKey, next.Value.Slot, guard + 1);
             return Walk(next.Value.NodeKey, guard + 1);
         }
+
+        /// <summary>
+        /// 这个类型够不够格说是「活着的后端节点」。判据只有一条，而且**是查得动的事实**：
+        /// 这台服务器的节点定义（`/object_info`）里真有它。
+        ///
+        /// 为什么不靠那张写死的「前端节点表」（<see cref="IsKnownFrontendType"/>）来判：表里那几个名字是
+        /// 我们在见过的那几台机器上攒的。换台装了别的 Set/Get、别的 bypasser 的服务器，它们的类型既不在表里、
+        /// 也不在 `object_info` 里，原先就会一路走到「源头是个活着的后端节点」→ 判成**「是我们丢的」**：
+        /// 把「我不认识」说成了「我们弄丢了」，用户会照它去重导、去改一份本来没毛病的工作流。
+        /// 所以**担保不了就不下这个重结论**。
+        /// </summary>
+        private bool LooksLikeBackendNode(string type)
+            => type.Length > 0
+            && !IsKnownFrontendType(type)
+            && objectInfo is { } definitions
+            && definitions.ContainsKey(type);
 
         /// <summary>「容器的输入」：顺着外面喂给容器那个输入的那条线继续往上走。</summary>
         private string WalkThroughContainer(string innerKey, int slot, int guard)
@@ -1066,6 +1136,13 @@ public static class ComfyUiWorkflowHealth
                 + "提交会被 ComfyUI 拒收（实测 HTTP 400，它会点名缺哪一处）——"
                 + "要去 ComfyUI 里把那几根线接上，或者换一份。"
                 + ListDetails(workflow.BrokenInputDetails));
+        if (workflow.UncertainInputs > 0)
+            lines.Add($"⚠ 这份工作流有 {workflow.UncertainInputs} 处输入我**判断不了**"
+                + "（导入体检查出来的）：链子停在我不担保的类型上——不在服务器的节点定义里、或者是纯前端件，"
+                + "新装的节点和纯前端件在 JSON 里长得一样。**不敢说成「是我们丢的」，可也不等于没事**："
+                + "真缺了必填输入，提交照样会被 ComfyUI 拒收（HTTP 400），它会点名缺哪一处。"
+                + "重新导入时选「让大模型认一认」，认下来就有明确结论了；急用的话先换一份。"
+                + ListDetails(workflow.UncertainInputDetails));
         if (workflow.MissingFiles > 0)
             lines.Add($"⚠ 这份工作流引用的文件里，有 {workflow.MissingFiles} 处**这台机器上没有**"
                 + "（拿服务器当前的候选清单核出来的，换台机器结论会变）：**有产物依赖它**的那几处，"
@@ -1174,6 +1251,7 @@ public static class ComfyUiWorkflowHealth
         ArgumentNullException.ThrowIfNull(workflow);
         if (workflow.DroppedInputs > 0) return "｜⚠ 转换丢过输入";
         if (workflow.BrokenInputs > 0) return "｜⚠ 自己有断线";
+        if (workflow.UncertainInputs > 0) return "｜⚠ 有一处判断不了";
         return workflow.MissingFiles > 0 ? $"｜⚠ 引用文件缺 {workflow.MissingFiles} 处" : string.Empty;
     }
 }

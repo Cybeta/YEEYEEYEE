@@ -22,6 +22,11 @@ public sealed record ComfyUiRuleLearningResult(
 
     public int DroppedAfter => After.Count(ComfyUiFindingKind.DroppedByConversion);
 
+    /// <summary>「判断不了」的处数——认下来一个类型，这个数就该往下走。</summary>
+    public int UncertainBefore => Before.Count(ComfyUiFindingKind.Unclassified);
+
+    public int UncertainAfter => After.Count(ComfyUiFindingKind.Unclassified);
+
     /// <summary>给人看的结果：认了哪些、没认的为什么、以及修前修后的账。</summary>
     public string Describe()
     {
@@ -40,7 +45,8 @@ public sealed record ComfyUiRuleLearningResult(
                 + (verdict.Accepted ? string.Empty : $"（{verdict.Reason}）"));
         }
         if (Verdicts.Count > 0)
-            lines.Add($"「我们丢了」从 {DroppedBefore} 处降到 {DroppedAfter} 处。");
+            lines.Add($"判断不了的输入从 {UncertainBefore} 处降到 {UncertainAfter} 处"
+                + $"（「我们丢了」{DroppedBefore} 处 → {DroppedAfter} 处）。");
         return string.Join(Environment.NewLine, lines);
     }
 }
@@ -51,9 +57,9 @@ public sealed record ComfyUiRuleLearningResult(
 /// 为什么只问「一个类型」而不是「一处输入」：一处输入坏掉的根子通常是某个前端节点族不认识，
 /// 认出这一族，那台机器上**所有**用到它的工作流一起好——这比逐处打补丁省得多，也才解释得通。
 ///
-/// 为什么答案必须验证：模型说的是猜测，而「我们丢了」是可以**量**的。做法是照它给的规则把那台机器
+/// 为什么答案必须验证：模型说的是猜测，而「判断不了」是可以**量**的。做法是照它给的规则把那台机器
 /// 的所有正文重转一遍（<see cref="ComfyUiLibrary.Reconvert"/>），再看两件事：
-/// ①「我们丢了」真的少了；② 没有多出「判断不了」的。两条都成立才采用。
+/// ① 有输入**变确定了**（「我们丢了」或「判断不了」少了一处）；② 没有一样**变坏**。两条都成立才采用。
 /// 猜错的代价不是「没修好」，而是「把本来接通的线改坏」——所以宁可不用。
 /// </summary>
 public static class ComfyUiVirtualNodeLearner
@@ -86,7 +92,7 @@ public static class ComfyUiVirtualNodeLearner
         var candidates = baseline.UnknownTypes.Take(MaxTypes).ToList();
         if (candidates.Count == 0)
             return new ComfyUiRuleLearningResult(alreadyKnown, Array.Empty<ComfyUiRuleVerdict>(),
-                baseline, baseline, "没有需要认的前端节点：这次体检里没有「我们丢了」的输入。");
+                baseline, baseline, "没有需要认的前端节点：这次体检里没有判断不了的输入。");
 
         var accepted = new List<ComfyUiVirtualNodeRule>(alreadyKnown);
         var verdicts = new List<ComfyUiRuleVerdict>();
@@ -133,8 +139,8 @@ public static class ComfyUiVirtualNodeLearner
                 current = trial.Library;
                 round = trial.Audit;
                 verdicts.Add(new ComfyUiRuleVerdict(candidate.Type, proposed, true, string.Empty));
-                progress?.Invoke($"「{candidate.Type}」认下来了：丢掉的输入降到 "
-                    + $"{round.Count(ComfyUiFindingKind.DroppedByConversion)} 处");
+                progress?.Invoke($"「{candidate.Type}」认下来了：判断不了的输入降到 "
+                    + $"{round.Count(ComfyUiFindingKind.Unclassified)} 处");
             }
             else
             {
@@ -152,7 +158,13 @@ public static class ComfyUiVirtualNodeLearner
 
     /// <summary>
     /// 验证一条规则**真的有用**：照它重转全库，再看账。
-    /// 采用的条件是「我们丢了的输入变少」**且**「没有多出判断不了的」——两条都要。
+    /// 采用的条件是「有输入变确定了」（「我们丢了」少了，**或者**「判断不了」少了）
+    /// **且**「没有一样变坏」——两条都要。
+    ///
+    /// 为什么「判断不了」也算变确定：链上出现我们不认识的类型时，我们**不下「是丢的」这个结论**，
+    /// 那一处落在「判断不了」里（见 <see cref="ComfyUiFindingKind.Unclassified"/>）。认下规则之后
+    /// 它会整条消失（线接上了，那个必填输入不再缺）——这正是这条路要走的方向。
+    /// 只看「我们丢了」变少的话，这类规则永远通不过，等于把功能关掉了。
     /// </summary>
     public static (bool Accepted, ComfyUiLibraryResult Library, ComfyUiImportAuditReport Audit, string Reason) TryRule(
         ComfyUiLibraryResult library,
@@ -162,15 +174,20 @@ public static class ComfyUiVirtualNodeLearner
     {
         var trial = ComfyUiLibrary.Reconvert(library, [.. accepted, proposed]);
         var after = trial.Audit ?? baseline;
-        var improved = after.Count(ComfyUiFindingKind.DroppedByConversion)
-            < baseline.Count(ComfyUiFindingKind.DroppedByConversion);
-        var polluted = after.Count(ComfyUiFindingKind.Unclassified) > 0;
 
-        if (improved && !polluted) return (true, trial, after, string.Empty);
+        var droppedBefore = baseline.Count(ComfyUiFindingKind.DroppedByConversion);
+        var droppedAfter = after.Count(ComfyUiFindingKind.DroppedByConversion);
+        var uncertainBefore = baseline.Count(ComfyUiFindingKind.Unclassified);
+        var uncertainAfter = after.Count(ComfyUiFindingKind.Unclassified);
+
+        var moreCertain = droppedAfter < droppedBefore || uncertainAfter < uncertainBefore;
+        var regrets = droppedAfter > droppedBefore || uncertainAfter > uncertainBefore;
+
+        if (moreCertain && !regrets) return (true, trial, after, string.Empty);
         return (false, library, baseline,
-            polluted
-                ? "照它改之后出现了判断不了的输入，宁可不用"
-                : "照它改之后「我们丢了」一处都没少，多半是认错了");
+            regrets
+                ? "照它改之后反而多出了「我们丢了」或「判断不了」的输入，宁可不用"
+                : "照它改之后一处都没变确定，多半是认错了");
     }
 
     /// <summary>
