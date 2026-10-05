@@ -191,6 +191,7 @@ var tests = new (string Name, Action Run)[]
     ("出视频 · 只吃首帧那一类（SVD）不再算成驱动不了，但要说清提示词没进工作流", WorkflowBinderTreatsFrameDrivenShapeAsUsable),
     ("出视频 · 写进去的到底是什么：帧数与比例照写、帧率一个字不动、没给就不许乱写", WorkflowBinderWritesLengthAspectAndSize),
     ("出视频 · 帧数是算出来的时候：认出那个收秒的常量（判据是表达式里带着帧率），写秒不写帧", WorkflowBinderFindsTheSecondsWhenFramesAreComputed),
+    ("转换 · Set/Get 配对是转发不是丢弃：Get 的值接到同名 Set 的源头，两个都不进 API", WorkflowConversionFollowsSetGetPairs),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -14212,6 +14213,68 @@ static void WorkflowBinderFindsTheSecondsWhenFramesAreComputed()
     var untouched = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues { Prompt = "她推开门" });
     var plain = System.Text.Json.Nodes.JsonNode.Parse(untouched.ToJsonString())!.AsObject();
     Expect(plain["6"]!["inputs"]!["value"]!.GetValue<double>() == 5, "没给秒数就别动它");
+}
+
+/// <summary>
+/// 钉住「Set / Get 配对要当转发处理」：前端用这一对把一条连线拉长（避免横穿整张图），
+/// 两个节点在 <c>/object_info</c> 里都查不到，所以会被当成「不是后端节点」跳过——
+/// 但 GetNode 的输出**有值**，值在同名的 SetNode 上。不跟过去，下游那个输入就整项消失。
+///
+/// 实测代价：那台机器上 G12 一份原稿里 GetNode × 177、SetNode × 79，正文里 96 处必填输入因此消失
+///（`CLIPTextEncode.clip`、`VAEDecode.vae`、`ImageResizeKJv2.width` …）；按 315 份全库核，
+/// 170 份都有这一类缺失。这和 Reroute 是同一类问题，只是转发要**一对**才成立。
+/// </summary>
+static void WorkflowConversionFollowsSetGetPairs()
+{
+    const string objectInfo = """
+    {
+      "CLIPLoader": {"input": {"required": {"clip_name": ["STRING"], "type": ["STRING"]}}},
+      "CLIPTextEncode": {"input": {"required": {"text": ["STRING"], "clip": ["CLIP"]}}},
+      "SaveImage": {"input": {"required": {"filename_prefix": ["STRING"], "images": ["IMAGE"]}}}
+    }
+    """;
+
+    // 一条 CLIP 从加载器出来，经 Set(CLIP) 与两个 Get(CLIP) 分别喂给两个文本编码节点。
+    const string ui = """
+    {
+      "last_node_id": 9, "last_link_id": 9,
+      "nodes": [
+        {"id": 1, "type": "CLIPLoader", "mode": 0, "inputs": [],
+         "outputs": [{"name":"CLIP","type":"CLIP","links":[11]}], "widgets_values": ["umt5.safetensors", "wan"]},
+        {"id": 2, "type": "SetNode", "mode": 0, "inputs": [{"name":"CLIP","type":"CLIP","link":11}],
+         "outputs": [], "widgets_values": ["CLIP"]},
+        {"id": 3, "type": "GetNode", "mode": 0, "inputs": [],
+         "outputs": [{"name":"CLIP","type":"CLIP","links":[12]}], "widgets_values": ["CLIP"]},
+        {"id": 4, "type": "CLIPTextEncode", "mode": 0, "inputs": [{"name":"clip","type":"CLIP","link":12}],
+         "outputs": [{"name":"CONDITIONING","type":"CONDITIONING","links":[]}], "widgets_values": ["她推开门"]},
+        {"id": 5, "type": "GetNode", "mode": 0, "inputs": [],
+         "outputs": [{"name":"CLIP","type":"CLIP","links":[13]}], "widgets_values": ["CLIP"]},
+        {"id": 6, "type": "CLIPTextEncode", "mode": 0, "inputs": [{"name":"clip","type":"CLIP","link":13}],
+         "outputs": [{"name":"CONDITIONING","type":"CONDITIONING","links":[]}], "widgets_values": ["模糊"]}
+      ],
+      "links": [
+        [11, 1, 0, 2, 0, "CLIP"],
+        [12, 3, 0, 4, 0, "CLIP"],
+        [13, 5, 0, 6, 0, "CLIP"]
+      ],
+      "groups": [], "config": {}, "extra": {}, "version": 0.4
+    }
+    """;
+
+    var converted = ComfyUiWorkflowConversion.Convert(ui, objectInfo);
+    var api = converted.ApiWorkflow;
+
+    var first = api["4"]!["inputs"]!["clip"]!.AsArray();
+    Expect(first.Count == 2 && first[0]!.GetValue<string>() == "1" && first[1]!.GetValue<int>() == 0,
+        "第一个 Get 要接到 Set 的源头（节点 1 的第 0 个输出），实际 " + first.ToJsonString());
+    var second = api["6"]!["inputs"]!["clip"]!.AsArray();
+    Expect(second.Count == 2 && second[0]!.GetValue<string>() == "1",
+        "同一个 Set 供几个 Get 都要接上，实际 " + second.ToJsonString());
+
+    Expect(!api.ContainsKey("2") && !api.ContainsKey("3") && !api.ContainsKey("5"),
+        "Set / Get 本身不该进 API，实际留下了 " + string.Join("、", api.Select(pair => pair.Key)));
+    Expect(converted.SkippedSummary.Contains("只转发的前端节点"),
+        "跳过说明要说清它们是「只转发」而不是「被丢掉」：" + converted.SkippedSummary);
 }
 
 static class Sample

@@ -96,7 +96,11 @@ public static class ComfyUiWorkflowConversion
             if (objectInfo[type] is not JsonObject def)
             {
                 // 不是后端节点：备注、Label 这类纯界面物件。官方靠 comfyClass 为空落空，效果一致。
-                Bump(skipped, "不是后端节点（" + type + "）");
+                // **但「只转发」的那几种要分开说**：Reroute 与 Set/Get 配对也不进 API，
+                // 可它们的连线被接到了真正的源头——把它们算进「被丢掉的」会让人去查根本没丢的东西。
+                Bump(skipped, IsForwardingOnly(type)
+                    ? "只转发的前端节点（连线已接到真正的源头）"
+                    : "不是后端节点（" + type + "）");
                 continue;
             }
 
@@ -407,6 +411,20 @@ public static class ComfyUiWorkflowConversion
         IReadOnlyDictionary<string, JsonObject> nodesById)
     {
         var resolved = new Dictionary<long, (string OriginId, int OriginSlot)>();
+
+        // Set/Get 配对：前端用来拉长连线的「虚拟节点」，两个都不进 API。
+        // GetNode 自己不产出，它的值在**同名**的 SetNode 上，所以先按名字把 Set 收起来。
+        // 一台真机上的实情：G12 那份原稿里 GetNode × 177、SetNode × 79，而正文里 96 处必填输入因此消失
+        //（`CLIPTextEncode.clip`、`VAEDecode.vae`、`ImageResizeKJv2.width` …）——
+        // 和 Reroute 是同一类问题，只是转发要**一对**才成立。
+        var setters = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var node in nodesById.Values)
+        {
+            if (!IsVirtualSetter(TypeOf(node))) continue;
+            var name = VirtualLinkName(node);
+            if (name.Length > 0) setters.TryAdd(name, node);
+        }
+
         foreach (var pair in links)
         {
             var hit = ResolveOutput(
@@ -440,7 +458,21 @@ public static class ComfyUiWorkflowConversion
             // Reroute 这类虚拟节点：自己不产出，但把上游原样转发。
             if (IsVirtualPassThrough(node)) return ResolveInput(nodeId, slot, type, visited);
 
+            // Set/Get 配对里的 GetNode：值在同名的 SetNode 上，从那里继续往上走。
+            if (IsVirtualGetter(TypeOf(node))) return ResolveSetSource(node, type, visited);
+
             return (nodeId, slot);
+        }
+
+        (string, int)? ResolveSetSource(JsonObject getter, string type, HashSet<string> visited)
+        {
+            var name = VirtualLinkName(getter);
+            if (name.Length == 0) return null;
+            if (!setters.TryGetValue(name, out var setter)) return null;
+            if (setter["inputs"] is not JsonArray inputs || inputs.Count == 0) return null;
+            if (inputs[0] is not JsonObject input) return null;
+            if (ReadLong(input["link"]) is not { } linkId || !links.TryGetValue(linkId, out var link)) return null;
+            return ResolveOutput(link.OriginId, link.OriginSlot, InputTypeAt(setter, 0) ?? type, visited);
         }
 
         (string, int)? ResolveInput(string nodeId, int slot, string? type, HashSet<string> visited)
@@ -515,9 +547,43 @@ public static class ComfyUiWorkflowConversion
             ? AsText(output["type"])
             : null;
 
+    /// <summary>节点自己的 type 文本（没有就是空串）。</summary>
+    private static string TypeOf(JsonObject node) => AsText(node["type"]) ?? string.Empty;
+
     /// <summary>Reroute 这类「只转发」的前端节点：<c>/object_info</c> 里查不到，但连线要跟着穿过去。</summary>
-    private static bool IsVirtualPassThrough(JsonObject node)
-        => (AsText(node["type"]) ?? string.Empty).StartsWith("Reroute", StringComparison.Ordinal);
+    private static bool IsVirtualPassThrough(JsonObject node) => IsVirtualPassThroughType(TypeOf(node));
+
+    private static bool IsVirtualPassThroughType(string type)
+        => type.StartsWith("Reroute", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Set/Get 配对的虚拟节点（前端用来把一条连线拉长，避免横穿整张图），<c>/object_info</c> 里同样查不到。
+    /// 名字取自实测：那台机器上的 G12 原稿里就是 <c>SetNode</c> / <c>GetNode</c>，靠同一个名字配对。
+    /// </summary>
+    private static bool IsVirtualSetter(string type) => type is "SetNode" or "NodeSet";
+
+    private static bool IsVirtualGetter(string type) => type is "GetNode" or "NodeGet";
+
+    /// <summary>
+    /// 「只转发」的那几种：它们都不进 API，但**连线已经被接到真正的源头**了
+    /// （见 <see cref="ResolvePassThroughs"/>）。把它们说成「不是后端节点、丢掉了」会让人去查根本没丢的东西。
+    /// </summary>
+    private static bool IsForwardingOnly(string type)
+        => IsVirtualPassThroughType(type) || IsVirtualSetter(type) || IsVirtualGetter(type);
+
+    /// <summary>Set/Get 靠这个名字配对（实测写在 <c>widgets_values</c> 的第一个字符串上）。</summary>
+    private static string VirtualLinkName(JsonObject node)
+    {
+        if (node["widgets_values"] is JsonArray values)
+        {
+            foreach (var value in values)
+            {
+                if (value is JsonValue text && text.TryGetValue<string>(out var name) && name.Length > 0)
+                    return name;
+            }
+        }
+        return string.Empty;
+    }
 
     /// <summary>官方最后一步：连到「已不进 API 的节点」的输入整条删掉。</summary>
     private static void PruneDanglingLinks(JsonObject output)
