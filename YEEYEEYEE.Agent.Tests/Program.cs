@@ -199,6 +199,8 @@ var tests = new (string Name, Action Run)[]
     ("转换 · 子图「输入直通到输出」要接到外面喂给容器那个输入的地方", ComfyUiConversionWiresContainerPassThrough),
     ("转换 · 旁路判定要认逗号分隔的联合类型（FLOAT,INT,BOOLEAN 也算接得上）", ComfyUiConversionBypassesThroughUnionTypedInputs),
     ("转换 · 固定选项的值是界面写法（Ref2VA — …）或数字下标时要纠正成它认的那个", ComfyUiConversionRepairsDecoratedComboValues),
+    ("ComfyUI 导入体检：把我们丢掉的输入指到具体哪一份哪一处，并分清不是我们丢的那几类", ComfyUiImportAuditNamesWhatWeDropped),
+    ("ComfyUI 导入体检：大模型说它是直通/界面件，都要照它重转核对过才采用", ComfyUiImportAuditOnlyKeepsVerifiedModelRules),
     ("返工 R6：复制保持版本所属变体作用域", ReworkDuplicateCanvasKeepsVersionScope),
     ("共享文案：两端只有一份（来源端说法与「谁在编辑」）", SharedUiTextHasOneCopyForBothEnds),
     ("备份：清单画布旁边的备份也列得出、清得掉，且不碰别的画布", ProjectCanvasBackupsAreListedAndPruned),
@@ -14761,6 +14763,169 @@ static void ComfyUiConversionRepairsDecoratedComboValues()
     // 文件引用这类「不在清单里」是正常的：清单说的是服务器 input 目录此刻有什么文件。
     Expect(api["6"]!["inputs"]!["image"]!.GetValue<string>() == "作者自己那张.png",
         "文件名不是选项、也不是「选项 + 装饰」，一个字都不许动，实际 " + api["6"]!["inputs"]!["image"]);
+}
+
+/// <summary>
+/// 钉住「导入前的体检」：拿原稿 + 转换结果 + 这台的节点定义，把「必填输入缺了」逐处定性。
+/// 只有「源头是个活着的后端节点」才算我们丢了；静音/绕过、原稿自己断线都不算。
+///
+/// 实测动机：认不出的前端节点会被跳过，**下游必填输入整项消失**，而服务端往往还回 success，
+/// 只是那一步不产出——那种错最难看出来。所以要在导入那一刻就说出来。
+/// </summary>
+static void ComfyUiImportAuditNamesWhatWeDropped()
+{
+    const string objectInfo = """
+    {
+      "CheckpointLoaderSimple": {"input":{"required":{"ckpt_name":["STRING"]}},"output":["MODEL","CLIP","VAE"]},
+      "EmptyLatentImage": {"input":{"required":{"width":["INT"],"height":["INT"]}},"output":["LATENT"]},
+      "VAEDecode": {"input":{"required":{"samples":["LATENT"],"vae":["VAE"]}},"output":["IMAGE"]}
+    }
+    """;
+
+    // 夹在中间的是一个我们不认识的纯前端节点（`FancyBridge`），它其实是个直通。
+    const string raw = """
+    {
+      "last_node_id": 4, "last_link_id": 12,
+      "nodes": [
+        {"id": 1, "type": "CheckpointLoaderSimple", "mode": 0, "inputs": [],
+         "outputs": [{"name":"MODEL","type":"MODEL","links":[]},{"name":"CLIP","type":"CLIP","links":[]},
+                     {"name":"VAE","type":"VAE","links":[12]}], "widgets_values": ["a.safetensors"]},
+        {"id": 4, "type": "EmptyLatentImage", "mode": 0, "inputs": [],
+         "outputs": [{"name":"LATENT","type":"LATENT","links":[10]}], "widgets_values": [512, 512]},
+        {"id": 2, "type": "FancyBridge", "mode": 0,
+         "inputs": [{"name":"","type":"*","link":10}],
+         "outputs": [{"name":"LATENT","type":"LATENT","links":[11]}]},
+        {"id": 3, "type": "VAEDecode", "mode": 0,
+         "inputs": [{"name":"samples","type":"LATENT","link":11},{"name":"vae","type":"VAE","link":12}],
+         "outputs": [{"name":"IMAGE","type":"IMAGE","links":[]}]}
+      ],
+      "links": [[10, 4, 0, 2, 0, "LATENT"], [11, 2, 0, 3, 0, "LATENT"], [12, 1, 2, 3, 1, "VAE"]],
+      "groups": [], "config": {}, "extra": {}, "version": 0.4
+    }
+    """;
+
+    var objectInfoNode = System.Text.Json.Nodes.JsonNode.Parse(objectInfo)!.AsObject();
+    var converted = ComfyUiWorkflowConversion.Convert(raw, objectInfoNode);
+    Expect(converted.ApiWorkflow["3"]!["inputs"]!["samples"] is null,
+        "认不出的节点被跳过之后，下游那个必填输入就整项没了——这正是要查出来的");
+    Expect(converted.SkippedSummary.Contains("不是后端节点"), "跳过说明要如实报： " + converted.SkippedSummary);
+
+    var raws = new Dictionary<string, string>(StringComparer.Ordinal) { ["T/一份.json"] = raw };
+    var payloads = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["T/一份.json"] = converted.ToJson()
+    };
+
+    var audit = ComfyUiImportAuditor.Inspect(raws, payloads, objectInfoNode);
+    Expect(audit.NeedsAttention, "必须有「要处理」的结论");
+    Expect(audit.Count(ComfyUiFindingKind.DroppedByConversion) == 1,
+        "恰好一处是我们丢的，实际 " + audit.Count(ComfyUiFindingKind.DroppedByConversion));
+    Expect(audit.AffectedWorkflows == 1, "影响 1 份，实际 " + audit.AffectedWorkflows);
+    Expect(audit.UnknownTypes.Count == 1 && audit.UnknownTypes[0].Type == "FancyBridge",
+        "要把链子上不认识的前端节点报出来（那是让模型认的清单），实际 "
+        + string.Join("/", audit.UnknownTypes.Select(item => item.Type)));
+    Expect(audit.Describe().Contains("VAEDecode.samples") || audit.Describe().Contains("我们转换时丢的"),
+        "总账里要说清是什么问题：" + audit.Describe());
+
+    // 原稿自己断线那种**不算我们的问题**，也不该催用户修：换成「输入没接线的 Reroute」。
+    const string brokenRaw = """
+    {
+      "nodes": [
+        {"id": 1, "type": "CheckpointLoaderSimple", "mode": 0, "inputs": [],
+         "outputs": [{"name":"MODEL","type":"MODEL","links":[]},{"name":"CLIP","type":"CLIP","links":[]},
+                     {"name":"VAE","type":"VAE","links":[12]}], "widgets_values": ["a.safetensors"]},
+        {"id": 2, "type": "Reroute", "mode": 0,
+         "inputs": [{"name":"","type":"*","link":null}],
+         "outputs": [{"name":"LATENT","type":"LATENT","links":[11]}]},
+        {"id": 3, "type": "VAEDecode", "mode": 0,
+         "inputs": [{"name":"samples","type":"LATENT","link":11},{"name":"vae","type":"VAE","link":12}],
+         "outputs": [{"name":"IMAGE","type":"IMAGE","links":[]}]}
+      ],
+      "links": [[11, 2, 0, 3, 0, "LATENT"], [12, 1, 2, 3, 1, "VAE"]]
+    }
+    """;
+    var brokenAudit = ComfyUiImportAuditor.Inspect(
+        new Dictionary<string, string>(StringComparer.Ordinal) { ["T/一份.json"] = brokenRaw },
+        payloads, objectInfoNode);
+    Expect(!brokenAudit.NeedsAttention,
+        "原稿自己断线不该算成「我们丢了」：" + brokenAudit.Describe());
+    Expect(brokenAudit.Count(ComfyUiFindingKind.BrokenInSource) == 1,
+        "要如实归到「工作流自己断线」，实际 " + brokenAudit.Count(ComfyUiFindingKind.BrokenInSource));
+}
+
+/// <summary>
+/// 钉住「大模型的答案要验证过才采用」：它的判断是猜测，而「我们丢了」可以量。
+/// 做法是照它给的规则重转全库，看两件事——丢了的是不是真的变少、有没有多出判断不了的。
+/// </summary>
+static void ComfyUiImportAuditOnlyKeepsVerifiedModelRules()
+{
+    const string objectInfo = """
+    {
+      "CheckpointLoaderSimple": {"input":{"required":{"ckpt_name":["STRING"]}},"output":["MODEL","CLIP","VAE"]},
+      "EmptyLatentImage": {"input":{"required":{"width":["INT"],"height":["INT"]}},"output":["LATENT"]},
+      "VAEDecode": {"input":{"required":{"samples":["LATENT"],"vae":["VAE"]}},"output":["IMAGE"]}
+    }
+    """;
+    const string raw = """
+    {
+      "nodes": [
+        {"id": 1, "type": "CheckpointLoaderSimple", "mode": 0, "inputs": [],
+         "outputs": [{"name":"MODEL","type":"MODEL","links":[]},{"name":"CLIP","type":"CLIP","links":[]},
+                     {"name":"VAE","type":"VAE","links":[12]}], "widgets_values": ["a.safetensors"]},
+        {"id": 4, "type": "EmptyLatentImage", "mode": 0, "inputs": [],
+         "outputs": [{"name":"LATENT","type":"LATENT","links":[10]}], "widgets_values": [512, 512]},
+        {"id": 2, "type": "FancyBridge", "mode": 0,
+         "inputs": [{"name":"","type":"*","link":10}],
+         "outputs": [{"name":"LATENT","type":"LATENT","links":[11]}]},
+        {"id": 3, "type": "VAEDecode", "mode": 0,
+         "inputs": [{"name":"samples","type":"LATENT","link":11},{"name":"vae","type":"VAE","link":12}],
+         "outputs": [{"name":"IMAGE","type":"IMAGE","links":[]}]}
+      ],
+      "links": [[10, 4, 0, 2, 0, "LATENT"], [11, 2, 0, 3, 0, "LATENT"], [12, 1, 2, 3, 1, "VAE"]]
+    }
+    """;
+
+    var objectInfoNode = System.Text.Json.Nodes.JsonNode.Parse(objectInfo)!.AsObject();
+    var converted = ComfyUiWorkflowConversion.Convert(raw, objectInfoNode);
+    var library = new ComfyUiLibraryResult(
+        "t", "http://127.0.0.1:8188",
+        new[] { new SiteWorkflow { Key = "T/一份.json", Title = "一份", Folder = "T", PayloadFile = "一份.json" } },
+        new Dictionary<string, string>(StringComparer.Ordinal) { ["T/一份.json"] = converted.ToJson() },
+        Array.Empty<string>())
+    {
+        RawDrafts = new Dictionary<string, string>(StringComparer.Ordinal) { ["T/一份.json"] = raw },
+        ObjectInfo = objectInfoNode
+    };
+    var baseline = ComfyUiImportAuditor.Inspect(library.RawDrafts, library.Payloads, objectInfoNode);
+    library = library with { Audit = baseline };
+    Expect(baseline.Count(ComfyUiFindingKind.DroppedByConversion) == 1, "起点是一处丢掉");
+
+    // 模型说它是「直通，走第 0 个输入」——这是对的，验证应当通过。
+    var good = ComfyUiVirtualNodeLearner.ProposalFromModelJson(
+        "FancyBridge", "```json\n{\"kind\":\"passthrough\",\"input_slot\":0,\"why\":\"只是把连线拉长\"}\n```", out var error);
+    Expect(good is { Kind: ComfyUiVirtualNodeKind.PassThrough, InputSlot: 0 },
+        "代码块包着的 JSON 也要认得出：" + error);
+    Expect(good!.Source.Contains("拉长"), "理由要留着，好让人核对：" + good.Source);
+
+    var trial = ComfyUiVirtualNodeLearner.TryRule(library, baseline, Array.Empty<ComfyUiVirtualNodeRule>(), good);
+    Expect(trial.Accepted, "这条规则确实把丢掉的输入接回来了，应当采用：" + trial.Reason);
+    Expect(trial.Audit.Count(ComfyUiFindingKind.DroppedByConversion) == 0, "采用之后应当一处不剩");
+    var samples = System.Text.Json.Nodes.JsonNode.Parse(trial.Library.Payloads["T/一份.json"])!["3"]!["inputs"]!["samples"]!.AsArray();
+    Expect(samples[0]!.GetValue<string>() == "4",
+        "接回来的线要指向真正的源头（节点 4），实际 " + samples[0]);
+
+    // 模型说它是「纯界面件」——照它改一处都不会少，验证必须拦住。
+    var wrong = ComfyUiVirtualNodeLearner.ProposalFromModelJson("FancyBridge", "{\"kind\":\"discard\"}", out _)!;
+    var rejected = ComfyUiVirtualNodeLearner.TryRule(library, baseline, Array.Empty<ComfyUiVirtualNodeRule>(), wrong);
+    Expect(!rejected.Accepted && rejected.Reason.Contains("一处都没少"),
+        "认错的规则不能采用，并且要说清为什么：" + rejected.Reason);
+    Expect(ReferenceEquals(rejected.Library, library), "没采用就不能把试错的结果留下来");
+
+    // 说不清就当它没说，不猜。
+    var vague = ComfyUiVirtualNodeLearner.ProposalFromModelJson("FancyBridge", "{\"kind\":\"unknown\",\"why\":\"看不出来\"}", out var vagueError);
+    Expect(vague is null && vagueError.Contains("说不清"), "说不清要如实记下来：" + vagueError);
+    Expect(ComfyUiVirtualNodeLearner.ProposalFromModelJson("FancyBridge", "我看不出这是什么节点", out var noJson) is null
+        && noJson.Contains("没有给出 JSON"), "没给 JSON 也要如实说");
 }
 
 static class Sample

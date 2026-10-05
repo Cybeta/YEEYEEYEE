@@ -15,7 +15,13 @@ public sealed record ComfyUiLibraryProgress(int Done, int Total, string Current)
         : $"正在转换工作流 {Done}/{Total}：{Current}";
 }
 
-/// <summary>拉下来的工作流清单（正文在内存里，落盘由 <see cref="ComfyUiLibrary.Install"/> 负责）。</summary>
+/// <summary>
+/// 拉下来的工作流清单（正文在内存里，落盘由 <see cref="ComfyUiLibrary.Install"/> 负责）。
+///
+/// 除了已转好的正文，还把**原稿**与**这台的节点定义**一起带着：导入那一刻手上有这三样，
+/// 就能当场体检（见 <see cref="ComfyUiImportAuditor"/>）并在用户同意后用学到的规则重转一遍
+/// （见 <see cref="ComfyUiLibrary.Reconvert"/>），**不必再向那台机器要一次数据**。
+/// </summary>
 public sealed record ComfyUiLibraryResult(
     string SiteId,
     string BaseUrl,
@@ -26,6 +32,18 @@ public sealed record ComfyUiLibraryResult(
     public int Converted => Workflows.Count(workflow => workflow.Converted);
 
     public int Failed => Workflows.Count(workflow => !workflow.Converted);
+
+    /// <summary>服务器上那一份「网页格式」的原稿，键与 <see cref="Payloads"/> 一致。体检与重转要用。</summary>
+    public IReadOnlyDictionary<string, string> RawDrafts { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>这台机器的节点定义（二十多 MB 的那份）。</summary>
+    public JsonObject? ObjectInfo { get; init; }
+
+    /// <summary>导入时的体检账。</summary>
+    public ComfyUiImportAuditReport? Audit { get; init; }
+
+    /// <summary>这次转换实际用上的「学来的前端节点规则」（会写进站点文件，下次导入接着用）。</summary>
+    public IReadOnlyList<ComfyUiVirtualNodeRule> AppliedRules { get; init; } = Array.Empty<ComfyUiVirtualNodeRule>();
 }
 
 /// <summary>
@@ -183,6 +201,9 @@ public static class ComfyUiLibrary
 
             var workflows = new List<SiteWorkflow>();
             var payloads = new Dictionary<string, string>(StringComparer.Ordinal);
+            // 原稿也留着：导入那一刻的体检与「让大模型认一认」都要回原稿看那一处到底连到哪儿，
+            // 事后再回来拉一遍不值得（而且那时用户已经在等了）。
+            var rawDrafts = new Dictionary<string, string>(StringComparer.Ordinal);
             using var gate = new SemaphoreSlim(MaxParallelFetches, MaxParallelFetches);
             var done = 0;
 
@@ -191,10 +212,10 @@ public static class ComfyUiLibrary
                 await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    var (workflow, payload) = await FetchOneAsync(
+                    var (workflow, payload, raw) = await FetchOneAsync(
                         client, normalized, path, objectInfo, cancellationToken).ConfigureAwait(false);
 
-                    // 计数器与两个集合一起进锁：并行跑的时候「读-加-写」不是原子的。
+                    // 计数器与三个集合一起进锁：并行跑的时候「读-加-写」不是原子的。
                     // 进度回调刻意放在锁**外面**（回调跑在用户的线程上，握着锁调出去容易变成死锁），
                     // 所以进度的数值在锁里先取成局部变量，避免锁外再读到半路的值。
                     int snapshot;
@@ -202,6 +223,7 @@ public static class ComfyUiLibrary
                     {
                         workflows.Add(workflow);
                         if (payload is not null) payloads[workflow.Key] = payload;
+                        if (raw is not null) rawDrafts[workflow.Key] = raw;
                         done++;
                         snapshot = done;
                     }
@@ -228,8 +250,20 @@ public static class ComfyUiLibrary
             if (failed > 0)
                 notes.Add($"{failed} 份没能转换（原因逐份记在各自条目上）；不影响其它工作流。");
 
+            // 体检放在**导入之前**（这里就是那一刻）：手上同时有原稿、转换结果与节点定义，
+            // 判断「这一项是我们丢的，还是原稿本来就没接线」全部是本地读 JSON，不发任何请求。
+            // 它的结论挂在结果上（<see cref="ComfyUiLibraryResult.Audit"/>），由导入流程当场说给用户；
+            // **不写进 Notes**：Notes 会跟着结果一路带到最后的报告里，而体检在「让大模型认一认」之后
+            // 还要重算一遍——两处都写就会出现一份过期的账。
+            var audit = ComfyUiImportAuditor.Inspect(rawDrafts, payloads, objectInfo);
+
             return new ComfyUiLibraryResult(
-                SiteCatalog.IdFor(normalized), normalized, ordered, payloads, notes);
+                SiteCatalog.IdFor(normalized), normalized, ordered, payloads, notes)
+            {
+                RawDrafts = rawDrafts,
+                ObjectInfo = objectInfo,
+                Audit = audit
+            };
         }
         finally
         {
@@ -262,7 +296,10 @@ public static class ComfyUiLibrary
             Checkpoint = checkpoint,
             ListSource = "ComfyUI 的 workflows 目录",
             Workflows = new List<SiteWorkflow>(),
-            OptionValues = CollectOptionValues(result.Payloads)
+            OptionValues = CollectOptionValues(result.Payloads),
+            // 这次实际用上的前端节点规则（含上次学到的、以及用户刚同意让模型认的）：落到站点上，
+            // 下次导入自动接着用——同一台机器不必每导一次就再认一遍。
+            VirtualNodeRules = result.AppliedRules.ToList()
         };
 
         // 重新导入时保住用户自己的取舍：被标成「停用」的仍然停用，用户手工改过的推荐项仍然推荐。
@@ -384,7 +421,8 @@ public static class ComfyUiLibrary
     }
 
     /// <summary>抓一份工作流并转换。失败**只让这一份失败**，把原因写进它的 Error 里。</summary>
-    private static async Task<(SiteWorkflow Workflow, string? Payload)> FetchOneAsync(
+    /// <returns>第三项是原稿（网页格式）：体检与「让大模型认一认」都要回它看那一处连到哪儿。</returns>
+    private static async Task<(SiteWorkflow Workflow, string? Payload, string? Raw)> FetchOneAsync(
         HttpClient client,
         string baseUrl,
         string path,
@@ -409,18 +447,18 @@ public static class ComfyUiLibrary
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             workflow.Error = "读取超时";
-            return (workflow, null);
+            return (workflow, null, null);
         }
         catch (HttpRequestException error)
         {
             workflow.Error = "读取失败：" + error.Message;
-            return (workflow, null);
+            return (workflow, null, null);
         }
 
         if (content is null)
         {
             workflow.Error = "服务器没有返回这一份的内容";
-            return (workflow, null);
+            return (workflow, null, null);
         }
 
         try
@@ -434,7 +472,7 @@ public static class ComfyUiLibrary
             // 正文文件现在就定下来（哪怕还没落盘）：拉取结果因此是**自洽**的，
             // 谁拿着它都能说出「这一份的正文该在哪个文件里」，而不是非要先落一次盘。
             workflow.PayloadFile = SiteCatalog.PayloadFileName(path);
-            return (workflow, converted.ToJson());
+            return (workflow, converted.ToJson(), content);
         }
         catch (Exception error)
         {
@@ -442,9 +480,66 @@ public static class ComfyUiLibrary
             // 一句笼统的「转换失败」会把我们自己的缺陷（比如空引用）和「这份文件引用了没装的节点」
             // 混成同一句话，前者需要修代码，后者只需要换一份工作流。
             workflow.Error = $"转换失败（{error.GetType().Name}）：{error.Message}";
-            return (workflow, null);
+            return (workflow, null, null);
         }
     }
+
+    /// <summary>
+    /// 用另一套（或多了几条）前端节点规则**重转一遍**——用户同意「让大模型认一认」之后走这里，
+    /// 以及下次导入时把上次学到的规则接着用上。
+    ///
+    /// 为什么能离线重转：拉取结果里带着原稿与节点定义（见 <see cref="ComfyUiLibraryResult.RawDrafts"/>），
+    /// 转换本身是纯计算。所以这件事**不碰网络、不重拉**，几秒钟。
+    /// 重转之后**顺手把体检重算一遍**：规则有没有用，不能听模型的，要看「我们丢了」是不是真的少了。
+    /// </summary>
+    public static ComfyUiLibraryResult Reconvert(
+        ComfyUiLibraryResult result, IReadOnlyList<ComfyUiVirtualNodeRule> rules)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        ArgumentNullException.ThrowIfNull(rules);
+        if (result.ObjectInfo is null || result.RawDrafts.Count == 0) return result;
+
+        var payloads = new Dictionary<string, string>(result.Payloads, StringComparer.Ordinal);
+        var workflows = new List<SiteWorkflow>(result.Workflows.Count);
+        foreach (var original in result.Workflows)
+        {
+            // 复制一份条目再改：验证一条规则要试好几次，试错的结果**不能留在「最终要落盘的那份结果」上**。
+            // 用 JSON 往返复制而不是手写字段：手写的话，以后给 SiteWorkflow 加字段就会漏掉，
+            // 而这种漏测试看不出来（它影响的是「重新导入时用户自己的取舍」这类状态）。
+            var workflow = Clone(original);
+            workflows.Add(workflow);
+            if (!result.RawDrafts.TryGetValue(workflow.Key, out var raw)) continue;
+            try
+            {
+                var converted = ComfyUiWorkflowConversion.Convert(raw, result.ObjectInfo, rules);
+                workflow.NodeCount = converted.ApiWorkflow.Count;
+                workflow.Note = converted.SkippedSummary;
+                var (kind, reason) = Classify(workflow.Folder, converted.ApiWorkflow);
+                workflow.Kind = kind;
+                workflow.KindReason = reason;
+                payloads[workflow.Key] = converted.ToJson();
+            }
+            catch (Exception error)
+            {
+                // 单份失败照旧只让这一份失败——但**不要**把上一次的成绩擦掉：那一份保持原样更安全。
+                workflow.Error = $"重转失败（{error.GetType().Name}）：{error.Message}";
+            }
+        }
+
+        return result with
+        {
+            Workflows = workflows,
+            Payloads = payloads,
+            AppliedRules = rules,
+            Audit = ComfyUiImportAuditor.Inspect(result.RawDrafts, payloads, result.ObjectInfo)
+        };
+    }
+
+    /// <summary>按 JSON 往返复制一份工作流条目（见 <see cref="Reconvert"/> 里为什么这么做）。</summary>
+    private static SiteWorkflow Clone(SiteWorkflow workflow)
+        => System.Text.Json.JsonSerializer.Deserialize<SiteWorkflow>(
+               System.Text.Json.JsonSerializer.Serialize(workflow))
+           ?? new SiteWorkflow { Key = workflow.Key, Title = workflow.Title, Folder = workflow.Folder };
 
     /// <summary>
     /// 判这份工作流是出图还是出视频（还是别的东西）。

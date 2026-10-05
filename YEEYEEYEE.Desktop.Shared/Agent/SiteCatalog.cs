@@ -4,6 +4,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Unicode;
+using YEEYEEYEE.Host;
 
 namespace YEEYEEYEE.Desktop;
 
@@ -255,6 +256,16 @@ public sealed class SiteProfile
 
     /// <summary>ComfyUI 站点下的工作流清单（只有 <see cref="Backend"/> 为 comfyui 时有意义）。</summary>
     public List<SiteWorkflow> Workflows { get; set; } = new();
+
+    /// <summary>
+    /// 这台机器上学到的「前端节点规则」（哪种节点是直通、哪种自带值、哪种是纯界面件）。
+    ///
+    /// 为什么要落在站点上：代码里那张内置表只认我们见过的那几族；新机器装了别的纯前端节点时，
+    /// 它在转换时会被跳过，**下游必填输入整项消失**（服务端往往还回 success，只是不产出）。
+    /// 导入时体检会把这些节点列出来，用户可以选「让大模型认一认」——认出来的规则记在这里，
+    /// 下次导入这台机器时**自动接着用**，不必再问一遍。
+    /// </summary>
+    public List<ComfyUiVirtualNodeRule> VirtualNodeRules { get; set; } = new();
 
     /// <summary>
     /// 全库在「同一个节点类型 + 同一个输入名」下**真实用过的固定选项值**（比例这类），键形如

@@ -7,6 +7,7 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using YEEYEEYEE.Core;
 using YEEYEEYEE.Desktop;
+using YEEYEEYEE.Host;
 using static YEEYEEYEE.Desktop.Avalonia.AgentDialogUi;
 
 namespace YEEYEEYEE.Desktop.Avalonia;
@@ -553,6 +554,47 @@ internal sealed class SettingsApiImportDialog
             var previous = SiteCatalog.Load().Sites.FirstOrDefault(item =>
                 string.Equals(item.Id, fetched.SiteId, StringComparison.OrdinalIgnoreCase));
 
+            // 上次这台机器上学到的「前端节点规则」接着用——同一台机器不该每导一次就再认一遍。
+            if (previous is { VirtualNodeRules.Count: > 0 })
+            {
+                SetStatus($"正在按上次学到的 {previous.VirtualNodeRules.Count} 条前端节点规则重转…");
+                fetched = ComfyUiLibrary.Reconvert(fetched, previous.VirtualNodeRules);
+            }
+
+            // ---------- 体检：拉到就查，查完当场说 ----------
+            // 体检要的三样（原稿、转换结果、这台的节点定义）在拉取时都拿到了，判断全是本地读 JSON。
+            // 有「我们丢了的输入」才值得打扰用户；那几类正常的（静音/绕过、原稿自己断线）只报不催。
+            var audit = fetched.Audit;
+            if (audit is { NeedsAttention: true })
+            {
+                SetStatus("体检发现问题：" + Environment.NewLine + audit.Describe());
+                switch (await AskRepairAsync(audit))
+                {
+                    case ComfyUiRepairChoice.Cancel:
+                        SetStatus("已取消这次导入：**没有登记站点**，也没有改动出图 / 出视频的设置。"
+                            + Environment.NewLine + audit.Describe());
+                        return;
+
+                    case ComfyUiRepairChoice.Repair:
+                        var known = previous?.VirtualNodeRules ?? new List<ComfyUiVirtualNodeRule>();
+                        var learning = await ComfyUiVirtualNodeLearner.LearnAsync(
+                            fetched,
+                            jsonCompleter!,
+                            known,
+                            message => SetStatus(message));
+                        // 只采用**验证过**的规则（照它重转之后「我们丢了」真的变少、且没多出判断不了的）。
+                        fetched = ComfyUiLibrary.Reconvert(fetched, learning.Accepted);
+                        SetStatus(learning.Describe() + Environment.NewLine + Environment.NewLine
+                            + (fetched.Audit?.Describe() ?? string.Empty));
+                        break;
+
+                    default:
+                        AppendStatus("按你的选择先这样导入：上面那些「我们丢了」的输入保持缺失状态，"
+                            + "用到那份工作流时可能缺东西。要治的话，选一份带源视频/底图入口的工作流，或重新导入时选「让大模型认一认」。");
+                        break;
+                }
+            }
+
             var (installed, failure) = ComfyUiLibrary.Install(
                 fetched,
                 previous?.DisplayName ?? string.Empty,
@@ -586,6 +628,13 @@ internal sealed class SettingsApiImportDialog
             if (fetched.Failed > 0)
                 lines.Add($"· **{fetched.Failed} 份没能转换**：原因逐份记在站点文件里，不影响其它工作流");
             foreach (var note in fetched.Notes) lines.Add("· " + note);
+            // 体检结论留在这一步的结论里：用户点「完成」之后把结论收走，之后想回看就只能重新导入一次。
+            if (fetched.Audit is { } finalAudit)
+            {
+                lines.Add("· 导入前体检：");
+                foreach (var line in finalAudit.Describe().Split(Environment.NewLine))
+                    lines.Add("    " + line);
+            }
             lines.Add("· 以后要换工作流 / 看这一台有哪些：**设置 → 技能管理 → 站点与池子**");
             lines.Add("· 出图 / 出视频时会先让你在这台服务器的工作流里选一份（默认选中的是推荐的那份）");
             SetStatus(string.Join(Environment.NewLine, lines));
@@ -596,6 +645,70 @@ internal sealed class SettingsApiImportDialog
             busy = false;
             createButton.IsEnabled = true;
         }
+    }
+
+    /// <summary>体检发现问题时用户的选择。</summary>
+    private enum ComfyUiRepairChoice
+    {
+        /// <summary>让大模型认一认那些不认识的前端节点，然后重转。</summary>
+        Repair,
+
+        /// <summary>先这样导入（问题留着，用到那几份工作流时可能缺东西）。</summary>
+        ImportAsIs,
+
+        /// <summary>取消这次导入（什么都不写）。</summary>
+        Cancel
+    }
+
+    /// <summary>
+    /// **当场问**：体检发现「我们丢了 N 处」时把这个窗口摆出来。
+    ///
+    /// 为什么必须问、不能自己决定：修它要花用户的钱（调大模型），改的还是**别人写的工作流**；
+    /// 而且「不修也能用」是事实——丢掉的输入多半只在少数几份工作流上，用户可能根本不用它们。
+    /// 所以三件事都说清：问题是什么、修是怎么修的（照模型给的规则重转**并核对**）、不修会怎样。
+    /// 没接入大模型时那个按钮置灰并说明去哪儿接——**不给一个点下去必然失败的按钮**。
+    /// </summary>
+    private async Task<ComfyUiRepairChoice> AskRepairAsync(ComfyUiImportAuditReport audit)
+    {
+        var body = new StackPanel { Margin = new Thickness(20), Spacing = 10 };
+        body.Children.Add(Header("导入前的体检：发现问题"));
+        var account = CodeText();
+        account.Text = audit.Describe();
+        account.TextWrapping = TextWrapping.Wrap;
+        body.Children.Add(CodeBox(account, 190));
+        body.Children.Add(Note(audit.UnknownTypes.Count > 0
+            ? "「让大模型认一认」做的是：把这些不认识的前端节点在原稿里的形状发给模型，"
+              + "它判断「是直通 / 自带值 / 纯界面件」，我们再**照它的答案把那台机器的全部正文重转一遍并核对**——"
+              + "只有当「我们丢了的输入」真的变少、而且没有多出判断不了的，才采用它。"
+              + (jsonCompleter is null
+                  ? "\n当前**没有接入大模型**：到「设置 → 模型接入」配好文本模型与密钥之后，这条路才能用；"
+                    + "现在可以先「先这样导入」。"
+                  : string.Empty)
+            : "这些问题不在我们认识的范围内，稍后可以再导入一次看看。",
+            audit.UnknownTypes.Count > 0 && jsonCompleter is not null
+                ? AgentNoteLevel.Info
+                : AgentNoteLevel.Warning));
+
+        var repair = Primary("让大模型认一认");
+        var asIs = Secondary("先这样导入");
+        var cancel = Secondary("取消这次导入");
+        repair.IsEnabled = jsonCompleter is not null && audit.UnknownTypes.Count > 0;
+        if (!repair.IsEnabled && jsonCompleter is null) repair.Content = "让大模型认一认（未接入模型）";
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            Children = { repair, asIs, cancel }
+        };
+
+        var choice = ComfyUiRepairChoice.Cancel;
+        var question = DialogShell.Create("导入前的体检", Layout(body, Footer(buttons)), 700, 470);
+        repair.Click += (_, _) => { choice = ComfyUiRepairChoice.Repair; question.Close(); };
+        asIs.Click += (_, _) => { choice = ComfyUiRepairChoice.ImportAsIs; question.Close(); };
+        cancel.Click += (_, _) => { choice = ComfyUiRepairChoice.Cancel; question.Close(); };
+        if (window is not null) await question.ShowDialog(window);
+        return choice;
     }
 
     private void Analyze(ApiDocReport report)

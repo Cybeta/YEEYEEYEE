@@ -4,6 +4,28 @@ using System.Text.Json.Nodes;
 
 namespace YEEYEEYEE.Host;
 
+/// <summary>
+/// 一条「这个前端节点该怎么处理」的规则——由人（或大模型）看过原稿之后给出，用来补进代码里那张内置的表。
+///
+/// 为什么需要它：内置表只认我们见过的那几族（Reroute、Set/Get 两套命名、Fast Bypasser、PrimitiveNode）。
+/// 新机器上装了别的纯前端节点（例如另一个「拉到别处」的节点），它会落进「不是后端节点」被跳过，
+/// 于是**下游那个必填输入整项消失**——服务端往往还回 success，只是产出为空。
+/// 判据只有三种，都是可以**验证**的：它是不是直通（顺着第几个输入往下走）、是不是自带一个值、还是纯界面件。
+/// </summary>
+public sealed record ComfyUiVirtualNodeRule(string Type, ComfyUiVirtualNodeKind Kind, int InputSlot = 0, string Source = "");
+
+public enum ComfyUiVirtualNodeKind
+{
+    /// <summary>直通：把第 <see cref="ComfyUiVirtualNodeRule.InputSlot"/> 个输入接过来的东西传下去（Reroute 就是这种）。</summary>
+    PassThrough,
+
+    /// <summary>它自己带着一个值（写在控件上），消费方要的是那个值（PrimitiveNode 就是这种）。</summary>
+    Value,
+
+    /// <summary>纯界面件：它本来就不参与计算，丢掉是对的。</summary>
+    Discard
+}
+
 /// <summary>一次转换的结果：可提交的 API 工作流，加上「哪些节点被跳过、为什么」的诚实说明。</summary>
 public sealed record ComfyUiConversionResult(JsonObject ApiWorkflow, IReadOnlyList<string> Notes)
 {
@@ -59,14 +81,16 @@ public static class ComfyUiWorkflowConversion
     private const int ModeNever = 2;   // 官方 LGraphEventMode.NEVER
     private const int ModeBypass = 4;  // 官方 LGraphEventMode.BYPASS
 
-    public static ComfyUiConversionResult Convert(string uiWorkflowJson, string objectInfoJson)
+    public static ComfyUiConversionResult Convert(
+        string uiWorkflowJson, string objectInfoJson, IReadOnlyList<ComfyUiVirtualNodeRule>? rules = null)
     {
         var objectInfo = JsonNode.Parse(objectInfoJson) as JsonObject
             ?? throw new InvalidOperationException("object_info 不是 JSON 对象");
-        return Convert(uiWorkflowJson, objectInfo);
+        return Convert(uiWorkflowJson, objectInfo, rules);
     }
 
-    public static ComfyUiConversionResult Convert(string uiWorkflowJson, JsonObject objectInfo)
+    public static ComfyUiConversionResult Convert(
+        string uiWorkflowJson, JsonObject objectInfo, IReadOnlyList<ComfyUiVirtualNodeRule>? rules = null)
     {
         var ui = JsonNode.Parse(uiWorkflowJson) as JsonObject
             ?? throw new InvalidOperationException("工作流不是 JSON 对象");
@@ -79,8 +103,8 @@ public static class ComfyUiWorkflowConversion
         nodes = ExpandSubgraphs(ui, nodes);
 
         var nodesById = IndexById(nodes);
-        var links = ResolvePassThroughs(ReadLinks(ui["links"] as JsonArray), nodesById);
-        var primitives = CollectPrimitiveValues(nodesById);
+        var links = ResolvePassThroughs(ReadLinks(ui["links"] as JsonArray), nodesById, rules);
+        var primitives = CollectPrimitiveValues(nodesById, rules);
 
         var output = new JsonObject();
         var skipped = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -105,11 +129,13 @@ public static class ComfyUiWorkflowConversion
                 // 不是后端节点：备注、Label 这类纯界面物件。官方靠 comfyClass 为空落空，效果一致。
                 // **但「只转发」的那几种要分开说**：Reroute 与 Set/Get 配对也不进 API，
                 // 可它们的连线被接到了真正的源头——把它们算进「被丢掉的」会让人去查根本没丢的东西。
-                Bump(skipped, IsPrimitiveValueNode(type)
+                Bump(skipped, IsPrimitiveValueNode(type, rules)
                     ? "纯前端的值节点（值已内联进下游）"
-                    : IsForwardingOnly(type)
+                    : IsForwardingOnly(type, rules)
                         ? "只转发的前端节点（连线已接到真正的源头）"
-                        : "不是后端节点（" + type + "）");
+                        : RuleFor(type, rules)?.Kind == ComfyUiVirtualNodeKind.Discard
+                            ? "纯界面的前端节点（本来就不参与计算）"
+                            : "不是后端节点（" + type + "）");
                 continue;
             }
 
@@ -529,7 +555,8 @@ public static class ComfyUiWorkflowConversion
     /// </summary>
     private static Dictionary<long, (string OriginId, int OriginSlot)> ResolvePassThroughs(
         Dictionary<long, LinkRow> links,
-        IReadOnlyDictionary<string, JsonObject> nodesById)
+        IReadOnlyDictionary<string, JsonObject> nodesById,
+        IReadOnlyList<ComfyUiVirtualNodeRule>? rules = null)
     {
         var resolved = new Dictionary<long, (string OriginId, int OriginSlot)>();
 
@@ -574,6 +601,24 @@ public static class ComfyUiWorkflowConversion
             {
                 var index = BypassSlotIndex(node, slot, type);
                 return index < 0 ? null : ResolveInput(nodeId, index, type: null, visited);
+            }
+
+            // 学来的规则**优先于内置表**：它是看过那一台的真实形状之后得出的，
+            // 而内置表是按类型名认的。三种情形都在这里分流。
+            if (RuleFor(TypeOf(node), rules) is { } learned)
+            {
+                switch (learned.Kind)
+                {
+                    // 自带值：它自己不产出，值由 BuildApiNode 内联到消费方那个输入上——
+                    // 所以这里保持「原样」，那条连线随后会被换成字面量。
+                    case ComfyUiVirtualNodeKind.Value:
+                        return (nodeId, slot);
+                    // 纯界面件：丢掉它、连它那条线一起（与静音同效）。
+                    case ComfyUiVirtualNodeKind.Discard:
+                        return null;
+                    default:
+                        return ResolveInput(nodeId, learned.InputSlot, type, visited);
+                }
             }
 
             // Reroute 这类虚拟节点：自己不产出，但把上游原样转发。
@@ -725,19 +770,38 @@ public static class ComfyUiWorkflowConversion
         => new(type.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 
     /// <summary>
+    /// 这个类型有没有**学来的**规则（大模型或人看过那一台的真实形状之后给的）。
+    /// 学来的规则优先于内置表：内置表是按名字猜的，而规则是看过原稿之后得出的。
+    /// </summary>
+    private static ComfyUiVirtualNodeRule? RuleFor(string type, IReadOnlyList<ComfyUiVirtualNodeRule>? rules)
+    {
+        if (rules is null || rules.Count == 0 || type.Length == 0) return null;
+        var key = NormalizeVirtualType(type);
+        foreach (var rule in rules)
+            if (NormalizeVirtualType(rule.Type) == key) return rule;
+        return null;
+    }
+
+    /// <summary>
     /// 纯前端的「裸值」节点：<c>PrimitiveNode</c>（<c>/object_info</c> 里没有）。
     /// 它只带一个控件值，官方导出时会把它**内联成消费者那个输入的值**（见 <see cref="BuildApiNode"/>），
     /// 而不是留一条连线。值的位置实测三种形状：裸字符串 <c>"Quality"</c>、
     /// 数组 <c>["xxx.mp4","increment",""]</c>（第一项才是值）、<c>[120,"fixed"]</c>。
     /// </summary>
-    private static bool IsPrimitiveValueNode(string type) => type == "PrimitiveNode";
+    private static bool IsPrimitiveValueNode(string type, IReadOnlyList<ComfyUiVirtualNodeRule>? rules = null)
+        => type == "PrimitiveNode" || RuleFor(type, rules)?.Kind == ComfyUiVirtualNodeKind.Value;
 
-    private static Dictionary<string, JsonNode?> CollectPrimitiveValues(Dictionary<string, JsonObject> nodesById)
+    /// <summary>
+    /// 收「值节点」的值：`PrimitiveNode` 与学来的 <see cref="ComfyUiVirtualNodeKind.Value"/> 规则都走这里。
+    /// 值写在第一个控件上（实测三种形状：裸字符串、数组的第一项、`[值, "fixed"]`）。
+    /// </summary>
+    private static Dictionary<string, JsonNode?> CollectPrimitiveValues(
+        Dictionary<string, JsonObject> nodesById, IReadOnlyList<ComfyUiVirtualNodeRule>? rules = null)
     {
         var values = new Dictionary<string, JsonNode?>(StringComparer.Ordinal);
         foreach (var pair in nodesById)
         {
-            if (!IsPrimitiveValueNode(TypeOf(pair.Value))) continue;
+            if (!IsPrimitiveValueNode(TypeOf(pair.Value), rules)) continue;
             var raw = pair.Value["widgets_values"];
             var first = raw is JsonArray array && array.Count > 0 ? array[0] : raw;
             if (first is not null) values[pair.Key] = first.DeepClone();
@@ -749,8 +813,9 @@ public static class ComfyUiWorkflowConversion
     /// 「只转发」的那几种：它们都不进 API，但**连线已经被接到真正的源头**了
     /// （见 <see cref="ResolvePassThroughs"/>）。把它们说成「不是后端节点、丢掉了」会让人去查根本没丢的东西。
     /// </summary>
-    private static bool IsForwardingOnly(string type)
-        => IsVirtualPassThroughType(type) || IsVirtualSetter(type) || IsVirtualGetter(type) || IsVirtualBypasser(type);
+    private static bool IsForwardingOnly(string type, IReadOnlyList<ComfyUiVirtualNodeRule>? rules = null)
+        => IsVirtualPassThroughType(type) || IsVirtualSetter(type) || IsVirtualGetter(type) || IsVirtualBypasser(type)
+           || RuleFor(type, rules)?.Kind == ComfyUiVirtualNodeKind.PassThrough;
 
     /// <summary>Set/Get 靠这个名字配对（实测写在 <c>widgets_values</c> 的第一个字符串上）。</summary>
     private static string VirtualLinkName(JsonObject node)
