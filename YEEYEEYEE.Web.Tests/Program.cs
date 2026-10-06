@@ -308,6 +308,26 @@ try
     Assert(cancelledJob.GetProperty("state").GetString() == "Cancelled" && mock.InterruptCount > 0, "Video cancellation reaches ComfyUI: " + cancelledJob + ", interrupts=" + mock.InterruptCount);
     await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{cancelId}/outputs/0", 404);
 
+    // 取消竞态里远端真报错：取消已经发出去了，但 history 里是一条 execution_error（不是
+    // execution_interrupted）。Job 必须落到 Failed，绝不能因为已经进了 Cancelling 就把这条
+    // 更新丢掉、永远停在那里——真实 ComfyUI 就是这么回报被打断的，这个坑只有跑真机才踩得到。
+    var cancelError = await Check(videoClient, HttpMethod.Post, "/api/web/skills/web.text-to-video/invoke", 200, "{\"prompt\":\"mock-cancel-error video\",\"seconds\":2,\"idempotencyKey\":\"video-cancel-error-1\"}");
+    var cancelErrorId = cancelError.GetProperty("jobId").GetGuid();
+    JsonElement cancelErrorReady = cancelError;
+    for (var i = 0; i < 60 && cancelErrorReady.GetProperty("state").GetString() is "Queued" or "Running"; i++)
+    {
+        await Task.Delay(50);
+        cancelErrorReady = await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{cancelErrorId}", 200);
+    }
+    await Check(videoClient, HttpMethod.Post, $"/api/web/jobs/{cancelErrorId}/cancel", 200);
+    JsonElement cancelErrorJob = cancelError;
+    for (var i = 0; i < 60 && cancelErrorJob.GetProperty("state").GetString() is "Queued" or "Running" or "Cancelling"; i++)
+    {
+        await Task.Delay(50);
+        cancelErrorJob = await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{cancelErrorId}", 200);
+    }
+    Assert(cancelErrorJob.GetProperty("state").GetString() == "Failed", "Cancel racing a real failure must not strand the job in Cancelling: " + cancelErrorJob);
+
     Assert((await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{videoJobId}", 200)).GetProperty("capability").GetString() == "TextToVideo", "Video owner can read video job");
     Stop();
     await Start(token: "video-other-user", videoApproval: "preapproved-local-video", comfyUiBaseUrl: mock.BaseAddress, comfyUiVideoBackend: true, comfyUiPollingInterval: TimeSpan.FromMilliseconds(50));

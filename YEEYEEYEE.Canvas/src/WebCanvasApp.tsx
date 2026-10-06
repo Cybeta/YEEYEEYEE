@@ -47,6 +47,9 @@ export { mapAssets, recordAttachments, recordReferences, resolveReference } from
 
 type Notice = { kind: 'success' | 'error' | 'info'; message: string }
 
+/** 任务跑完了的三种结局。到这一步之后它不会再变，界面也该停了。 */
+const TERMINAL_JOB_STATES = ['Succeeded', 'Failed', 'Cancelled']
+
 export function WebCanvasApp() {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [authFailure, setAuthFailure] = useState('')
@@ -63,6 +66,12 @@ export function WebCanvasApp() {
   const [jobs, setJobs] = useState<WebJob[]>([])
   const [prompt, setPrompt] = useState('')
   const [taskNotice, setTaskNotice] = useState('技能与任务尚未加载。')
+  /**
+   * 顶部那条「任务 X：状态」写的是**发起那一刻**的快照。它要是不跟着轮询走，用户在取消之后
+   * 会一直看见「Cancelling」，而下面那张卡片早写着 Cancelled——同一条任务，两种说法。
+   * 所以记住是哪个任务，等它落终态时把提示条对齐（见下面那个 effect）。
+   */
+  const [noticeJobId, setNoticeJobId] = useState<string | null>(null)
   const [taskBusy, setTaskBusy] = useState(false)
   const [view, setView] = useState<WorkbenchView>('canvas')
   const [section, setSection] = useState<RailSection>('story')
@@ -292,6 +301,14 @@ export function WebCanvasApp() {
     return () => { active = false; window.clearInterval(timer) }
   }, [auth?.user?.id])
 
+  // 轮询把刚才那条任务推到终态之后，把顶部提示条对齐——否则它会停在「Cancelling」不动。
+  useEffect(() => {
+    if (!noticeJobId) return
+    const job = jobs.find((candidate) => candidate.jobId === noticeJobId)
+    if (!job || !TERMINAL_JOB_STATES.includes(job.state)) return
+    setTaskNotice(`任务 ${job.jobId}：${job.state}${job.errorMessage ? ` · ${job.errorMessage}` : ''}`)
+  }, [jobs, noticeJobId])
+
   // Esc 退出连接模式。只退模式、**不清选中**：清选中会牵出「未保存的修改要不要放弃」那一问，
   // 而按 Esc 的人想停的是「连线」这件事，不是想丢掉手上的草稿。
   useEffect(() => {
@@ -309,6 +326,7 @@ export function WebCanvasApp() {
       const result = await request<WebJob>(path, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
       if (run !== generation.current) return
       setJobs((current) => [result, ...current.filter((job) => job.jobId !== result.jobId)])
+      setNoticeJobId(result.jobId)
       setTaskNotice(`任务 ${result.jobId}：${result.state}${result.errorMessage ? ` · ${result.errorMessage}` : ''}`)
     } catch (error) { if (run === generation.current) setTaskNotice(`任务操作失败：${errorMessage(error)}`) }
     finally { setTaskBusy(false) }

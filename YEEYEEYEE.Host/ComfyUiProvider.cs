@@ -291,6 +291,21 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
             if (string.Equals(value, "error", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(value, "failed", StringComparison.OrdinalIgnoreCase))
             {
+                // **被打断不等于是失败**：ComfyUI 对 `/interrupt` 打断掉的任务，history 里写的是
+                // `status_str = "error"`、`completed = false`，真正的证据是 messages 末尾那条
+                // `execution_interrupted`。**我们要的是用户点了取消这件事本身**，不是它借用了
+                // 「错误」这个状态位；否则用户按下取消，界面最后告诉他「执行失败」，还会把一句
+                // 与取消无关的报错塞到他面前。
+                if (HistoryWasInterrupted(status))
+                {
+                    return new ExternalTaskUpdate
+                    {
+                        ExternalTaskId = externalTaskId,
+                        State = ExternalTaskState.Cancelled,
+                        ProgressPercent = 100
+                    };
+                }
+
                 return new ExternalTaskUpdate
                 {
                     ExternalTaskId = externalTaskId,
@@ -358,6 +373,29 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
             State = ExternalTaskState.Running,
             ProgressPercent = 50
         };
+    }
+
+    /// <summary>
+    /// history 的 <c>status.messages</c> 里有没有 <c>execution_interrupted</c>。
+    ///
+    /// 这是 ComfyUI 表示「这个 prompt 是被 /interrupt 打断的」的唯一凭据：它把打断记成
+    /// <c>status_str = "error"</c>，与真正的节点异常共用同一个状态位，所以只能从消息里认。
+    /// </summary>
+    private static bool HistoryWasInterrupted(JsonElement status)
+    {
+        if (!status.TryGetProperty("messages", out var messages) || messages.ValueKind != JsonValueKind.Array)
+            return false;
+
+        foreach (var message in messages.EnumerateArray())
+        {
+            if (message.ValueKind != JsonValueKind.Array || message.GetArrayLength() < 1) continue;
+            var kind = message[0].ValueKind == JsonValueKind.String ? message[0].GetString() : null;
+            if (string.Equals(kind, "execution_interrupted", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(kind, "execution_cancelled", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>

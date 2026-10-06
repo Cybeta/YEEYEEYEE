@@ -137,11 +137,14 @@ public sealed class Job
                     break;
                 case ExternalTaskState.Succeeded:
                     if (State == JobState.Queued) State = JobState.Running;
-                    if (State == JobState.Running) { Outputs = update.Outputs.ToArray(); State = JobState.Succeeded; ProgressPercent = 100; }
+                    // **Cancelling 也要认**：远端在取消竞态里把产物做完了，Job 就得如实收下。
+                    // 只认 Running 的话，这条更新会被丢掉，Job 永远停在 Cancelling——既没有产物、
+                    // 也没有错误、也不会再变，是比「取消」和「成功」都更难解释的一种结局。
+                    if (State is JobState.Running or JobState.Cancelling) { Outputs = update.Outputs.ToArray(); State = JobState.Succeeded; ProgressPercent = 100; }
                     break;
                 case ExternalTaskState.Failed:
                     if (State == JobState.Queued) State = JobState.Running;
-                    if (State == JobState.Running) { ErrorCode = update.ErrorCode ?? "EXTERNAL_TASK_FAILED"; ErrorMessage = update.ErrorMessage; State = JobState.Failed; }
+                    if (State is JobState.Running or JobState.Cancelling) { ErrorCode = update.ErrorCode ?? "EXTERNAL_TASK_FAILED"; ErrorMessage = update.ErrorMessage; State = JobState.Failed; }
                     break;
                 case ExternalTaskState.Cancelled:
                     if (State == JobState.Queued) State = JobState.Cancelled;

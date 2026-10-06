@@ -89,9 +89,11 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
         promptAttempts[key] = attempt;
         var mode = promptText.Contains("mock-fail", StringComparison.OrdinalIgnoreCase)
             ? MockMode.Failed
-            : promptText.Contains("mock-cancel", StringComparison.OrdinalIgnoreCase)
-                ? MockMode.Cancellable
-                : MockMode.Succeeded;
+            : promptText.Contains("mock-cancel-error", StringComparison.OrdinalIgnoreCase)
+                ? MockMode.CancellableError
+                : promptText.Contains("mock-cancel", StringComparison.OrdinalIgnoreCase)
+                    ? MockMode.Cancellable
+                    : MockMode.Succeeded;
         if (promptText.Contains("mock-retry", StringComparison.OrdinalIgnoreCase) && attempt == 1)
             mode = MockMode.Failed;
         lock (prompts) prompts[id] = new MockPrompt(id, mode);
@@ -122,7 +124,27 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
         if (prompt.Cancelled)
         {
             prompt.Terminal = true;
-            await JsonAsync(context, History(id, "cancelled", Array.Empty<object>()));
+            if (prompt.Mode == MockMode.CancellableError)
+            {
+                // 取消竞态里远端是**真的报错**了：history 里没有 execution_interrupted，
+                // 只有一条 execution_error。Job 必须落到 Failed，而不是停在 Cancelling。
+                await JsonAsync(context, History(id, "error", new object[]
+                {
+                    new object[] { "execution_start", new { prompt_id = id } },
+                    new object[] { "execution_error", new { prompt_id = id, node_id = "4", node_type = "easy ltxSamplerSimple", exception_message = "mock sampler error during cancel" } }
+                }, completed: false));
+                return;
+            }
+
+            // **复刻真实 ComfyUI 的取消回包**：`/interrupt` 打断掉的任务，history 里写的是
+            // status_str = "error"（与节点异常共用同一个状态位），真正的证据是 messages 里
+            // 那条 execution_interrupted。Mock 要是图省事直接回 "cancelled"，就永远测不出
+            // 「取消被当成失败」这一类真实存在的偏差。
+            await JsonAsync(context, History(id, "error", new object[]
+            {
+                new object[] { "execution_start", new { prompt_id = id } },
+                new object[] { "execution_interrupted", new { prompt_id = id, node_id = "2", node_type = "easy ltxMultiTrackEncode" } }
+            }, completed: false));
             return;
         }
         if (prompt.Mode == MockMode.Failed)
@@ -131,7 +153,7 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
             await JsonAsync(context, History(id, "error", new object[] { new object[] { "execution_error", new { node_id = "7", node_type = "VHS_VideoCombine", exception_message = "mock failure" } } }));
             return;
         }
-        if (prompt.Mode == MockMode.Cancellable)
+        if (prompt.Mode is MockMode.Cancellable or MockMode.CancellableError)
         {
             await JsonAsync(context, History(id, "running", Array.Empty<object>()));
             return;
@@ -146,7 +168,7 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
         {
             [id] = new
             {
-                status = new { status_str = "success", messages = Array.Empty<object>() },
+                status = new { status_str = "success", completed = true, messages = Array.Empty<object>() },
                 outputs = new Dictionary<string, object>
                 {
                     ["7"] = new { videos = new object[] { new { filename = "mock-output.mp4", subfolder = "", type = "output" } } }
@@ -174,8 +196,12 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
         await context.Response.OutputStream.WriteAsync(outputBytes);
     }
 
-    private static Dictionary<string, object> History(string id, string status, object messages) =>
-        new() { [id] = new { status = new { status_str = status, messages } } };
+    /// <summary>
+    /// 组装一条 history 记录。<c>completed</c> 默认 false：只有「跑完了」那一条会自己写，
+    /// 而 running / error / interrupted 这三种在真实 ComfyUI 里都是 <c>completed = false</c>。
+    /// </summary>
+    private static Dictionary<string, object> History(string id, string status, object messages, bool completed = false) =>
+        new() { [id] = new { status = new { status_str = status, completed, messages } } };
 
     private static async Task JsonAsync(HttpListenerContext context, object value)
     {
@@ -210,5 +236,5 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
         public int HistoryCalls { get; set; }
     }
 
-    private enum MockMode { Succeeded, Failed, Cancellable }
+    private enum MockMode { Succeeded, Failed, Cancellable, CancellableError }
 }
