@@ -321,6 +321,8 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 落盘：孤儿正文被清掉，删站点连正文目录一起删", ComfyUiLibraryPrunesAndDeletesPayloads),
     ("ComfyUI 槽位：从四份真机样本里认出参数该放哪，认不出的如实说", ComfyUiBinderDetectsOnRealSamples),
     ("ComfyUI 槽位：按一次调用绑值，不改模板本身，连线槽位不硬写", ComfyUiBinderBindsWithoutDamagingTemplate),
+    ("ComfyUI 槽位：中文画面比例和真实随机种子输入名可绑定", ComfyUiBinderBindsChineseAspectAndRealSeedInputs),
+    ("ComfyUI 导入：从服务端 COMBO 声明读取完整画面比例选项", ComfyUiImportReadsDeclaredAspectOptions),
     ("ComfyUI 当前这一台：切换把地址与底模写成站点那一份，同一台不重复写", ComfyUiActivationProjectsSiteOntoConfig),
     ("对话用量：流式末尾那条 usage 要读出来（含缓存命中 / 未命中）", AiStreamReportsUsage),
     ("ComfyUI 转换：穿过 Reroute 的连线要跟到源头，不能整项丢掉", ComfyUiConversionFollowsReroute),
@@ -2953,6 +2955,94 @@ static void ComfyUiBinderDetectsOnRealSamples()
 /// <summary>
 /// 钉住按一次调用绑值，不改模板本身，连线槽位不硬写。改坏模板会污染后续所有调用。
 /// </summary>
+static void ComfyUiBinderBindsChineseAspectAndRealSeedInputs()
+{
+    const string source = """
+    {
+      "1": {"class_type":"CustomGenerator","inputs":{"noise_seed":11,"steps":8}},
+      "2": {"class_type":"Seed (rgthree)","inputs":{"seed":-1}},
+      "3": {"class_type":"CustomGenerator","inputs":{"seed":["2",0],"steps":8}},
+      "4": {"class_type":"NanFengH3MultiReferenceGeneratorV10","inputs":{"画面比例":"16:9 (横屏)","时长秒":5.0,"随机种子":11,"固定随机种子":false}}
+    }
+    """;
+    var optionValues = new Dictionary<string, List<string>>(StringComparer.Ordinal)
+    {
+        ["NanFengH3MultiReferenceGeneratorV10.画面比例"] = new List<string> { "16:9 (横屏)", "9:16 (竖屏)" }
+    };
+
+    var slots = ComfyUiWorkflowBinder.Detect(source, optionValues);
+    Expect(slots.AspectInput == "画面比例", "中文比例输入名没有认出来：" + Explain(slots));
+    Expect(slots.AspectOptions.SequenceEqual(optionValues["NanFengH3MultiReferenceGeneratorV10.画面比例"]),
+        "中文比例的站点选项没有贴到槽位上：" + string.Join("、", slots.AspectOptions));
+    Expect(slots.SeedSlots.Count == 2
+        && slots.SeedSlots.Any(item => item.NodeId == "1" && item.Input == "noise_seed")
+        && slots.SeedSlots.Any(item => item.NodeId == "4" && item.Input == "随机种子"),
+        "应认出普通节点和 V10 的可写种子，实际：" + string.Join("、", slots.SeedSlots.Select(item => item.NodeId + "." + item.Input)));
+    Expect(!slots.SeedSlots.Any(item => item.NodeId == "2" || item.NodeId == "3"),
+        "固定随机种子和连线种子都不该被强行认成可写槽位");
+
+    Expect(slots.SecondsNodeId == "4" && slots.SecondsInput == "时长秒",
+        "V10 的直接秒数输入没有认出来：" + Explain(slots));
+
+    var bound = ComfyUiWorkflowBinder.Bind(source, slots, new ComfyUiBindValues
+    {
+        Seed = 42,
+        AspectRatio = "9:16",
+        Seconds = 8.5
+    });
+    Expect(bound["1"]!["inputs"]!["noise_seed"]!.GetValue<long>() == 42,
+        "种子要写回真实的 noise_seed 输入名");
+    Expect(bound["4"]!["inputs"]!["画面比例"]!.GetValue<string>() == "9:16 (竖屏)",
+        "中文画面比例要写回站点见过的完整选项值");
+    Expect(Math.Abs(bound["4"]!["inputs"]!["时长秒"]!.GetValue<double>() - 8.5) < 0.001,
+        "V10 的时长秒要保持 FLOAT 直接写回");
+    Expect(bound["4"]!["inputs"]!["固定随机种子"]!.GetValue<bool>() == false,
+        "固定随机种子开关不能被当成种子值改写");
+    Expect(bound["2"]!["inputs"]!["seed"]!.GetValue<long>() == -1,
+        "固定随机种子节点必须保持原样");
+    Expect(bound["3"]!["inputs"]!["seed"] is JsonArray,
+        "连线种子必须保持连线，不能被写成数字");
+}
+
+static void ComfyUiImportReadsDeclaredAspectOptions()
+{
+    const string objectInfo = """
+    {
+      "AspectPicker": {
+        "input": {
+          "required": {
+            "画面比例": ["COMBO", {"options": ["16:9 (横屏)", "9:16 (竖屏)", "1:1"]}]
+          }
+        }
+      },
+      "DynamicAspectPicker": {
+        "input": {
+          "optional": {
+            "aspect_ratio": ["COMFY_DYNAMICCOMBO_V3", {"options": [
+              {"key": "16:9 (Landscape)"},
+              {"key": "9:16 (Portrait)"}
+            ]}]
+          }
+        }
+      }
+    }
+    """;
+
+    var definitions = JsonNode.Parse(objectInfo)!.AsObject();
+    var options = ComfyUiImportAuditor.CollectAspectOptions(definitions);
+
+    Expect(options.Count == 2, "应读取两个服务端比例输入，实际 " + options.Count);
+    Expect(options.ContainsKey("AspectPicker.画面比例")
+        && options.ContainsKey("DynamicAspectPicker.aspect_ratio"),
+        "服务端比例输入键缺失：" + string.Join("、", options.Keys));
+    Expect(options["AspectPicker.画面比例"].SequenceEqual(
+            new[] { "16:9 (横屏)", "9:16 (竖屏)", "1:1" }),
+        "普通 COMBO 的中文比例选项读取不完整");
+    Expect(options["DynamicAspectPicker.aspect_ratio"].SequenceEqual(
+            new[] { "16:9 (Landscape)", "9:16 (Portrait)" }),
+        "动态 COMBO 的 key 比例选项读取不完整");
+}
+
 static void ComfyUiBinderBindsWithoutDamagingTemplate()
 {
     // 用一张**合成图**来测绑值，因为真机样本里 T01 的尺寸是上游算出来的（改不了），
@@ -6187,20 +6277,20 @@ static void ProviderImportAppliesWithoutLosingConfig()
         VideoDefaultSeconds = 8
     };
 
-    var draft = ProviderImporter.Inspect("https://gate.example.com/v1/images/generations\nmodel: flux-1-dev\nAuthorization: Bearer sk-brandnew0987654321");
+    var draft = ProviderImporter.Inspect("https://gate.example.com/v1/images/generations\nmodel: flux-1-dev\nAuthorization: Bearer test-import-key-0987654321");
     Expect(draft.Kind == ProviderKind.ImageApi, "应识别为画图接口");
 
     var preview = ProviderImporter.DescribeChanges(config, draft);
     Expect(preview.Count == 3, "预览应列出 3 项改动（图像地址、图像模型、密钥）：" + string.Join("；", preview));
     Expect(preview.Any(item => item.Contains("图像接口地址")), "预览应包含图像接口地址");
     Expect(preview.Any(item => item.Contains("图像模型")), "预览应包含图像模型");
-    Expect(preview.All(item => !item.Contains("sk-brandnew0987654321")), "预览不得回显完整密钥：" + string.Join("；", preview));
+    Expect(preview.All(item => !item.Contains("test-import-key-0987654321")), "预览不得回显完整密钥：" + string.Join("；", preview));
 
     var applied = ProviderImporter.Apply(config, draft);
     Expect(applied.Count == 3, "应写入 3 项：" + string.Join("；", applied));
     Expect(config.ImageEndpoint == "https://gate.example.com/v1", "图像地址应写入：" + config.ImageEndpoint);
     Expect(config.ImageModel == "flux-1-dev", "图像模型应写入：" + config.ImageModel);
-    Expect(config.ApiKey == "sk-brandnew0987654321", "密钥应更新");
+    Expect(config.ApiKey == "test-import-key-0987654321", "密钥应更新");
 
     // 其余配置必须原样保留（这正是设置对话框重建对象时会丢的那批字段）。
     Expect(config.Endpoint == "https://text.example.com/v1", "文本地址不应被改动");
@@ -6219,7 +6309,7 @@ static void ProviderImportAppliesWithoutLosingConfig()
     Expect(AiProviderSettings.Save(config), "配置应能写入隔离的配置目录");
     var onDisk = File.ReadAllText(AiProviderSettings.ConfigFilePath);
     Expect(onDisk.Contains("dpapi:"), "密钥应以 dpapi 密文落盘");
-    Expect(!onDisk.Contains("sk-brandnew0987654321"), "配置文件里不得出现明文密钥");
+    Expect(!onDisk.Contains("test-import-key-0987654321"), "配置文件里不得出现明文密钥");
 
     // 视频配置语义：有模型 + 能解析地址才算已配置；空地址时复用主接口地址。
     var videoConfig = new AiProviderConfig { Endpoint = "https://text.example.com/v1", VideoModel = "veo-3" };

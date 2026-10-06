@@ -306,8 +306,12 @@ public static class ComfyUiLibrary
             Checkpoint = checkpoint,
             ListSource = "ComfyUI 的 workflows 目录",
             Workflows = new List<SiteWorkflow>(),
-            OptionValues = CollectOptionValues(result.Payloads),
-            // 「文件选择槽」表：判据在**服务端的节点定义**里，而生成时读不到那二十多 MB；导入时算一次存这儿。
+            OptionValues = MergeOptionValues(
+                CollectOptionValues(result.Payloads),
+                result.ObjectInfo is { } aspectDefinitions
+                    ? ComfyUiImportAuditor.CollectAspectOptions(aspectDefinitions)
+                    : new Dictionary<string, List<string>>(StringComparer.Ordinal)),
+            // 「文件选择槽」表：判据在**服务端的节点定义**里；生成时读不到那二十多 MB；导入时算一次存这儿。
             // 定义拉不到时留空——binder 那边缺了这张表只会少认几处（照旧说「我没认出来」），不会说错话。
             FileSlots = result.ObjectInfo is { } definitions
                 ? ComfyUiImportAuditor.CollectFileSlots(definitions, result.Payloads)
@@ -371,7 +375,7 @@ public static class ComfyUiLibrary
     /// </summary>
     private static Dictionary<string, List<string>> CollectOptionValues(IReadOnlyDictionary<string, string> payloads)
     {
-        var names = new[] { "aspect_ratio", "aspect", "ratio" };
+        var names = new[] { "aspect_ratio", "aspect", "ratio", "画面比例" };
         var seen = new Dictionary<string, SortedSet<string>>(StringComparer.Ordinal);
 
         foreach (var payload in payloads.Values)
@@ -402,6 +406,26 @@ public static class ComfyUiLibrary
         }
 
         return seen.ToDictionary(pair => pair.Key, pair => pair.Value.ToList(), StringComparer.Ordinal);
+    }
+
+    private static Dictionary<string, List<string>> MergeOptionValues(
+        IReadOnlyDictionary<string, List<string>> observed,
+        IReadOnlyDictionary<string, List<string>> declared)
+    {
+        var merged = declared.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value.Distinct(StringComparer.Ordinal).ToList(),
+            StringComparer.Ordinal);
+
+        foreach (var pair in observed)
+        {
+            if (!merged.TryGetValue(pair.Key, out var values))
+                merged[pair.Key] = values = new List<string>();
+            foreach (var value in pair.Value)
+                if (!values.Contains(value, StringComparer.Ordinal)) values.Add(value);
+        }
+
+        return merged;
     }
 
     /// <summary>

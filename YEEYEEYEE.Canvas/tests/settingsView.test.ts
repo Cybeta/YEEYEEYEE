@@ -31,9 +31,9 @@ describe('设置响应', () => {
   it('密钥永远不带进界面这一侧（服务端就算误发，这一层也不认）', () => {
     const leaky = {
       ...configured,
-      apiKey: 'sk-REAL-SECRET',
-      imageApiKey: 'sk-IMAGE-SECRET',
-      providers: [{ ...configured.providers[0], apiKey: 'sk-PROFILE-SECRET' }]
+      apiKey: 'test-api-key',
+      imageApiKey: 'test-image-key',
+      providers: [{ ...configured.providers[0], apiKey: 'test-profile-key' }]
     }
     const parsed = parseSettings(leaky)
     expect(JSON.stringify(parsed)).not.toContain('sk-')

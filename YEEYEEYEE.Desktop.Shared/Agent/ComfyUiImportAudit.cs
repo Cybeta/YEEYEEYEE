@@ -750,6 +750,32 @@ public static class ComfyUiImportAuditor
     /// **是同一份**（input 目录的全量文件列表），值也可能是空的（`未选择`）——只有名字说得出这一格收什么。
     /// 要「路径 / URL」的那些名字一律不收（我们按文件名引用，写路径进去反而找不到文件）。
     /// </summary>
+    /// <summary>
+    /// 从服务器节点定义读取比例类 COMBO 的完整候选集合。
+    /// 键按「节点类型.输入名」保存，供站点导入时写入 OptionValues；工作流正文里没有出现过的合法值也不会丢失。
+    /// </summary>
+    public static Dictionary<string, List<string>> CollectAspectOptions(JsonObject objectInfo)
+    {
+        ArgumentNullException.ThrowIfNull(objectInfo);
+        var names = new[] { "aspect_ratio", "aspect", "ratio", "画面比例" };
+        var result = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+
+        foreach (var definitionPair in objectInfo)
+        {
+            if (definitionPair.Value is not JsonObject definition) continue;
+            foreach (var name in names)
+            {
+                if (ComboOptions(definition, name, out var fixedOptions) is not { Count: > 0 } options
+                    || !fixedOptions) continue;
+                result[definitionPair.Key + "." + name] = options
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+            }
+        }
+
+        return result;
+    }
+
     public static Dictionary<string, string> CollectFileSlots(
         JsonObject objectInfo, IReadOnlyDictionary<string, string> payloads)
     {

@@ -11,6 +11,9 @@ namespace YEEYEEYEE.Host;
 /// </summary>
 public sealed record ComfyUiFileSlot(string NodeId, string Input);
 
+/// <summary>一个可写的种子输入。输入名不能写死成 seed：部分采样器使用 noise_seed 或中文字段。</summary>
+public sealed record ComfyUiSeedSlot(string NodeId, string Input);
+
 /// <summary>
 /// 「文件选择槽」是收哪一类素材。判据来自服务器的节点定义（导入时算出来，见 <c>SiteProfile.FileSlots</c>），
 /// 值就是这三个字符串。
@@ -45,8 +48,11 @@ public sealed class ComfyUiWorkflowSlots
     /// <summary>决定画幅的节点（EmptyLatentImage 这类），要改 width / height。</summary>
     public string LatentNodeId { get; set; } = string.Empty;
 
-    /// <summary>收种子的采样器节点；出多张时要逐张换种子。</summary>
+    /// <summary>收种子的采样器节点；出多张时要逐张换种子。保留供旧调用方查看节点 id。</summary>
     public List<string> SeedNodeIds { get; set; } = new();
+
+    /// <summary>可写的种子输入，记录真实输入名；固定随机种子节点不会进入这里。</summary>
+    public List<ComfyUiSeedSlot> SeedSlots { get; set; } = new();
 
     /// <summary>收底图的节点（LoadImage 这类），图生图时要把参考图的名字放进去。</summary>
     public string ImageNodeId { get; set; } = string.Empty;
@@ -382,8 +388,8 @@ public static class ComfyUiWorkflowBinder
         { "loadvideo", "videoloader", "loadaudio", "audioloader", "audioupload", "trimaudio",
           "promptenhancer", "promptor" };
 
-    /// <summary>比例的输入名。这三个都是**一串固定选项**那种控件，值一定是字面量字符串。</summary>
-    private static readonly string[] AspectNames = { "aspect_ratio", "aspect", "ratio" };
+    /// <summary>比例的输入名。这些都是**一串固定选项**那种控件，值一定是字面量字符串。</summary>
+    private static readonly string[] AspectNames = { "aspect_ratio", "aspect", "ratio", "画面比例" };
 
     /// <summary>认「秒数常量」时，常量节点上可能用的输入名。</summary>
     private static readonly string[] ConstantNames = { "value", "seconds", "duration", "int", "float", "number" };
@@ -1115,23 +1121,35 @@ public static class ComfyUiWorkflowBinder
         }
     }
 
-    /// <summary>认种子：类型像采样器、并且 seed 是字面量的那些节点。</summary>
+    /// <summary>
+    /// 认种子：只认明确的种子输入名上的数值字面量，并记录真实输入名。
+    /// 不能只看 Sampler 类名：自定义生成节点（例如 V10）也可能直接收随机种子。
+    /// 连线值以及 `Seed (rgthree)` 这类固定随机节点保守不写，避免把随机策略改成固定种子。
+    /// </summary>
     private static void ResolveSeeds(JsonObject graph, ComfyUiWorkflowSlots slots)
     {
+        var seedNames = new[] { "seed", "noise_seed", "random_seed", "随机种子", "种子" };
         foreach (var pair in graph)
         {
             if (pair.Value is not JsonObject node) continue;
-            if (!ClassTypeOf(node).Contains("Sampler", StringComparison.Ordinal)) continue;
-            if (node["inputs"] is JsonObject inputs && inputs["seed"] is JsonValue)
+            var classType = ClassTypeOf(node);
+            if (classType.Contains("Seed", StringComparison.OrdinalIgnoreCase)) continue;
+            if (node["inputs"] is not JsonObject inputs) continue;
+
+            foreach (var name in seedNames)
+            {
+                if (inputs[name] is not JsonValue value || !value.TryGetValue<long>(out _)) continue;
+                slots.SeedSlots.Add(new ComfyUiSeedSlot(pair.Key, name));
                 slots.SeedNodeIds.Add(pair.Key);
+                break;
+            }
         }
 
         if (slots.SeedNodeIds.Count == 0)
             // 认不出就**退回保守行为**（什么都不写、保持原样），并且把「这是我按类名没认出来」说清楚——
             // 说成「没有种子输入」是假的，用户会以为这份工作流本来就不带种子。
-            slots.Notes.Add("**没认出种子**：我是按「类名里带 Sampler、且 seed 是字面量」找的，"
-                + "这份可能用的是别的写法——所以**不往任何地方乱写**（保持原样），"
-                + "代价是同一批的多张可能出一模一样的几张，只能靠服务端自己决定。");
+            slots.Notes.Add("**没认出种子**：只接受明确种子输入名上的数值 seed / noise_seed / 随机种子，"
+                + "连线或固定随机节点不会强行改写——所以**不往任何地方乱写**（保持原样）。");
         else if (slots.SeedNodeIds.Count > 1)
             slots.Notes.Add($"这份工作流有 {slots.SeedNodeIds.Count} 段采样（节点 {string.Join("、", slots.SeedNodeIds)}）："
                 + "同一张图会往每一段写同一个种子。");
@@ -1716,8 +1734,8 @@ public static class ComfyUiWorkflowBinder
             SetInput(graph, slots.SecondsNodeId, slots.SecondsInput, SecondsValueFor(graph, slots, seconds));
 
         if (values.Seed is { } seed)
-            foreach (var seedNodeId in slots.SeedNodeIds)
-                SetInput(graph, seedNodeId, "seed", JsonValue.Create(seed));
+            foreach (var slot in slots.SeedSlots)
+                SetInput(graph, slot.NodeId, slot.Input, JsonValue.Create(seed));
 
         // 源视频 / 源音频：视频二创、对口型、视频修复那一支吃的是**一段片子**（对口型还要一段音）。
         // 与底图同一条规矩：按入口顺序对号入座，给不满就只写前几个，多出来的保持它自己的示例，
