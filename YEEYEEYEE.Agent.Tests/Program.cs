@@ -203,6 +203,7 @@ var tests = new (string Name, Action Run)[]
     ("出视频 · 只吃一段片子的那一类（视频修复 / 补帧 / 二创）单列出来，源视频按入口顺序写进去", WorkflowBinderTreatsSourceVideoShapeAsUsable),
     ("出视频 · 写进去的到底是什么：帧数与比例照写、帧率一个字不动、没给就不许乱写", WorkflowBinderWritesLengthAspectAndSize),
     ("出视频 · 帧数是算出来的时候：认出那个收秒的常量（判据是表达式里带着帧率），写秒不写帧", WorkflowBinderFindsTheSecondsWhenFramesAreComputed),
+    ("出视频 · 「控件本身就直接收秒」那种时长入口（中文包的 时长秒），名字要整串对上、输出侧的秒不算", WorkflowBinderFindsASecondsControlDirectly),
     ("转换 · Set/Get 配对是转发不是丢弃：Get 的值接到同名 Set 的源头，两个都不进 API", WorkflowConversionFollowsSetGetPairs),
     ("转换 · PrimitiveNode 的值内联进下游；Fast Bypasser 当直通跟到源头", ComfyUiConversionInlinesPrimitiveAndFollowsBypasser),
     ("转换 · 子图「输入直通到输出」要接到外面喂给容器那个输入的地方", ComfyUiConversionWiresContainerPassThrough),
@@ -15197,6 +15198,105 @@ static void WorkflowBinderFindsTheSecondsWhenFramesAreComputed()
     var untouched = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues { Prompt = "她推开门" });
     var plain = System.Text.Json.Nodes.JsonNode.Parse(untouched.ToJsonString())!.AsObject();
     Expect(plain["6"]!["inputs"]!["value"]!.GetValue<double>() == 5, "没给秒数就别动它");
+}
+
+/// <summary>
+/// 钉住「**控件本身就直接收秒**」这一种时长入口（与「帧数是算出来的」平行的另一条路）。
+///
+/// 实测 `NanFengH3MultiReferenceGeneratorV10`（U23-南风 V10 / V15）把时长命名为 `时长秒`
+/// （FLOAT / min 1 / max 15 / 默认 5）：既不是 `length` 那族名字，也不经过任何算数节点。
+/// 于是我们对这一份说「它出多少帧就是多少帧，时长改不了」——而它其实一格就能改。
+/// 中文包的输入名不在名单里，这与提示词入口是**同一种病**。
+/// </summary>
+static void WorkflowBinderFindsASecondsControlDirectly()
+{
+    const string template = """
+    {
+      "1": {"class_type":"NanFengH3MultiReferenceGeneratorV10","inputs":{"提示词":"a cat","时长秒":5.0,"画面比例":"21:9 (Ultrawide)","图片1":"a.png"}},
+      "3": {"class_type":"VHS_VideoCombine","inputs":{"frame_rate":24.0,"images":["1",0],"format":"video/h264-mp4"}}
+    }
+    """;
+
+    var slots = ComfyUiWorkflowBinder.Detect(template);
+    Expect(!slots.CanSetLength, "它没有帧数的字面量入口，所以「直接写帧」这条路认不出来");
+    Expect(slots.CanSetSeconds, "但该认得出秒数写在哪儿：" + slots.Describe());
+    Expect(slots.SecondsNodeId == "1" && slots.SecondsInput == "时长秒",
+        $"秒数该认在节点 1 的 时长秒 上，实际 {slots.SecondsNodeId}.{slots.SecondsInput}");
+    Expect(slots.Describe().Contains("时长✓（写秒数"), "Describe 要照实说它能改：" + slots.Describe());
+    Expect(slots.SecondsChain.Contains("时长秒"), "说明里要点名那一格：" + slots.SecondsChain);
+
+    var bound = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues { Prompt = "她推开门", Seconds = 8 });
+    var root = System.Text.Json.Nodes.JsonNode.Parse(bound.ToJsonString())!.AsObject();
+    Expect(root["1"]!["inputs"]!["时长秒"]!.GetValue<double>() == 8,
+        "8 秒要写进那一格，实际 " + root["1"]!["inputs"]!["时长秒"]);
+    Expect(root["1"]!["inputs"]!["画面比例"]!.GetValue<string>() == "21:9 (Ultrawide)", "没给比例的这次别动它");
+
+    var untouched = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues { Prompt = "她推开门" });
+    var plain = System.Text.Json.Nodes.JsonNode.Parse(untouched.ToJsonString())!.AsObject();
+    Expect(plain["1"]!["inputs"]!["时长秒"]!.GetValue<double>() == 5, "没给秒数就别动它");
+
+    // 名字必须**整串**对上。同一批中文包里还有「开头缓冲秒 / 结尾缓冲秒」（音频前奏留多久），
+    // 子串一匹配就会把它们当成长度——那种错不会报错，只会安静地出一段时长不对的片。
+    var buffer = ComfyUiWorkflowBinder.Detect("""
+    {
+      "1": {"class_type":"SomeAudioPrep","inputs":{"开头缓冲秒":2,"结尾缓冲秒":1}},
+      "3": {"class_type":"VHS_VideoCombine","inputs":{"frame_rate":24.0,"images":["1",0]}}
+    }
+    """);
+    Expect(!buffer.CanSetSeconds, "「开头缓冲秒」不能被当成长度入口：" + buffer.Describe());
+
+    // 输出侧节点上的秒不是时长：那决定的是播放端的事（与帧率同理）。
+    var outputSide = ComfyUiWorkflowBinder.Detect("""
+    {"3": {"class_type":"VHS_VideoCombine","inputs":{"frame_rate":24.0,"duration":5,"images":["1",0]}}}
+    """);
+    Expect(!outputSide.CanSetSeconds, "输出侧节点上的秒不是时长入口：" + outputSide.Describe());
+
+    // 范围之外的数不许认。写错一个数不会有任何报错，只会安静地出一段时长不对的片。
+    var absurd = ComfyUiWorkflowBinder.Detect("""
+    {
+      "1": {"class_type":"NanFengH3MultiReferenceGeneratorV10","inputs":{"提示词":"a cat","时长秒":900}},
+      "3": {"class_type":"VHS_VideoCombine","inputs":{"frame_rate":24.0,"images":["1",0]}}
+    }
+    """);
+    Expect(!absurd.CanSetSeconds, "900 秒超出说得通的范围，宁可判不出来：" + absurd.Describe());
+
+    // 光秃秃的 `duration` 一律不收：全库扫下来它在别的包里全是别的意思
+    // （`LoadVideoUI` 是素材多长、`VHS_LoadAudioUpload` 是音频多长、`TrimAudioDuration` 是裁多久）。
+    var bareDuration = ComfyUiWorkflowBinder.Detect("""
+    {
+      "1": {"class_type":"LoadVideoUI","inputs":{"video":"a.mp4","duration":4.84}},
+      "3": {"class_type":"VHS_VideoCombine","inputs":{"frame_rate":24.0,"images":["1",0]}}
+    }
+    """);
+    Expect(!bareDuration.CanSetSeconds, "「读进来的素材有多长」不是这一镜要出多长：" + bareDuration.Describe());
+
+    var trim = ComfyUiWorkflowBinder.Detect("""
+    {
+      "1": {"class_type":"TrimAudioDuration","inputs":{"duration_seconds":20}},
+      "3": {"class_type":"VHS_VideoCombine","inputs":{"frame_rate":24.0,"images":["1",0]}}
+    }
+    """);
+    Expect(!trim.CanSetSeconds, "裁音轨的那个秒不是时长：" + trim.Describe());
+
+    var enhancer = ComfyUiWorkflowBinder.Detect("""
+    {
+      "1": {"class_type":"MiniMaxH3PromptEnhancerT8","inputs":{"duration_seconds":15}},
+      "3": {"class_type":"VHS_VideoCombine","inputs":{"frame_rate":24.0,"images":["1",0]}}
+    }
+    """);
+    Expect(!enhancer.CanSetSeconds,
+        "写词节点上的秒说的是「要描述的镜头多长」，写它渲染长度一点不变，答应下来就是承诺做不到的事："
+        + enhancer.Describe());
+
+    // 而导演台那种 `duration_seconds` 就是它出的片长，要认。
+    var director = ComfyUiWorkflowBinder.Detect("""
+    {
+      "1": {"class_type":"LTXDirector","inputs":{"duration_seconds":5.0}},
+      "3": {"class_type":"VHS_VideoCombine","inputs":{"frame_rate":24.0,"images":["1",0]}}
+    }
+    """);
+    Expect(director.CanSetSeconds && director.SecondsInput == "duration_seconds",
+        "导演台上的 duration_seconds 就是片长，要认：" + director.Describe());
 }
 
 /// <summary>

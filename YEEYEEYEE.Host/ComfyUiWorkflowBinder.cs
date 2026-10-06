@@ -346,6 +346,42 @@ public static class ComfyUiWorkflowBinder
     private static readonly string[] FrameRateNames =
         { "frame_rate", "fps", "framerate", "video_fps", "frame_rate_value" };
 
+    /// <summary>
+    /// 「**控件本身就是给秒的**」那类时长入口的输入名，按明确程度排序。
+    ///
+    /// 与 <see cref="LengthNames"/> 是**两种形状**：那种收的是帧数（要我们自己按帧率换算），
+    /// 这种直接收秒、帧数由它自己折——所以写在同一个「时长」结论里，走 <see cref="ComfyUiWorkflowSlots.CanSetSeconds"/>。
+    ///
+    /// 为什么要单列：实测中文包把这一类命名为 `时长秒`（`NanFengH3MultiReferenceGeneratorV10`，
+    /// FLOAT / min 1 / max 15 / 默认 5），英文名单里一个都对不上，于是我们对这一份说「时长改不了」——
+    /// 而它其实是一格就能改的。这是「中文包的输入名不在名单里」的第 N 次：上一次是提示词。
+    ///
+    /// 名单必须是**整个名字**对上，不做子串匹配：同一批中文包里还有 `开头缓冲秒` / `结尾缓冲秒`，
+    /// 子串一匹配就会把「音频前奏留多久」当成长度写进去——那种错不会报错，只会安静地出一段时长不对的片。
+    ///
+    /// 也**不收**光秃秃的 `duration`：全库扫下来它在别的包里全是别的意思——`LoadVideoUI.duration`
+    /// 是**读进来的那段素材有多长**、`VHS_LoadAudioUpload.duration` 是**上传的音频多长**、
+    /// `TrimAudioDuration.duration` 是**音轨裁掉多少**、`ACEStep.duration` 是**音乐生成多长**。
+    /// 往这些格子写「这一镜要几秒」，轻则白写，重则把素材裁短，而且都不会报错。
+    /// 只收「名字里带 seconds / 秒」这种**明说了是秒的长度**。
+    /// </summary>
+    private static readonly string[] SecondsNames =
+        { "duration_seconds", "video_seconds", "时长秒", "视频时长", "时长（秒）", "时长(秒)" };
+
+    /// <summary>
+    /// 名字对上了、也**不能**当长度写的几类节点（按类名归一化后的片段）。
+    ///
+    /// 两条道理，都不是「名字猜的」：
+    /// ① **读素材的节点**（`LoadVideo*` / `VHS_LoadAudioUpload` / `LoadAudio*` /
+    ///    `TrimAudioDuration`）上那个秒说的是**素材/音轨有多长**，不是这一镜要出多长——
+    ///    它们本来就已经被认成「源视频 / 源音频入口」（见 <c>CollectVideoSources</c>），在这里再认一次就是自相矛盾。
+    /// ② **写词的节点**（`*PromptEnhancer*` / `*Promptor`）上那个秒说的是**要描述的镜头多长**，
+    ///    写进去渲染长度一点不变，可我们会因此告诉用户「时长可以改」——那是承诺了做不到的事，比不说更坏。
+    /// </summary>
+    private static readonly string[] NotDurationNodeHints =
+        { "loadvideo", "videoloader", "loadaudio", "audioloader", "audioupload", "trimaudio",
+          "promptenhancer", "promptor" };
+
     /// <summary>比例的输入名。这三个都是**一串固定选项**那种控件，值一定是字面量字符串。</summary>
     private static readonly string[] AspectNames = { "aspect_ratio", "aspect", "ratio" };
 
@@ -958,12 +994,66 @@ public static class ComfyUiWorkflowBinder
         {
             // 帧数不是字面量时，可能是**算出来的**——那就去找那个真正收秒的常量。
             ResolveSeconds(graph, slots);
+            // 还有一种更省事的形状：控件自己就收秒（不经过任何算数节点）。先试前一种，
+            // 因为「算出来的」那条路能说清换算链，信息更多；两条都试不到才说改不了。
+            if (!slots.CanSetSeconds) ResolveSecondsLiteral(graph, slots);
             if (slots.CanSetSeconds)
                 slots.Notes.Add("时长可以改（写秒数）：" + slots.SecondsChain);
             else if (lengths.Count == 0)
-                slots.Notes.Add("这份工作流里找不到帧数入口（生成侧的 length / num_frames 这类）："
+                slots.Notes.Add("这份工作流里找不到时长入口：既没有帧数入口（生成侧的 length / num_frames 这类），"
+                    + "也没有直接收秒数的输入（seconds / duration_seconds / 时长秒 这类）——"
                     + "它出多少帧就是多少帧，时长改不了。");
         }
+    }
+
+    /// <summary>
+    /// 认「控件本身就是给秒的」时长入口：某个非输出侧节点上有一个**字面量**的数字输入，
+    /// 名字在 <see cref="SecondsNames"/> 里，值在一个说得通的秒数范围内。
+    ///
+    /// 为什么要卡范围：这一类名字（尤其 `duration`）在别的包里也可能指毫秒或帧。
+    /// 一个数写错不会有任何报错，只会安静地出一段时长不对的片——所以宁可判不出来。
+    /// 上限取 600 秒（10 分钟，比这个上限更长的镜头不靠这条路设）。
+    ///
+    /// 与 <see cref="ResolveSeconds"/> 的关系：那条路处理「帧数是算出来的」（要说清换算链），
+    /// 这条处理「控件直接收秒」。两条都写进 <see cref="ComfyUiWorkflowSlots.CanSetSeconds"/> 的同一组槽位。
+    /// </summary>
+    private static void ResolveSecondsLiteral(JsonObject graph, ComfyUiWorkflowSlots slots)
+    {
+        var candidates = new List<(string NodeId, int Rank, string Input, double Seconds)>();
+        foreach (var pair in graph)
+        {
+            if (pair.Value is not JsonObject node || node["inputs"] is not JsonObject inputs) continue;
+            var classType = ClassTypeOf(node);
+            if (IsOutputSideNode(classType)) continue;
+            if (LooksLikeNotDurationNode(classType)) continue;
+            for (var rank = 0; rank < SecondsNames.Length; rank++)
+            {
+                if (inputs[SecondsNames[rank]] is not JsonValue value
+                    || !value.TryGetValue<double>(out var seconds)
+                    || seconds <= 0 || seconds > 600) continue;
+                candidates.Add((pair.Key, rank, SecondsNames[rank], seconds));
+                break;
+            }
+        }
+
+        if (candidates.Count == 0) return;
+
+        var chosen = candidates
+            .OrderBy(item => item.Rank)
+            .ThenBy(item => item.NodeId, NodeIdComparer.Instance)
+            .First();
+        slots.SecondsNodeId = chosen.NodeId;
+        slots.SecondsInput = chosen.Input;
+        slots.SecondsChain = $"节点 {chosen.NodeId}（{ClassTypeOf(graph[chosen.NodeId]!.AsObject())}）的 "
+            + $"{chosen.Input} 直接收秒数（现在是 {chosen.Seconds:0.##} 秒），帧数由它自己按帧率折。";
+    }
+
+    /// <summary>「这一格说的是别的意思」的那几类节点，见 <see cref="NotDurationNodeHints"/>。</summary>
+    private static bool LooksLikeNotDurationNode(string classType)
+    {
+        var flat = new string(classType.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+        if (flat.Length == 0) return false;
+        return NotDurationNodeHints.Any(hint => flat.Contains(hint, StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -1620,9 +1710,10 @@ public static class ComfyUiWorkflowBinder
         if (slots.LengthNodeId.Length > 0 && values.Length is { } frames && frames > 1)
             SetInput(graph, slots.LengthNodeId, slots.LengthInput, JsonValue.Create(frames));
 
-        // 帧数是算出来的那种：写**秒**，让那份工作流自己的表达式去折帧数与对齐。
+        // 帧数是算出来的那种，以及「控件本身就直接收秒」那种：都写**秒**，
+        // 让那份工作流自己的表达式（或它自己）去折帧数与对齐。
         if (slots.SecondsNodeId.Length > 0 && values.Seconds is { } seconds && seconds > 0)
-            SetInput(graph, slots.SecondsNodeId, slots.SecondsInput, JsonValue.Create(seconds));
+            SetInput(graph, slots.SecondsNodeId, slots.SecondsInput, SecondsValueFor(graph, slots, seconds));
 
         if (values.Seed is { } seed)
             foreach (var seedNodeId in slots.SeedNodeIds)
@@ -1750,6 +1841,24 @@ public static class ComfyUiWorkflowBinder
         if (graph[nodeId]?["inputs"] is not JsonObject inputs) return;
         if (inputs[input] is JsonArray) return;
         inputs[input] = value;
+    }
+
+    /// <summary>
+    /// 秒数按**原来那个值的写法**写：原来是整数就写整数（四舍五入到整秒），原来是小数才写小数。
+    ///
+    /// 为什么要看原样：同一批工作流里，秒数有的声明成 FLOAT（`时长秒` 就是），有的声明成 INT。
+    /// 往 INT 上写 `7.5` 会被服务端的类型校验拒掉——那同样是「跑不起来」，而错误现场离用户很远。
+    /// 整数控件上宁可差半秒，也不要整份被拒。
+    /// </summary>
+    private static JsonNode SecondsValueFor(JsonObject graph, ComfyUiWorkflowSlots slots, double seconds)
+    {
+        var wasInteger = graph[slots.SecondsNodeId] is JsonObject node
+            && node["inputs"] is JsonObject inputs
+            && inputs[slots.SecondsInput] is JsonValue current
+            && current.TryGetValue<long>(out _);
+        return wasInteger
+            ? JsonValue.Create((long)Math.Round(seconds, MidpointRounding.AwayFromZero))
+            : JsonValue.Create(seconds);
     }
 
     private static (string NodeId, int Slot)? ReadLink(JsonObject inputs, string key)
