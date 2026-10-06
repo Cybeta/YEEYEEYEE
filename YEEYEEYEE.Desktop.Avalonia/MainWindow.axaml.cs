@@ -54,6 +54,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     private static readonly JsonSerializerOptions SnapshotOptions = new();
     private bool suppressSnapshot;
     private bool canEdit;
+    private readonly string? startupProjectPath;
     private Point workTreeDragOrigin;
     private bool workTreeDragStarted;
 
@@ -149,7 +150,13 @@ public partial class MainWindow : Window, IAgentSessionHost
     private CenterView centerView = CenterView.Canvas;
 
     public MainWindow()
+        : this(null)
     {
+    }
+
+    public MainWindow(IReadOnlyList<string>? startupArgs)
+    {
+        startupProjectPath = ResolveStartupProjectPath(startupArgs);
         InitializeComponent();
         // 版本号只有一处来源（程序集）：标题栏那枚胶囊与左栏最底下一行都从这里取。
         TitleVersionText.Text = AppVersion.Display;
@@ -251,6 +258,25 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         Opened -= MainWindow_OnOpened;
         await UpdateFlow.HandleStartupAsync(this);
+
+        if (startupProjectPath is { Length: > 0 })
+            await OpenProjectAtAsync(startupProjectPath);
+    }
+
+    private static string? ResolveStartupProjectPath(IReadOnlyList<string>? args)
+    {
+        if (args is null) return null;
+
+        foreach (var argument in args)
+        {
+            if (string.IsNullOrWhiteSpace(argument) || argument.StartsWith("-", StringComparison.Ordinal))
+                continue;
+
+            var path = Path.GetFullPath(argument.Trim('"'));
+            if (Directory.Exists(path)) return path;
+        }
+
+        return null;
     }
 
     // ==================== 启动页：先选项目 ====================
