@@ -228,6 +228,12 @@ try
     }
     Assert(readJob.GetProperty("state").GetString() == "Failed" && readJob.GetProperty("errorCode").GetString() == "JOB_EXECUTION_FAILED", "Real failure not surfaced");
 
+    // 开机自检要如实说「连不上」，而且要**登录才问得到**——失败正文里带着后端地址。
+    var offlineProbe = await Check(authorized, HttpMethod.Get, "/api/web/settings/comfyui", 200);
+    Assert(offlineProbe.GetProperty("reachable").GetBoolean() == false, "Self-check reports unreachable when nothing listens: " + offlineProbe);
+    using (var anonymousProbe = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") })
+        await Check(anonymousProbe, HttpMethod.Get, "/api/web/settings/comfyui", 401);
+
     // 本地 ComfyUI HTTP Mock：不依赖 GPU，覆盖视频后端的真实提交、轮询、下载和控制面。
     await using var mock = new MockComfyUiServer();
     await mock.StartAsync();
@@ -237,6 +243,9 @@ try
     videoClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
     var videoCatalog = await Check(videoClient, HttpMethod.Get, "/api/web/skills", 200);
     Assert(videoCatalog.GetProperty("skills").EnumerateArray().Any(item => item.GetProperty("id").GetString() == "web.text-to-video" && item.GetProperty("capability").GetString() == "TextToVideo"), "Video skill catalog");
+    // 自检读的是后端自己的 system_stats，不是「端口通不通」。
+    var mockProbe = await Check(videoClient, HttpMethod.Get, "/api/web/settings/comfyui", 200);
+    Assert(mockProbe.GetProperty("reachable").GetBoolean() && mockProbe.GetProperty("version").GetString() == "0.0.0-mock", "Self-check reads the backend's system_stats: " + mockProbe);
     await Check(videoClient, HttpMethod.Post, "/api/web/skills/web.text-to-video/invoke", 400, "{\"prompt\":\"x\",\"idempotencyKey\":\"video-invalid\",\"unknown\":true}");
     await Check(videoClient, HttpMethod.Post, "/api/web/skills/web.text-to-video/invoke", 400, "{\"prompt\":\"x\",\"seconds\":0,\"idempotencyKey\":\"video-invalid-seconds\"}");
     await Check(videoClient, HttpMethod.Post, "/api/web/skills/comfyui.text-to-image/invoke", 400, "{\"prompt\":\"x\",\"model\":\"wrong\",\"idempotencyKey\":\"image-video-boundary\"}");

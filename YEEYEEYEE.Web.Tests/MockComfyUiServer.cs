@@ -63,6 +63,7 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
             switch (context.Request.HttpMethod, segments.FirstOrDefault())
             {
                 case ("POST", "prompt"): await PromptAsync(context); break;
+                case ("GET", "system_stats"): await SystemStatsAsync(context); break;
                 case ("GET", "queue"): await QueueAsync(context); break;
                 case ("GET", "history") when segments.Length == 2: await HistoryAsync(context, segments[1]); break;
                 case ("POST", "interrupt"): await InterruptAsync(context); break;
@@ -77,6 +78,17 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
         }
         finally { context.Response.Close(); }
     }
+
+    /// <summary>
+    /// 开机自检探的就是这一条。Mock 提供它，是为了让「自检说通了」这条路也有人走一遍——
+    /// 否则那一句判断永远只在真机上才被执行到。
+    /// </summary>
+    private async Task SystemStatsAsync(HttpListenerContext context) =>
+        await JsonAsync(context, new
+        {
+            system = new { comfyui_version = "0.0.0-mock" },
+            devices = new object[] { new { name = "mock-gpu", vram_free = 1024L } }
+        });
 
     private async Task PromptAsync(HttpListenerContext context)
     {

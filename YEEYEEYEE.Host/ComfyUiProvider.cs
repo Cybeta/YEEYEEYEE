@@ -55,18 +55,34 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
     {
         var effective = await ResolveUploadsAsync(invocation, cancellationToken).ConfigureAwait(false);
         var workflow = workflowFactory(effective);
-        var response = await http.PostAsJsonAsync(
-            "prompt",
-            new ComfyUiPromptRequest
-            {
-                Prompt = workflow,
-                ClientId = clientId,
-                ExtraData = new ComfyUiExtraData
+        HttpResponseMessage response;
+        try
+        {
+            response = await http.PostAsJsonAsync(
+                "prompt",
+                new ComfyUiPromptRequest
                 {
-                    ExtraPngInfo = new ComfyUiExtraPngInfo { Workflow = workflow }
-                }
-            },
-            cancellationToken).ConfigureAwait(false);
+                    Prompt = workflow,
+                    ClientId = clientId,
+                    ExtraData = new ComfyUiExtraData
+                    {
+                        ExtraPngInfo = new ComfyUiExtraPngInfo { Workflow = workflow }
+                    }
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (System.Net.Http.HttpRequestException error)
+        {
+            throw new InvalidOperationException(UnreachableMessage(error), error);
+        }
+        catch (TaskCanceledException error) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException(
+                $"提交到 ComfyUI 超时（{Endpoint()}）：约定时间内没有回应。"
+                + "机器可能还在加载模型，或者这条隧道很慢——稍等一会儿再重试；"
+                + "一直超时就到设置里确认地址。",
+                error);
+        }
 
         // **别用 EnsureSuccessStatusCode**：它只留一个状态码，而服务端的报错正文才是最有用的那一句话
         // （它会点名哪个节点类型这台机器上没装、哪个必填输入缺了）。实测排查一次提交被拒时，
@@ -85,6 +101,29 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
         if (body is null || string.IsNullOrWhiteSpace(body.PromptId))
             throw new InvalidOperationException("ComfyUI 未返回 prompt_id");
         return new ExecutionOutput { ExternalTaskId = body.PromptId, AwaitExternalCompletion = true };
+    }
+
+    /// <summary>
+    /// 自己这边的地址，出错时写进正文里。写出来是有意的：用户手里那台机器到底是哪个地址，
+    /// 只有配置里才知道，而这条任务失败的答案往往就在「地址变了」这四个字上。
+    /// </summary>
+    private string Endpoint() => http.BaseAddress?.ToString() ?? "（未配置地址）";
+
+    /// <summary>
+    /// 「连不上」要说成连不上。
+    ///
+    /// 与「提交被拒」是两回事：被拒时服务端还在，它会点名缺哪个节点；连不上则说明**那台机器
+    /// 或那条隧道已经不在了**，该去看地址，而不是去改提示词。原始的 socket 报错是英文的、
+    /// 还带着端口和内部异常链，直接塞给用户等于什么都没说。
+    /// </summary>
+    private string UnreachableMessage(System.Net.Http.HttpRequestException error) =>
+        $"连不上 ComfyUI（{Endpoint()}）：{FirstLine(error.Message)}。"
+        + "确认那台机器上的 ComfyUI 还在跑、地址还是当前这个——云上临时隧道的地址每次重启都可能变。";
+
+    private static string FirstLine(string message)
+    {
+        var index = message.IndexOfAny(new[] { '\r', '\n' });
+        return (index < 0 ? message : message[..index]).Trim();
     }
 
     /// <summary>

@@ -89,6 +89,26 @@ internal static class WebSettingsApi
                 return Error(500, "SETTINGS_READ_FAILED", "模型配置文件读取失败或格式无效");
             }
         });
+
+        // ComfyUI 此刻到底通不通。**只读、且要登录**：路径挂在 /api/web 下面所以走同一道守卫——
+        // 探针失败时正文里会带上后端地址，那是内部信息，没有理由让匿名请求问到。
+        app.MapGet("/api/web/settings/comfyui", async (
+            IHttpClientFactory factory,
+            IConfiguration configuration,
+            HttpContext context) =>
+        {
+            var http = factory.CreateClient("comfyui");
+            var timeout = configuration.GetValue("ComfyUI:SelfCheckTimeout", TimeSpan.FromSeconds(5));
+            var result = await ComfyUiSelfCheck.ProbeAsync(http, timeout, context.RequestAborted);
+            return Results.Json(new
+            {
+                reachable = result.Reachable,
+                baseUrl = http.BaseAddress?.ToString() ?? string.Empty,
+                version = result.Version,
+                device = result.Device,
+                detail = result.Detail
+            });
+        });
     }
 
     /// <summary>

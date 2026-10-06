@@ -129,4 +129,28 @@ app.MapPost("/callbacks/comfyui/{userId:guid}", async (HttpRequest request, Guid
     catch (JsonException) { return Results.BadRequest("回调内容无效"); }
 });
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+// 开机自检：这个地址后面到底是不是一台在跑的 ComfyUI。**只报告、不阻拦**——
+// 画布、账号、协作都跟 ComfyUI 无关，不能因为它没开就把整个服务端拦下来。
+var selfCheckTimeout = configuration.GetValue("ComfyUI:SelfCheckTimeout", TimeSpan.FromSeconds(5));
+var selfCheck = await ComfyUiSelfCheck.ProbeAsync(
+    app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("comfyui"),
+    selfCheckTimeout,
+    CancellationToken.None);
+if (selfCheck.Reachable)
+{
+    app.Logger.LogInformation(
+        "ComfyUI 自检通过：{BaseUrl}（版本 {Version}，设备 {Device}）",
+        comfyUiBaseUrl,
+        selfCheck.Version ?? "未知",
+        selfCheck.Device ?? "未知");
+}
+else
+{
+    app.Logger.LogWarning("ComfyUI 自检未通过：{BaseUrl} —— {Detail}", comfyUiBaseUrl, selfCheck.Detail);
+    if (comfyUiVideoBackend)
+        app.Logger.LogWarning(
+            "已启用 ComfyUI 视频后端，但此刻连不上它：现在提交的视频任务会失败（任务详情里可以重试）；画布与账号不受影响。");
+}
+
 app.Run();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseSettings, settingsGroups } from '../src/shell/settingsView'
+import { parseSettings, settingsGroups, parseComfyUiProbe, describeComfyUiProbe } from '../src/shell/settingsView'
 
 /**
  * 网页端设置页（第 179 轮）。
@@ -67,5 +67,27 @@ describe('设置响应', () => {
     const collaboration = groups[2].rows
     expect(collaboration.find((row) => row.label === '改完自动同步')).toMatchObject({ value: '关' })
     expect(collaboration.find((row) => row.label === '停用的内置技能')).toMatchObject({ value: 'a、b' })
+  })
+})
+
+describe('ComfyUI 探针', () => {
+  it('通了就报地址、版本与设备', () => {
+    const probe = parseComfyUiProbe({ reachable: true, baseUrl: 'http://127.0.0.1:8188/', version: '0.37.0', device: 'RTX 4080 SUPER', detail: '已连接' })
+    expect(describeComfyUiProbe(probe)).toBe('通：http://127.0.0.1:8188/（版本 0.37.0，设备 RTX 4080 SUPER）')
+  })
+
+  it('不通时把服务端那句原话带上——「404 后面是一页 HTML」与「连接被拒绝」要修的是两件事', () => {
+    const probe = parseComfyUiProbe({ reachable: false, baseUrl: 'http://x:8443/', detail: 'HTTP 404：<!DOCTYPE html>…' })
+    expect(describeComfyUiProbe(probe)).toContain('HTTP 404：<!DOCTYPE html>')
+  })
+
+  it('服务端没给 detail 时也不能只说「失败」两个字', () => {
+    const probe = parseComfyUiProbe({ reachable: false, baseUrl: '' })
+    expect(describeComfyUiProbe(probe)).toBe('不通：后端没有回应')
+  })
+
+  it('形状不对就抛，不把 undefined 画到页面上', () => {
+    expect(() => parseComfyUiProbe(null)).toThrow(/reachable/)
+    expect(() => parseComfyUiProbe({ reachable: 'yes' })).toThrow(/reachable/)
   })
 })

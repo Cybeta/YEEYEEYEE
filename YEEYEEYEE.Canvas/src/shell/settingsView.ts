@@ -109,6 +109,41 @@ export function parseSettings(raw: unknown): WebSettings {
 
 export type SettingsRow = { label: string; value: string; warn?: boolean }
 
+/** ComfyUI 连通性探针（GET /api/web/settings/comfyui）的响应。 */
+export type ComfyUiProbe = {
+  reachable: boolean
+  baseUrl: string
+  version: string
+  device: string
+  detail: string
+}
+
+export function parseComfyUiProbe(raw: unknown): ComfyUiProbe {
+  // 不走 asObject：它那句报错说的是「某个分组」，用在探针响应上等于指错地方。
+  if (typeof raw !== 'object' || raw === null || typeof (raw as Record<string, unknown>).reachable !== 'boolean')
+    throw new Error('设置接口的响应里 reachable 不对（GET /api/web/settings/comfyui）')
+  const root = raw as Record<string, unknown>
+  return {
+    reachable: root.reachable as boolean,
+    baseUrl: asText(root.baseUrl),
+    version: asText(root.version),
+    device: asText(root.device),
+    detail: asText(root.detail)
+  }
+}
+
+/**
+ * 把探针结果说成一句人话。
+ *
+ * **不通时把服务端给的那句原话带上**：它是这个页面唯一能解释「为什么不通」的东西——
+ * 「HTTP 404 后面跟着一页 HTML」和「连接被拒绝」要修的是两件不同的事，压成一句
+ * 「连接失败」等于把线索扔了。
+ */
+export function describeComfyUiProbe(probe: ComfyUiProbe): string {
+  if (!probe.reachable) return `不通：${probe.detail || '后端没有回应'}`
+  return `通：${probe.baseUrl}（版本 ${probe.version || '未知'}，设备 ${probe.device || '未知'}）`
+}
+
 /** 一格没配的值写法统一：直接写「未配置」，而不是留一个空字符串让人猜。 */
 const orUnset = (value: string): { value: string; warn?: boolean } =>
   value ? { value } : { value: '未配置', warn: true }
