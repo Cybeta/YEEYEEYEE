@@ -8,7 +8,7 @@ using YEEYEEYEE.Host;
 
 namespace YEEYEEYEE.Desktop;
 
-public enum VideoGenerationStatus { NotConfigured, Succeeded, Failed }
+public enum VideoGenerationStatus { NotConfigured, Succeeded, Failed, Cancelled }
 
 /// <summary>一次出视频请求：提示词、模型、画幅、时长与参考帧本机路径。</summary>
 public sealed class VideoGenerationRequest
@@ -80,6 +80,12 @@ public sealed class VideoGenerationRequest
     public double Megapixels { get; init; }
 
     public bool HasReferenceImages => ReferenceImages.Count > 0;
+}
+
+public sealed class VideoGenerationProgress
+{
+    public string Phase { get; init; } = string.Empty;
+    public string Message { get; init; } = string.Empty;
 }
 
 public sealed class VideoGenerationResult
@@ -286,6 +292,7 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
     public async Task<VideoGenerationResult> GenerateAsync(
         VideoGenerationRequest request, CancellationToken cancellationToken = default)
     {
+        ReportProgress("preparing", "正在准备视频工作流与素材…");
         if (string.IsNullOrWhiteSpace(request.WorkflowPayloadFile))
             return Failed("这一路要用一份选定的 ComfyUI 工作流出视频，而这次没带上工作流正文。");
 
@@ -551,6 +558,7 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         execution.Updated += OnUpdated;
         try
         {
+            ReportProgress("submitting", $"正在提交到 ComfyUI（{Label}）…");
             var started = await execution.StartAsync(
                 session, invocation, $"node-video-{invocation.InvocationId:N}", cancellationToken);
             jobId = started.JobId;
@@ -558,7 +566,7 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
                 completion.TrySetResult(started);
             else
                 // 提交成功之后才说这句：说在前面，任务还没发出去就报「可能要等十几分钟」是空话。
-                Status?.Invoke($"已提交到 ComfyUI（{Label}），它是异步任务，出好之前请别关窗口…");
+                ReportProgress("queued", $"已提交到 ComfyUI（{Label}），正在排队，出好之前请别关窗口…");
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(CompletionTimeout);
@@ -570,9 +578,18 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
             }).ConfigureAwait(false);
 
             var result = await completion.Task.ConfigureAwait(false);
+            ReportProgress("downloading", "任务已完成，正在下载并检查实际视频产物…");
             return MapResult(result, useReference, references.Count, detected, notes, wantedSummary);
         }
-        catch (OperationCanceledException) { return Failed("ComfyUI 出视频任务已取消。"); }
+        catch (OperationCanceledException)
+        {
+            return new VideoGenerationResult
+            {
+                Status = VideoGenerationStatus.Cancelled,
+                Provider = Name,
+                Error = "ComfyUI 出视频任务已取消。"
+            };
+        }
         catch (TimeoutException error) { return Failed(error.Message); }
         // 限定名字空间：System.Net 里也有一个同名的 ProtocolViolationException，这里要的是 Core 那个。
         catch (YEEYEEYEE.Core.ProtocolViolationException error) { return Failed($"提交 ComfyUI 任务失败：{error.Message}"); }
@@ -589,6 +606,15 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
     /// 把应用带走（同一个口径在导入那边就踩成了必崩）。
     /// </summary>
     public Action<string>? Status { get; set; }
+
+    /// <summary>可选的结构化阶段回调，供桌面端显示准备、提交、排队、执行和收尾。</summary>
+    public Action<VideoGenerationProgress>? Progress { get; set; }
+
+    private void ReportProgress(string phase, string message)
+    {
+        Progress?.Invoke(new VideoGenerationProgress { Phase = phase, Message = message });
+        Status?.Invoke(message);
+    }
 
     /// <summary>报出去的「模型」是那份工作流的名字：报 checkpoint 会让人以为跑的是配置里那个底模。</summary>
     private string Label => choice.Workflow.Title.Length > 0

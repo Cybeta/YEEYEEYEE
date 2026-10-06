@@ -398,6 +398,8 @@
             <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
               <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
                 <TextBlock x:Name="StatusText" Text="就绪" Classes="muted" FontSize="11" />
+                <Button x:Name="CancelVideoButton" Classes="miniButton" Content="取消视频" IsVisible="False"
+                        ToolTip.Tip="取消当前视频任务" Click="CancelVideo_OnClick" />
                 <TextBlock Text="修订 —" Classes="dim" FontSize="11" />
                 <StackPanel Orientation="Horizontal" Spacing="5">
                   <TextBlock Text="●" Foreground="{StaticResource DfPrimary}" FontSize="11" />

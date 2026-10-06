@@ -101,4 +101,4 @@ dotnet run --project YEEYEEYEE.Agent.Tests -c Release
 dotnet build YEEYEEYEE.slnx -c Release --no-restore
 ```
 
-当前 Agent 测试共 318 项，解决方案构建无错误。当前版本：`0.1.4.1`。
+当前 Agent 测试共 318 项，解决方案构建无错误。当前版本：`0.1.5`。

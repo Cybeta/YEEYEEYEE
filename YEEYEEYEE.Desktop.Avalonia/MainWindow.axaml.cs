@@ -55,6 +55,8 @@ public partial class MainWindow : Window, IAgentSessionHost
     private bool suppressSnapshot;
     private bool canEdit;
     private readonly string? startupProjectPath;
+    private CancellationTokenSource? activeVideoCancellation;
+    private bool lastVideoWasCancelled;
     private Point workTreeDragOrigin;
     private bool workTreeDragStarted;
 
@@ -2679,6 +2681,11 @@ public partial class MainWindow : Window, IAgentSessionHost
                 await RunVideoAsync(target, suggestion.Prompt, LatestImageAttachmentPath(target),
                     request.Seconds, request.VideoSource, provider, request.AspectRatio, request.Megapixels);
                 if (currentCanvas != canvas) return;
+                if (lastVideoWasCancelled)
+                {
+                    failures.Add($"{target.Title}：用户取消了视频任务，已停止后续镜头");
+                    break;
+                }
 
                 if (target.Attachments.Any(attachment =>
                         attachment.Kind == AttachmentKind.Video && AssetStore.Exists(attachment.Reference)))
@@ -3139,6 +3146,10 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         if (currentCanvas is null) return;
 
+        using var cancellation = new CancellationTokenSource();
+        activeVideoCancellation = cancellation;
+        lastVideoWasCancelled = false;
+        CancelVideoButton.IsVisible = true;
         RecordSnapshot();
         node.ExecutionStatus = NodeExecutionStatus.Generating;
         CanvasSurfaceControl.Refresh();
@@ -3194,12 +3205,16 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 走 OnUiThread：这条回调的口径是「任何线程都可能来」，而它今天恰好发生在自己的 await 之前
         // 只是运气，不该被依赖（同一个口径在导入那边就踩成了必崩）。
         if (provider is ComfyUiVideoProvider comfyVideo)
+        {
             comfyVideo.Status = message => OnUiThread(() => StatusText.Text = message);
+            comfyVideo.Progress = progress => OnUiThread(() =>
+                StatusText.Text = $"视频 · {progress.Phase}：{progress.Message}");
+        }
 
         VideoGenerationResult result;
         try
         {
-            result = await provider.GenerateAsync(request);
+            result = await provider.GenerateAsync(request, cancellation.Token);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
         {
@@ -3209,6 +3224,14 @@ public partial class MainWindow : Window, IAgentSessionHost
                 Provider = provider.Name,
                 Error = error.Message
             };
+        }
+        finally
+        {
+            if (ReferenceEquals(activeVideoCancellation, cancellation))
+            {
+                activeVideoCancellation = null;
+                CancelVideoButton.IsVisible = false;
+            }
         }
 
         // 等结果的这几分钟里用户可能已经换了画布：那时不该再往旧画布上挂东西。
@@ -3220,9 +3243,12 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         if (result.Status != VideoGenerationStatus.Succeeded || result.FilePath.Length == 0)
         {
+            lastVideoWasCancelled = result.Status == VideoGenerationStatus.Cancelled;
             node.ExecutionStatus = NodeExecutionStatus.Failed;
             CanvasSurfaceControl.Refresh();
-            StatusText.Text = referenceNote + $"出视频没成（{result.Provider}）：{result.Error}";
+            StatusText.Text = lastVideoWasCancelled
+                ? "视频任务已取消。"
+                : referenceNote + $"出视频没成（{result.Provider}）：{result.Error}";
             return;
         }
 
@@ -3252,6 +3278,12 @@ public partial class MainWindow : Window, IAgentSessionHost
             await ShowVideoResultNoteAsync(node.Title, result.Note);
 
         StatusText.Text = referenceNote + $"已出视频并挂到「{node.Title}」：{Path.GetFileName(result.FilePath)} —— 记得点「保存修订」";
+    }
+
+    private void CancelVideo_OnClick(object? sender, RoutedEventArgs e)
+    {
+        activeVideoCancellation?.Cancel();
+        StatusText.Text = "正在取消视频任务…";
     }
 
     /// <summary>
