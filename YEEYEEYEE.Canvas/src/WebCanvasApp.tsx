@@ -6,6 +6,7 @@ import { CANVAS_VERSION } from './Protocol/VersionedMessages'
 import { SessionPanel } from './SessionPanel'
 import { canEdit, gateOf, parseAuthState, roleLabel, type AuthState } from './SessionView'
 import { AgentPanel, type WebJob, type WebSkill } from './shell/AgentPanel'
+import { DEFAULT_VIDEO_PARAMS, buildInvocationBody, type VideoParams } from './shell/videoParams'
 import { ChapterTree } from './shell/ChapterTree'
 import { InspectorPanel } from './shell/InspectorPanel'
 import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layoutPlan'
@@ -65,6 +66,8 @@ export function WebCanvasApp() {
   const [skills, setSkills] = useState<WebSkill[]>([])
   const [jobs, setJobs] = useState<WebJob[]>([])
   const [prompt, setPrompt] = useState('')
+  /** 文生视频的画面参数：秒数、边长、种子。构造请求体见 buildInvocationBody。 */
+  const [videoParams, setVideoParams] = useState<VideoParams>(DEFAULT_VIDEO_PARAMS)
   const [taskNotice, setTaskNotice] = useState('技能与任务尚未加载。')
   /**
    * 顶部那条「任务 X：状态」写的是**发起那一刻**的快照。它要是不跟着轮询走，用户在取消之后
@@ -950,11 +953,13 @@ export function WebCanvasApp() {
                 skills={skills}
                 jobs={jobs}
                 prompt={prompt}
+                videoParams={videoParams}
                 busy={taskBusy}
                 canInvoke={!!auth.user}
                 notice={taskNotice}
                 onPrompt={setPrompt}
-                onInvoke={(skillId) => void taskAction(`/api/web/skills/${encodeURIComponent(skillId)}/invoke`, { prompt, idempotencyKey: crypto.randomUUID() })}
+                onVideoParams={setVideoParams}
+                onInvoke={(skillId) => void taskAction(`/api/web/skills/${encodeURIComponent(skillId)}/invoke`, buildInvocationBody(skillId, prompt, videoParams, crypto.randomUUID()))}
                 onCancel={(jobId) => void taskAction(`/api/web/jobs/${jobId}/cancel`)}
                 onRetry={(jobId) => void taskAction(`/api/web/jobs/${jobId}/retry`)}
               />

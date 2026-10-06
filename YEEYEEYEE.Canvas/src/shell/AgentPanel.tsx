@@ -8,6 +8,7 @@
  */
 
 import { useState } from 'react'
+import { VIDEO_FRAMES_PER_SECOND, VIDEO_SIZE_OPTIONS, videoEffectiveSeconds, videoFramesForSeconds, type VideoParams } from './videoParams'
 
 export type WebSkill = { id: string; name: string; capability: string }
 
@@ -28,10 +29,12 @@ export type AgentPanelProps = {
   skills: WebSkill[]
   jobs: WebJob[]
   prompt: string
+  videoParams: VideoParams
   busy: boolean
   canInvoke: boolean
   notice: string
   onPrompt: (value: string) => void
+  onVideoParams: (next: VideoParams) => void
   onInvoke: (skillId: string) => void
   onCancel: (jobId: string) => void
   onRetry: (jobId: string) => void
@@ -40,7 +43,7 @@ export type AgentPanelProps = {
 const RUNNING_STATES = ['Queued', 'Running']
 
 export function AgentPanel(props: AgentPanelProps) {
-  const { skills, jobs, prompt, busy, canInvoke, notice, onPrompt, onInvoke, onCancel, onRetry } = props
+  const { skills, jobs, prompt, videoParams, busy, canInvoke, notice, onPrompt, onVideoParams, onInvoke, onCancel, onRetry } = props
   const [mediaErrors, setMediaErrors] = useState<Record<string, boolean>>({})
   return (
     <div className="df-section" style={{ gap: 16 }}>
@@ -68,6 +71,48 @@ export function AgentPanel(props: AgentPanelProps) {
                 onChange={(event) => onPrompt(event.target.value)}
               />
             </div>
+            {skill.id === 'web.text-to-video' && (
+              <div className="df-section" style={{ gap: 6 }}>
+                <span className="df-dim" style={{ fontSize: 10 }}>画面参数</span>
+                <div className="df-row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  <label className="df-dim" style={{ fontSize: 10 }}>
+                    时长（秒）
+                    <input
+                      className="df-input"
+                      style={{ width: 56 }}
+                      inputMode="numeric"
+                      value={videoParams.seconds}
+                      onChange={(event) => onVideoParams({ ...videoParams, seconds: event.target.value })}
+                    />
+                  </label>
+                  <label className="df-dim" style={{ fontSize: 10 }}>
+                    边长
+                    <select
+                      className="df-input"
+                      value={videoParams.size}
+                      onChange={(event) => onVideoParams({ ...videoParams, size: event.target.value })}
+                    >
+                      {VIDEO_SIZE_OPTIONS.map((option) => (
+                        <option key={option} value={option}>{option}×{option}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="df-dim" style={{ fontSize: 10 }}>
+                    种子（留空随机）
+                    <input
+                      className="df-input"
+                      style={{ width: 96 }}
+                      inputMode="numeric"
+                      value={videoParams.seed}
+                      onChange={(event) => onVideoParams({ ...videoParams, seed: event.target.value })}
+                    />
+                  </label>
+                </div>
+                <span className="df-dim" style={{ fontSize: 10 }}>
+                  这次 {videoFramesForSeconds(videoParams.seconds)} 帧 ≈ {videoEffectiveSeconds(videoParams.seconds).toFixed(2)} 秒（{VIDEO_FRAMES_PER_SECOND}fps，帧数按 1+8k 向上取整）；边长越大越慢、越吃显存。
+                </span>
+              </div>
+            )}
             <button
               type="button"
               className="df-mini-button"
