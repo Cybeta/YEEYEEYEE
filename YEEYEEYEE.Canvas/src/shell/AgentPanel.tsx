@@ -7,13 +7,15 @@
  * 摆一堆点了会 404 的按钮不算功能对等。
  */
 
+import { useState } from 'react'
+
 export type WebSkill = { id: string; name: string; capability: string }
 
 export type WebJob = {
   jobId: string
   state: string
   progressPercent: number
-  errorCode?: string
+  errorCode?: string | null
   errorMessage?: string
   attempt: number
   retryOfJobId?: string
@@ -39,6 +41,7 @@ const RUNNING_STATES = ['Queued', 'Running']
 
 export function AgentPanel(props: AgentPanelProps) {
   const { skills, jobs, prompt, busy, canInvoke, notice, onPrompt, onInvoke, onCancel, onRetry } = props
+  const [mediaErrors, setMediaErrors] = useState<Record<string, boolean>>({})
   return (
     <div className="df-section" style={{ gap: 16 }}>
       <div className="df-section">
@@ -93,9 +96,35 @@ export function AgentPanel(props: AgentPanelProps) {
             </div>
             <span className="df-dim" style={{ fontSize: 10 }}>第 {job.attempt} 次{retryNote(job)}</span>
             {job.errorCode && <span className="df-notice is-error">{job.errorCode}：{job.errorMessage || '任务失败'}</span>}
-            {job.outputs?.map((output, index) => (
-              <span key={index} className="df-dim df-mono" style={{ fontSize: 10, wordBreak: 'break-all' }}>{output.role}：{output.ref}</span>
-            ))}
+            {job.outputs?.map((output, index) => {
+              const outputUrl = `/api/web/jobs/${job.jobId}/outputs/${index}`
+              if (output.role === 'video') {
+                return (
+                  <div key={index} className="df-section" style={{ gap: 6 }}>
+                    <span className="df-dim" style={{ fontSize: 10 }}>视频产物</span>
+                    {mediaErrors[outputUrl] ? (
+                      <span className="df-notice is-error">视频加载失败，请重试或下载文件检查。</span>
+                    ) : (
+                      <video
+                        controls
+                        preload="metadata"
+                        style={{ width: '100%', maxHeight: 220, background: '#111' }}
+                        src={outputUrl}
+                        onError={() => setMediaErrors((current) => ({ ...current, [outputUrl]: true }))}
+                      />
+                    )}
+                    <a className="df-mini-button" href={outputUrl} download>
+                      下载视频
+                    </a>
+                  </div>
+                )
+              }
+              return (
+                <span key={index} className="df-dim df-mono" style={{ fontSize: 10, wordBreak: 'break-all' }}>
+                  {output.role}：{output.ref}
+                </span>
+              )
+            })}
             <div className="df-row" style={{ gap: 6 }}>
               <button
                 type="button"

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using YEEYEEYEE.Core;
+using YEEYEEYEE.Desktop;
 using YEEYEEYEE.Host;
 using YEEYEEYEE.Web;
 using YEEYEEYEE.Web.Auth;
@@ -12,7 +13,14 @@ var databasePath = LegacyConfig.Text(configuration, "JobDatabasePath") ?? Path.C
 var comfyUiBaseUrl = configuration["ComfyUI:BaseUrl"] ?? throw new InvalidOperationException("ComfyUI:BaseUrl 未配置");
 var comfyUiClientId = configuration["ComfyUI:ClientId"];
 var comfyUiCheckpoint = configuration["ComfyUI:Checkpoint"];
+var comfyUiLtxCheckpoint = configuration["ComfyUI:LtxCheckpoint"];
+var comfyUiVideoBackend = string.Equals(configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase);
+if (comfyUiVideoBackend && string.IsNullOrWhiteSpace(comfyUiLtxCheckpoint))
+    throw new InvalidOperationException("启用 ComfyUI 视频后端时必须配置 ComfyUI:LtxCheckpoint");
 var assetDirectory = LegacyConfig.Text(configuration, "AssetDirectory") ?? Path.Combine(AppContext.BaseDirectory, "assets");
+assetDirectory = Path.GetFullPath(assetDirectory);
+Directory.CreateDirectory(assetDirectory);
+Environment.SetEnvironmentVariable("ASSET_DIR", assetDirectory);
 // 账号库与任务库分开存：任务库会随作业增长，账号库只有几十行；混在一起会让备份账号时顺带拖走一堆作业记录。
 var userDatabasePath = LegacyConfig.Text(configuration, "UserDatabasePath") ?? Path.Combine(AppContext.BaseDirectory, "yeeeyee.users.db");
 // 前端产物默认在源码树里，容器部署时它不在那个相对位置，所以允许用配置指定。
@@ -24,12 +32,31 @@ builder.Services.AddHttpClient("comfyui", client =>
     client.BaseAddress = new Uri(comfyUiBaseUrl, UriKind.Absolute);
     client.Timeout = configuration.GetValue("ComfyUI:HttpTimeout", TimeSpan.FromSeconds(30));
 });
-builder.Services.AddSingleton<IInvocationExecutor>(services =>
+builder.Services.AddHttpClient("video", client =>
+{
+    client.Timeout = configuration.GetValue("VideoHttpTimeout", TimeSpan.FromMinutes(5));
+});
+builder.Services.AddSingleton<ComfyUiExecutor>(services =>
 {
     var http = services.GetRequiredService<IHttpClientFactory>().CreateClient("comfyui");
-    var factory = new ComfyUiWorkflowFactory(comfyUiCheckpoint);
+    var factory = new ComfyUiWorkflowFactory(comfyUiCheckpoint, comfyUiLtxCheckpoint);
     return new ComfyUiExecutor(http, factory.Create, comfyUiClientId);
 });
+builder.Services.AddSingleton<IVideoProvider>(services =>
+{
+    var config = new AiProviderConfig
+    {
+        VideoModel = LegacyConfig.Text(configuration, "VideoModel") ?? string.Empty,
+        VideoEndpoint = LegacyConfig.Text(configuration, "VideoEndpoint") ?? string.Empty,
+        VideoApiKey = LegacyConfig.Text(configuration, "VideoApiKey") ?? string.Empty
+    };
+    return new HttpVideoProvider(config, services.GetRequiredService<IHttpClientFactory>().CreateClient("video"));
+});
+builder.Services.AddSingleton<IInvocationExecutor>(services => new WebInvocationExecutor(
+    services.GetRequiredService<ComfyUiExecutor>(),
+    services.GetRequiredService<IVideoProvider>(),
+    services.GetRequiredService<ComfyUiExecutor>(),
+    comfyUiVideoBackend));
 var comfyUiWebSocketBaseUrl = configuration["ComfyUI:WebSocketBaseUrl"] ?? comfyUiBaseUrl;
 builder.Services.AddSingleton<ComfyUiProvider>(services => new ComfyUiProvider(
     services.GetRequiredService<IHttpClientFactory>().CreateClient("comfyui"), assetDirectory,

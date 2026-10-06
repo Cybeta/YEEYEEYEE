@@ -5,6 +5,8 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using YEEYEEYEE.Core;
+using YEEYEEYEE.Host;
 
 var root = Path.Combine(Path.GetTempPath(), "yeeeyee-web-tests-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
@@ -24,7 +26,7 @@ var dll = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "YEEYEEYEE.Web
 if (!File.Exists(dll)) throw new Exception("Web assembly missing");
 Process? server = null;
 var port = 0;
-async Task Start(string? token = "secret-value", string claims = "canvas.edit,skill.invoke,job.cancel", string approval = "preapproved-local-image", bool standalone = true, string? projectCanvas = null, string? userDatabase = null, string? setupToken = null, int? leaseSeconds = null, int? presenceSeconds = null)
+async Task Start(string? token = "secret-value", string claims = "canvas.edit,skill.invoke,job.cancel", string approval = "preapproved-local-image", bool standalone = true, string? projectCanvas = null, string? userDatabase = null, string? setupToken = null, int? leaseSeconds = null, int? presenceSeconds = null, string? videoApproval = null, string? videoModel = null, string? videoEndpoint = null, Uri? comfyUiBaseUrl = null, bool comfyUiVideoBackend = false, TimeSpan? comfyUiPollingInterval = null)
 {
     SetClaims(claims);
     using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -54,10 +56,23 @@ async Task Start(string? token = "secret-value", string claims = "canvas.edit,sk
     // 在线的兜底 TTL 也可配：用例要验「断开之后不再算在线」，就得把它缩到几秒，否则要干等两分钟。
     if (presenceSeconds is null) start.Environment.Remove("YEEYEEYEE__PresenceLifetimeSeconds");
     else start.Environment["YEEYEEYEE__PresenceLifetimeSeconds"] = presenceSeconds.Value.ToString();
-    start.Environment["ComfyUI__BaseUrl"] = "http://127.0.0.1:8188";
+    start.Environment["ComfyUI__BaseUrl"] = (comfyUiBaseUrl ?? new Uri("http://127.0.0.1:8188")).ToString();
     start.Environment["ComfyUI__Checkpoint"] = "offline-model.safetensors";
+    start.Environment["ComfyUI__LtxCheckpoint"] = "ltx-test.safetensors";
+    if (comfyUiPollingInterval is null) start.Environment.Remove("ComfyUI__PollingInterval");
+    else start.Environment["ComfyUI__PollingInterval"] = comfyUiPollingInterval.Value.ToString();
+    if (comfyUiVideoBackend) start.Environment["WebVideoBackend"] = "ComfyUI";
+    else start.Environment.Remove("WebVideoBackend");
     // appsettings.json reloads in the running server, allowing real HTTP revocation tests.
     start.Environment["YEEYEEYEE__WebSkillApprovalMode"] = approval;
+    if (videoApproval is null) start.Environment.Remove("YEEYEEYEE__WebVideoApprovalMode");
+    else start.Environment["YEEYEEYEE__WebVideoApprovalMode"] = videoApproval;
+    if (videoModel is null) start.Environment.Remove("YEEYEEYEE__VideoModel");
+    else start.Environment["YEEYEEYEE__VideoModel"] = videoModel;
+    if (videoEndpoint is null) start.Environment.Remove("YEEYEEYEE__VideoEndpoint");
+    else start.Environment["YEEYEEYEE__VideoEndpoint"] = videoEndpoint;
+    start.Environment["YEEYEEYEE__AssetDirectory"] = Path.Combine(root, "assets");
+    start.Environment["ASSET_DIR"] = Path.Combine(root, "assets");
     server = Process.Start(start)!;
     using var probe = new HttpClient();
     for (var i = 0; i < 100; i++)
@@ -96,6 +111,30 @@ async Task<JsonElement> Check(HttpClient client, HttpMethod method, string path,
     return result;
 }
 void Assert(bool condition, string message) { if (!condition) throw new Exception(message); }
+
+// LTX 2.3 workflow contract: keep the known-good audio/video graph protected from regressions.
+var ltxInputs = new Dictionary<string, JsonElement>
+{
+    ["prompt"] = JsonSerializer.SerializeToElement("a lantern sitting on a wooden table"),
+    ["videoFrames"] = JsonSerializer.SerializeToElement(17),
+    ["width"] = JsonSerializer.SerializeToElement(256),
+    ["height"] = JsonSerializer.SerializeToElement(256),
+    ["seed"] = JsonSerializer.SerializeToElement(123L)
+};
+var ltxWorkflow = new ComfyUiWorkflowFactory(ltxCheckpoint: "ltx-test.safetensors").Create(new Invocation
+{
+    Capability = Capability.TextToVideo,
+    Inputs = ltxInputs
+});
+var ltxNodes = ltxWorkflow;
+Assert(ltxNodes.GetProperty("2").GetProperty("class_type").GetString() == "easy ltxMultiTrackEncode", "LTX encode node");
+Assert(ltxNodes.GetProperty("2").GetProperty("inputs").GetProperty("half_latent_size").GetBoolean() == false, "LTX full latent size");
+Assert(ltxNodes.GetProperty("4").GetProperty("inputs").GetProperty("video_latent")[0].GetString() == "2", "LTX video latent wiring");
+Assert(ltxNodes.GetProperty("4").GetProperty("inputs").GetProperty("audio_latent")[0].GetString() == "2", "LTX audio latent wiring");
+Assert(ltxNodes.GetProperty("6").GetProperty("class_type").GetString() == "LTXVAudioVAEDecode", "LTX audio decoder");
+Assert(ltxNodes.GetProperty("7").GetProperty("class_type").GetString() == "VHS_VideoCombine" &&
+    ltxNodes.GetProperty("7").GetProperty("inputs").GetProperty("format").GetString() == "video/h264-mp4", "LTX MP4 muxer");
+
 // 首次建号要带初始化令牌：没配部署令牌时，那串是服务**首次启动时自己生成**的，
 // 就写在账号库旁边（见 BootstrapToken）；真机上是人从 `docker compose logs` 里抄下来。
 // 这个助手把它读出来带上——不然所有「先在空库上建个管理员」的用例都会撞在 403 上。
@@ -158,7 +197,7 @@ try
     using var anonymous = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
     using var wrong = new HttpClient { BaseAddress = anonymous.BaseAddress };
     wrong.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "wrong");
-    using var authorized = new HttpClient { BaseAddress = anonymous.BaseAddress };
+    var authorized = new HttpClient { BaseAddress = anonymous.BaseAddress };
     authorized.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
     var before = File.ReadAllText(scenePath);
     await Check(anonymous, HttpMethod.Get, "/api/web/skills", 401);
@@ -188,18 +227,115 @@ try
         readJob = await Check(authorized, HttpMethod.Get, $"/api/web/jobs/{jobId}", 200);
     }
     Assert(readJob.GetProperty("state").GetString() == "Failed" && readJob.GetProperty("errorCode").GetString() == "JOB_EXECUTION_FAILED", "Real failure not surfaced");
-    await Check(authorized, HttpMethod.Post, $"/api/web/jobs/{jobId}/cancel", 409);
-    var retried = await Check(authorized, HttpMethod.Post, $"/api/web/jobs/{jobId}/retry", 200);
+
+    // 本地 ComfyUI HTTP Mock：不依赖 GPU，覆盖视频后端的真实提交、轮询、下载和控制面。
+    await using var mock = new MockComfyUiServer();
+    await mock.StartAsync();
+    Stop();
+    await Start(videoApproval: "preapproved-local-video", comfyUiBaseUrl: mock.BaseAddress, comfyUiVideoBackend: true, comfyUiPollingInterval: TimeSpan.FromMilliseconds(50));
+    using var videoClient = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+    videoClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
+    var videoCatalog = await Check(videoClient, HttpMethod.Get, "/api/web/skills", 200);
+    Assert(videoCatalog.GetProperty("skills").EnumerateArray().Any(item => item.GetProperty("id").GetString() == "web.text-to-video" && item.GetProperty("capability").GetString() == "TextToVideo"), "Video skill catalog");
+    await Check(videoClient, HttpMethod.Post, "/api/web/skills/web.text-to-video/invoke", 400, "{\"prompt\":\"x\",\"idempotencyKey\":\"video-invalid\",\"unknown\":true}");
+    await Check(videoClient, HttpMethod.Post, "/api/web/skills/web.text-to-video/invoke", 400, "{\"prompt\":\"x\",\"seconds\":0,\"idempotencyKey\":\"video-invalid-seconds\"}");
+    await Check(videoClient, HttpMethod.Post, "/api/web/skills/comfyui.text-to-image/invoke", 400, "{\"prompt\":\"x\",\"model\":\"wrong\",\"idempotencyKey\":\"image-video-boundary\"}");
+
+    var videoInvoke = await Check(videoClient, HttpMethod.Post, "/api/web/skills/web.text-to-video/invoke", 200, "{\"prompt\":\"mock success video\",\"seconds\":2,\"idempotencyKey\":\"video-run-1\"}");
+    var videoJobId = videoInvoke.GetProperty("jobId").GetGuid();
+    Assert(videoInvoke.GetProperty("capability").GetString() == "TextToVideo" && videoInvoke.GetProperty("tool").GetString() == "web.text-to-video", "Video job capability");
+    Assert((await Check(videoClient, HttpMethod.Post, "/api/web/skills/web.text-to-video/invoke", 200, "{\"prompt\":\"mock success video\",\"seconds\":2,\"idempotencyKey\":\"video-run-1\"}")).GetProperty("jobId").GetGuid() == videoJobId, "Video idempotency");
+    JsonElement videoJob = videoInvoke;
+    for (var i = 0; i < 60 && videoJob.GetProperty("state").GetString() != "Succeeded"; i++)
+    {
+        await Task.Delay(50);
+        videoJob = await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{videoJobId}", 200);
+    }
+    Assert(videoJob.GetProperty("state").GetString() == "Succeeded", "ComfyUI mock success surfaced");
+    Assert(videoJob.GetProperty("outputs").GetArrayLength() == 1 && videoJob.GetProperty("outputs")[0].GetProperty("ref").GetString()!.StartsWith("asset://", StringComparison.Ordinal), "Video asset reference");
+    using (var output = await videoClient.GetAsync($"/api/web/jobs/{videoJobId}/outputs/0"))
+    {
+        Assert(output.StatusCode == HttpStatusCode.OK && output.Content.Headers.ContentType?.MediaType == "video/mp4", "Video output download");
+        Assert((await output.Content.ReadAsByteArrayAsync()).Length > 100, "Video output is binary MP4");
+    }
+    using (var range = new HttpRequestMessage(HttpMethod.Get, $"/api/web/jobs/{videoJobId}/outputs/0"))
+    {
+        range.Headers.Range = new RangeHeaderValue(0, 15);
+        using var output = await videoClient.SendAsync(range);
+        Assert(output.StatusCode == HttpStatusCode.PartialContent && output.Content.Headers.ContentRange?.From == 0 && output.Content.Headers.ContentRange?.To == 15, "Video output range");
+        Assert((await output.Content.ReadAsByteArrayAsync()).Length == 16, "Video range length");
+    }
+
+    var failed = await Check(videoClient, HttpMethod.Post, "/api/web/skills/web.text-to-video/invoke", 200, "{\"prompt\":\"mock-fail video\",\"seconds\":2,\"idempotencyKey\":\"video-fail-1\"}");
+    var failedId = failed.GetProperty("jobId").GetGuid();
+    JsonElement failedJob = failed;
+    for (var i = 0; i < 60 && failedJob.GetProperty("state").GetString() != "Failed"; i++)
+    {
+        await Task.Delay(50);
+        failedJob = await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{failedId}", 200);
+    }
+    Assert(failedJob.GetProperty("state").GetString() == "Failed" && failedJob.GetProperty("errorCode").GetString() == "COMFYUI_TASK_FAILED" && failedJob.GetProperty("outputs").GetArrayLength() == 0, "Video failure surfaced: " + failedJob);
+    await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{failedId}/outputs/0", 404);
+
+    var retrySource = await Check(videoClient, HttpMethod.Post, "/api/web/skills/web.text-to-video/invoke", 200, "{\"prompt\":\"mock-retry video\",\"seconds\":2,\"idempotencyKey\":\"video-retry-1\"}");
+    var retrySourceId = retrySource.GetProperty("jobId").GetGuid();
+    for (var i = 0; i < 60 && (await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{retrySourceId}", 200)).GetProperty("state").GetString() != "Failed"; i++) await Task.Delay(50);
+    var retriedVideo = await Check(videoClient, HttpMethod.Post, $"/api/web/jobs/{retrySourceId}/retry", 200);
+    var retriedVideoId = retriedVideo.GetProperty("jobId").GetGuid();
+    JsonElement retriedVideoJob = retriedVideo;
+    for (var i = 0; i < 60 && retriedVideoJob.GetProperty("state").GetString() != "Succeeded"; i++)
+    {
+        await Task.Delay(50);
+        retriedVideoJob = await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{retriedVideoId}", 200);
+    }
+    Assert(retriedVideo.GetProperty("attempt").GetInt32() == 2 && retriedVideoJob.GetProperty("state").GetString() == "Succeeded", "Video retry succeeds");
+
+    var cancelInvoke = await Check(videoClient, HttpMethod.Post, "/api/web/skills/web.text-to-video/invoke", 200, "{\"prompt\":\"mock-cancel video\",\"seconds\":2,\"idempotencyKey\":\"video-cancel-1\"}");
+    var cancelId = cancelInvoke.GetProperty("jobId").GetGuid();
+    JsonElement cancelReady = cancelInvoke;
+    for (var i = 0; i < 60 && cancelReady.GetProperty("state").GetString() is "Queued" or "Running"; i++)
+    {
+        await Task.Delay(50);
+        cancelReady = await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{cancelId}", 200);
+    }
+    await Check(videoClient, HttpMethod.Post, $"/api/web/jobs/{cancelId}/cancel", 200);
+    JsonElement cancelledJob = cancelInvoke;
+    for (var i = 0; i < 60 && cancelledJob.GetProperty("state").GetString() != "Cancelled"; i++)
+    {
+        await Task.Delay(50);
+        cancelledJob = await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{cancelId}", 200);
+    }
+    Assert(cancelledJob.GetProperty("state").GetString() == "Cancelled" && mock.InterruptCount > 0, "Video cancellation reaches ComfyUI: " + cancelledJob + ", interrupts=" + mock.InterruptCount);
+    await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{cancelId}/outputs/0", 404);
+
+    Assert((await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{videoJobId}", 200)).GetProperty("capability").GetString() == "TextToVideo", "Video owner can read video job");
+    Stop();
+    await Start(token: "video-other-user", videoApproval: "preapproved-local-video", comfyUiBaseUrl: mock.BaseAddress, comfyUiVideoBackend: true, comfyUiPollingInterval: TimeSpan.FromMilliseconds(50));
+    using var otherVideoUser = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+    otherVideoUser.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "video-other-user");
+    await Check(otherVideoUser, HttpMethod.Get, $"/api/web/jobs/{videoJobId}", 404);
+    await Check(otherVideoUser, HttpMethod.Post, $"/api/web/jobs/{videoJobId}/retry", 404);
+    Stop();
+    await Start(videoApproval: "preapproved-local-video", comfyUiBaseUrl: mock.BaseAddress, comfyUiVideoBackend: true, comfyUiPollingInterval: TimeSpan.FromMilliseconds(50));
+    using var authorizedAfterVideo = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+    authorizedAfterVideo.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
+    Assert((await Check(authorizedAfterVideo, HttpMethod.Get, $"/api/web/jobs/{videoJobId}", 200)).GetProperty("capability").GetString() == "TextToVideo", "Video owner can read video job");
+    authorized = authorizedAfterVideo;
+
+    var retried = await Check(authorizedAfterVideo, HttpMethod.Post, $"/api/web/jobs/{jobId}/retry", 200);
     Assert(retried.GetProperty("retryOfJobId").GetGuid() == jobId && retried.GetProperty("attempt").GetInt32() == 2, "Retry ancestry");
     var retryJobId = retried.GetProperty("jobId").GetGuid();
-    for (var i = 0; i < 30 && (await Check(authorized, HttpMethod.Get, $"/api/web/jobs/{retryJobId}", 200)).GetProperty("state").GetString() != "Failed"; i++) await Task.Delay(100);
-    var third = await Check(authorized, HttpMethod.Post, $"/api/web/jobs/{jobId}/retry", 200);
+    for (var i = 0; i < 30 && (await Check(authorizedAfterVideo, HttpMethod.Get, $"/api/web/jobs/{retryJobId}", 200)).GetProperty("state").GetString() != "Failed"; i++) await Task.Delay(100);
+    var third = await Check(authorizedAfterVideo, HttpMethod.Post, $"/api/web/jobs/{jobId}/retry", 200);
     Assert(third.GetProperty("attempt").GetInt32() == 3, "Chain attempt numbering");
     var thirdId = third.GetProperty("jobId").GetGuid();
-    for (var i = 0; i < 30 && (await Check(authorized, HttpMethod.Get, $"/api/web/jobs/{thirdId}", 200)).GetProperty("state").GetString() != "Failed"; i++) await Task.Delay(100);
-    await Check(authorized, HttpMethod.Post, $"/api/web/jobs/{jobId}/retry", 409);
-    await Check(anonymous, HttpMethod.Put, $"/api/web/records/{id}", 401, "{\"baseRevision\":4,\"title\":\"bad\",\"content\":\"bad\"}");
-    await Check(wrong, HttpMethod.Get, "/api/web/scene", 401);
+    for (var i = 0; i < 30 && (await Check(authorizedAfterVideo, HttpMethod.Get, $"/api/web/jobs/{thirdId}", 200)).GetProperty("state").GetString() != "Failed"; i++) await Task.Delay(100);
+    await Check(authorizedAfterVideo, HttpMethod.Post, $"/api/web/jobs/{jobId}/retry", 409);
+    using var anonymousAfterVideo = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+    using var wrongAfterVideo = new HttpClient { BaseAddress = anonymousAfterVideo.BaseAddress };
+    wrongAfterVideo.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "wrong");
+    await Check(anonymousAfterVideo, HttpMethod.Put, $"/api/web/records/{id}", 401, "{\"baseRevision\":4,\"title\":\"bad\",\"content\":\"bad\"}");
+    await Check(wrongAfterVideo, HttpMethod.Get, "/api/web/scene", 401);
     Assert(before == File.ReadAllText(scenePath), "Denied requests changed scene");
     var initial = await Check(authorized, HttpMethod.Get, "/api/web/scene", 200);
     Assert(initial.GetProperty("revision").GetInt32() == 4, "Initial revision");

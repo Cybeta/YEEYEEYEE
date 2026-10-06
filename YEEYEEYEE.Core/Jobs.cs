@@ -145,7 +145,7 @@ public sealed class Job
                     break;
                 case ExternalTaskState.Cancelled:
                     if (State == JobState.Queued) State = JobState.Cancelled;
-                    else if (State == JobState.Running) { State = JobState.Cancelling; State = JobState.Cancelled; }
+                    else if (State is JobState.Running or JobState.Cancelling) { State = JobState.Cancelled; }
                     break;
                 default:
                     throw new InvalidOperationException("未知外部任务状态");

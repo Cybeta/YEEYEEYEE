@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { request } from './api'
 import {
   canManageUsers, describeUser, gateOf, roleLabel, sessionNotice, validateLogin, validateSetup,
   type AuthState, type SessionUser, type UserRole
@@ -13,19 +14,12 @@ import './session.css'
 
 type Notice = { kind: 'info' | 'error' | 'success'; message: string }
 
-async function send<T>(path: string, method: 'GET' | 'POST' | 'PATCH' | 'DELETE', body?: object): Promise<T> {
-  const response = await fetch(path, {
+async function send<T>(path: string, method: 'GET' | 'POST' | 'PATCH' | 'DELETE', body?: object, headers?: HeadersInit): Promise<T> {
+  return request<T>(path, {
     method,
-    credentials: 'same-origin',
-    ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
-    cache: 'no-store'
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    headers
   })
-  const data: unknown = await response.json().catch(() => null)
-  if (!response.ok) {
-    const failure = data && typeof data === 'object' ? data as { code?: unknown; message?: unknown } : {}
-    throw new Error(`${typeof failure.code === 'string' ? `[${failure.code}] ` : ''}${typeof failure.message === 'string' ? failure.message : `HTTP ${response.status}`}`)
-  }
-  return data as T
 }
 
 export function SessionPanel({ state, onChanged }: { state: AuthState; onChanged: () => void }) {
@@ -62,7 +56,7 @@ export function SessionPanel({ state, onChanged }: { state: AuthState; onChanged
         const invalid = validateSetup(input, state)
         if (invalid) { setNotice({ kind: 'error', message: invalid }); return }
         void run(async () => {
-          await send('/api/auth/setup', 'POST', { username: username.trim(), password, displayName: displayName.trim() })
+          await send('/api/auth/setup', 'POST', { username: username.trim(), password, displayName: displayName.trim() }, { 'X-Setup-Token': setupToken })
           clearSecrets()
           onChanged()
           return { kind: 'success', message: '管理员已建立，正在进入画布…' }

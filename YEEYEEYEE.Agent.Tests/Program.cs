@@ -2142,11 +2142,11 @@ static void UsageReportFormatsWithoutLying()
 /// </summary>
 static void RedactedKeyDisplayIsNotAKey()
 {
-    const string stored = "sk-4f2c8a1d9e7b3c5f0a2e6d8b1c3f5a7e";
+    const string stored = "test-secret-value-4f2c5a7e";
     var shown = SecretProtector.Describe(stored);
-    Expect(shown == "sk-4…5a7e", $"脱敏显示应露出首尾各 4 位，实际：{shown}");
+    Expect(shown == "test…5a7e", $"脱敏显示应露出首尾各 4 位，实际：{shown}");
 
-    // 框里停着脱敏值时保存 → 盘上那份原样保留。照抄会把 "sk-4…5a7e" 当密钥写进配置文件，下一次必然 401。
+    // 框里停着脱敏值时保存 → 盘上那份原样保留。照抄会把 "test…5a7e" 当密钥写进配置文件，下一次必然 401。
     Expect(SecretProtector.ResolveTypedKey(shown, stored, storedUnreadable: false) == stored, "脱敏显示被当成了新密钥");
     // 真敲了新值才是换密钥。
     Expect(SecretProtector.ResolveTypedKey("sk-brand-new-key-0001", stored, false) == "sk-brand-new-key-0001", "新填的密钥没被采纳");

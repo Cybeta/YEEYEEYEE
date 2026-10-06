@@ -43,10 +43,12 @@ export function apiBody(error: unknown): unknown {
 }
 
 export async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers = new Headers(options?.headers)
+  if (options?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   const response = await fetch(path, {
     ...options,
     credentials: 'same-origin',
-    headers: { ...(options?.body ? { 'Content-Type': 'application/json' } : {}) },
+    headers,
     cache: 'no-store'
   })
   const data: unknown = await response.json().catch(() => null)

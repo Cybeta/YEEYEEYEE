@@ -136,7 +136,8 @@ public sealed class SingleMachineExecutionService
             {
                 job.Transition(JobState.Cancelling);
                 Publish(job.ToResult());
-                cancellation[jobId].Cancel();
+                if (cancellation.TryGetValue(jobId, out var runningCancellation))
+                    runningCancellation.Cancel();
                 _ = CancelExternalAsync(job.ExternalTaskId);
             }
         }

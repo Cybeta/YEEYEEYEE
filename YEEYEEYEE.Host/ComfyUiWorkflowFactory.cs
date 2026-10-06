@@ -7,10 +7,12 @@ namespace YEEYEEYEE.Host;
 public sealed class ComfyUiWorkflowFactory
 {
     private readonly string? checkpoint;
+    private readonly string? ltxCheckpoint;
 
-    public ComfyUiWorkflowFactory(string? checkpoint = null)
+    public ComfyUiWorkflowFactory(string? checkpoint = null, string? ltxCheckpoint = null)
     {
         this.checkpoint = checkpoint;
+        this.ltxCheckpoint = ltxCheckpoint;
     }
 
     public JsonElement Create(Invocation invocation)
@@ -25,12 +27,11 @@ public sealed class ComfyUiWorkflowFactory
         if (GetString(invocation, "workflowTemplate") is { Length: > 0 } template)
             return BindTemplate(template, invocation);
 
-        // 内置模板**只出图**（KSampler → VAEDecode → SaveImage），一个视频节点都没有。
-        // 出视频时不带工作流模板走到这里，就等于拿一张静图去冒充视频——所以如实拒绝。
-        // 这一句是给「挑了池子却走成工作流」这类接线错误兜底的，正常情况下上面那一支已经接住了。
-        if (invocation.Capability is Capability.TextToVideo or Capability.ImageToVideo)
-            throw new InvalidOperationException(
-                "出视频必须带一份选定的 ComfyUI 工作流：内置模板只出图，里面没有任何视频节点。");
+        if (invocation.Capability == Capability.TextToVideo)
+            return CreateLtxTextToVideo(invocation);
+
+        if (invocation.Capability == Capability.ImageToVideo)
+            throw new InvalidOperationException("图生视频必须带一份选定的 ComfyUI 工作流。");
 
         var prompt = GetString(invocation, "prompt")
             ?? GetString(invocation, "text")
@@ -130,6 +131,127 @@ public sealed class ComfyUiWorkflowFactory
             };
         }
 
+        return JsonDocument.Parse(workflow.ToJsonString()).RootElement.Clone();
+    }
+
+    private JsonElement CreateLtxTextToVideo(Invocation invocation)
+    {
+        var prompt = GetString(invocation, "prompt") ?? GetString(invocation, "text") ?? string.Empty;
+        var model = GetString(invocation, "model") ?? ltxCheckpoint
+            ?? "ltx-2.3-22b-distilled-1.1.safetensors";
+        var width = GetInt(invocation, "width", 256, 64, 2048);
+        var height = GetInt(invocation, "height", 256, 64, 2048);
+        var frames = GetInt(invocation, "videoFrames", 17, 1, 4096);
+        var seed = GetLong(invocation, "seed", Random.Shared.NextInt64(0, long.MaxValue), 0, long.MaxValue);
+
+        var workflow = new JsonObject
+        {
+            ["1"] = new JsonObject
+            {
+                ["class_type"] = "DenoLTX23PresetLoader",
+                ["inputs"] = new JsonObject
+                {
+                    ["pipeline_mode"] = "Checkpoint Style",
+                    ["checkpoint_name"] = model,
+                    ["diffusion_model_name"] = "Ltx/ltx-2.3-22b-distilled-1.1_transformer_only_bf16.safetensors",
+                    ["gguf_unet_name"] = "__none__",
+                    ["video_vae_name"] = "LTX23_video_vae_bf16.safetensors",
+                    ["audio_vae_name"] = "LTX23_audio_vae_bf16.safetensors",
+                    ["text_encoder_name"] = "gemma_3_12B_it_fp4_mixed.safetensors",
+                    ["text_projection_name"] = "ltx-2.3_text_projection_bf16.safetensors",
+                    ["clip_device"] = "default",
+                    ["weight_dtype"] = "default"
+                }
+            },
+            ["2"] = new JsonObject
+            {
+                ["class_type"] = "easy ltxMultiTrackEncode",
+                ["inputs"] = new JsonObject
+                {
+                    ["model"] = new JsonArray("1", 0),
+                    ["clip"] = new JsonArray("1", 1),
+                    ["audio_vae"] = new JsonArray("1", 3),
+                    ["local_prompt"] = prompt,
+                    ["global_prompt"] = prompt,
+                    ["epsilon"] = 0.001,
+                    ["width"] = width,
+                    ["height"] = height,
+                    ["frame_rate"] = 24.0,
+                    ["video_length"] = frames,
+                    ["half_latent_size"] = false
+                }
+            },
+            ["3"] = new JsonObject
+            {
+                ["class_type"] = "BasicScheduler",
+                ["inputs"] = new JsonObject
+                {
+                    ["model"] = new JsonArray("2", 0),
+                    ["scheduler"] = "simple",
+                    ["steps"] = 8,
+                    ["denoise"] = 1.0
+                }
+            },
+            ["4"] = new JsonObject
+            {
+                ["class_type"] = "easy ltxSamplerSimple",
+                ["inputs"] = new JsonObject
+                {
+                    ["model"] = new JsonArray("2", 0),
+                    ["positive"] = new JsonArray("2", 1),
+                    ["negative"] = new JsonArray("2", 2),
+                    ["video_latent"] = new JsonArray("2", 3),
+                    ["audio_latent"] = new JsonArray("2", 4),
+                    ["sampler_name"] = "euler",
+                    ["sigmas"] = new JsonArray("3", 0),
+                    ["cfg"] = 1.0,
+                    ["seed"] = seed
+                }
+            },
+            ["5"] = new JsonObject
+            {
+                ["class_type"] = "LTXVTiledVAEDecode",
+                ["inputs"] = new JsonObject
+                {
+                    ["vae"] = new JsonArray("1", 2),
+                    ["latents"] = new JsonArray("4", 2),
+                    ["horizontal_tiles"] = 1,
+                    ["vertical_tiles"] = 1,
+                    ["overlap"] = 1,
+                    ["last_frame_fix"] = false,
+                    ["working_device"] = "auto",
+                    ["working_dtype"] = "auto"
+                }
+            },
+            ["6"] = new JsonObject
+            {
+                ["class_type"] = "LTXVAudioVAEDecode",
+                ["inputs"] = new JsonObject
+                {
+                    ["samples"] = new JsonArray("4", 3),
+                    ["audio_vae"] = new JsonArray("1", 3)
+                }
+            },
+            ["7"] = new JsonObject
+            {
+                ["class_type"] = "VHS_VideoCombine",
+                ["inputs"] = new JsonObject
+                {
+                    ["images"] = new JsonArray("5", 0),
+                    ["audio"] = new JsonArray("6", 0),
+                    ["frame_rate"] = 24.0,
+                    ["loop_count"] = 0,
+                    ["filename_prefix"] = "trae_ltx23_web",
+                    ["format"] = "video/h264-mp4",
+                    ["pingpong"] = false,
+                    ["save_output"] = true,
+                    ["pix_fmt"] = "yuv420p",
+                    ["crf"] = 23,
+                    ["save_metadata"] = true,
+                    ["trim_to_audio"] = false
+                }
+            }
+        };
         return JsonDocument.Parse(workflow.ToJsonString()).RootElement.Clone();
     }
 

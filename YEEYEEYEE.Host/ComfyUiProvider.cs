@@ -10,6 +10,19 @@ public sealed record ComfyUiPromptRequest
 {
     public JsonElement Prompt { get; init; }
     public string? ClientId { get; init; }
+    [System.Text.Json.Serialization.JsonPropertyName("extra_data")]
+    public ComfyUiExtraData? ExtraData { get; init; }
+}
+
+public sealed record ComfyUiExtraData
+{
+    [System.Text.Json.Serialization.JsonPropertyName("extra_pnginfo")]
+    public ComfyUiExtraPngInfo? ExtraPngInfo { get; init; }
+}
+
+public sealed record ComfyUiExtraPngInfo
+{
+    public JsonElement Workflow { get; init; }
 }
 
 public sealed record ComfyUiPromptResponse
@@ -41,9 +54,18 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
     public async Task<ExecutionOutput> ExecuteAsync(SessionContext session, Invocation invocation, Job job, CancellationToken cancellationToken)
     {
         var effective = await ResolveUploadsAsync(invocation, cancellationToken).ConfigureAwait(false);
+        var workflow = workflowFactory(effective);
         var response = await http.PostAsJsonAsync(
             "prompt",
-            new ComfyUiPromptRequest { Prompt = workflowFactory(effective), ClientId = clientId },
+            new ComfyUiPromptRequest
+            {
+                Prompt = workflow,
+                ClientId = clientId,
+                ExtraData = new ComfyUiExtraData
+                {
+                    ExtraPngInfo = new ComfyUiExtraPngInfo { Workflow = workflow }
+                }
+            },
             cancellationToken).ConfigureAwait(false);
 
         // **别用 EnsureSuccessStatusCode**：它只留一个状态码，而服务端的报错正文才是最有用的那一句话
@@ -256,6 +278,16 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
             && status.TryGetProperty("status_str", out var statusText))
         {
             var value = statusText.GetString();
+            if (string.Equals(value, "cancelled", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "canceled", StringComparison.OrdinalIgnoreCase))
+            {
+                return new ExternalTaskUpdate
+                {
+                    ExternalTaskId = externalTaskId,
+                    State = ExternalTaskState.Cancelled,
+                    ProgressPercent = 100
+                };
+            }
             if (string.Equals(value, "error", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(value, "failed", StringComparison.OrdinalIgnoreCase))
             {
