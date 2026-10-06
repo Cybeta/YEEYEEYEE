@@ -28,6 +28,12 @@ public sealed record CanvasPort(WorkflowNode Node, bool IsInput);
 /// <summary>右键请求：只带「点了哪个节点」。菜单本身贴在鼠标位置弹出（PopupFlyoutBase.ShowAt 的 showAtPointer）。</summary>
 public sealed record CanvasNodeContextRequest(WorkflowNode Node);
 
+/// <summary>
+/// 空白画布上的右键请求：只带「点在世界坐标的哪一点」。
+/// 菜单内容（有哪些节点可加）归主窗口管——与左栏「＋ 节点」共用同一份，画布不重复维护一份清单。
+/// </summary>
+public sealed record CanvasEmptyContextRequest(Point WorldPoint);
+
 public partial class CanvasSurface : UserControl
 {
     private const double NodeWidth = 232;
@@ -174,6 +180,12 @@ public partial class CanvasSurface : UserControl
     /// 画布只负责把「点了哪个节点」告诉出去。
     /// </summary>
     public event EventHandler<CanvasNodeContextRequest>? NodeContextRequested;
+
+    /// <summary>
+    /// 右键点**空白画布**（不在任何节点卡上）：用户想在这儿加点东西。
+    /// 菜单内容由主窗口给，与左栏「＋ 节点」同一份；画布只说「点在哪」。
+    /// </summary>
+    public event EventHandler<CanvasEmptyContextRequest>? EmptyCanvasContextRequested;
 
     /// <summary>一次性提示（删了线、取消了连接…），由界面写到状态栏。</summary>
     public event EventHandler<string>? Notice;
@@ -2797,6 +2809,16 @@ public partial class CanvasSurface : UserControl
 
         // 节点卡片自行处理按下事件，其余区域视为空白画布
         if (e.Source is Border { Tag: WorkflowNode }) return;
+
+        // 空白处右键 = 想在这儿加东西。**不能顺手把选中清掉**：右键是「问有什么可以做」，
+        // 不是「换一个操作对象」，把用户刚选中的节点抹了会让他下一句指令落空。
+        // 也不进入平移：菜单弹出来的同时画面跟着动，看着像点错了。
+        if (e.GetCurrentPoint(this).Properties.IsRightButtonPressed)
+        {
+            EmptyCanvasContextRequested?.Invoke(this, new CanvasEmptyContextRequest(e.GetPosition(NodeCanvas)));
+            e.Handled = true;
+            return;
+        }
 
         var hadSelection = selectedNode is not null || selectedEdge is not null;
         var hadExpansion = referenceExpansionOwner is not null;

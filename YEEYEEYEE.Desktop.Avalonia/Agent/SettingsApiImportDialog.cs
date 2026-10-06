@@ -1,10 +1,13 @@
 ﻿using System.Diagnostics;
 using Avalonia;
+using Avalonia.Animation;
+using Avalonia.Animation.Easings;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Avalonia.Styling;
 using Avalonia.Threading;
 using YEEYEEYEE.Core;
 using YEEYEEYEE.Desktop;
@@ -129,6 +132,21 @@ internal sealed class SettingsApiImportDialog
     private readonly Image previewImage = new() { Stretch = Stretch.Uniform, MaxHeight = 190, IsVisible = false };
     private readonly Button openFileButton = Secondary("打开产出文件");
 
+    /// <summary>
+    /// 状态区那一格。留一个引用是为了**点亮它**：读取网页回来之后结论就写在下面那一格里，
+    /// 而它在窗口下半截、要滚动才看得到，不给个视觉指引用户常常以为「点了没反应」。
+    /// </summary>
+    private Border? statusBox;
+
+    /// <summary>「读取网页」的呼吸提示：地址填了、还没点过的时候一闪一闪。</summary>
+    private AttentionPulse? fetchPulse;
+
+    /// <summary>下一步那颗按钮（登记站点 / 拉取工作流并登记站点）的呼吸提示。</summary>
+    private AttentionPulse? nextStepPulse;
+
+    /// <summary>用户已经点过「读取网页」：同一个提示重复闪只会变成噪音，所以点了就不再闪。</summary>
+    private bool fetchPrompted;
+
     private SettingsApiImportDialog(AiProviderConfig config)
     {
         this.config = config;
@@ -155,12 +173,30 @@ internal sealed class SettingsApiImportDialog
 
     private void Wire(Window window)
     {
-        fetchButton.Click += async (_, _) => await AnalyzeUrlAsync(urlBox.Text);
-        analyzeButton.Click += (_, _) => AnalyzeContent(pasteBox.Text, urlBox.Text);
+        fetchButton.Click += async (_, _) =>
+        {
+            // 先记住「他照做了」再停止提示：同一个指引闪第二次就是噪音。
+            fetchPrompted = true;
+            SyncFetchPulse();
+            await AnalyzeUrlAsync(urlBox.Text);
+        };
+        analyzeButton.Click += (_, _) =>
+        {
+            AnalyzeContent(pasteBox.Text, urlBox.Text);
+            // 粘贴正文这条入口走完之后，结论同样要能被看见、下一步同样要指出来。
+            MarkStatusImportant();
+        };
         repairButton.Click += async (_, _) => await RepairWithModelAsync();
-        forceComfyButton.Click += (_, _) => ForceComfyUi();
+        forceComfyButton.Click += (_, _) =>
+        {
+            ForceComfyUi();
+            MarkStatusImportant();
+        };
         createButton.Click += async (_, _) =>
         {
+            // 用户已经走向下一步：闪烁与点亮的使命结束，收回去。
+            nextStepPulse?.Stop();
+            HighlightStatus(false);
             // 同一个按钮两种意思：ComfyUI 那条分支拉工作流 + 登记站点，接口站那条分支登记站点。
             if (comfyDraft is not null) { await InstallComfyUiAsync(); return; }
             await CreateSite();
@@ -279,7 +315,8 @@ internal sealed class SettingsApiImportDialog
             Children = { previewImage, openFileButton }
         };
         var bottom = new Grid { ColumnDefinitions = new ColumnDefinitions("*,232"), ColumnSpacing = 8 };
-        bottom.Children.Add(CodeBox(statusText, 128));
+        statusBox = CodeBox(statusText, 128);
+        bottom.Children.Add(statusBox);
         Grid.SetColumn(previewPanel, 1);
         bottom.Children.Add(previewPanel);
 
@@ -322,7 +359,139 @@ internal sealed class SettingsApiImportDialog
 
         EnterStep(ApiWizardStep.Document);
         SetBalance("余额：未查询\n填密钥后自动查");
+
+        // 两处引导：地址填好之后「读取网页」闪起来；读取回来之后「下一步」闪起来。
+        // 建在这里而不建在字段初始化里，是因为要等到按钮已经进了可视树——动画挂在控件本身上。
+        fetchPulse = new AttentionPulse(fetchButton);
+        nextStepPulse = new AttentionPulse(createButton);
+        urlBox.TextChanged += (_, _) => SyncFetchPulse();
         return root;
+    }
+
+    // ---------- 引导：呼吸提示与点亮 ----------
+
+    /// <summary>地址非空、按钮还能点、而且他还没点过 → 让「读取网页」一闪一闪，等于说「下一步点这里」。</summary>
+    private void SyncFetchPulse()
+    {
+        if (fetchPulse is null) return;
+        var ready = !fetchPrompted && (urlBox.Text?.Trim().Length ?? 0) > 0 && fetchButton.IsEnabled;
+        if (ready) fetchPulse.Start();
+        else fetchPulse.Stop();
+    }
+
+    /// <summary>
+    /// 读取网页回来了：把结论那一格点亮，并让「下一步」那颗按钮闪起来。
+    ///
+    /// 为什么值得做这两下：这一页从上到下很长（地址、正文、报告、密钥、测试、状态区），
+    /// 用户点完「读取网页」之后视线还停在按钮上，而结论与下一步都在**他看不见的下方**——
+    /// 不指一下，很多人会以为没反应，然后再点一次。
+    /// </summary>
+    private void MarkStatusImportant()
+    {
+        HighlightStatus(true);
+        SyncNextStepPulse();
+    }
+
+    /// <summary>下一步那颗按钮「可以点了」才闪；正在忙或还没露面就收回去。</summary>
+    private void SyncNextStepPulse()
+    {
+        if (nextStepPulse is null) return;
+        if (createButton.IsVisible && createButton.IsEnabled && !busy) nextStepPulse.Start();
+        else nextStepPulse.Stop();
+    }
+
+    /// <summary>
+    /// 点亮 / 收回状态区。动的是边框与底色，**不动字色**：那一格是 SelectableTextBlock，
+    /// 里面贴的常常是服务端原样的报错，把前景色一起换掉会让报错本身更难读。
+    /// </summary>
+    private void HighlightStatus(bool on)
+    {
+        if (statusBox is null) return;
+        statusBox.BorderBrush = Brush(on ? "DfPrimary" : "DfLine");
+        statusBox.BorderThickness = new Thickness(on ? 2 : 1);
+        statusBox.Background = Brush(on ? "DfPrimarySoft" : "DfBg");
+    }
+
+    /// <summary>
+    /// 一闪一闪：来回摆不透明度，用来指「这里可以点」。
+    ///
+    /// 停下时**必须把不透明度还原成 1**：半透明的按钮看着像被禁用了，比不做提示更误导。
+    /// 动画是无限循环的，所以要用一个 token 才停得下来（RunAsync 一直不返回）。
+    /// </summary>
+    private sealed class AttentionPulse
+    {
+        private static readonly Animation Blink = new()
+        {
+            Duration = TimeSpan.FromMilliseconds(820),
+            IterationCount = IterationCount.Infinite,
+            PlaybackDirection = PlaybackDirection.Alternate,
+            Easing = new SineEaseInOut(),
+            Children =
+            {
+                new KeyFrame { Cue = new Cue(0d), Setters = { new Setter(Visual.OpacityProperty, 1d) } },
+                new KeyFrame { Cue = new Cue(1d), Setters = { new Setter(Visual.OpacityProperty, 0.5d) } }
+            }
+        };
+
+        private readonly Visual target;
+        private CancellationTokenSource? cancellation;
+
+        public AttentionPulse(Visual target) => this.target = target;
+
+        public void Start()
+        {
+            if (cancellation is not null) return;
+            var source = new CancellationTokenSource();
+            cancellation = source;
+            _ = RunAsync(source.Token);
+        }
+
+        public void Stop()
+        {
+            if (cancellation is null) return;
+            var source = cancellation;
+            cancellation = null;
+            source.Cancel();
+            source.Dispose();
+            target.Opacity = 1;
+        }
+
+        private async Task RunAsync(CancellationToken cancellationToken)
+        {
+            try { await Blink.RunAsync(target, cancellationToken); }
+            catch (OperationCanceledException) { }
+        }
+    }
+
+    /// <summary>
+    /// 把这一次的结果**当面**说一遍：说清了什么、成在哪、以后去哪儿看。
+    ///
+    /// 为什么要一个弹窗而不只是写进状态区：拉工作流要等好一会儿，用户点完常常已经去干别的了，
+    /// 回来只看到窗口还在——状态区那一格在下半截、还要滚，等于结论没人读。弹窗是他回来必然撞到的东西。
+    /// </summary>
+    private async Task ShowCompletionDialogAsync(string title, IReadOnlyList<string> lines)
+    {
+        if (window is null) return;
+
+        var body = new StackPanel { Spacing = 8, Margin = new Thickness(20) };
+        foreach (var line in lines)
+        {
+            body.Children.Add(new TextBlock
+            {
+                Text = line,
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                // 「·」开头的是细节、其余是主句：用字色把主次分开，扫一眼先看到「成了什么」。
+                Foreground = Brush(line.StartsWith('·') ? "DfInk2" : "DfInk")
+            });
+        }
+
+        var ok = Primary("知道了");
+        var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        row.Children.Add(ok);
+        var dialog = DialogShell.Create(title, Layout(body, Footer(row)), 540, 440);
+        ok.Click += (_, _) => dialog.Close();
+        await dialog.ShowDialog(window);
     }
 
     private void CloseWithSummary()
@@ -365,6 +534,7 @@ internal sealed class SettingsApiImportDialog
         urlBox.Text = target;
         SetStatus($"正在读取 {target} …");
         fetchButton.IsEnabled = false;
+        SyncFetchPulse();      // 正在读：按钮按住的同时把呼吸提示收掉，免得「看起来还能点」
         try
         {
             var fetched = await fetcher(target, CancellationToken.None);
@@ -390,6 +560,9 @@ internal sealed class SettingsApiImportDialog
         finally
         {
             fetchButton.IsEnabled = true;
+            SyncFetchPulse();
+            // 结论已经落在状态区里了：点亮它，并把「下一步可以点了」指出来。
+            MarkStatusImportant();
         }
     }
 
@@ -653,6 +826,23 @@ internal sealed class SettingsApiImportDialog
             lines.Add("· 出图 / 出视频时会先让你在这台服务器的工作流里选一份（默认选中的是推荐的那份）");
             SetStatus(string.Join(Environment.NewLine, lines));
             EnterStep(ApiWizardStep.Done);
+
+            // 拉取是这一步里最花时间、也最容易「点完就去干别的」的动作：把它当面说清楚，
+            // 并把「以后去哪儿管这一台」一起交代掉——只写在状态区里，用户往往已经不在看那一格了。
+            await ShowCompletionDialogAsync("ComfyUI 导入完成", new List<string>
+            {
+                $"站点「{installed.Label}」已登记。",
+                $"· 图像工作流 {installed.ImageWorkflows.Count} 份、视频工作流 {installed.VideoWorkflows.Count} 份"
+                    + $"（服务器上共 {installed.Workflows.Count} 份，转换成功 {fetched.Converted} 份"
+                    + (fetched.Failed > 0 ? $"，{fetched.Failed} 份没转成" : string.Empty) + "）",
+                $"· 地址：{installed.BaseUrl}"
+                    + (installed.Checkpoint.Length > 0 ? $"｜checkpoint {installed.Checkpoint}" : string.Empty),
+                $"· 每个家族各推了一份默认，共 {installed.UsableWorkflows.Count(workflow => workflow.Recommended)} 份标为推荐",
+                string.Empty,
+                "以后要换工作流、改推荐、停用某几份，或看这一台还有哪些：",
+                "设置 → 技能管理 → 站点与池子（「生图与生视频」页也有同一个入口）。",
+                "出图 / 出视频时会先让你在这台服务器的工作流里挑一份。"
+            });
         }
         finally
         {

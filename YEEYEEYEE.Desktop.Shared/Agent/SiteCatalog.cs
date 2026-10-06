@@ -471,10 +471,12 @@ public sealed record ImageSourceChoice(SitePoolChoice? Pool, SiteWorkflowChoice?
 }
 
 /// <summary>
-/// 站点文件（<c>skills/sites/&lt;id&gt;.json</c>）的读写。
+/// 站点文件（<c>&lt;站点目录&gt;/&lt;id&gt;.json</c>）的读写。
 ///
-/// 放在技能目录下的子目录里，而不是和技能混在一起：技能是「一步一步的流程」，站点是「一家有哪些能用的」，
-/// 两种东西混在一层目录里，技能管理页与装载器都得靠文件名前缀去猜，那是迟早会出错的做法。
+/// 目录分两种口径，见 <see cref="Directory"/>：默认是**用户级**的一份（跨项目共用），
+/// 显式指定过技能目录时跟着那一份走（测试隔离与便携部署）。单独占一个目录、不和技能混在一起：
+/// 技能是「一步一步的流程」，站点是「一家有哪些能用的」，两层混在一起，技能管理页与装载器
+/// 都得靠文件名前缀去猜，那是迟早会出错的做法。
 /// </summary>
 public static class SiteCatalog
 {
@@ -486,8 +488,80 @@ public static class SiteCatalog
         Encoder = JavaScriptEncoder.Create(UnicodeRanges.All)
     };
 
-    /// <summary>站点目录：技能目录下的 sites/。</summary>
-    public static string Directory => Path.Combine(SkillLibrary.Directory, "sites");
+    /// <summary>
+    /// 站点目录。
+    ///
+    /// **默认放在用户级目录，不放在项目里**：站点是「这台机器能连哪几家、各自有哪些池子」，
+    /// 与正在做哪个项目无关。早先它跟着项目走（<c>&lt;项目&gt;/skills/sites</c>），于是每新建一个项目
+    /// 就得重新「智能导入」一次——同一台机器、同一个地址，导入第二遍纯属浪费，
+    /// 而用户看到的是「我刚导入的站点怎么不见了」。
+    ///
+    /// 显式指定过技能目录（<c>YEEYEEYEE_SKILL_DIR</c>，测试隔离与便携部署在用）时仍旧跟着它走：
+    /// 那时候调用方要的是「这一整份东西都放我指定的地方」，站点不该单独跑到用户配置目录去。
+    /// </summary>
+    public static string Directory =>
+        EnvCompat.Get("SKILL_DIR") is { Length: > 0 }
+            ? Path.Combine(SkillLibrary.Directory, "sites")
+            : Path.Combine(AppPaths.UserConfigDirectory, "sites");
+
+    /// <summary>
+    /// 把老位置上（项目内 <c>skills/sites</c>）的站点接进用户级目录，**只在用户级目录还空着时做一次**。
+    ///
+    /// 为什么要接：站点以前跟着项目存，改成用户级之后，项目里那一份就成了没人再读的死文件——
+    /// 用户看到的是「我的站点全没了」，而它们其实还在。搬是**复制**不是移动：
+    /// 原始文件留在项目里，用户自己翻得到，也不会因为这一次搬迁而出任何差错。
+    ///
+    /// 返回搬过来的站点份数（0 表示没什么可搬的）。
+    /// </summary>
+    public static int AdoptProjectSites(string? projectRoot)
+    {
+        // 技能目录是显式指定的：两边本来就是同一份，没有什么可接的。
+        if (EnvCompat.Get("SKILL_DIR") is { Length: > 0 }) return 0;
+        if (string.IsNullOrWhiteSpace(projectRoot)) return 0;
+
+        var legacy = Path.Combine(projectRoot, "skills", "sites");
+        if (!System.IO.Directory.Exists(legacy)) return 0;
+
+        var target = EnsureDirectory();
+        // 用户级目录里已经有东西了就不再接：那说明这一版已经用过，用户级那份才是现在的真相，
+        // 把项目里那份老的倒回去，等于让用户刚删掉的站点复活。
+        if (System.IO.Directory.EnumerateFileSystemEntries(target).Any()) return 0;
+
+        var copied = 0;
+        foreach (var file in System.IO.Directory.EnumerateFiles(legacy))
+        {
+            try
+            {
+                File.Copy(file, Path.Combine(target, Path.GetFileName(file)), overwrite: false);
+                if (string.Equals(Path.GetExtension(file), ".json", StringComparison.OrdinalIgnoreCase)) copied++;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+
+        // 工作流正文（每份站点一个子目录）也得一起接过来：只搬站点文件的话，
+        // 站点在、正文还在老地方，用的时候会报「这份工作流的正文找不到」。
+        foreach (var directory in System.IO.Directory.EnumerateDirectories(legacy))
+        {
+            try { CopyTree(directory, Path.Combine(target, Path.GetFileName(directory))); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+
+        return copied;
+    }
+
+    /// <summary>整棵复制。单份文件失败只跳过它，不因为一个坏文件把其余的都丢掉。</summary>
+    private static void CopyTree(string source, string destination)
+    {
+        System.IO.Directory.CreateDirectory(destination);
+        foreach (var file in System.IO.Directory.EnumerateFiles(source))
+        {
+            try { File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: false); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+
+        foreach (var directory in System.IO.Directory.EnumerateDirectories(source))
+            CopyTree(directory, Path.Combine(destination, Path.GetFileName(directory)));
+    }
 
     public static string EnsureDirectory()
     {

@@ -127,6 +127,7 @@ var tests = new (string Name, Action Run)[]
     ("智能导入：中文说明里的光杆家族词（runway）不得被当成模型名", ApiDocFamilyWordInProseIsNotAModel),
     ("智能导入：前端渲染站点从空壳里找回正文的挑选规则（同源 / 按路由名 / 只认够像文档的）", ApiDocShellMiningPicksSafely),
     ("站点与池子：站点标识与落盘、清单宽容解析（模型 × 档位、价格、参考图能力）", SiteCatalogAndPoolProbe),
+    ("站点目录：默认用户级（新建项目继承同一批）、指定技能目录时跟着走、老位置那份只接一次", SiteDirectoryIsGlobalAndAdoptsLegacyProbe),
     ("候选图批次：只留选中的那张、其余进回收站，没出好的不算在内", NodeImageBatchKeepsOnlyPicked),
     ("智能导入认得出 ComfyUI（且不把普通画图接口误认成它）", ProviderImportRecognizesComfyUi),
     ("只贴一个 ComfyUI 地址：分类器认不出，靠问一句地址 + 人来定兜底", ComfyUiBareAddressFallback),
@@ -13236,6 +13237,57 @@ static void SettingsProfilesMultiEnableAndSelection()
 	}
 }
 
+/// <summary>
+/// 站点目录的口径与迁移：默认落在**用户级**（新建项目因此自动继承同一批站点），
+/// 显式指定技能目录时跟着那一份；老位置（项目内 skills/sites）那一份会被接过来一次。
+/// </summary>
+static void SiteDirectoryIsGlobalAndAdoptsLegacyProbe()
+{
+	var previousSkillDir = Environment.GetEnvironmentVariable("YEEYEEYEE_SKILL_DIR");
+	var previousConfigHome = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME");
+	var skillDir = NewTempDirectory("site-scope");
+	var configHome = NewTempDirectory("site-home");
+	var projectRoot = NewTempDirectory("site-project");
+	try
+	{
+		// ① 显式指定技能目录：站点跟着它走。测试隔离与便携部署靠这条，不能被改掉。
+		Environment.SetEnvironmentVariable("YEEYEEYEE_SKILL_DIR", skillDir);
+		Expect(SiteCatalog.Directory == Path.Combine(SkillLibrary.Directory, "sites"),
+			"指定技能目录时站点应跟着它：" + SiteCatalog.Directory);
+
+		// ② 没指定：站点落在用户级目录，与正在做哪个项目无关——
+		//    「新项目自动继承全局站点」靠的就是这一条。
+		Environment.SetEnvironmentVariable("YEEYEEYEE_SKILL_DIR", null);
+		Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME", configHome);
+		Expect(SiteCatalog.Directory == Path.Combine(configHome, "sites"),
+			"默认站点目录应在用户级配置目录下：" + SiteCatalog.Directory);
+
+		// ③ 老位置那份（项目内 skills/sites）会被接过来一次，连工作流正文一起。
+		var legacySites = Path.Combine(projectRoot, "skills", "sites");
+		Directory.CreateDirectory(Path.Combine(legacySites, "example"));
+		File.WriteAllText(Path.Combine(legacySites, "example.json"), "{}");
+		File.WriteAllText(Path.Combine(legacySites, "example", "wf.abc.json"), "{}");
+		Expect(SiteCatalog.AdoptProjectSites(projectRoot) == 1, "老位置的站点应被接过来一份");
+		Expect(File.Exists(Path.Combine(SiteCatalog.Directory, "example.json")), "站点文件应出现在用户级目录");
+		Expect(File.Exists(Path.Combine(SiteCatalog.Directory, "example", "wf.abc.json")), "工作流正文要一起接过来");
+		// 源文件不动：这是复制不是移动，用户回头自己还找得到。
+		Expect(File.Exists(Path.Combine(legacySites, "example.json")), "老位置那份应原样留着");
+		// 再接一次不重复搬：用户级那边已经有东西了，就不该把老的那份又倒回去——
+		// 那等于让用户刚删掉的站点复活。
+		Expect(SiteCatalog.AdoptProjectSites(projectRoot) == 0, "用户级已有站点时不再接");
+	}
+	finally
+	{
+		Environment.SetEnvironmentVariable("YEEYEEYEE_SKILL_DIR", previousSkillDir);
+		Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME", previousConfigHome);
+		foreach (var directory in new[] { skillDir, configHome, projectRoot })
+		{
+			try { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+			catch (IOException) { }
+		}
+	}
+}
+
 // Updated in round 127 from the last good build: this test was changed after the last commit,
 // so the committed body no longer matched the implementation (decompiler dropped its comments).
 /// <summary>
@@ -16033,12 +16085,17 @@ sealed class ConfigEnvironment : IDisposable
 /// <summary>
 /// 把画布库、资产目录与模型配置都指向临时目录并把环境变量隔离掉，
 /// 让保存/迁移/资产相关的测试不碰用户真实工程与真实图片资产。
+///
+/// **用户级配置目录也要一起隔离**：站点是用户级的（不跟着项目走），
+/// 只隔离工程目录的话，写站点的用例会去动用户真实那一份——沙箱会在那一步拦下来，
+/// 而报出来的是「站点文件写盘失败」，看着像功能坏了。
 /// </summary>
 sealed class IsolatedStores : IDisposable
 {
     private readonly string? previousCanvasDirectory = Environment.GetEnvironmentVariable("YEEYEEYEE_CANVAS_DIR");
     private readonly string? previousAssetDirectory = Environment.GetEnvironmentVariable("YEEYEEYEE_ASSET_DIR");
     private readonly string? previousConfig = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG");
+    private readonly string? previousConfigHome = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME");
 
     public IsolatedStores()
     {
@@ -16048,6 +16105,7 @@ sealed class IsolatedStores : IDisposable
         Environment.SetEnvironmentVariable("YEEYEEYEE_CANVAS_DIR", CanvasDirectory);
         Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", AssetDirectory);
         Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG", Path.Combine(Root, "ai-config.json"));
+        Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME", Path.Combine(Root, "config-home"));
     }
 
     public string Root { get; }
@@ -16064,6 +16122,7 @@ sealed class IsolatedStores : IDisposable
         Environment.SetEnvironmentVariable("YEEYEEYEE_CANVAS_DIR", previousCanvasDirectory);
         Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", previousAssetDirectory);
         Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG", previousConfig);
+        Environment.SetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME", previousConfigHome);
         try { if (Directory.Exists(Root)) Directory.Delete(Root, true); } catch (IOException) { }
     }
 }

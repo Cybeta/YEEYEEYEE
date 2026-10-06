@@ -180,6 +180,8 @@ public partial class MainWindow : Window, IAgentSessionHost
         };
         CanvasSurfaceControl.NodeMutationCompleted += CanvasSurface_OnNodeMutationCompleted;
         CanvasSurfaceControl.NodeContextRequested += CanvasSurface_OnNodeContextRequested;
+        // 空白处右键：弹出与左栏「＋ 节点」同一份菜单，节点落在右键那一点上。
+        CanvasSurfaceControl.EmptyCanvasContextRequested += CanvasSurface_OnEmptyContextRequested;
         CanvasSurfaceControl.ConnectionRequested += CanvasSurface_OnConnectionRequested;
         CanvasSurfaceControl.NodeDoubleClicked += CanvasSurface_OnNodeDoubleClicked;
         CanvasSurfaceControl.NodeReferenceDoubleClicked += CanvasSurface_OnReferenceDoubleClicked;
@@ -336,6 +338,9 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (canvasTabs.Count > 0) PersistCanvasTabs(reportFailure: false);
 
         AppPaths.UseProject(project);
+        // 站点以前跟着项目存，现在是用户级的一份。进项目时顺手把老位置那份接过来
+        //（只在用户级目录还空着时做一次）——否则升级之后用户看到的是「我的站点全没了」。
+        var adoptedSites = SiteCatalog.AdoptProjectSites(project.RootPath);
         ProjectHistory.Add(project.RootPath);
         UpdateProjectUi(project);
         LoadProjectCanvasTabs();
@@ -345,7 +350,9 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 右侧栏默认落在 Agent 面板：进项目第一件事通常是想说点什么，而不是检查某个节点。
         // 检查器没被删掉，点顶栏「◧」或面板右上角的「›」就回去（两处都走 ShowInspectorMode）。
         ShowAgentMode();
-        StatusText.Text = $"项目已打开：{project.Descriptor.Name}";
+        StatusText.Text = adoptedSites > 0
+            ? $"项目已打开：{project.Descriptor.Name}（已把项目里原有的 {adoptedSites} 个站点接进全局站点）"
+            : $"项目已打开：{project.Descriptor.Name}";
 
         // 先选项目、再问模型：两件事同时糊在脸上，用户不知道该先答哪个。
         await RunPendingOnboardingAsync();
@@ -388,13 +395,22 @@ public partial class MainWindow : Window, IAgentSessionHost
         else Dispatcher.UIThread.Post(action);
     }
 
+    /// <summary>
+    /// 新建项目：**先问名字与位置**（启动页那一栏与顶栏共用同一个对话框），再建。
+    /// 用户取消时什么都不做——不建目录、也不动最近项目列表。
+    /// </summary>
     private async Task CreateProjectAsync(string? name)
     {
+        var request = await NewProjectDialog.ShowAsync(this, AppPaths.DefaultProjectsRoot, name);
+        if (request is null) return;
+
         try
         {
-            var parent = AppPaths.DefaultProjectsRoot;
+            var parent = string.IsNullOrWhiteSpace(request.ParentDirectory)
+                ? AppPaths.DefaultProjectsRoot
+                : request.ParentDirectory;
             Directory.CreateDirectory(parent);
-            var project = ProjectContext.Create(parent, NewProjectFolderName(parent, name), ProjectType.Other);
+            var project = ProjectContext.Create(parent, NewProjectFolderName(parent, request.Name), ProjectType.Other);
             await EnterWorkbenchAsync(project);
             StatusText.Text = $"项目已创建：{project.Descriptor.Name}";
         }
@@ -1877,7 +1893,20 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// <summary>
     /// 「＋ 节点」先选类型再建。以前只有一个「通用」，建完还要自己改回想要的类型，等于每次多点一步。
     /// </summary>
-    private void AddNodeMenu_OnClick(object? sender, RoutedEventArgs e)
+    private void AddNodeMenu_OnClick(object? sender, RoutedEventArgs e) => ShowAddNodeMenu(AddNodeButton);
+
+    /// <summary>
+    /// 画布空白处右键：把同一份「加什么节点」的菜单贴着他点的地方弹出来。
+    /// </summary>
+    private void CanvasSurface_OnEmptyContextRequested(object? sender, CanvasEmptyContextRequest request) =>
+        ShowAddNodeMenu(CanvasSurfaceControl, request.WorldPoint);
+
+    /// <summary>
+    /// 「＋ 节点」这份菜单由**左栏按钮与画布空白右键共用**。
+    /// 两处各写一份的话，日后加一种新类别必然漏掉一处，而漏掉的那一处不会报错，只是少一项——
+    /// 用户看到的是「右键怎么少了这个」，排查时却找不到任何日志。所以清单只留这一份。
+    /// </summary>
+    private void ShowAddNodeMenu(Control anchor, Point? dropAt = null)
     {
         var menu = new MenuFlyout();
         foreach (var category in new[]
@@ -1889,13 +1918,17 @@ public partial class MainWindow : Window, IAgentSessionHost
         {
             var chosen = category;
             var item = new MenuItem { Header = $"{CategoryNameOf(chosen)} · {DefaultNodeTitle(chosen)}" };
-            item.Click += (_, _) => AddNode(chosen);
+            item.Click += (_, _) => AddNode(chosen, dropAt);
             menu.Items.Add(item);
         }
-        menu.ShowAt(AddNodeButton);
+
+        // 有落点（右键）时贴着鼠标弹；没有（按钮）时贴在按钮上——按钮旁弹出来才不会跑到画面另一头。
+        menu.ShowAt(anchor, dropAt is not null);
     }
 
-    private void AddNode(NodeCategory category)
+    private void AddNode(NodeCategory category) => AddNode(category, null);
+
+    private void AddNode(NodeCategory category, Point? dropAt)
     {
         try
         {
@@ -1918,8 +1951,19 @@ public partial class MainWindow : Window, IAgentSessionHost
                 Y = 32 + (index / 3) * 136,
                 ManualPosition = true
             };
-            node.X = Math.Min(node.X, (float)visibleWidth);
-            node.Y = Math.Min(node.Y, (float)visibleHeight);
+            if (dropAt is { } point)
+            {
+                // 右键点在哪就放哪，不用用户点完再满画布找它。
+                // 世界坐标**不再夹到可视区**：那个上界是给「按钮新建」用的屏幕尺度，
+                // 缩放后拿它当世界坐标会把这枚节点按到左上角去。
+                node.X = (float)Math.Max(0, point.X);
+                node.Y = (float)Math.Max(0, point.Y);
+            }
+            else
+            {
+                node.X = Math.Min(node.X, (float)visibleWidth);
+                node.Y = Math.Min(node.Y, (float)visibleHeight);
+            }
             currentCanvas.Canvas.Nodes.Add(node);
             CanvasSurfaceControl.Refresh();
             RefreshOpenCenterView();
