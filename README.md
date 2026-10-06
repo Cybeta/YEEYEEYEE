@@ -6,6 +6,14 @@
 
 YEEYEEYEE 把 **企划、章节、分镜、图片、视频和成片** 放在同一个项目里。角色、道具和场景可以作为设定被分镜引用，设定更新后会提示受影响的内容。
 
+## 界面预览
+
+<p align="center">
+  <img src="docs/screenshots/01-start.png" alt="主界面" width="32%" />
+  <img src="docs/screenshots/11-gacha-reveal.png" alt="抽卡开奖" width="32%" />
+  <img src="docs/screenshots/16-gacha-graded.png" alt="出图判档" width="32%" />
+</p>
+
 ## 快速开始
 
 ### 下载运行
