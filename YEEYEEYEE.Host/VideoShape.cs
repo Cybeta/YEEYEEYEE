@@ -74,17 +74,22 @@ public static class VideoShape
         if (wanted.Length == 0) return string.Empty;
         if (!TryParseRatio(wanted, out var wantFirst, out var wantSecond)) return string.Empty;
 
-        // 同比例：一个字都不用改（先判它，免得把一个已经正确的值换成清单里另一个同比例的写法）。
-        if (TryParseRatio(current, out var haveFirst, out var haveSecond)
-            && SameRatio(wantFirst, wantSecond, haveFirst, haveSecond))
-            return current;
-
+        // 同比例时也要先检查服务器的合法选项：工作流正文里的当前值可能是旧的简写，
+        // 例如 `16:9`，而节点定义要求 `16:9 (Widescreen)`。
         if (known is not null)
         {
             foreach (var option in known)
                 if (TryParseRatio(option, out var optionFirst, out var optionSecond)
                     && SameRatio(wantFirst, wantSecond, optionFirst, optionSecond))
                     return option;
+        }
+
+        if (TryParseRatio(current, out var haveFirst, out var haveSecond)
+            && SameRatio(wantFirst, wantSecond, haveFirst, haveSecond))
+        {
+            // 没有站点选项时，不凭比例数字猜服务端的描述性标签；
+            // 工作流当前值既然能运行，就保持它自己的写法。
+            return current;
         }
 
         if (!TryParseRatio(current, out haveFirst, out haveSecond)) return string.Empty;
@@ -127,6 +132,19 @@ public static class VideoShape
         var steps = (int)Math.Round(value / SizeQuantum, MidpointRounding.AwayFromZero);
         return Math.Max(SizeQuantum, steps * SizeQuantum);
     }
+
+    public static string CanonicalAspectValue(int first, int second) => (first, second) switch
+    {
+        (1, 1) => "1:1 (Square)",
+        (2, 3) => "2:3 (Portrait Photo)",
+        (3, 2) => "3:2 (Photo)",
+        (3, 4) => "3:4 (Portrait Standard)",
+        (4, 3) => "4:3 (Standard)",
+        (9, 16) => "9:16 (Portrait Widescreen)",
+        (16, 9) => "16:9 (Widescreen)",
+        (21, 9) => "21:9 (Ultrawide)",
+        _ => string.Empty
+    };
 
     /// <summary>把「1080x1920」里的两个数按顺序换成新的两个数，分隔符原样保留。</summary>
     private static string ReplaceNumbers(string text, int first, int second)

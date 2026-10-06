@@ -1720,7 +1720,8 @@ public static class ComfyUiWorkflowBinder
         if (slots.AspectNodeId.Length > 0 && values.AspectRatio.Length > 0)
         {
             var text = VideoShape.FormatAspect(slots.AspectCurrent, values.AspectRatio, slots.AspectOptions);
-            if (text.Length > 0) SetInput(graph, slots.AspectNodeId, slots.AspectInput, JsonValue.Create(text));
+            if (text.Length > 0)
+                SetInput(graph, slots.AspectNodeId, slots.AspectInput, JsonValue.Create(text));
         }
 
         // 时长：写的是**帧数**（已经由 VideoFrameMath 按帧率换算并贴到它原来的家族上）。

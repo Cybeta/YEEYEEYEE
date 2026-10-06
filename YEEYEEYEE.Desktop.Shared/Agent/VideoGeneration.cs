@@ -459,23 +459,33 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         else if (sizeApplied)
             notes.Add($"画幅已写入：{width}×{height}（节点 {detected.LatentNodeId}）。");
 
-        if (aspectRatio.Length > 0 && detected.CanSetAspect && !sizeApplied)
+        if (aspectRatio.Length > 0 && detected.CanSetAspect)
         {
             // 说清**真正写进去的是哪个字符串**：这类控件的值是「一串固定选项」，
             // 写错一个字符（例如把 `9:16 (Portrait Widescreen)` 写成 `9:16 (Widescreen)`）就是一次 400 拒收，
             // 而两串人看着差不多，不说出来根本对不上账。
             var written = VideoShape.FormatAspect(detected.AspectCurrent, aspectRatio, detected.AspectOptions);
             if (written.Length == 0)
+            {
                 notes.Add($"比例这一项没能写进去：它的值「{detected.AspectCurrent}」我们造不出对应的写法"
                     + "（要改请在那份工作流里改）。");
-            else if (string.Equals(written, detected.AspectCurrent, StringComparison.Ordinal))
-                notes.Add($"比例已经是 {aspectRatio}（它当前写的就是「{detected.AspectCurrent}」），这一项没动。");
-            else if (detected.AspectOptions.Contains(written))
-                notes.Add($"比例已写入：{detected.AspectCurrent} → {written}"
-                    + "（这是这台服务器上同一个节点用过的写法，不是我们拼的）。");
+                // 不能把用户的简写继续交给执行层，否则执行层会再次覆盖工作流并触发 400。
+                aspectRatio = string.Empty;
+            }
             else
-                notes.Add($"比例已写入：{detected.AspectCurrent} → {written}"
-                    + "（照它自己的分隔符拼的：这个值不一定在它的选项清单里，提交可能被服务端拒）。");
+            {
+                // 执行层会把 aspectRatio 再交给 Binder。这里必须传回已经解析出的
+                // 服务端合法枚举值，而不是用户输入的 16:9 / 9:16 简写。
+                aspectRatio = written;
+                if (string.Equals(written, detected.AspectCurrent, StringComparison.Ordinal))
+                    notes.Add($"比例已经是 {aspectRatio}（它当前写的就是「{detected.AspectCurrent}」），这一项没动。");
+                else if (detected.AspectOptions.Contains(written))
+                    notes.Add($"比例已写入：{detected.AspectCurrent} → {written}"
+                        + "（这是这台服务器上同一个节点用过的写法，不是我们拼的）。");
+                else
+                    notes.Add($"比例已写入：{detected.AspectCurrent} → {written}"
+                        + "（照它自己的分隔符拼的：这个值不一定在它的选项清单里，提交可能被服务端拒）。");
+            }
         }
         else if (aspectRatio.Length > 0 && !detected.CanSetAspect && !sizeApplied)
             notes.Add("这份工作流既没有可写的画幅、也没有比例选项，比例没能写进去。");

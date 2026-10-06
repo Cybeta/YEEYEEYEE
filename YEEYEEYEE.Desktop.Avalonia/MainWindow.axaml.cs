@@ -5219,6 +5219,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         ImageGenerationResult result;
         try
         {
+            var rememberedWorkflow = RememberedWorkflow();
             result = await provider.GenerateAsync(new ImageGenerationRequest
             {
                 Prompt = prompt,
@@ -5226,7 +5227,12 @@ public partial class MainWindow : Window, IAgentSessionHost
                 Width = currentCanvas.Width,
                 Height = currentCanvas.Height,
                 Steps = currentCanvas.Steps,
-                Cfg = currentCanvas.Cfg
+                Cfg = currentCanvas.Cfg,
+                // 设定图重生成也沿用最近一次明确选择的 ComfyUI 工作流，
+                // 避免节点出图走工作流而这里悄悄退回内置模板。
+                WorkflowSiteId = rememberedWorkflow?.Site.Id ?? string.Empty,
+                WorkflowPayloadFile = rememberedWorkflow?.Workflow.PayloadFile ?? string.Empty,
+                WorkflowKey = rememberedWorkflow?.Workflow.Key ?? string.Empty
             });
         }
         catch (Exception error) when (error is HttpRequestException or TaskCanceledException or IOException or InvalidOperationException)
