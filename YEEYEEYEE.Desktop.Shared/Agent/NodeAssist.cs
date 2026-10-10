@@ -65,7 +65,13 @@ public sealed record NodeAssistSuggestion(
     string SkillId,
     string Prompt,
     string NegativePrompt,
-    string Blocked)
+    string Blocked,
+    int Priority = 100,
+    bool IsPrimary = false,
+    AssetGenerationIntent? Intent = null,
+    IReadOnlyList<GenerationCapability>? RequiredCapabilities = null,
+    string TemplateId = "",
+    bool TemplateLocked = false)
 {
     /// <summary>现在能不能跑；不能跑时 Blocked 里写着原因。</summary>
     public bool CanRun => Blocked.Length == 0;
@@ -338,29 +344,42 @@ public static class NodeAssistPlanner
         switch (node.Category)
         {
             case NodeCategory.Character:
-                suggestions.Add(Image(node, contextText, blocked, "character-front", "出角色图（正面全身）", "正面全身，站姿，全身入镜"));
-                suggestions.Add(Image(node, contextText, blocked, "character-bust", "出角色图（半身特写）", "半身特写，面部清晰，肩部以上"));
-                suggestions.Add(PromptOnly(node, contextText, blocked, "character-sheet", "生成角色设定提示词（外观锚点）", "角色设定表，含外观锚点、服装、神态与常用道具，按正面/侧面/四分之三/半身/全身分组描述"));
-                suggestions.Add(Agent(node, hasMaterial, contextText, blocked, "character-generation", "让 Agent 补全角色小传"));
+                // 角色图片动作与 Agent / 参考卡共用同一套素材门槛：没有正文、引用或上游设定时明确禁用。
+                // 这样不会在缺少角色身份信息时直接向模型发起空泛请求。
+                // 资产先于镜头：三视图建立身份锚点，九宫格用于探索，不把探索板误当成正式参考组。
+                suggestions.Add(Image(node, contextText, blocked, "character-turnaround-3", "出角色三视图", "同一角色、同一套服装与发型，正面/侧面/背面三视图，完整全身，站姿，均匀棚拍光，角色设定板，无文字", AssetGenerationIntent.CharacterTurnaround, [GenerationCapability.TextToImage, GenerationCapability.ImageSet, GenerationCapability.BatchOutput]));
+                suggestions.Add(Image(node, contextText, blocked, "character-sheet-9", "出角色九宫格探索板", CharacterNineViewTemplate.BuildPromptPrefix(), AssetGenerationIntent.CharacterNineView, [GenerationCapability.TextToImage, GenerationCapability.ImageSet, GenerationCapability.BatchOutput], CharacterNineViewTemplate.TemplateId, templateLocked: true));
+                suggestions.Add(PromptOnly(node, contextText, blocked, "character-reference-card", "生成角色参考卡提示词", "角色参考卡：身份锚点、脸部特征、发型、服装材质、颜色、身高比例、标志性道具、常用表情；另列三视图与九宫格探索的生成要求"));
+                suggestions.Add(Image(node, contextText, blocked, "character-detail-sheet", "出角色表情与服装细节", "角色细节参考板：正脸表情组、发型细节、服装面料与关键配饰特写；保持同一身份与服装，不添加新设定", AssetGenerationIntent.CharacterDetailSheet, [GenerationCapability.TextToImage, GenerationCapability.ImageToImage]));
+                suggestions.Add(Agent(node, hasMaterial, contextText, blocked, "character-generation", "让 Agent 补全角色资产卡"));
                 break;
 
             case NodeCategory.Scene:
-                suggestions.Add(Image(node, contextText, blocked, "scene-wide", "出场景基准图（远景宽幅）", "远景宽幅，交代空间关系与光线，无主要人物"));
-                suggestions.Add(PromptOnly(node, contextText, blocked, "scene-sheet", "生成场景设定提示词（远中近景）", "场景设定，含时间天气、光线方向、材质细节，并给出远/中/近三档构图"));
-                suggestions.Add(Agent(node, hasMaterial, contextText, blocked, "scene-generation", "让 Agent 补全场景设定"));
+                // 场景资产必须环境-only，人物只在分镜首帧中出现，避免空间参考和人物身份绑死。
+                suggestions.Add(Image(node, contextText, blocked, "scene-base-keyframe", "出场景基准图", "环境-only 场景基准图，远景宽幅，交代空间结构、动线、材质与主光方向；禁止人物、脸、手、剪影、人体客串，无文字", AssetGenerationIntent.SceneBaseKeyframe, [GenerationCapability.TextToImage]));
+                suggestions.Add(Image(node, contextText, blocked, "scene-multi-view", "出场景多角度", "同一场景、同一时间与材质，正向/左侧/右侧/反向四个空间视角，保持建筑结构、入口、窗户和主光方向一致，环境-only，无人物", AssetGenerationIntent.SceneMultiView, [GenerationCapability.TextToImage, GenerationCapability.ImageSet, GenerationCapability.BatchOutput]));
+                suggestions.Add(Image(node, contextText, blocked, "scene-distance-sheet", "出场景远中近景板", "同一场景参考板，远景交代空间、中景交代主体区域、近景展示材质细节；时间天气和色彩连续，环境-only，无人物", AssetGenerationIntent.SceneDistanceSheet, [GenerationCapability.TextToImage, GenerationCapability.ImageSet, GenerationCapability.BatchOutput]));
+                suggestions.Add(Image(node, contextText, blocked, "scene-mood-keyframe", "出场景氛围基准", "环境-only 氛围基准图，明确时间、天气、光线方向、色温、空气透视与地面反光；空间结构不变，无人物和文字", AssetGenerationIntent.SceneMoodKeyframe, [GenerationCapability.TextToImage]));
+                suggestions.Add(PromptOnly(node, contextText, blocked, "scene-reference-card", "生成场景参考卡提示词", "场景参考卡：空间结构、固定地标、出入口、材质、时间天气、主光方向、远中近景和可变氛围；明确禁止人物进入环境资产"));
+                suggestions.Add(Agent(node, hasMaterial, contextText, blocked, "scene-generation", "让 Agent 补全场景资产卡"));
                 break;
 
             case NodeCategory.Prop:
-                suggestions.Add(Image(node, contextText, blocked, "prop-closeup", "出道具特写图", "道具特写，居中，干净背景，材质与磨损细节清晰"));
-                suggestions.Add(Agent(node, hasMaterial, contextText, blocked, "prop-generation", "让 Agent 补全道具设定"));
+                suggestions.Add(Image(node, contextText, blocked, "prop-turnaround-3", "出道具三视图", "同一道具、同一材质与磨损状态，正面/侧面/背面三视图，干净中性背景，比例一致，结构完整，无手持、无人物、无文字", AssetGenerationIntent.PropTurnaround, [GenerationCapability.TextToImage, GenerationCapability.ImageSet, GenerationCapability.BatchOutput]));
+                suggestions.Add(Image(node, contextText, blocked, "prop-sheet-9", "出道具九宫格探索板", "同一道具身份锁定，3×3 道具探索板：角度、摆放、局部构图小幅变化，形状、材质、颜色和关键标记保持一致，九格整齐分隔，无人物和文字", AssetGenerationIntent.PropExplorationSheet, [GenerationCapability.TextToImage, GenerationCapability.ImageSet, GenerationCapability.BatchOutput]));
+                suggestions.Add(Image(node, contextText, blocked, "prop-detail-material", "出道具材质与结构细节", "道具细节参考板：材质纹理、连接结构、磨损、刻字或关键标记的近距离特写；保持同一物件，不新增结构，无手和人物", AssetGenerationIntent.PropMaterialDetail, [GenerationCapability.TextToImage, GenerationCapability.ImageToImage]));
+                suggestions.Add(PromptOnly(node, contextText, blocked, "prop-reference-card", "生成道具参考卡提示词", "道具参考卡：用途、尺寸比例、材质、颜色、结构、关键标记、磨损和镜头可见细节；另列三视图、九宫格探索和材质细节要求"));
+                suggestions.Add(Agent(node, hasMaterial, contextText, blocked, "prop-generation", "让 Agent 补全道具资产卡"));
                 break;
 
             case NodeCategory.Storyboard:
-                suggestions.Add(Image(node, contextText, blocked, "storyboard-frame", "出这一镜的画面", "电影感单帧：按镜头描述构图，人物与场景沿用素材设定，注意景别与光线方向"));
+                suggestions.Add(Image(node, contextText, blocked, "storyboard-first-frame", "出这一镜的首帧", "电影感分镜首帧：人物身份引用角色参考组，环境引用场景资产，道具引用道具资产；按景别、构图、动作起点、光线和画幅完成一张可审核的首帧，不要把动作写成多帧", AssetGenerationIntent.StoryboardFirstFrame, [GenerationCapability.TextToImage, GenerationCapability.ImageToImage, GenerationCapability.MultiReferenceImage]));
                 // 出视频：先如实摆出来，再如实说它现在跑不跑得了。
                 // 藏起来的话，用户会以为这个应用根本没有出视频这条路——而站点里明明已经导进视频池子了。
                 suggestions.Add(Video(node, contextText, blocked, videoAvailable, "storyboard-video", "出这一镜的视频",
-                    "把这一镜拍成一段镜头：以这一镜的画面为首帧，人物与场景沿用素材设定，一个镜头内完成主体动作"));
+                    "先复用或生成并审核首帧，再以首帧作为图生视频输入；人物身份、场景空间和道具沿用各自参考组，一个镜头内完成主体动作"));
+                suggestions.Add(Agent(node, hasMaterial, contextText, blocked, "storyboard-one-click", "一键出片：自检、首帧、视频", "storyboard-one-click", AssetGenerationIntent.StoryboardOneClick));
+                suggestions.Add(Agent(node, hasMaterial, contextText, blocked, "generation-audit", "自检：引用、首帧与连续性", "generation-audit"));
                 suggestions.Add(PromptOnly(node, contextText, blocked, "storyboard-sheet", "生成镜头提示词（含景别与运镜）", "把这一个镜头写成可执行的出图提示词：景别、主体动作、环境、光线、画幅与运镜备注"));
                 suggestions.Add(Agent(node, hasMaterial, contextText, blocked, "storyboard-generation", "让 Agent 把这一镜拆细"));
                 break;
@@ -442,10 +461,22 @@ public static class NodeAssistPlanner
         string blocked,
         string id,
         string title,
-        string shot)
+        string shot,
+        AssetGenerationIntent? intent = null,
+        IReadOnlyList<GenerationCapability>? requiredCapabilities = null,
+        string templateId = "",
+        bool templateLocked = false)
     {
         var prompt = ComposeShotPrompt(node, contextText, shot);
-        return new NodeAssistSuggestion(id, title, NodeAssistKind.Image, "image-generation", prompt, NegativeFor(node), blocked);
+        var negative = intent == AssetGenerationIntent.CharacterNineView
+            ? CharacterNineViewTemplate.BuildNegativePrompt() + " " + NegativeFor(node)
+            : NegativeFor(node);
+        return new NodeAssistSuggestion(
+            id, title, NodeAssistKind.Image, "image-generation", prompt, negative, blocked,
+            Intent: intent,
+            RequiredCapabilities: requiredCapabilities,
+            TemplateId: templateId,
+            TemplateLocked: templateLocked);
     }
 
     private static NodeAssistSuggestion PromptOnly(
@@ -486,7 +517,9 @@ public static class NodeAssistPlanner
                 : available
                     ? blocked
                     : "还没有可用的出视频链路：请在「设置 → 生图与生视频 → 视频接口」里填上地址与模型。"
-                      + "在那之前，先按上面的「出图」把每一镜的底图做出来。");
+                      + "在那之前，先按上面的「出图」把每一镜的底图做出来。",
+            Intent: AssetGenerationIntent.StoryboardVideo,
+            RequiredCapabilities: [GenerationCapability.ImageToVideo]);
 
     private static NodeAssistSuggestion Agent(
         WorkflowNode node,
@@ -494,10 +527,14 @@ public static class NodeAssistPlanner
         string contextText,
         string blocked,
         string skillId,
-        string title)
+        string title,
+        string? id = null,
+        AssetGenerationIntent? intent = null)
     {
         var prompt = ComposeAgentInstruction(node, hasMaterial, contextText, title);
-        return new NodeAssistSuggestion(skillId + "-ask", title, NodeAssistKind.Agent, skillId, prompt, string.Empty, blocked);
+        return new NodeAssistSuggestion(
+            id ?? skillId + "-ask", title, NodeAssistKind.Agent, skillId, prompt, string.Empty, blocked,
+            Intent: intent);
     }
 
     private const string DefaultNegative = "低清，模糊，多余的手指，变形的手，多余肢体，文字水印，logo，杂乱背景，过度磨皮";

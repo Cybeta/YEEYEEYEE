@@ -44,11 +44,15 @@ public sealed record GenerationAuditItem(
     string ActionNodeTitle,
     string Target,
     string Reason,
-    bool Actionable)
+    bool Actionable,
+    Guid ReferenceEntityId = default,
+    Guid ReferenceVariantId = default)
 {
     public string Display => ActionNodeTitle.Length == 0 ? Target : $"{ActionNodeTitle} · {Target}";
 
-    public string ActionHint => ActionNodeId == Guid.Empty ? "引用画廊" : "定位";
+    public bool IsReferenceImage => ReferenceEntityId != Guid.Empty && ReferenceVariantId != Guid.Empty;
+
+    public string ActionHint => IsReferenceImage ? "引用画廊" : ActionNodeId == Guid.Empty ? "引用画廊" : "定位";
 }
 
 /// <summary>
@@ -84,12 +88,13 @@ public sealed record GenerationAuditReport(
     int UnrecordedBaselineNodes,
     string Note)
 {
+    public IReadOnlyList<GenerationAuditItem> VideoAssetIssues { get; init; } = Array.Empty<GenerationAuditItem>();
     public int MissingCount => Layers.Sum(layer => layer.Missing.Count);
 
     /// <summary>有几处产物**照着的设定后来变了**（不是缺，是旧）。</summary>
     public int StaleCount => Stale.Count;
 
-    public bool IsClean => MissingCount == 0;
+    public bool IsClean => MissingCount == 0 && VideoAssetIssues.Count == 0;
 
     /// <summary>会挡路的层：补图时只看设定图，出视频时前三层全看。</summary>
     public IReadOnlyList<GenerationStage> BlockingStages => Intent == GenerationIntent.Video
@@ -126,9 +131,11 @@ public sealed record GenerationAuditReport(
     public string Describe()
     {
         if (Note.Length > 0) return Note;
-        var head = IsClean
+        var head = MissingCount == 0
             ? $"「{RootTitle}」的依赖链是齐的：{string.Join(" → ", Layers.Select(layer => $"{layer.Title} {layer.TargetCount}/{layer.TargetCount}"))}"
             : $"「{RootTitle}」缺：{string.Join(" · ", Layers.Where(layer => !layer.IsClean).Select(layer => $"{layer.Title} 缺 {layer.MissingCount}/{layer.TargetCount}"))}";
+        if (VideoAssetIssues.Count > 0)
+            head += $"；视频资产前置检查有 {VideoAssetIssues.Count} 处问题或待确认，请查看清单";
         return StaleCount == 0 ? head : $"{head}；另有 {StaleCount} 处产物照着的设定已更新，建议重出";
     }
 
@@ -172,6 +179,8 @@ public sealed record GenerationAuditReport(
         : $"另有 {StaleCount} 处产物照着的设定已更新、建议重出（重出会再走一次出图 / 出视频，钱按同样的单价算）";
 
     /// <summary>报告的纯文本版（复制到剪贴板、贴进笔记都直接可用）。</summary>
+    private static string SingleImageVideoNoteForReport() => GenerationAudit.SingleImageVideoNote;
+
     public string ToText(double? unitPrice)
     {
         var lines = new List<string>
@@ -182,6 +191,9 @@ public sealed record GenerationAuditReport(
             string.Empty
         };
 
+        foreach (var issue in VideoAssetIssues)
+            lines.Add($"[视频资产前置检查] {issue.Display}：{issue.Reason}");
+        lines.Add(SingleImageVideoNoteForReport());
         foreach (var layer in Layers)
         {
             lines.Add($"[{layer.Title}] {layer.What} —— {(layer.IsClean ? $"齐了（共 {layer.TargetCount} 个）" : $"缺 {layer.MissingCount} / 共 {layer.TargetCount}")}");
@@ -214,8 +226,110 @@ public sealed record GenerationAuditReport(
 /// 于是它能被测试完整钉住（见 YEEYEEYEE.Agent.Tests 的 GenerationAudit* 用例）。
 /// 花钱的动作留给调用方，在用户看过这份报告之后。
 /// </summary>
+public sealed record StoryboardVideoPreflight(IReadOnlyList<string> Errors, string Warning, string AdoptedFrame)
+{
+    public bool CanSubmit(bool confirmedWithoutReferences = false) =>
+        Errors.Count == 0 && (Warning.Length == 0 || confirmedWithoutReferences);
+}
+
 public static class GenerationAudit
 {
+    public const string SingleImageVideoNote = "当前单图视频接口只使用首帧：角色、道具、场景资产应先用于生成并采用分镜首帧，再让这一镜动起来；不能把设定图当作分镜首帧。";
+
+    /// <summary>首帧和视频共享的资产校验。需求未知不可用临时确认绕过。</summary>
+    public static IReadOnlyList<string> CheckImageAssets(
+        WorkflowCanvasState canvas, WorkflowNode node, Func<WorkflowAttachment, string?> locatePath,
+        int? referenceCap = null, IReadOnlyCollection<string>? onlyKeys = null,
+        bool supportsReferences = true)
+    {
+        var errors = new List<string>();
+        if (node.Category != NodeCategory.Storyboard) return errors;
+        foreach (var kind in Enum.GetValues<EntityKind>())
+        {
+            var need = node.AssetRequirements?.For(kind) ?? AssetNeed.Unknown;
+            var has = canvas.ResolveReferences(node).Any(c => c.Entity.Kind == kind);
+            if (need == AssetNeed.Unknown || !Enum.IsDefined(need))
+                errors.Add($"{WorkflowEntity.KindName(kind)}资产需求未知，请明确确认无需求或需要资产。");
+            else if (need == AssetNeed.Required && !has)
+                errors.Add($"必要{WorkflowEntity.KindName(kind)}尚未绑定引用。");
+            else if (need == AssetNeed.None && has)
+                errors.Add($"已确认无{WorkflowEntity.KindName(kind)}，但存在该类引用，请修正需求或引用。");
+        }
+        foreach (var (reference, content) in canvas.ResolveReferencePairs(node))
+        {
+            if (content is null)
+                errors.Add($"失效引用：{reference.EntityId:N}/{reference.VariantId:N}，请重新绑定或删除失效引用。");
+            else if (content.VersionMissing)
+                errors.Add($"「{content.Entity.Name} · {content.Variant.Name}」缺失指定版本，请重新锁定版本或明确改为跟随最新。");
+        }
+        var slots = ReferenceImagePicker.ResolveSlots(canvas, node, locatePath);
+        foreach (var slot in slots)
+        {
+            if (string.IsNullOrWhiteSpace(slot.Path))
+                errors.Add($"必要引用「{slot.Label}」无可用图片，请补齐所引用版本的图片。");
+            if (onlyKeys is not null && !onlyKeys.Contains(slot.Key))
+                errors.Add($"必要引用「{slot.Label}」被取消勾选，禁止过滤必要参考。");
+        }
+        if (slots.Count > 0 && !supportsReferences)
+            errors.Add("当前来源不支持必要参考图，禁止降级为无参考生成。");
+        if (referenceCap is { } cap && slots.Count > Math.Max(0, cap))
+            errors.Add($"必要参考共 {slots.Count} 张，超过当前上限 {cap}，禁止裁剪；请更换来源或调整上限。");
+        foreach (var status in CanvasNodeVersions.Of(canvas, node).Statuses.Where(s => s.Warn))
+            errors.Add($"引用待确认：{status.Describe()}，请先处理版本决策。");
+        return errors;
+    }
+
+    /// <summary>最终请求必须包含全部必要路径，重生成也须经过此检查。</summary>
+    public static IReadOnlyList<string> CheckImageSubmission(
+        WorkflowCanvasState canvas, WorkflowNode node, Func<WorkflowAttachment, string?> locatePath,
+        IReadOnlyList<string> paths, int cap, bool supportsReferences = true)
+    {
+        var errors = CheckImageAssets(canvas, node, locatePath, cap, supportsReferences: supportsReferences).ToList();
+        if (node.Category != NodeCategory.Storyboard) return errors;
+        foreach (var slot in ReferenceImagePicker.ResolveSlots(canvas, node, locatePath))
+            if (slot.Path is { } path && !paths.Contains(path, StringComparer.Ordinal))
+                errors.Add($"必要参考「{slot.Label}」未包含在请求中，禁止过滤或降级。");
+        if (paths.Count > cap) errors.Add("请求参考数量超过上限，禁止裁剪。");
+        if (paths.Any(path => string.IsNullOrWhiteSpace(path))) errors.Add("请求参考路径为空。");
+        return errors;
+    }
+
+    /// <summary>本轮失败资产阻断依赖镜头，即使资产还留有旧图。</summary>
+    public static bool DependsOnFailedAssets(WorkflowCanvasState canvas, WorkflowNode node,
+        IReadOnlySet<(Guid EntityId, Guid VariantId)> failed) =>
+        canvas.ResolveReferences(node).Any(content => failed.Contains((content.Entity.Id, content.Variant.Id)));
+
+    /// <summary>附件是已经采用的首帧，候选批次不算。</summary>
+    public static StoryboardVideoPreflight CheckVideoAssets(
+        WorkflowCanvasState canvas, WorkflowNode node,
+        Func<WorkflowAttachment, string?> locatePath, string? firstFrame = null)
+    {
+        var errors = CheckImageAssets(canvas, node, locatePath).ToList();
+        var frameAttachment = node.Attachments.LastOrDefault(a => a.Kind == AttachmentKind.Image &&
+            !string.IsNullOrWhiteSpace(locatePath(a)));
+        var adoptedFrame = frameAttachment is null ? string.Empty : locatePath(frameAttachment) ?? string.Empty;
+        if (node.Category != NodeCategory.Storyboard)
+            return new(errors, string.Empty, adoptedFrame);
+
+        if (frameAttachment is not null)
+        {
+            var required = canvas.ResolveReferences(node).Where(content =>
+                node.AssetRequirements?.For(content.Entity.Kind) == AssetNeed.Required);
+            if (required.Any(content => !frameAttachment.SourceFingerprints.TryGetValue(
+                    $"{content.Entity.Id:N}/{content.Variant.Id:N}", out var recorded) ||
+                recorded != ReferenceStaleness.FingerprintOf(content)))
+                errors.Add("采用首帧无法证明必要参考覆盖，请按当前引用重新生成并采用首帧；确认资产需求不能补记生成依据。");
+            if (ReferenceStaleness.OfAttachment(canvas, node, frameAttachment).Count > 0)
+                errors.Add("采用首帧的资产依据已过期，请按当前引用重新生成并采用首帧。");
+        }
+
+        if (node.References.Count > 0 && adoptedFrame.Length == 0)
+            errors.Add("有引用的分镜必须先生成并采用首帧，不能降级为文生视频。" + SingleImageVideoNote);
+        if (firstFrame is not null && firstFrame != adoptedFrame)
+            errors.Add("提交首帧与当前采用首帧不一致，请重新打开视频生成窗口。");
+        return new(errors, string.Empty, adoptedFrame);
+    }
+
     /// <summary>沿连线向上追溯的层数：够把「成品 ← 分镜 ← 角色/场景」串起来。</summary>
     public const int MaxDepth = 3;
 
@@ -263,7 +377,16 @@ public static class GenerationAudit
             layers,
             StaleItems(canvas, scope),
             UnrecordedBaselines(scope),
-            scopeNote);
+            scopeNote)
+        {
+            VideoAssetIssues = storyboards.SelectMany(node =>
+            {
+                var check = CheckVideoAssets(canvas, node, a => exists(a.Reference) ? a.Reference : null);
+                return check.Errors.Concat(check.Warning.Length > 0 ? new[] { check.Warning } : Array.Empty<string>())
+                    .Select(reason => new GenerationAuditItem(GenerationStage.StoryboardVideo, node.Id, node.Title,
+                        "视频资产前置检查", reason, Actionable: false));
+            }).ToList()
+        };
     }
 
     /// <summary>
@@ -441,10 +564,12 @@ public static class GenerationAudit
                 GenerationStage.SettingImage,
                 Guid.Empty,
                 string.Empty,
-                need,
-                $"设定「{need}」被分镜引用了，但画布上没有承载它的角色 / 场景 / 道具节点，"
-                + "也没有图：到引用画廊里给这个变体补一张设定图。",
-                Actionable: false));
+                need.Label,
+                $"设定「{need.Label}」被分镜引用了，但画布上没有承载它的角色 / 场景 / 道具节点，"
+                + "也没有图：勾选后会直接把设定图写回引用画廊里的这个变体。",
+                Actionable: true,
+                ReferenceEntityId: need.EntityId,
+                ReferenceVariantId: need.VariantId));
 
         // 引用到了、**变体上却没有图**，而承载它的设定节点其实出过图。
         //
@@ -458,8 +583,10 @@ public static class GenerationAudit
                 need.NodeTitle,
                 need.Label,
                 $"「{need.Label}」在「{need.NodeTitle}」上出过图，但那张图还没提交到引用（变体）上："
-                + "参考图取的是变体，所以引用它的分镜拿不到它——每一镜都会各编一套外观。",
-                Actionable: true));
+                + "参考图取的是变体，所以引用它的分镜拿不到它——勾选后会把新图写回这个变体。",
+                Actionable: true,
+                ReferenceEntityId: need.EntityId,
+                ReferenceVariantId: need.VariantId));
 
         return new GenerationAuditLayer(
             GenerationStage.SettingImage,
@@ -475,12 +602,12 @@ public static class GenerationAudit
     /// 被范围里的节点引用、却没有任何画布节点承载的设定实体（去重、带名字）。
     /// 这些设定的图只能在引用画廊里出，画布上点不到，所以报告里要单独列出来并标明去处。
     /// </summary>
-    private static List<string> GalleryOnlyNeeds(
+    private static List<(Guid EntityId, Guid VariantId, string Label)> GalleryOnlyNeeds(
         WorkflowCanvasState canvas,
         IReadOnlyList<WorkflowNode> scope,
         Func<string, bool> exists)
     {
-        var result = new List<string>();
+        var result = new List<(Guid, Guid, string)>();
         var seen = new HashSet<(Guid, Guid)>();
 
         foreach (var owner in scope)
@@ -495,13 +622,10 @@ public static class GenerationAudit
 
             var content = canvas.ResolveReferenceContent(reference);
             if (content is null)
-            {
-                result.Add($"（引用失效）{owner.Title} 引用的设定已经不存在，先修好这条引用");
                 continue;
-            }
 
             if (HasKind(content.Attachments, AttachmentKind.Image, exists)) continue;
-            result.Add($"{content.Entity.Name} · {content.Variant.Name}");
+            result.Add((content.Entity.Id, content.Variant.Id, $"{content.Entity.Name} · {content.Variant.Name}"));
         }
 
         return result;
@@ -514,13 +638,13 @@ public static class GenerationAudit
     /// 没有承载节点的那种归 <see cref="GalleryOnlyNeeds"/>（那条路本来就按变体判），
     /// 节点自己也没图的那种归上面第一条，两边都不重复报。
     /// </summary>
-    private static List<(Guid NodeId, string NodeTitle, string Label)> ReferencesWaitingForCommit(
+    private static List<(Guid NodeId, string NodeTitle, string Label, Guid EntityId, Guid VariantId)> ReferencesWaitingForCommit(
         WorkflowCanvasState canvas,
         IReadOnlyList<WorkflowNode> scope,
         IReadOnlyList<WorkflowNode> settings,
         Func<string, bool> exists)
     {
-        var result = new List<(Guid, string, string)>();
+        var result = new List<(Guid, string, string, Guid, Guid)>();
         var seen = new HashSet<(Guid, Guid)>();
 
         foreach (var owner in scope)
@@ -539,7 +663,7 @@ public static class GenerationAudit
             if (content is null) continue;
             if (HasKind(content.Attachments, AttachmentKind.Image, exists)) continue;
 
-            result.Add((carrier.Id, carrier.Title, $"{content.Entity.Name} · {content.Variant.Name}"));
+            result.Add((carrier.Id, carrier.Title, $"{content.Entity.Name} · {content.Variant.Name}", content.Entity.Id, content.Variant.Id));
         }
 
         return result;

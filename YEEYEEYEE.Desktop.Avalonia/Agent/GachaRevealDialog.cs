@@ -477,7 +477,7 @@ internal static class GachaRevealDialog
         var window = new Window
         {
             Title = "出图开奖",
-            SystemDecorations = SystemDecorations.None,
+            WindowDecorations = WindowDecorations.None,
             WindowState = WindowState.FullScreen,
             ShowInTaskbar = false,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,

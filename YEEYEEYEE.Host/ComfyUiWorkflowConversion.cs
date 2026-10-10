@@ -27,6 +27,55 @@ public enum ComfyUiVirtualNodeKind
 }
 
 /// <summary>一次转换的结果：可提交的 API 工作流，加上「哪些节点被跳过、为什么」的诚实说明。</summary>
+public enum ComfyUiNunchakuQuantization
+{
+    Unknown,
+    Int4,
+    Fp4
+}
+
+public sealed record ComfyUiDeviceCapabilities(
+    string? DeviceName,
+    ComfyUiNunchakuQuantization NunchakuQuantization,
+    string Source = "")
+{
+    public static ComfyUiDeviceCapabilities Unknown(string source = "")
+        => new(null, ComfyUiNunchakuQuantization.Unknown, source);
+}
+
+public static class ComfyUiDeviceDetector
+{
+    public static ComfyUiDeviceCapabilities FromSystemStats(string json)
+    {
+        try
+        {
+            var root = JsonNode.Parse(json) as JsonObject;
+            var device = root?["devices"]?.AsArray().FirstOrDefault() as JsonObject;
+            var name = device?["name"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(name)) return ComfyUiDeviceCapabilities.Unknown("/system_stats");
+
+            var upper = name.ToUpperInvariant();
+            var quantization = upper.Contains("A10", StringComparison.Ordinal)
+                || upper.Contains("A100", StringComparison.Ordinal)
+                || upper.Contains("RTX 30", StringComparison.Ordinal)
+                || upper.Contains("RTX30", StringComparison.Ordinal)
+                || upper.Contains("T4", StringComparison.Ordinal)
+                || upper.Contains("RTX 40", StringComparison.Ordinal)
+                || upper.Contains("RTX40", StringComparison.Ordinal)
+                || upper.Contains("L40", StringComparison.Ordinal)
+                || upper.Contains("ADA", StringComparison.Ordinal)
+                    ? ComfyUiNunchakuQuantization.Int4
+                    : ComfyUiNunchakuQuantization.Unknown;
+
+            return new ComfyUiDeviceCapabilities(name, quantization, "/system_stats");
+        }
+        catch (Exception error) when (error is JsonException or InvalidOperationException)
+        {
+            return ComfyUiDeviceCapabilities.Unknown("/system_stats");
+        }
+    }
+}
+
 public sealed record ComfyUiConversionResult(JsonObject ApiWorkflow, IReadOnlyList<string> Notes)
 {
     /// <summary>跳过说明合并成一句，没有跳过时为空串。</summary>
@@ -82,15 +131,19 @@ public static class ComfyUiWorkflowConversion
     private const int ModeBypass = 4;  // 官方 LGraphEventMode.BYPASS
 
     public static ComfyUiConversionResult Convert(
-        string uiWorkflowJson, string objectInfoJson, IReadOnlyList<ComfyUiVirtualNodeRule>? rules = null)
+        string uiWorkflowJson, string objectInfoJson,
+        ComfyUiDeviceCapabilities? capabilities = null,
+        IReadOnlyList<ComfyUiVirtualNodeRule>? rules = null)
     {
         var objectInfo = JsonNode.Parse(objectInfoJson) as JsonObject
             ?? throw new InvalidOperationException("object_info 不是 JSON 对象");
-        return Convert(uiWorkflowJson, objectInfo, rules);
+        return Convert(uiWorkflowJson, objectInfo, capabilities, rules);
     }
 
     public static ComfyUiConversionResult Convert(
-        string uiWorkflowJson, JsonObject objectInfo, IReadOnlyList<ComfyUiVirtualNodeRule>? rules = null)
+        string uiWorkflowJson, JsonObject objectInfo,
+        ComfyUiDeviceCapabilities? capabilities = null,
+        IReadOnlyList<ComfyUiVirtualNodeRule>? rules = null)
     {
         var ui = JsonNode.Parse(uiWorkflowJson) as JsonObject
             ?? throw new InvalidOperationException("工作流不是 JSON 对象");
@@ -143,7 +196,7 @@ public static class ComfyUiWorkflowConversion
             if (id is null) continue;
 
             var repairs = new List<string>();
-            var (apiNode, unnamed) = BuildApiNode(node, def, type, links, primitives, repairs);
+            var (apiNode, unnamed) = BuildApiNode(node, def, type, links, primitives, repairs, capabilities);
             output[id] = apiNode;
             if (repairs.Count > 0)
             {
@@ -171,7 +224,8 @@ public static class ComfyUiWorkflowConversion
         JsonObject node, JsonObject def, string type,
         IReadOnlyDictionary<long, (string OriginId, int OriginSlot)> links,
         IReadOnlyDictionary<string, JsonNode?> primitives,
-        List<string> comboRepairs)
+        List<string> comboRepairs,
+        ComfyUiDeviceCapabilities? capabilities)
     {
         var inputs = new JsonObject();
 
@@ -223,6 +277,31 @@ public static class ComfyUiWorkflowConversion
 
             var value = Coerce(raw, spec.Type);
             if (value is null) continue;
+
+            // 只有导入前从当前站点 /system_stats 识别出 int4 策略时才修复。
+            // 未识别设备时保持原值，避免把一个可能适配的 fp4 模型误改掉。
+            if (capabilities?.NunchakuQuantization == ComfyUiNunchakuQuantization.Int4
+                && type == "NunchakuQwenImageDiTLoader"
+                && spec.Name == "model_name"
+                && value is JsonValue modelValue
+                && modelValue.TryGetValue<string>(out var modelText)
+                && modelText.Contains("nunchaku/svdq-fp4_r", StringComparison.Ordinal))
+            {
+                var compatible = spec.Options?.FirstOrDefault(option =>
+                    option is not null
+                    && string.Equals(option.ToString(),
+                        modelText.Replace("svdq-fp4_r", "svdq-int4_r", StringComparison.Ordinal),
+                        StringComparison.Ordinal));
+                if (compatible is not null)
+                {
+                    comboRepairs.Add($"{spec.Name}「{modelText}」→「{compatible}」（Nunchaku 在 Turing/Ampere/Ada 上使用 int4）");
+                    value = compatible.DeepClone();
+                }
+                else
+                {
+                    comboRepairs.Add($"警告：{spec.Name}「{modelText}」没有对应的 int4 候选，未改写模型；请检查该站点模型与 GPU 兼容性");
+                }
+            }
 
             // 固定选项的值必须是清单里的一个，两种形状要纠正（见 RepairComboValue）。
             if (spec.Options is { Count: > 0 } choices && value is JsonValue candidate)

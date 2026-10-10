@@ -108,6 +108,8 @@ public sealed record AgentContext(
       {"kind":"write_file","path":"相对工作文件夹的路径.md","content":"文件内容","reason":"为什么写"}
     ]}
     ```
+    每个分镜 create_node / update_node 必须明确资产需求：assetRequirements={"character":"required|none|unknown","scene":"required|none|unknown","prop":"required|none|unknown"}。
+    required 必须通过 entityTargets 绑定对应资产；none 是明确无该类需求（空镜允许无角色、无道具）；信息不足填 unknown 并用 ask 确认，unknown 会阻断首帧和视频。不可把空引用当作已确认无需求，不可为绕过阻断虚构确认。省略字段的旧节点保留原确认状态。
     **JSON 必须合法**：content / title 这类字符串里如果要用引号，请用中文引号「」或转义成 \\"，
     不要直接写英文双引号——那会让整块 JSON 失效，界面解析不了，你的改动就全部作废（用户会说"没加上"）。
     换行请写成 \\n。

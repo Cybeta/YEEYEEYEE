@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Input.Platform;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
@@ -41,7 +42,8 @@ internal static class GenerationAuditDialog
         ImageSourceChoice? initialImageSource,
         ImageSourceChoice? initialVideoSource,
         int initialSeconds,
-        Func<VideoRouteMode, Task<(ImageSourceChoice? Source, string Note)>>? resolveVideoRoute = null)
+        Func<VideoRouteMode, Task<(ImageSourceChoice? Source, string Note)>>? resolveVideoRoute = null,
+        Func<OneClickRunRequest, IReadOnlyList<string>>? checkAssetRequirements = null)
     {
         Guid? locate = null;
         OneClickRunRequest? run = null;
@@ -73,6 +75,9 @@ internal static class GenerationAuditDialog
         body.Children.Add(Note("依赖链：设定图 → 分镜图 → 分镜视频 → 成品视频。上一层没有产物时，"
             + "下一层也能出来，但那是模型现编的——所以缺哪一层都要先在这里看到。", AgentNoteLevel.Info));
 
+        body.Children.Add(Note(GenerationAudit.SingleImageVideoNote));
+        foreach (var issue in report.VideoAssetIssues)
+            body.Children.Add(Note($"{issue.ActionNodeTitle}：{issue.Reason}", AgentNoteLevel.Warning));
         var current = report;
         var checkedItems = new HashSet<GenerationAuditItem>();
 
@@ -400,6 +405,12 @@ internal static class GenerationAuditDialog
                 costNote.Text = "这一档没有要生成的东西：把上面清单里要补的勾上，或换一档。";
                 return;
             }
+            var assetErrors = checkAssetRequirements?.Invoke(request) ?? Array.Empty<string>();
+            if (assetErrors.Count > 0)
+            {
+                costNote.Text = string.Join("\n", assetErrors);
+                return;
+            }
             run = request;
             dialog.Close();
         };
@@ -521,13 +532,11 @@ internal static class GenerationAuditDialog
         var check = new CheckBox
         {
             IsChecked = preset && item.Actionable,
-            // 不能直接生成的（例如引用已失效、设定只在引用画廊里）不给勾：
-            // 勾了却生成不出来，用户会以为是自己点的姿势不对。
             IsEnabled = item.Actionable,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 4, 0)
         };
-        if (!item.Actionable) ToolTip.SetTip(check, "这一项不能在画布节点上直接生成，先按说明处理。");
+        if (!item.Actionable) ToolTip.SetTip(check, "这一项目前不能自动生成，请先按说明处理。");
         check.IsCheckedChanged += (_, _) =>
         {
             if (check.IsChecked == true) checkedItems.Add(item);
@@ -584,7 +593,7 @@ internal static class GenerationAuditDialog
         }
         else
         {
-            var hint = Note("引用画廊", AgentNoteLevel.Warning);
+            var hint = Note(item.IsReferenceImage ? "引用画廊 · 可自动补图" : "引用画廊", item.IsReferenceImage ? AgentNoteLevel.Info : AgentNoteLevel.Warning);
             hint.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(hint, 2);
             row.Children.Add(hint);

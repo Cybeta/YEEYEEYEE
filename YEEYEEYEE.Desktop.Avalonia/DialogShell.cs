@@ -44,9 +44,8 @@ internal static class DialogShell
             ShowInTaskbar = false,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             // 与主窗口同一套无边框策略：系统不画标题栏，标题条与窗口按钮都由我们自己画。
-            SystemDecorations = SystemDecorations.None,
+            WindowDecorations = WindowDecorations.None,
             ExtendClientAreaToDecorationsHint = true,
-            ExtendClientAreaChromeHints = ExtendClientAreaChromeHints.NoChrome,
             ExtendClientAreaTitleBarHeightHint = 0,
             TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent },
             Background = Brushes.Transparent

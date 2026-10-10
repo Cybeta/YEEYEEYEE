@@ -17,23 +17,53 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $notes = [System.IO.File]::ReadAllText($NotesPath, [System.Text.Encoding]::UTF8)
+$root = Split-Path -Parent $PSScriptRoot
+$head = & git -C $root rev-parse --verify HEAD
+if ($LASTEXITCODE -ne 0) { throw 'could not resolve current HEAD' }
+$head = ($head -join '').Trim()
+if ($head -notmatch '^[0-9a-f]{40,64}$') { throw 'invalid current HEAD commit id' }
 
-$env:GIT_TERMINAL_PROMPT = '0'
-# Ask git for the stored token by redirecting a request FILE into `git credential fill`.
-# A PowerShell pipeline into the native command is not reliable here: piping a string may arrive
-# without the terminating blank line (git then fails with "missing protocol field"), and an array
-# loses its empty entries. A file redirection always delivers the exact bytes (measured).
-$requestFile = [System.IO.Path]::GetTempFileName()
-[System.IO.File]::WriteAllText($requestFile, "protocol=https`nhost=github.com`n`n")
-$strict = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-$line = (cmd /c "git credential fill < `"$requestFile`"") 2>$null |
-    Where-Object { $_ -like 'password=*' } | Select-Object -First 1
-$ErrorActionPreference = $strict
-Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue
-if (-not $line) { throw "no stored credential for github.com" }
-$token = $line.Substring('password='.Length)
-if ([string]::IsNullOrWhiteSpace($token)) { throw "stored credential has an empty token" }
+# Send the exact request through Process stdin; never invoke cmd or print credentials.
+$startInfo = New-Object System.Diagnostics.ProcessStartInfo
+$startInfo.FileName = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+$startInfo.Arguments = 'credential fill'
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$startInfo.RedirectStandardInput = $true
+$startInfo.RedirectStandardOutput = $true
+$startInfo.RedirectStandardError = $true
+$startInfo.EnvironmentVariables['GIT_TERMINAL_PROMPT'] = '0'
+$startInfo.EnvironmentVariables['GCM_INTERACTIVE'] = 'Never'
+$process = New-Object System.Diagnostics.Process
+$process.StartInfo = $startInfo
+$credentialOutput = $null
+try {
+    if (-not $process.Start()) { throw 'could not start git credential fill' }
+    $outputTask = $process.StandardOutput.ReadToEndAsync()
+    $errorTask = $process.StandardError.ReadToEndAsync()
+    $process.StandardInput.Write("protocol=https`nhost=github.com`n`n")
+    $process.StandardInput.Close()
+    if (-not $process.WaitForExit(30000)) {
+        $process.Kill()
+        $process.WaitForExit()
+        throw 'git credential fill timed out'
+    }
+    $credentialOutput = $outputTask.GetAwaiter().GetResult()
+    $null = $errorTask.GetAwaiter().GetResult()
+    if ($process.ExitCode -ne 0) { throw 'git credential fill failed; credential output suppressed' }
+    $line = $credentialOutput -split "`r?`n" |
+        Where-Object { $_ -like 'password=*' } | Select-Object -First 1
+    if (-not $line) { throw 'no stored credential for github.com' }
+    $token = $line.Substring('password='.Length)
+    if ([string]::IsNullOrWhiteSpace($token)) { throw 'stored credential has an empty token' }
+}
+finally {
+    $credentialOutput = $null
+    $line = $null
+    $outputTask = $null
+    $errorTask = $null
+    $process.Dispose()
+}
 
 $headers = @{
     Authorization = "token $token"
@@ -55,6 +85,7 @@ catch {
 if ($null -eq $release) {
     $payload = @{
         tag_name   = $Tag
+        target_commitish = $head
         name       = $Name
         body       = $notes
         draft      = $false

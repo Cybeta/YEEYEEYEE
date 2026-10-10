@@ -25,7 +25,7 @@ public sealed record StaleReference(Guid EntityId, Guid VariantId, string Label,
 /// 三条刻意的取舍：
 /// 1. **没有记录的产物不报**（老产物、手放的素材）。没有可比的东西，硬报「过期」等于让用户
 ///    去重出一张可能是对的图。宁可漏报，不误报。
-/// 2. **出图之后才新加的引用不报**：那不是「你照着的那一版变了」，而是「这一镜后来多引了一张设定」。
+/// 2. 出图之后新增的引用会使已记录依据的产物过期；空引用快照也显式记录。
 /// 3. **锁定版本的引用不会因为变体内容变化而报警**：锁版本的意思就是「我就要那一版」，
 ///    指纹取的是版本快照的内容，变体再怎么改它都不变——这是对的，不是漏报。
 /// </summary>
@@ -48,6 +48,22 @@ public static class ReferenceStaleness
 
     /// <summary>引用解析不出来时的指纹标记。用不可能与真指纹相同的写法，免得被当成「没变」。</summary>
     private const string BrokenMarker = "\u0000broken";
+    private const string BaselineMarker = "\u0000recorded";
+
+    public static IReadOnlyList<StaleReference> OfAttachment(
+        WorkflowCanvasState canvas, WorkflowNode node, WorkflowAttachment attachment)
+    {
+        if (attachment.SourceFingerprints.Count == 0) return Array.Empty<StaleReference>();
+        return node.References.Where(reference =>
+        {
+            var content = canvas.ResolveReferenceContent(reference);
+            var current = content is null ? BrokenMarker : FingerprintOf(content);
+            return !attachment.SourceFingerprints.TryGetValue(KeyOf(reference), out var previous)
+                || previous != current;
+        }).Select(reference => new StaleReference(reference.EntityId, reference.VariantId,
+            canvas.ResolveReferenceContent(reference)?.Label ?? "（引用已失效）",
+            canvas.ResolveReferenceContent(reference) is null)).ToList();
+    }
 
     /// <summary>
     /// 为这个节点现在的引用拍一份指纹快照——**出图时记在产物上**，以后靠它判断过期。
@@ -57,7 +73,7 @@ public static class ReferenceStaleness
         ArgumentNullException.ThrowIfNull(canvas);
         ArgumentNullException.ThrowIfNull(node);
 
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        var result = new Dictionary<string, string>(StringComparer.Ordinal) { [BaselineMarker] = "1" };
         foreach (var reference in node.References)
         {
             var content = canvas.ResolveReferenceContent(reference);
@@ -89,9 +105,9 @@ public static class ReferenceStaleness
 
             foreach (var attachment in recorded)
             {
-                // 记录里没有这一条引用：说明它是出图**之后**才加的，不算「更新」（第 2 条取舍）。
-                if (!attachment.SourceFingerprints.TryGetValue(key, out var was)) continue;
-                if (string.Equals(was, current, StringComparison.Ordinal)) continue;
+                // 新引用不在生成时的快照中，同样需要重新生成。
+                if (attachment.SourceFingerprints.TryGetValue(key, out var was)
+                    && string.Equals(was, current, StringComparison.Ordinal)) continue;
                 // 同一条引用被多张产物记着，只报一次。
                 if (!seen.Add(key)) break;
 

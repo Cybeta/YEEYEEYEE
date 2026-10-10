@@ -999,10 +999,15 @@ function NodeContextMenu({ x, y, items, onPick, onClose }: {
   onPick: (item: NodeMenuItem) => void
   onClose: () => void
 }) {
+  const menuRef = useRef<HTMLDivElement>(null)
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
-    // 用捕获阶段：画布那边也监听指针事件，先收菜单再让别的逻辑跑，免得一次点击既关了菜单又改了选中。
-    const onDown = () => onClose()
+    // 用捕获阶段关闭菜单外的点击；菜单内的按下必须保留给按钮，否则菜单会在 click 前被卸载。
+    const onDown = (event: Event) => {
+      if (menuRef.current?.contains(event.target as Node)) return
+      onClose()
+    }
     window.addEventListener('keydown', onKey)
     window.addEventListener('pointerdown', onDown, true)
     window.addEventListener('wheel', onDown, { passive: true })
@@ -1014,7 +1019,7 @@ function NodeContextMenu({ x, y, items, onPick, onClose }: {
   }, [onClose])
 
   return (
-    <div className="df-menu" style={{ left: x, top: y }} onPointerDown={(event) => event.stopPropagation()}>
+    <div ref={menuRef} className="df-menu" style={{ left: x, top: y }} onPointerDown={(event) => event.stopPropagation()}>
       {items.map((item, index) => (
         <span key={item.id}>
           {/* 分组之间切一条线：上面是「这个节点能做什么」，下面才是「对节点本身做什么」。 */}

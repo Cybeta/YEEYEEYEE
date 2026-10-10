@@ -28,7 +28,14 @@ $artifacts = Join-Path $root 'artifacts'
 $publishDir = Join-Path $artifacts "publish-$Runtime"
 $zipPath = Join-Path $artifacts ("yeeeyee-{0}-{1}.zip" -f $Version, $Runtime)
 
-if (Test-Path $publishDir) { Remove-Item -LiteralPath $publishDir -Recurse -Force }
+if (Test-Path -LiteralPath $publishDir) {
+    $existingProjects = @(Get-ChildItem -LiteralPath $publishDir -Directory -Recurse -Force |
+        Where-Object { $_.Name -eq 'Projects' })
+    if ($existingProjects.Count -gt 0) {
+        throw "publish output contains existing Projects; refusing to clear it: $publishDir"
+    }
+    Remove-Item -LiteralPath $publishDir -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
 if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 
@@ -49,7 +56,16 @@ Write-Output ("publishing " + $Version + " for " + $Runtime + " ...")
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
 
 $exe = Join-Path $publishDir 'YEEYEEYEE.Desktop.Avalonia.exe'
-if (-not (Test-Path $exe)) { throw "publish output has no main executable: $exe" }
+if (-not (Test-Path $exe -PathType Leaf)) { throw "publish output has no main executable: $exe" }
+if ($Runtime -eq 'win-x64') {
+    foreach ($relativePath in @('tools\ffmpeg\win-x64\ffmpeg.exe', 'tools\ffmpeg\win-x64\LICENSE', 'tools\ffmpeg\win-x64\README.txt')) {
+        $requiredFile = Join-Path $publishDir $relativePath
+        if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf) -or
+            (Get-Item -LiteralPath $requiredFile).Length -eq 0) {
+            throw "publish output is missing a required FFmpeg file or it is empty: $requiredFile"
+        }
+    }
+}
 
 # Ship a README next to the exe so a recipient of the zip knows what this is.
 $readme = @(

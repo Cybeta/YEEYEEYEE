@@ -18,6 +18,13 @@ using YEEYEEYEE.Host;
 // 测试全部离线，不访问网络、不需要模型——报文形状用桩 HttpClient 拦下来检查。
 var tests = new (string Name, Action Run)[]
 {
+    ("资产依赖：必要参考过滤、容量、失败隔离与请求快照", AssetDependencyRegression),
+    ("资产需求：Agent确认、省略保留、旧数据与预览兼容", AssetRequirementsRegression),
+    ("资产提交：缺文件和超容量不发送HTTP请求", ImageReferencesFailBeforeHttp),
+    ("一键资产前检：Unknown 在补图前整批阻断，状态变化重验", OneClickUnknownPreflight),
+    ("视频资产前检：失效、版本缺失、图片缺失、采用首帧", VideoAssetPreflightReferences),
+    ("视频资产前检：空镜不强制角色，无引用必须显式确认", VideoAssetPreflightEmptyShot),
+    ("视频资产前检：引用待确认和历史保留，自检同源", VideoAssetPreflightVersions),
     ("提议解析：剥离操作块并读出 source", ParseReplyAndSource),
     ("版本采纳：只接受JSON布尔true并传递到执行器", ParseVersionAdopted),
     ("同一批里建节点后用标题建立连线", CreateNodesThenConnectInOneBatch),
@@ -104,6 +111,7 @@ var tests = new (string Name, Action Run)[]
     ("画布标签：编号不与已有画布撞名（标题即文件名）", CanvasTabRulesAreCollisionProof),
     ("画布标签：改名查重挡住空名、超长与重名", CanvasTabRenameGuardsNames),
     ("节点协助：沿连线收集上游设定并按类型给建议", NodeAssistCollectsUpstream),
+    ("节点协助：角色道具场景分镜使用领域化资产动作", NodeAssistUsesProductionAssetActions),
     ("节点协助素材：本体设定 → 上游 → 同镜 → 所属章节，叶子节点不再被判成没素材", NodeAssistMaterialsMergeFourSources),
     ("制作阶段：按阶段筛节点与统计真实数量", ProductionStagesFilterAndCount),
     ("章节拆分：按标题或长度拆文本，并按设定名匹配出场", ChapterSplitByHeadingAndLength),
@@ -118,6 +126,7 @@ var tests = new (string Name, Action Run)[]
     ("附件提示词：出图用的提示词随画布存住，老画布缺字段也能读", AttachmentPromptIsStoredAndReadable),
     ("出图方式：按剧情判文生图 / 图生图（合成底图 · 改稿 · 同场景连续性）", NodeImageModeFollowsStoryContinuity),
     ("角色参考图：三/四视图是标准、九视图不是；视图粘连负面词与逐字复用纪律", CharacterSheetFollowsTurnaroundStandard),
+    ("角色九视图：固定九格模板顺序、锁定字段与 NodeAssist 提示词合同", CharacterNineViewTemplateContract),
     ("模型配置多份：可同时启用多份、停用当前选中自动切换、密钥不落明文、旧配置自动迁移", SettingsProfilesMultiEnableAndSelection),
     ("模型配置：复制一份逐字段一致（含密钥与启用状态）", ProfileDuplicateCopiesEveryField),
     ("模型清单：地址按基础地址 / 完整 URL / Anthropic 推导，两种响应形状都能解析", ModelCatalogResolvesUrlAndParsesList),
@@ -142,6 +151,7 @@ var tests = new (string Name, Action Run)[]
     ("参考图上限：设置 / 池子 / 工作流三处取小，「0」与「没声明」不能混，note 要说对是谁定的", ReferenceCapResolverPicksTheTightestLimit),
     ("参考图手动指定：按实体+变体点名、先筛再裁、一张不勾要说成「你没勾」", ReferenceImagePlanHonoursHandPickedKeys),
     ("ComfyUI 绑定：每个底图入口按顺序各收一张参考图，给不满不拿同一张凑数", BinderFillsEveryImageSlotInOrder),
+    ("ComfyUI 绑定：首尾帧、高级控制素材和批量输出写入真实槽位，缺值保留模板", BinderWritesExplicitFramesControlsAndBatch),
     ("ComfyUI 绑定：合集型工作流（几组各自带输出）要按组填，不能把图平铺到前几个入口", BinderFillsImageGroupsInsteadOfFlattening),
     ("ComfyUI 绑定：「文件清单式」底图入口（多行文本框）要按行装全部参考图，空字段不算入口", ComfyUiImageListEntriesTakeEveryReference),
     ("ComfyUI 体检：引用的文件这台机器上没有要报出来（哨兵值不算文件），但不该触发让大模型认一认", ComfyUiAuditReportsFilesMissingFromTheServer),
@@ -152,7 +162,7 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 认提示词：中文包的 `提示词` 要认、正负不许指同一格、跳一跳要穿过中转、名字对不上时用图结构兜底", ComfyUiPromptSlotsFallBackToTheGraph),
     ("ComfyUI 体检：服务器上没有那个类型时只能说「判断不了」，不能说成「是我们转换丢的」", ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
-    ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；没记录的、新加的、锁版本的不报", ReferenceStalenessDetectsUpdatedSettings),
+    ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；新增引用要过期，没记录的旧数据与锁定版本兼容", ReferenceStalenessDetectsUpdatedSettings),
     ("AI 建实体：内容同时落到核心设定与默认变体，引用卡不再空白", AgentEntityContentReachesVariantAndCard),
     ("ID 校验：空 ID 与重复 ID 逐项报告", IdentityValidatorEmptyAndDuplicateIds),
     ("ID 校验：悬空边端点、父节点、工作树锚点与布局可选引用", IdentityValidatorDanglingReferences),
@@ -210,6 +220,8 @@ var tests = new (string Name, Action Run)[]
     ("转换 · 子图「输入直通到输出」要接到外面喂给容器那个输入的地方", ComfyUiConversionWiresContainerPassThrough),
     ("转换 · 旁路判定要认逗号分隔的联合类型（FLOAT,INT,BOOLEAN 也算接得上）", ComfyUiConversionBypassesThroughUnionTypedInputs),
     ("转换 · 固定选项的值是界面写法（Ref2VA — …）或数字下标时要纠正成它认的那个", ComfyUiConversionRepairsDecoratedComboValues),
+    ("转换 · Nunchaku Qwen fp4 仅在站点候选含匹配 int4 时修复", ComfyUiConversionRepairsNunchakuQuantization),
+    ("ComfyUI 导入体检：活动动态 COMBO 子字段递归校验类型、范围与候选", ComfyUiImportAuditValidatesActiveDynamicCombo),
     ("ComfyUI 导入体检：判断不了的那几处指名道姓，并分清「我们丢了 / 它自己断线 / 我不认识」", ComfyUiImportAuditNamesWhatWeDropped),
     ("ComfyUI 导入体检：大模型说它是直通/界面件，都要照它重转核对过才采用", ComfyUiImportAuditOnlyKeepsVerifiedModelRules),
     ("ComfyUI 导入整链：拉取→体检→让模型认→重转→落盘（真实 HTTP 与磁盘）", ComfyUiImportRepairsThroughTheWholeChain),
@@ -308,6 +320,10 @@ var tests = new (string Name, Action Run)[]
     ("出视频：密钥绝不外送到别的域（预签名 CDN 只收字节）", VideoProviderNeverSendsKeyToForeignHost),
     ("出视频：容器按文件头认（mp4 / webm / 认不出退回 mp4）", VideoFormatSnifferReadsContainer),
     ("出视频：地址 + 模型齐了才给真执行方，缺的时候指明去哪里配", VideoProviderFactoryNeedsEndpointAndModel),
+    ("出视频：明确选视频池时不被默认配置替换，并按能力匹配", VideoProviderFactorySelectsChosenPool),
+    ("出视频：明确选 ComfyUI 工作流时绝不回退 HTTP", VideoProviderFactoryKeepsChosenWorkflow),
+    ("出视频：选定来源缺能力时提交前就标记不匹配", VideoProviderFactoryReportsMissingCapability),
+    ("出视频能力：ComfyUI 槽位按真实入口声明文生、首帧、首尾帧和视频参考", ComfyUiVideoCapabilitiesFollowRealSlots),
     ("节点协助：出视频那条可不可点跟着执行方走，没素材仍要挡住", NodeAssistVideoFollowsProviderAvailability),
     ("裂纹卡自动重出：只挑裂纹那几张，且受轮数上限约束", CrackedRedrawPicksOnlyCrackedWithinCap),
     ("一键：时长与池子档位对不上要提醒，没写就交给服务端", OneClickDurationFollowsPoolTier),
@@ -320,8 +336,13 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 拉取：单份读不到或转不了只让那一份失败，其余照常，原因逐份记着", ComfyUiLibraryIsolatesFailures),
     ("ComfyUI 落盘：正文按份落文件、站点文件里不带正文，重新导入保住用户停用与推荐", ComfyUiLibraryInstallKeepsUserChoices),
     ("ComfyUI 落盘：孤儿正文被清掉，删站点连正文目录一起删", ComfyUiLibraryPrunesAndDeletesPayloads),
+    ("ComfyUI 官方宿主：缺失时 UI 明确失败，API 直接读取，导出异常不连坐", ComfyUiLibraryExporterContract),
+    ("ComfyUI 安全重导删除：失败保旧、成功换版、提交失败不裁剪、删除后可重试清理", ComfyUiLibrarySafeReimportAndDelete),
+    ("ComfyUI 部分重导：未选条目原样保留，过期内存删除以磁盘为准", ComfyUiLibraryPartialReimportAndDelete),
     ("ComfyUI 槽位：从四份真机样本里认出参数该放哪，认不出的如实说", ComfyUiBinderDetectsOnRealSamples),
     ("ComfyUI 槽位：按一次调用绑值，不改模板本身，连线槽位不硬写", ComfyUiBinderBindsWithoutDamagingTemplate),
+    ("ComfyUI Binder 官方 A01：独立宽高常量、反向词缺省与显式清空", ComfyUiBinderOfficialA01),
+    ("ComfyUI Binder 官方 C19：追踪用户输入并保留系统提示词及连线", ComfyUiBinderOfficialC19),
     ("ComfyUI 槽位：中文画面比例和真实随机种子输入名可绑定", ComfyUiBinderBindsChineseAspectAndRealSeedInputs),
     ("ComfyUI 导入：从服务端 COMBO 声明读取完整画面比例选项", ComfyUiImportReadsDeclaredAspectOptions),
     ("ComfyUI 当前这一台：切换把地址与底模写成站点那一份，同一台不重复写", ComfyUiActivationProjectsSiteOntoConfig),
@@ -339,15 +360,20 @@ var tests = new (string Name, Action Run)[]
     ("技能参考图：越界/槽位没图要报降级说明，不静默丢掉", SkillReferenceOutOfRangeIsReportedNotSilentlyDropped),
 };
 
+// 可按测试名或方法名筛选，便于只运行相关回归。
+var selectedTests = args.Length == 0 ? tests : tests.Where(test => args.Any(filter =>
+    test.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)
+    || test.Run.Method.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))).ToArray();
+if (selectedTests.Length == 0) throw new ArgumentException("没有匹配的测试。");
 var failures = new List<string>();
-foreach (var test in tests)
+foreach (var test in selectedTests)
 {
     try { test.Run(); Console.WriteLine($"PASS {test.Name}"); }
     catch (Exception ex) { failures.Add($"FAIL {test.Name}: {ex.Message}"); Console.WriteLine(failures[^1]); }
 }
 
 if (failures.Count > 0) Environment.ExitCode = 1;
-else Console.WriteLine($"全部 {tests.Length} 项 Agent 测试通过。");
+else Console.WriteLine($"全部 {selectedTests.Length} 项 Agent 测试通过。");
 
 /// <summary>模型按协议给出的回复：自然语言 + 末尾的操作块。</summary>
 static string SampleReply() => """
@@ -767,6 +793,10 @@ static void SolutionCoversEveryProject()
         .ToList();
     Expect(onDisk.Count >= 10, "仓库里认出的 csproj 太少：" + onDisk.Count);
 
+    // 根目录下带日期的 WebView 实验是独立验证工程，不属于主解决方案。
+    // 仅排除这一明确命名空间；正式新增项目（包括未跟踪项目）仍然会报漏项。
+    onDisk = onDisk.Where(path => !System.Text.RegularExpressions.Regex.IsMatch(
+        path, @"^webview-[^/]+-\d{8}/", System.Text.RegularExpressions.RegexOptions.IgnoreCase)).ToList();
     var missing = onDisk.Where(path => !declared.Contains(path)).ToList();
     var extra = declared.Where(path => !onDisk.Contains(path, StringComparer.OrdinalIgnoreCase)).ToList();
     Expect(missing.Count == 0, "这些项目没装进 YEEYEEYEE.slnx（构建覆盖不到它们）：" + string.Join("、", missing));
@@ -2355,9 +2385,214 @@ static AiProviderConfig ConfigFor(AiApiFormat format) => new()
     SendSamplingParameters = true
 };
 
-/// <summary>
-/// 断言为真，否则抛出带消息的异常；测试里统一走它，省去各处手写判断。
-/// </summary>
+/// <summary>依赖完整性、请求依据和本轮失败隔离的离线回归。</summary>
+static void AssetDependencyRegression()
+{
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Prop, Name = "剑" };
+    var variant = entity.CreateVariant("默认");
+    variant.Attachments.Add(new() { Kind = AttachmentKind.Image, Reference = "prop" });
+    canvas.Entities.Add(entity);
+    var shot = new WorkflowNode { Category = NodeCategory.Storyboard,
+        AssetRequirements = new() { Character = AssetNeed.None, Scene = AssetNeed.None, Prop = AssetNeed.Required } };
+    var batch = new NodeImageBatch { SourceFingerprints = ReferenceStaleness.Snapshot(canvas, shot) };
+    shot.References.Add(new() { EntityId = entity.Id, VariantId = variant.Id });
+    var frame = new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "frame",
+        SourceFingerprints = new(batch.SourceFingerprints) };
+    shot.Attachments.Add(frame);
+    Expect(ReferenceStaleness.OfAttachment(canvas, shot, frame).Count == 1, "提交至采用之间新增引用也使首帧过期，空快照不能被当前引用重拍");
+    Expect(!GenerationAudit.CheckVideoAssets(canvas, shot, a => a.Reference).CanSubmit(), "过期采用首帧阻断视频");
+    Expect(GenerationAudit.CheckImageSubmission(canvas, shot, a => a.Reference, Array.Empty<string>(), 2).Any(e => e.Contains("未包含")), "最终请求遗漏必要参考阻断");
+    Expect(GenerationAudit.CheckImageAssets(canvas, shot, a => a.Reference, 0).Any(e => e.Contains("禁止裁剪")), "容量不足阻断");
+    Expect(GenerationAudit.CheckImageAssets(canvas, shot, a => a.Reference, onlyKeys: Array.Empty<string>()).Any(e => e.Contains("取消勾选")), "手动过滤阻断");
+    Expect(GenerationAudit.CheckImageAssets(canvas, shot, a => a.Reference, supportsReferences: false).Any(e => e.Contains("禁止降级")), "来源不支持阻断");
+    Expect(GenerationAudit.CheckImageSubmission(canvas, shot, a => a.Reference, new[] { "prop" }, 1).Count == 0, "完整必要参考允许首帧重出");
+    var failed = new HashSet<(Guid, Guid)> { (entity.Id, variant.Id) };
+    Expect(GenerationAudit.DependsOnFailedAssets(canvas, shot, failed), "本轮失败即使留有旧图也阻断依赖镜头");
+    Expect(!GenerationAudit.DependsOnFailedAssets(canvas, new WorkflowNode(), failed), "不相关镜头不连坐");
+    frame.SourceFingerprints = ReferenceStaleness.Snapshot(canvas, shot);
+    Expect(GenerationAudit.CheckVideoAssets(canvas, shot, a => a.Reference).CanSubmit(), "采用新依据后解除过期");
+    shot.Attachments.Insert(0, new() { Kind = AttachmentKind.Image, Reference = "old", SourceFingerprints = new(batch.SourceFingerprints) });
+    Expect(GenerationAudit.CheckVideoAssets(canvas, shot, a => a.Reference).CanSubmit(), "旧历史附件不能污染当前采用首帧");
+}
+
+static void AssetRequirementsRegression()
+{
+    var canvas = new WorkflowCanvasState();
+    var actions = AgentActionParser.Parse("""{"actions":[{"kind":"create_node","title":"空镜","nodeCategory":"storyboard","assetRequirements":{"character":"none","scene":"required","prop":"none"}}]}""").Actions;
+    var result = AgentActionExecutor.Apply(actions, canvas, null);
+    Expect(result.Errors.Count == 0 && canvas.Nodes.Count == 1, "Agent需求应可执行");
+    var shot = canvas.Nodes[0];
+    Expect(shot.AssetRequirements.Scene == AssetNeed.Required && shot.AssetRequirements.Character == AssetNeed.None, "Agent写入明确需求");
+    AgentActionExecutor.Apply(AgentActionParser.Parse("""{"actions":[{"kind":"update_node","target":"空镜","content":"改写"}]}""").Actions, canvas, null);
+    Expect(shot.AssetRequirements.Scene == AssetNeed.Required, "省略需求的更新不得清空确认");
+    var clone = CanvasPreviewBuilder.Clone(canvas);
+    Expect(clone.Nodes[0].AssetRequirements.Scene == AssetNeed.Required, "预览复制保留确认");
+    var restored = JsonSerializer.Deserialize<WorkflowCanvasState>(JsonSerializer.Serialize(canvas))!;
+    Expect(restored.Nodes[0].AssetRequirements.Prop == AssetNeed.None, "需求保存重载保留");
+    var old = JsonSerializer.Deserialize<WorkflowNode>("""{"Title":"老镜头","Content":"保留正文","Attachments":[{"Reference":"old.png"}]}""")!;
+    Expect(old.AssetRequirements.Character == AssetNeed.Unknown && old.Content == "保留正文" && old.Attachments[0].Reference == "old.png", "旧数据内容保留，缺字段默认未知");
+    var malformed = AgentActionParser.Parse("""{"actions":[{"kind":"update_node","target":"空镜","assetRequirements":{"character":true,"scene":"typo"}}]}""").Actions[0];
+    Expect(malformed.AssetRequirements!.Character == AssetNeed.Unknown && malformed.AssetRequirements.Scene == AssetNeed.Unknown, "非法或遗漏需求不能虚构确认");
+}
+
+static void ImageReferencesFailBeforeHttp()
+{
+    var calls = 0;
+    using var client = new HttpClient(new StubHttpHandler(_ => { calls++; return JsonResponse("{}"); }));
+    var provider = new OpenAiCompatibleImageProvider(new AiProviderConfig {
+        ImageEndpoint = "https://example.invalid/v1", ImageModel = "test", ImageMaxReferenceImages = 1 }, client);
+    var missing = provider.GenerateAsync(new ImageGenerationRequest { Prompt = "测试", ReferenceImages = new[] { "missing-" + Guid.NewGuid() + ".png" } }).GetAwaiter().GetResult();
+    Expect(missing.Status == ImageGenerationStatus.Failed && calls == 0, "缺文件必须在HTTP前失败，不得降级收费");
+    var valid = typeof(WorkflowNode).Assembly.Location;
+    var excess = provider.GenerateAsync(new ImageGenerationRequest { Prompt = "测试", ReferenceImages = new[] { valid, valid } }).GetAwaiter().GetResult();
+    Expect(excess.Status == ImageGenerationStatus.Failed && calls == 0, "超容量不得裁剪后提交");
+
+    // 执行服务故意不提供：拒绝路径若误提交，将直接抛异常。
+    var config = new AiProviderConfig { ComfyUiBaseUrl = "http://example.invalid", ComfyUiCheckpoint = "test.safetensors" };
+    var comfy = new ComfyUiImageProvider(null!, config, new SessionContext());
+    var comfyMissing = comfy.GenerateAsync(new ImageGenerationRequest { Prompt = "测试", ReferenceImages = new[] { "missing-" + Guid.NewGuid() + ".png" } }).GetAwaiter().GetResult();
+    Expect(comfyMissing.Status == ImageGenerationStatus.Failed && comfyMissing.Error.Contains("参考图不存在"), "ComfyUI缺失参考不得进入执行服务");
+    var comfyExcess = comfy.GenerateAsync(new ImageGenerationRequest { Prompt = "测试", ReferenceImages = new[] { valid, valid } }).GetAwaiter().GetResult();
+    Expect(comfyExcess.Status == ImageGenerationStatus.Failed && comfyExcess.Error.Contains("禁止忽略"), "ComfyUI内置单图模板超限不得进入执行服务");
+    var multi = new ComfyUiImageProvider(null!, config, new SessionContext(),
+        new ComfyUiWorkflowSlots { ImageNodeId = "1", ImageListCapacity = 3 });
+    Expect(multi.ReferenceCapacity.MaxImages == 3 && multi.Capabilities.Contains(GenerationCapability.MultiReferenceImage), "已识别多参考工作流必须按实际容量声明能力");
+    var textOnly = new ComfyUiImageProvider(null!, config, new SessionContext(), new ComfyUiWorkflowSlots());
+    Expect(textOnly.ReferenceCapacity.MaxImages == 0 && !textOnly.Capabilities.Contains(GenerationCapability.ImageToImage), "无参考入口不能声明图生图能力");
+}
+
+static void OneClickUnknownPreflight()
+{
+    var canvas = new WorkflowCanvasState();
+    var shot = new WorkflowNode { Category = NodeCategory.Storyboard, Title = "待确认镜头" };
+    canvas.Nodes.Add(shot);
+    var entity = new WorkflowEntity { Kind = EntityKind.Prop, Name = "剑" };
+    var variant = entity.CreateVariant("默认");
+    canvas.Entities.Add(entity);
+    shot.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
+    var setting = new GenerationAuditItem(GenerationStage.SettingImage, Guid.Empty, "", "剑", "缺图", true,
+        ReferenceEntityId: entity.Id, ReferenceVariantId: variant.Id);
+    var frame = new GenerationAuditItem(GenerationStage.StoryboardImage, shot.Id, shot.Title, "首帧", "缺图", true);
+    var request = new OneClickRunRequest(GenerationIntent.Images, true, new[] { setting, frame },
+        Array.Empty<GenerationAuditItem>(), null, null, 0);
+    Expect(request.CheckAssetRequirements(canvas).Count == 3, "整批在任何设定补图之前阻断未知需求");
+    Expect((request with { ImageItems = new[] { setting } }).CheckAssetRequirements(canvas).Count == 3,
+        "仅勾选资源补图仍检查其分镜消费者");
+    shot.AssetRequirements = new() { Character = AssetNeed.None, Scene = AssetNeed.None, Prop = AssetNeed.Required };
+    canvas.Nodes.Add(new WorkflowNode { Category = NodeCategory.Storyboard, Title = "无关镜头" });
+    Expect(request.CheckAssetRequirements(canvas).Count == 0, "已确认需求可补缺图，无关Unknown不阻断");
+    shot.AssetRequirements.Prop = AssetNeed.Unknown;
+    Expect(request.CheckAssetRequirements(canvas).Count == 1, "窗口打开期间变化必须重新阻断");
+    canvas.Nodes.Remove(shot);
+    Expect(request.CheckAssetRequirements(canvas).Any(e => e.Contains("不存在")), "节点删除后旧清单不能开跑");
+}
+
+static void VideoAssetPreflightReferences()
+{
+    var canvas = new WorkflowCanvasState();
+    var entity = new WorkflowEntity { Kind = EntityKind.Prop, Name = "剑" };
+    var variant = entity.CreateVariant("默认");
+    canvas.Entities.Add(entity);
+    var shot = new WorkflowNode { Category = NodeCategory.Storyboard,
+        AssetRequirements = new() { Character = AssetNeed.None, Scene = AssetNeed.None, Prop = AssetNeed.Required } };
+    canvas.Nodes.Add(shot);
+    var reference = new NodeReference { EntityId = entity.Id, VariantId = variant.Id };
+    shot.References.Add(reference);
+    string? Locate(WorkflowAttachment a) => a.Reference == "missing" ? null : a.Reference;
+    StoryboardVideoPreflight Check(string? frame = null) => GenerationAudit.CheckVideoAssets(canvas, shot, Locate, frame);
+    Expect(Check().Errors.Any(e => e.Contains("无可用图片")) && !Check().CanSubmit(true), "必要引用缺图必须阻断，确认不能覆盖硬错误");
+    variant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "prop" });
+    Expect(Check().Errors.Any(e => e.Contains("采用首帧")), "设定图不能冒充首帧，候选结果未采用也不能提交");
+    shot.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "frame" });
+    Expect(!Check("frame").CanSubmit(true) && Check().Errors.Any(e => e.Contains("无法证明必要参考覆盖")),
+        "历史无快照首帧不能通过确认需求绕过");
+    shot.Attachments[0].SourceFingerprints = ReferenceStaleness.Snapshot(canvas, shot);
+    Expect(Check("frame").CanSubmit(), "有效依据的仅道具引用即可，不强制角色");
+    shot.Attachments[0].SourceFingerprints.Clear();
+    shot.Attachments[0].SourceFingerprints["\u0000recorded"] = "1";
+    Expect(!Check().CanSubmit(true), "空快照不能证明后来新增的必要引用");
+    shot.Attachments[0].SourceFingerprints = ReferenceStaleness.Snapshot(canvas, shot);
+    var second = new WorkflowEntity { Kind = EntityKind.Prop, Name = "鞘" };
+    var secondVariant = second.CreateVariant("默认");
+    secondVariant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "sheath" });
+    canvas.Entities.Add(second);
+    var secondReference = new NodeReference { EntityId = second.Id, VariantId = secondVariant.Id };
+    shot.References.Add(secondReference);
+    Expect(!Check().CanSubmit(true), "部分必要引用有依据仍不足以放行");
+    shot.Attachments[0].SourceFingerprints = ReferenceStaleness.Snapshot(canvas, shot);
+    Expect(Check().CanSubmit(), "所有必要参考有有效依据才可提交");
+    shot.References.Remove(secondReference);
+    shot.Attachments[0].SourceFingerprints = ReferenceStaleness.Snapshot(canvas, shot);
+    Expect(!Check("prop").CanSubmit(), "不能把设定图传作首帧");
+    reference.VariantVersionId = Guid.NewGuid();
+    Expect(Check().Errors.Any(e => e.Contains("缺失指定版本")), "不得回退到有图的当前变体");
+    reference.VariantVersionId = variant.Versions[0].Id;
+    Expect(Check().Errors.Any(e => e.Contains("无可用图片")), "指定版本没有图，当前变体有图也阻断");
+    reference.VariantVersionId = null;
+    variant.Attachments[0].Reference = "missing";
+    Expect(!Check().CanSubmit(), "图片文件丢失必须阻断");
+    variant.Attachments[0].Reference = "prop";
+    entity.ProjectMissingReason = "已删除";
+    Expect(Check().Errors.Any(e => e.Contains("失效引用")), "项目权威资产缺失必须阻断");
+    entity.ProjectMissingReason = null;
+    reference.VariantId = Guid.NewGuid();
+    Expect(Check().Errors.Any(e => e.Contains("失效引用")), "变体不存在不能被槽位过滤隐藏");
+    reference.VariantId = variant.Id;
+    shot.Attachments[0].Reference = "missing";
+    Expect(!Check().CanSubmit(), "采用首帧文件丢失必须阻断");
+}
+
+static void VideoAssetPreflightEmptyShot()
+{
+    foreach (var id in new[] { "chapter-decomposition", "storyboard-generation" })
+    {
+        var skill = BuiltInSkills.All.Single(s => s.Id == id);
+        Expect(skill.OutputFormat.Contains("create_entity") && skill.OutputFormat.Contains("entityTargets")
+            && skill.OutputFormat.Contains("assetRequirements") && skill.OutputFormat.Contains("unknown"),
+            "拆分技能必须统一资源库与需求协议：" + id);
+    }
+    var canvas = new WorkflowCanvasState();
+    var shot = new WorkflowNode { Category = NodeCategory.Storyboard, Content = "空镜，雨中的庭院" };
+    var check = GenerationAudit.CheckVideoAssets(canvas, shot, a => a.Reference);
+    Expect(check.Errors.Count == 3 && !check.CanSubmit(true), "空引用和提示词不能推断需求，未知不可临时绕过");
+    shot.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "frame" });
+    Expect(!GenerationAudit.CheckVideoAssets(canvas, shot, a => a.Reference).CanSubmit(true), "有首帧也不能免除需求确认");
+    shot.AssetRequirements = new() { Character = AssetNeed.None, Scene = AssetNeed.None, Prop = AssetNeed.None };
+    Expect(GenerationAudit.CheckVideoAssets(canvas, shot, a => a.Reference).CanSubmit(), "明确空镜允许无角色和无道具");
+    Expect(GenerationAudit.CheckImageAssets(canvas, shot, a => a.Reference).Count == 0, "首帧与视频共用需求确认");
+}
+
+static void VideoAssetPreflightVersions()
+{
+    var canvas = new WorkflowCanvasState();
+    var chapter = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = "第1章" };
+    canvas.WorkTree.Add(chapter);
+    var entity = new WorkflowEntity { Kind = EntityKind.Scene, Name = "庭院" };
+    var variant = entity.CreateVariant("默认");
+    variant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "scene" });
+    var v2 = variant.Commit("基准图");
+    variant.Description = "更新庭院";
+    variant.Commit("更新");
+    canvas.Entities.Add(entity);
+    var shot = new WorkflowNode { Category = NodeCategory.Storyboard, WorkTreeItemId = chapter.Id,
+        AssetRequirements = new() { Character = AssetNeed.None, Scene = AssetNeed.Required, Prop = AssetNeed.None } };
+    shot.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = v2.Id });
+    shot.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "frame" });
+    canvas.Nodes.Add(shot);
+    var check = GenerationAudit.CheckVideoAssets(canvas, shot, a => a.Reference);
+    Expect(check.Errors.Any(e => e.Contains("引用待确认")) && !check.CanSubmit(true), "待确认不可绕过");
+    var report = GenerationAudit.Build(canvas, shot, GenerationIntent.Video, _ => true);
+    Expect(report.VideoAssetIssues.Any(i => i.Reason.Contains("引用待确认")), "自检与提交前检同源");
+    var completeProducts = report with { Layers = Array.Empty<GenerationAuditLayer>() };
+    Expect(!completeProducts.IsClean && completeProducts.Describe().Contains("视频资产前置检查"),
+        "产物齐全但资产前检有问题时不得显示为检查通过");
+    Expect(report.ToText(null).Contains(GenerationAudit.SingleImageVideoNote), "自检说明单图接口资产先用于首帧");
+    shot.VersionDecision = VersionDecision.KeepHistorical;
+    shot.Attachments[0].SourceFingerprints = ReferenceStaleness.Snapshot(canvas, shot);
+    Expect(GenerationAudit.CheckVideoAssets(canvas, shot, a => a.Reference).CanSubmit(), "明确历史保留允许有效旧版");
+}
+
 static void Expect(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
 
 /// <summary>这段调用该抛 ArgumentOutOfRangeException 吗。用来钉「越界必须报错，不能静默夹到边界」。</summary>
@@ -2549,6 +2784,15 @@ static string ComfyUiObjectInfoFixture()
 static string ComfyUiUiFixture(string tag) =>
     File.ReadAllText(Path.Combine(ComfyUiFixtureDir(), tag + ".ui.json"), Encoding.UTF8);
 
+// 只替代官方前端宿主：返回预先导出的 API 样本，绝不调用 C# 转换器伪造官方结果。
+static ComfyUiFrontendExporterFactory FixtureExporterFactory()
+{
+    var samples = new[] { "T01", "T03", "T04", "G01" }.Select(tag => (
+        Ui: JsonNode.Parse(ComfyUiUiFixture(tag))!.AsObject(),
+        Api: JsonNode.Parse(File.ReadAllText(Path.Combine(ComfyUiFixtureDir(), tag + ".api.json")))!.AsObject())).ToArray();
+    return (baseUrl, workerId) => new FixtureComfyUiExporter(samples);
+}
+
 /// <summary>本机技能目录换成临时目录（站点文件与工作流正文都写在它下面）。</summary>
 static void WithSiteDirectory(string directory, Action body)
 {
@@ -2585,7 +2829,11 @@ static string NewTempDirectory(string tag)
 /// </summary>
 static void ComfyUiLibraryFetchesAndClassifies()
 {
-    var server = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
+    var server = new ComfyUiStubServer
+    {
+        ObjectInfo = ComfyUiObjectInfoFixture(),
+        SystemStats = """{"system":{"comfyui_version":"0.0.0-test"},"devices":[{"name":"NVIDIA RTX A10"}]}"""
+    };
     // 同一家族放两份（11 节点 vs 16 节点），用来验「推荐挑节点最少的那一份」。
     server.Add("A图像-Qwen生成/简单文生图.json", ComfyUiUiFixture("T01"));
     server.Add("A图像-Qwen生成/复杂三视图.json", ComfyUiUiFixture("T04"));
@@ -2598,7 +2846,7 @@ static void ComfyUiLibraryFetchesAndClassifies()
 
     var progress = new SyncProgress<ComfyUiLibraryProgress>();
     using var http = new HttpClient(server.Handler());
-    var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, progress, CancellationToken.None)
+    var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, progress, CancellationToken.None, exporterFactory: FixtureExporterFactory())
         .GetAwaiter().GetResult();
 
     Expect(result.Workflows.Count == 5, "应拉回 5 份工作流，实际 " + result.Workflows.Count);
@@ -2627,7 +2875,7 @@ static void ComfyUiLibraryFetchesAndClassifies()
     // 推荐：每个「种类 + 家族」各一份，组内挑节点最少的。
     Expect(simple.Recommended, "同家族里 11 节点的应胜过 16 节点的");
     Expect(!Of("A图像-Qwen生成/复杂三视图.json").Recommended, "同家族只能有一个推荐");
-    Expect(video.Recommended && generic.Recommended && tools.Recommended, "每个家族各推一份");
+    Expect(video.Recommended && generic.Recommended && !tools.Recommended && tools.BrokenInputs == 2, "每个家族各推一份：" + string.Join("；", result.Workflows.Select(w => $"{w.Key}: 推荐={w.Recommended}, 丢失={w.DroppedInputs}, 断线={w.BrokenInputs}, 未知={w.UncertainInputs}, 文件={w.MissingFiles} {ComfyUiWorkflowHealth.Describe(w)}")) + "\n" + result.Audit?.Describe());
     var groups = result.Workflows.Where(w => w.Recommended).Select(w => (w.Kind, w.Folder)).ToList();
     Expect(groups.Count == groups.Distinct().Count(), "同一组里不得出现两个推荐：" + string.Join("；", groups));
 
@@ -2637,16 +2885,27 @@ static void ComfyUiLibraryFetchesAndClassifies()
     Expect(!result.Payloads[simple.Key].Contains("\"widgets_values\""),
         "正文里不该留网页格式的 widgets_values（那是没转干净的迹象）");
 
-    // 进度：先报一次「正在拉节点定义」（那一步是二十多 MB，最慢也最该让用户看见），再逐份报。
+    // 进度：节点定义一次，每份开始与完成各一次；并行 worker 的回调到达顺序不作保证。
     var seen = progress.Seen;
-    Expect(seen.Count == 6, "应先报一次节点定义、再逐份报，共 6 次，实际 " + seen.Count);
+    Expect(seen.Count == 11, "应报一次节点定义、五次开始和五次完成，共 11 次，实际 " + seen.Count);
+    var started = seen.Skip(1).Where(item => result.Workflows.Any(w => w.Key == item.Current)).ToList();
+    Expect(started.Count == 5 && started.Select(item => item.Current).Distinct().Count() == 5,
+        "每份必须恰好报告一次开始，不能漏报或重复");
+    Expect(started.All(item => item.Total == 5 && item.Done >= 0 && item.Done < 5), "开始进度的计数与总数必须合法");
+    var completed = seen.Skip(1).Where(item => result.Workflows.Any(w => w.Title == item.Current)).ToList();
+    Expect(completed.Count == 5 && completed.Select(item => item.Current).Distinct().Count() == 5
+        && completed.All(item => item.Total == 5), "每份必须恰好报告一次完成且总数为 5");
     Expect(seen[0].Done == 0 && seen[0].Current.Contains("object_info"),
         "第一次应报「正在拉节点定义」，实际 " + seen[0].Done + "/" + seen[0].Total + " " + seen[0].Current);
     Expect(seen[^1].Done == 5 && seen[^1].Total == 5, "最后一次进度应是 5/5，实际 "
         + seen[^1].Done + "/" + seen[^1].Total);
-    Expect(seen.Skip(1).Select(item => item.Done).SequenceEqual(new[] { 1, 2, 3, 4, 5 }),
-        "逐份进度应从 1 数到 5：" + string.Join("、", seen.Skip(1).Select(item => item.Done)));
+    Expect(completed.Select(item => item.Done).Order().SequenceEqual(new[] { 1, 2, 3, 4, 5 }),
+        "逐份进度应从 1 数到 5：" + string.Join("、", completed.Select(item => item.Done)));
     Expect(result.Notes.Any(note => note.Contains("节点定义")), "报告里要说清节点定义有多大：" + string.Join("；", result.Notes));
+    Expect(result.DeviceCapabilities.NunchakuQuantization == ComfyUiNunchakuQuantization.Int4,
+        "导入前应从 /system_stats 识别 A10 的 int4 策略");
+    Expect(server.Requests.Any(request => request.Contains("system_stats", StringComparison.Ordinal)),
+        "导入工作流前必须请求 /system_stats");
 }
 
 /// <summary>
@@ -2657,7 +2916,7 @@ static void ComfyUiLibraryEndpointShapes()
     var server = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
     server.Add("T-图像-Krea/T01-写实.json", ComfyUiUiFixture("T01"));
     using var http = new HttpClient(server.Handler());
-    var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None)
+    var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None, exporterFactory: FixtureExporterFactory())
         .GetAwaiter().GetResult();
     Expect(result.Workflows.Count == 1 && result.Workflows[0].Converted,
         "一份工作流都没拉到：" + (result.Workflows.Count == 0 ? "空清单" : result.Workflows[0].Error));
@@ -2680,7 +2939,7 @@ static void ComfyUiLibraryEndpointShapes()
     var legacy = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture(), WithoutApiPrefix = true };
     legacy.Add("T-图像-Krea/T01-写实.json", ComfyUiUiFixture("T01"));
     using var legacyHttp = new HttpClient(legacy.Handler());
-    var legacyResult = ComfyUiLibrary.FetchAsync("https://comfy.example.com/", legacyHttp, null, CancellationToken.None)
+    var legacyResult = ComfyUiLibrary.FetchAsync("https://comfy.example.com/", legacyHttp, null, CancellationToken.None, exporterFactory: FixtureExporterFactory())
         .GetAwaiter().GetResult();
     Expect(legacyResult.Workflows.Count == 1 && legacyResult.Workflows[0].Converted,
         "老版（没有 /api 前缀）也要能读："
@@ -2708,7 +2967,7 @@ static void ComfyUiLibraryIsolatesFailures()
 
     using var http = new HttpClient(fake.Handler());
     // 一份坏掉不该把整次导入掀翻：315 份里坏一两份是常态。
-    var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None)
+    var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None, exporterFactory: FixtureExporterFactory())
         .GetAwaiter().GetResult();
 
     Expect(result.Workflows.Count == 3, "三份都要有条目（坏的也要留下，不能默默消失）");
@@ -2751,7 +3010,7 @@ static void ComfyUiLibraryInstallKeepsUserChoices()
         server.Add("G视频-Wan图生/图生视频.json", ComfyUiUiFixture("G01"));
 
         using var http = new HttpClient(server.Handler());
-        var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None)
+        var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None, exporterFactory: FixtureExporterFactory())
             .GetAwaiter().GetResult();
 
         var (site, error) = ComfyUiLibrary.Install(result, "我的 ComfyUI", "sd_xl_base_1.0.safetensors", null);
@@ -2785,7 +3044,9 @@ static void ComfyUiLibraryInstallKeepsUserChoices()
         var pool = site.Workflows.Where(workflow => workflow.Folder == "A图像-Qwen生成")
             .OrderBy(workflow => workflow.Key, StringComparer.Ordinal).ToList();
         var autoRecommended = pool.Single(workflow => workflow.Recommended);
-        var userPicked = pool.First(workflow => workflow.Key != autoRecommended.Key);
+        var userPicked = pool.First(workflow => workflow.Key != autoRecommended.Key
+            && workflow.DroppedInputs == 0 && workflow.BrokenInputs == 0
+            && workflow.UncertainInputs == 0 && workflow.MissingFiles == 0);
         var disabled = pool.First(workflow => workflow.Key != autoRecommended.Key && workflow.Key != userPicked.Key);
         disabled.Enabled = false;
         foreach (var workflow in site.Workflows) workflow.Recommended = false;
@@ -2835,7 +3096,7 @@ static void ComfyUiLibraryPrunesAndDeletesPayloads()
         server.Add("A图像-Qwen生成/复杂三视图.json", ComfyUiUiFixture("T04"));
 
         using var http = new HttpClient(server.Handler());
-        var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None)
+        var result = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, null, CancellationToken.None, exporterFactory: FixtureExporterFactory())
             .GetAwaiter().GetResult();
         var (site, error) = ComfyUiLibrary.Install(result, "我的 ComfyUI", "sd_xl.safetensors", null);
         Expect(site is not null && error.Length == 0, "落盘失败：" + error);
@@ -2861,6 +3122,118 @@ static void ComfyUiLibraryPrunesAndDeletesPayloads()
         Expect(SiteCatalog.TryDelete(site, out var deleteError), "删站点失败：" + deleteError);
         Expect(!File.Exists(Path.Combine(SiteCatalog.Directory, site.Id + ".json")), "站点文件该没了");
         Expect(!Directory.Exists(payloadDirectory), "正文目录该跟着站点一起删：" + payloadDirectory);
+    });
+}
+
+static void ComfyUiLibraryExporterContract()
+{
+    var server = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
+    server.Add("image/ui.json", ComfyUiUiFixture("T01"));
+    server.Add("image/api.json", File.ReadAllText(Path.Combine(ComfyUiFixtureDir(), "T01.api.json")));
+    using var http = new HttpClient(server.Handler());
+    var missing = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http).GetAwaiter().GetResult();
+    Expect(missing.Converted == 1 && missing.Failed == 1 && missing.Payloads.Count == 1, "缺宿主只能使 UI 失败，API 应直接读取");
+    var ui = missing.Workflows.Single(w => w.Key == "image/ui.json");
+    Expect(ui.Error.Contains("未提供 exporter factory") && ui.PayloadFile.Length == 0 && !ui.Recommended,
+        "缺宿主必须明确报错且不得留正文或推荐：" + ui.Error);
+    var broken = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http,
+        exporterFactory: (_, _) => new ThrowingComfyUiExporter()).GetAwaiter().GetResult();
+    Expect(broken.Converted == 1 && broken.Failed == 1 && broken.Payloads.ContainsKey("image/api.json"), "导出异常不得连坐 API");
+    Expect(broken.Workflows.Single(w => w.Key == ui.Key).Error.Contains("InvalidOperationException")
+        && broken.Workflows.Single(w => w.Key == ui.Key).Error.Contains("test exporter failure"), "必须保留导出器真实异常");
+    Expect(server.Methods.All(method => method == HttpMethod.Get), "拉取不得发生成或写请求");
+}
+
+static void ComfyUiLibrarySafeReimportAndDelete()
+{
+    WithSiteDirectory(NewTempDirectory("comfyui-safe-reimport"), () =>
+    {
+        const string body = "{\"1\":{\"class_type\":\"SaveImage\",\"inputs\":{}}}";
+        ComfyUiLibraryResult Result(string? payload, string error = "") => new("safecheck", "https://safecheck.example.com",
+            new[] { new SiteWorkflow { Key = "a.json", Title = "a", Kind = "image", Error = error, LastImportAttemptAt = DateTimeOffset.UtcNow } },
+            payload is null ? new Dictionary<string, string>() : new Dictionary<string, string> { ["a.json"] = payload }, Array.Empty<string>()) { IsPartialImport = true };
+        SiteProfile Install(ComfyUiLibraryResult result, SiteProfile? previous)
+        {
+            var (site, error) = ComfyUiLibrary.Install(result, "test", "", previous);
+            Expect(site is not null && error.Length == 0, "安装失败：" + error);
+            return site!;
+        }
+        SiteProfile Reload() => SiteCatalog.Load().Sites.Single(s => s.Id == "safecheck");
+        var first = Install(Result(body), null);
+        var original = first.Workflows.Single();
+        Expect(original.ImportedAt is not null && SiteCatalog.ReadWorkflowStatus(first, original).IsUsable, "成功导入应有时间且可用");
+        var failedResult = Result(null, "conversion failure");
+        var retry = Install(failedResult, Reload());
+        var preserved = Reload().Workflows.Single();
+        Expect(preserved.PayloadFile == original.PayloadFile && preserved.ImportedAt == original.ImportedAt && preserved.Converted,
+            "失败重导须保住成功版本、时间和可用标志");
+        Expect(preserved.LastImportError == "conversion failure" && preserved.LastImportAttemptAt == failedResult.Workflows[0].LastImportAttemptAt,
+            "失败尝试的时间和原因必须持久化");
+        Expect(SiteCatalog.LoadPayload(first.Id, original.PayloadFile) == body && failedResult.Workflows[0].PayloadFile == "", "保住原文且不修改调用方结果");
+        var manifest = Path.Combine(SiteCatalog.Directory, first.Id + ".json");
+        var before = File.ReadAllBytes(manifest);
+        var memoryBefore = JsonSerializer.Serialize(retry);
+        using (var held = new FileStream(manifest, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            var failedSave = ComfyUiLibrary.Install(Result(body + " "), "test", "", retry);
+            Expect(failedSave.Site is null && failedSave.Error.Length > 0, "锁住清单须使提交失败");
+            Expect(File.ReadAllBytes(manifest).SequenceEqual(before) && SiteCatalog.LoadPayload(first.Id, original.PayloadFile) == body,
+                "提交失败不得修改旧清单或裁剪旧正文");
+            Expect(!SiteCatalog.TryDeleteWorkflow(retry, "a.json", out var error) && error.Length > 0
+                && JsonSerializer.Serialize(retry) == memoryBefore && File.ReadAllBytes(manifest).SequenceEqual(before), "删除提交失败须保持内存和磁盘原样");
+        }
+        var second = Install(Result(body + " "), Reload());
+        var updated = Reload().Workflows.Single();
+        Expect(updated.PayloadFile != original.PayloadFile && SiteCatalog.LoadPayload(second.Id, updated.PayloadFile) == body + " ", "换版按原文哈希且正文逐字保留");
+        Expect(!File.Exists(Path.Combine(SiteCatalog.PayloadDirectory(second.Id), original.PayloadFile)), "成功提交后应裁剪旧版本");
+        Expect(updated.LastImportError.Length == 0 && updated.ImportedAt is not null, "成功重导应清掉最近失败原因");
+        var currentFile = Path.Combine(SiteCatalog.PayloadDirectory(second.Id), updated.PayloadFile);
+        using (var held = new FileStream(currentFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            Expect(SiteCatalog.TryDeleteWorkflow(second, "a.json", out var error) && error.Length == 0
+                && second.Workflows.Count == 0 && Reload().Workflows.Count == 0, "正文清理失败也应持久化已提交的单项删除");
+            Expect(File.Exists(currentFile), "被占用的孤儿正文应暂留");
+        }
+        Expect(SiteCatalog.PrunePayloads(second) == 1 && !File.Exists(currentFile), "解除占用后须能补清孤儿正文");
+        Expect(!SiteCatalog.TryDeleteWorkflow(second, "a.json", out var missingError) && missingError.Length > 0, "重复删除应明确失败");
+        var unavailable = Install(Result(null, "bad"), Reload());
+        Expect(!SiteCatalog.ReadWorkflowStatuses(unavailable)[0].IsUsable && unavailable.Workflows[0].ImportedAt is null
+            && Reload().Workflows[0].LastImportError == "bad", "没有旧成功版本的失败项须不可用且保存原因");
+        Expect(!SiteCatalog.SavePayload("../escape", "a.json", body, out _), "正文不得越出站点目录");
+    });
+}
+
+static void ComfyUiLibraryPartialReimportAndDelete()
+{
+    WithSiteDirectory(NewTempDirectory("comfyui-partial-safe"), () =>
+    {
+        var server = new ComfyUiStubServer { ObjectInfo = ComfyUiObjectInfoFixture() };
+        server.Add("image/a.json", ComfyUiUiFixture("T01"));
+        server.Add("image/b.json", ComfyUiUiFixture("T04"));
+        using var http = new HttpClient(server.Handler());
+        var factory = FixtureExporterFactory();
+        var full = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, exporterFactory: factory).GetAwaiter().GetResult();
+        var (initial, error) = ComfyUiLibrary.Install(full, "test", "", null);
+        Expect(initial is not null && error.Length == 0, "初次安装失败：" + error);
+        var previous = SiteCatalog.Load().Sites.Single();
+        var retained = previous.Workflows.Single(w => w.Key == "image/b.json");
+        retained.Enabled = false;
+        retained.Recommended = true;
+        Expect(SiteCatalog.Save(previous, out error), "保存取舍失败：" + error);
+        var oldItem = JsonSerializer.Serialize(retained);
+        var oldBody = SiteCatalog.LoadPayload(previous.Id, retained.PayloadFile);
+        var partial = ComfyUiLibrary.FetchAsync("https://comfy.example.com", http, exporterFactory: factory,
+            selectedPaths: new[] { "image/a.json" }).GetAwaiter().GetResult();
+        Expect(partial.IsPartialImport && partial.Workflows.Count == 1 && partial.Converted == 1, "必须严格只拉选中项");
+        var (again, againError) = ComfyUiLibrary.Install(partial, "test", "", SiteCatalog.Load().Sites.Single());
+        Expect(again is not null && againError.Length == 0, "部分重导失败：" + againError);
+        var reloaded = SiteCatalog.Load().Sites.Single();
+        Expect(reloaded.Workflows.Count == 2 && JsonSerializer.Serialize(reloaded.Workflows.Single(w => w.Key == retained.Key)) == oldItem
+            && SiteCatalog.LoadPayload(reloaded.Id, retained.PayloadFile) == oldBody, "未选条目的元数据、取舍和正文须原样保留");
+        Expect(SiteCatalog.TryDeleteWorkflow(previous, "image/a.json", out error), "以过期对象删除失败：" + error);
+        Expect(JsonSerializer.Serialize(previous.Workflows.Single()) == oldItem && SiteCatalog.Load().Sites.Single().Workflows.Count == 1
+            && SiteCatalog.LoadPayload(previous.Id, retained.PayloadFile) == oldBody, "单项删除须以最新磁盘清单为准并保留其它正文");
+        Expect(server.Methods.All(method => method == HttpMethod.Get), "部分重导及本地删除不得向服务器写入");
     });
 }
 
@@ -9170,7 +9543,18 @@ static void VersionTagParsing()
 	Expect(!AppVersion.TryParse("", out _), "空串要返回 false");
 	Expect(!AppVersion.TryParse(null, out _), "null 要返回 false");
 	Expect(!AppVersion.TryParse("1", out _), "只有一段不算版本号");
-	Expect(!AppVersion.TryParse("1.2.3.4", out _), "四段不是发行版标签的写法");
+	Expect(AppVersion.TryParse("1.2.3.4", out var fourPart) && fourPart == new Version(1, 2, 3, 4), "四段版本保留修订号");
+	Expect(twoPart.Revision == -1 && bare.Revision == -1, "两段和三段保持未指定修订号 -1");
+	Expect(twoPart.Equals(new Version(1, 2, 0)) && bare.Equals(new Version(0, 2, 0)), "两段和三段必须保持现有 Equals 三段版本口径");
+	Expect(AppVersion.TryParse("2147483647.2147483647.2147483647.2147483647", out var maximum)
+		&& maximum.Equals(new Version(int.MaxValue, int.MaxValue, int.MaxValue, int.MaxValue)), "四段 int 最大值合法且保留修订号");
+	Expect(AppVersion.TryParse("v0.1.5.1", out var patch) && AppVersion.TryParse("0.1.5", out var previous)
+		&& patch > previous, "0.1.5.1 必须比 0.1.5 新");
+	Expect(AppVersion.TryParse("0.1.5.0", out var zeroRevision) && zeroRevision == new Version(0, 1, 5, 0), "四段零修订号也须保留");
+	Expect(AppVersion.TryParse("V0.1.5.1+build.42", out var buildSuffix) && buildSuffix == patch, "四段支持大写前缀和构建后缀");
+	Expect(!AppVersion.TryParse("1.2.3.4.5", out _), "五段版本必须拒绝");
+	foreach (var overflow in new[] { "2147483648.1", "1.2147483648", "1.2.2147483648", "1.2.3.2147483648" })
+		Expect(!AppVersion.TryParse(overflow, out _), "整数溢出必须拒绝：" + overflow);
 	Expect(AppVersion.Display.StartsWith('v'), "界面显示形式带 v 前缀：" + AppVersion.Display);
 	Expect(AppVersion.Text(new Version(0, 1, 0)) == "0.1.0", "三段式就是 0.1.0：" + AppVersion.Text(new Version(0, 1, 0)));
 	Expect(AppVersion.Text(new Version(0, 1, 2, 3)) == "0.1.2.3", "有修订号时写四段：" + AppVersion.Text(new Version(0, 1, 2, 3)));
@@ -9191,6 +9575,11 @@ static void UpdateCheckComparesVersionsAndReportsFailures()
 	Expect(available.Release?.HtmlUrl == "https://example.com/r", "发布页地址要解出来");
 	Expect(UpdateChecker.FindPackage(available.Release)?.Name == "yeeeyee-win-x64.zip", "挑出 zip 包");
 
+	var revisionRelease = newer.Replace("v0.9.0", "v0.1.5.1");
+	Expect(UpdateChecker.Compare(new Version(0, 1, 5), revisionRelease).State == UpdateCheckState.UpdateAvailable,
+		"0.1.5 用户必须能检测到 0.1.5.1 更新");
+	Expect(UpdateChecker.Compare(new Version(0, 1, 5, 1), revisionRelease).State == UpdateCheckState.UpToDate,
+		"相同四段版本算已是最新");
 	Expect(UpdateChecker.Compare(new Version(0, 9, 0), newer).State == UpdateCheckState.UpToDate, "同版本算已是最新");
 	Expect(UpdateChecker.Compare(new Version(1, 0, 0), newer).State == UpdateCheckState.UpToDate, "本地比线上新时不算有更新");
 
@@ -10180,6 +10569,26 @@ static void ChapterSplitByHeadingAndLength()
 /// <summary>
 /// 钉住角色参考图认三、四视图为标准、九视图不是，并钉住视图粘连的负面词与逐字复用纪律。标准不统一会让角色在不同镜头里变样。
 /// </summary>
+static void CharacterNineViewTemplateContract()
+{
+    Expect(CharacterNineViewTemplate.TemplateId == "character-nine-view-v1", "九视图 TemplateId 必须稳定");
+    Expect(CharacterNineViewTemplate.Slots.Count == 9, "九视图必须恰好九格");
+    var expected = new[] { "全身正面", "全身左侧面", "全身右侧面", "全身背面", "正面半身", "左侧半身", "右侧半身", "正脸表情、发型细节", "服装、鞋子、关键道具细节" };
+    for (var index = 0; index < expected.Length; index++)
+        Expect(CharacterNineViewTemplate.Slots[index].Contains(expected[index], StringComparison.Ordinal), $"第 {index + 1} 格顺序不正确");
+    Expect(CharacterNineViewTemplate.BuildPromptPrefix().Contains("模板已锁定"), "九视图前缀必须声明模板锁定");
+    Expect(CharacterNineViewTemplate.BuildNegativePrompt().Contains("不要交换格位"), "九视图负面合同必须禁止交换格位");
+
+    var request = new ImageGenerationRequest
+    {
+        ProductionIntent = AssetGenerationIntent.CharacterNineView,
+        TemplateId = CharacterNineViewTemplate.TemplateId,
+        TemplateLocked = true,
+        Prompt = CharacterNineViewTemplate.BuildPromptPrefix()
+    };
+    Expect(request.ProductionIntent == AssetGenerationIntent.CharacterNineView && request.TemplateId == CharacterNineViewTemplate.TemplateId && request.TemplateLocked, "请求字段合同不可用");
+}
+
 static void CharacterSheetFollowsTurnaroundStandard()
 {
 	string turnaroundSpec = PromptBaseline.TurnaroundSpec;
@@ -10282,6 +10691,73 @@ static void BinderFillsEveryImageSlotInOrder()
 	});
 	Expect(only["1"]!["inputs"]!["image"]!.GetValue<string>() == "chen.png", "给一张时写第 1 个入口");
 	Expect(only["2"]!["inputs"]!["image"]!.GetValue<string>() == "example2.png", "第 2 个入口保持示例图，不拿同一张凑数");
+}
+
+/// <summary>
+/// 钉住视频高级控制的真实写回：首尾帧、ControlNet、Pose、Depth、IP-Adapter 和批量输出都只能写到已识别槽位；没有新值时模板原值不变。
+/// </summary>
+static void BinderWritesExplicitFramesControlsAndBatch()
+{
+	const string template = """
+	{
+	  "1": {"class_type":"LoadImage", "inputs":{"image":"old-first.png"}},
+	  "2": {"class_type":"LoadImage", "inputs":{"image":"old-last.png"}},
+	  "3": {"class_type":"ApplyControlNet", "inputs":{"image":"old-control.png","strength":0.6}},
+	  "4": {"class_type":"OpenPoseControl", "inputs":{"pose_image":"old-pose.png"}},
+	  "5": {"class_type":"DepthControl", "inputs":{"depth_image":"old-depth.png"}},
+	  "6": {"class_type":"IPAdapterApply", "inputs":{"ipadapter_image":"old-ip.png"}},
+	  "7": {"class_type":"VideoSampler", "inputs":{"batch_size":1}}
+	}
+	""";
+
+	var detected = ComfyUiWorkflowBinder.Detect(JsonNode.Parse(template)!.AsObject());
+	Expect(detected.ControlSlots.Count == 4,
+		"Detect 只应识别四个高级素材槽，不应把 strength 识别成素材槽："
+			+ Explain(detected));
+	Expect(!detected.ControlSlots.Any(slot => slot.Input == "strength"),
+		"ControlNet strength 不得被识别成素材槽：" + Explain(detected));
+
+	var slots = new ComfyUiWorkflowSlots
+	{
+		ImageNodeIds = new List<string> { "1", "2" },
+		ImageNodeId = "1",
+		ImageInput = "image",
+		ControlSlots = new List<ComfyUiControlSlot>
+		{
+			new("3", "image", "controlnet"),
+			new("4", "pose_image", "pose"),
+			new("5", "depth_image", "depth"),
+			new("6", "ipadapter_image", "ip_adapter")
+		},
+		BatchSlots = new List<ComfyUiBatchSlot>
+		{
+			new("7", "batch_size", "batch_size", 1)
+		}
+	};
+
+	var bound = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues
+	{
+		FirstFrameName = "first.png",
+		LastFrameName = "last.png",
+		ControlNetNames = new[] { "control.png" },
+		PoseNames = new[] { "pose.png" },
+		DepthNames = new[] { "depth.png" },
+		IpAdapterNames = new[] { "ip.png" },
+		BatchSize = 4
+	});
+
+	Expect(bound["1"]!["inputs"]!["image"]!.GetValue<string>() == "first.png", "首帧写入第一个图片槽");
+	Expect(bound["2"]!["inputs"]!["image"]!.GetValue<string>() == "last.png", "尾帧写入第二个图片槽");
+	Expect(bound["3"]!["inputs"]!["image"]!.GetValue<string>() == "control.png", "ControlNet 素材写入对应槽位");
+	Expect(bound["4"]!["inputs"]!["pose_image"]!.GetValue<string>() == "pose.png", "Pose 素材写入对应槽位");
+	Expect(bound["5"]!["inputs"]!["depth_image"]!.GetValue<string>() == "depth.png", "Depth 素材写入对应槽位");
+	Expect(bound["6"]!["inputs"]!["ipadapter_image"]!.GetValue<string>() == "ip.png", "IP-Adapter 素材写入对应槽位");
+	Expect(bound["7"]!["inputs"]!["batch_size"]!.GetValue<int>() == 4, "批量输出数量写入对应槽位");
+
+	var untouched = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues());
+	Expect(untouched["1"]!["inputs"]!["image"]!.GetValue<string>() == "old-first.png", "没有首帧时保留模板值");
+	Expect(untouched["3"]!["inputs"]!["image"]!.GetValue<string>() == "old-control.png", "没有控制素材时保留模板值");
+	Expect(untouched["7"]!["inputs"]!["batch_size"]!.GetValue<int>() == 1, "没有批量数量时保留模板值");
 }
 
 /// <summary>
@@ -11013,6 +11489,75 @@ static void ComfyUiDeclaredFileSlotsBecomeEntries()
 		"不是素材槽的那几格一个字都不许动");
 }
 
+static JsonObject ReadOfficialBinderGraph(string name)
+{
+    for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+    {
+        var path = Path.Combine(directory.FullName, name);
+        if (File.Exists(path)) return JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+    }
+    throw new FileNotFoundException("缺少官方 API 图", name);
+}
+
+static void ComfyUiBinderOfficialA01()
+{
+    var template = ReadOfficialBinderGraph("API-A01.official.api.json");
+    var snapshot = template.DeepClone();
+    var slots = ComfyUiWorkflowBinder.Detect(template);
+    Expect(slots.PositiveNodeId == "187" && slots.NegativeNodeId == "437", "A01 正负槽位不正确");
+    Expect(slots.CanResize && slots.WidthSlot == new ComfyUiFileSlot("515", "value")
+        && slots.HeightSlot == new ComfyUiFileSlot("516", "value"), "A01 应识别独立宽高常量");
+    slots = JsonSerializer.Deserialize<ComfyUiWorkflowSlots>(JsonSerializer.Serialize(slots))!;
+    var bound = ComfyUiWorkflowBinder.Bind(template, slots,
+        new ComfyUiBindValues { Prompt = "院落中的青衣人物", Width = 1024, Height = 1536, Seed = 123 });
+    var expected = template.DeepClone().AsObject();
+    expected["187"]!["inputs"]!["text"] = "院落中的青衣人物";
+    expected["515"]!["inputs"]!["value"] = 1024;
+    expected["516"]!["inputs"]!["value"] = 1536;
+    foreach (var seed in slots.SeedSlots) expected[seed.NodeId]!["inputs"]![seed.Input] = 123L;
+    Expect(JsonNode.DeepEquals(expected, bound), "A01 应仅覆盖指定值，保留反向词和所有连线");
+    Expect(JsonNode.DeepEquals(snapshot, template), "A01 原模板不得改变");
+    Expect(JsonNode.DeepEquals(template, ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues())),
+        "未提供参数应完整保留官方模板");
+    foreach (var negative in new[] { "", "模糊、畸形", null })
+    {
+        var result = ComfyUiWorkflowBinder.Bind(template.ToJsonString(), slots, new ComfyUiBindValues { Negative = negative });
+        var want = template.DeepClone().AsObject();
+        if (negative is not null) want["437"]!["inputs"]!["text"] = negative;
+        Expect(JsonNode.DeepEquals(want, result), "反向词必须区分未提供和显式空值");
+    }
+    var widthOnly = ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues { Width = 2048 });
+    expected = template.DeepClone().AsObject();
+    expected["515"]!["inputs"]!["value"] = 2048;
+    Expect(JsonNode.DeepEquals(expected, widthOnly), "只给宽度不能改高度或连线");
+}
+
+static void ComfyUiBinderOfficialC19()
+{
+    var template = ReadOfficialBinderGraph("C19.official.api.json");
+    var snapshot = template.DeepClone();
+    var slots = ComfyUiWorkflowBinder.Detect(template);
+    Expect(slots.PositiveNodeId == "42" && slots.PositiveInput == "prompt", "C19 正向应沿文字链追到 42.prompt");
+    Expect(slots.NegativeDeliberatelyEmpty && slots.NegativeNodeId.Length == 0, "C19 负向置空节点不应被绑定");
+    Expect(slots.Notes.Any(note => note.Contains("沿连线")), "C19 应从采样器沿连线识别入口");
+    var bound = ComfyUiWorkflowBinder.Bind(template, slots,
+        new ComfyUiBindValues { Prompt = "披着青色斗篷的年轻女剑客", Negative = "", Width = 1280, Height = 720 });
+    var expected = template.DeepClone().AsObject();
+    expected["42"]!["inputs"]!["prompt"] = "披着青色斗篷的年轻女剑客";
+    expected["47"]!["inputs"]!["width"] = 1280;
+    expected["47"]!["inputs"]!["height"] = 720;
+    Expect(JsonNode.DeepEquals(expected, bound), "C19 应只修改用户提示词与指定尺寸，系统提示词、预设及连线保持原样");
+    Expect(JsonNode.DeepEquals(snapshot, template), "C19 原模板不得改变");
+    Expect(JsonNode.DeepEquals(template, ComfyUiWorkflowBinder.Bind(template, slots, new ComfyUiBindValues())),
+        "C19 未提供参数时应完整保留模板");
+    // 移除独立 prompt 名候选，确认不是靠全图扫描 42.prompt 偶然通过。
+    template["42"]!["inputs"]!["text"] = template["42"]!["inputs"]!["prompt"]!.DeepClone();
+    template["42"]!["inputs"]!.AsObject().Remove("prompt");
+    var traced = ComfyUiWorkflowBinder.Detect(template);
+    Expect(traced.PositiveNodeId == "42" && traced.PositiveInput == "text",
+        "C19 必须穿过拼接、清理与 Llama.custom_prompt 的实际连线");
+}
+
 /// <summary>
 /// 钉住提示词入口的四条规矩（都是这一轮按证据加的）：
 ///
@@ -11326,7 +11871,8 @@ static void GenerationAuditListsStaleProducts()
 	// 那条与本用例要验的东西无关。
 	variant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://hero.png" });
 
-	WorkflowNode shot = new WorkflowNode { Title = "分镜 1", Category = NodeCategory.Storyboard };
+	WorkflowNode shot = new WorkflowNode { Title = "分镜 1", Category = NodeCategory.Storyboard,
+        AssetRequirements = new() { Character = AssetNeed.Required, Scene = AssetNeed.None, Prop = AssetNeed.None } };
 	shot.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
 	canvas.Nodes.Add(shot);
 	// 图带依据（出图时记的），视频不带——过期判定只看记过依据的那些产物。
@@ -11543,9 +12089,22 @@ static void GenerationAuditReportsDependencyChain()
 	GenerationAuditReport generationAuditReport4 = GenerationAudit.Build(workflowCanvasState, workflowNode6, null, (string _) => true);
 	GenerationAuditLayer generationAuditLayer6 = generationAuditReport4.Layers.First((GenerationAuditLayer layer) => layer.Stage == GenerationStage.SettingImage);
 	Expect(generationAuditLayer6.MissingCount == 1, "这个场景还没有图");
-	Expect(generationAuditLayer6.Missing[0].ActionNodeId == Guid.Empty && !generationAuditLayer6.Missing[0].Actionable, "画布上没有承载它的节点：要如实说「去引用画廊」，不能给一个点了没反应的假定位");
-	Expect(generationAuditLayer6.Missing[0].Reason.Contains("引用画廊"), "说明里要写清去处，实际：" + generationAuditLayer6.Missing[0].Reason);
-	Expect(generationAuditReport4.DefaultChecked.Count == 0, "不能直接生成的那一项不该被预勾");
+	var galleryOnlyMissing = generationAuditLayer6.Missing[0];
+	Expect(galleryOnlyMissing.ActionNodeId == Guid.Empty && galleryOnlyMissing.IsReferenceImage, "画布上没有承载节点时，要带着引用实体与变体目标进入引用画廊路径");
+	Expect(galleryOnlyMissing.ReferenceEntityId == workflowEntity2.Id, "缺图项目要携带正确的引用实体 ID");
+	Expect(galleryOnlyMissing.ReferenceVariantId == workflowEntityVariant2.Id, "缺图项目要携带正确的引用变体 ID");
+	Expect(galleryOnlyMissing.Actionable, "有稳定实体/变体目标的引用缺图现在可以自动补图");
+	Expect(galleryOnlyMissing.Reason.Contains("引用画廊"), "说明里要写清去处，实际：" + galleryOnlyMissing.Reason);
+	Expect(generationAuditReport4.DefaultChecked.Count == 1 && generationAuditReport4.DefaultChecked[0] == galleryOnlyMissing, "引用缺图应默认勾选并进入一键补图清单");
+	var galleryRequest = new OneClickRunRequest(
+		GenerationIntent.Images,
+		FillMissingImages: true,
+		new[] { galleryOnlyMissing },
+		Array.Empty<GenerationAuditItem>(),
+		null,
+		null,
+		Seconds: 0);
+	Expect(galleryRequest.WantsImages && galleryRequest.ImageCount == 1, "一键请求应承载这条引用画廊补图项目");
 	WorkflowNode workflowNode7 = new WorkflowNode
 	{
 		Title = "第七章",
@@ -11742,7 +12301,14 @@ static void NodeAssistCollectsUpstream()
 	Expect(nodeAssistSuggestion.Prompt.Contains("场景「场景卡 · 雨夜码头」"), "出图提示词要带上游场景设定");
 	Expect(nodeAssistSuggestion.Prompt.Contains("林晚站在码头边回头"), "出图提示词要带节点自己的内容");
 	NodeAssistPlan nodeAssistPlan2 = NodeAssistPlanner.BuildPlan(workflowCanvasState, workflowNode3);
-	Expect(nodeAssistPlan2.Suggestions.Count((NodeAssistSuggestion item) => item.Kind == NodeAssistKind.Image) == 2, "角色应当给两条出图（正面全身 / 半身特写）");
+	Expect(nodeAssistPlan2.Suggestions.Count((NodeAssistSuggestion item) => item.Kind == NodeAssistKind.Image) == 3, "角色应当给三条资产出图（角色三视图 / 九宫格探索板 / 细节设定板）");
+	Expect(nodeAssistPlan2.Suggestions.Any((NodeAssistSuggestion item) => item.Id == "character-turnaround-3" && item.Intent == AssetGenerationIntent.CharacterTurnaround), "角色应当提供三视图资产动作");
+	Expect(nodeAssistPlan2.Suggestions.Any((NodeAssistSuggestion item) => item.Id == "character-sheet-9" && item.Intent == AssetGenerationIntent.CharacterNineView), "角色应当提供九宫格探索板动作");
+	var nineViewSuggestion = nodeAssistPlan2.Suggestions.FirstOrDefault((NodeAssistSuggestion item) => item.Id == "character-sheet-9");
+	Expect(nineViewSuggestion is not null
+		&& nineViewSuggestion.TemplateId == CharacterNineViewTemplate.TemplateId
+		&& nineViewSuggestion.TemplateLocked,
+		"九视图建议必须携带固定模板 ID 和锁定状态");
 	Expect(nodeAssistPlan2.Suggestions.Any((NodeAssistSuggestion item) => item.Kind == NodeAssistKind.Agent && item.SkillId == "character-generation"), "角色应当有一条交给 Agent 的「角色设定」技能");
 	Expect(nodeAssistPlan2.Suggestions.Any((NodeAssistSuggestion item) => item.Kind == NodeAssistKind.Prompt), "角色应当有一条纯提示词建议");
 	NodeAssistPlan nodeAssistPlan3 = NodeAssistPlanner.BuildPlan(workflowCanvasState, workflowNode2);
@@ -11758,6 +12324,56 @@ static void NodeAssistCollectsUpstream()
 	Expect(nodeAssistPlan4.ContextSummary.Contains("没有"), "孤立节点要说明没有上游设定，实际：" + nodeAssistPlan4.ContextSummary);
 	Expect(nodeAssistPlan4.Suggestions.All((NodeAssistSuggestion item) => !item.CanRun), "空节点上所有建议都要标出原因");
 	Expect(nodeAssistPlan4.Suggestions.All((NodeAssistSuggestion item) => item.Blocked.Length > 0), "被挡住的建议必须写明原因");
+}
+
+/// <summary>
+/// 领域动作是产品合同，不依赖菜单中文标题：资产节点先产出参考板，分镜先产出首帧再进视频。
+/// </summary>
+static void NodeAssistUsesProductionAssetActions()
+{
+    var canvas = new WorkflowCanvasState();
+
+    var character = new WorkflowNode { Title = "林晚", Category = NodeCategory.Character, Content = "短发，藏青风衣" };
+    var prop = new WorkflowNode { Title = "旧铜钥匙", Category = NodeCategory.Prop, Content = "有磨损的铜钥匙" };
+    var scene = new WorkflowNode { Title = "雨夜码头", Category = NodeCategory.Scene, Content = "湿滑石板路与昏黄路灯" };
+    var storyboard = new WorkflowNode { Title = "分镜 01", Category = NodeCategory.Storyboard, Content = "林晚在码头回头" };
+    canvas.Nodes.AddRange(new[] { character, prop, scene, storyboard });
+
+    var characterPlan = NodeAssistPlanner.BuildPlan(canvas, character);
+    var characterIds = characterPlan.Suggestions.Select(item => item.Id).ToHashSet();
+    Expect(characterIds.Contains("character-turnaround-3"), "角色应有三视图资产动作");
+    Expect(characterIds.Contains("character-sheet-9"), "角色应有九宫格探索动作");
+    Expect(!characterIds.Contains("character-front") && !characterIds.Contains("character-bust"), "角色不应再暴露正面/半身旧动作");
+    var nineView = characterPlan.Suggestions.Single(item => item.Id == "character-sheet-9");
+    Expect(nineView.Prompt.Contains(CharacterNineViewTemplate.TemplateId), "九视图提示词必须带固定模板标识");
+    Expect(nineView.Prompt.Contains(CharacterNineViewTemplate.Slots[0]) && nineView.Prompt.Contains(CharacterNineViewTemplate.Slots[8]), "九视图提示词必须带首尾格位");
+    Expect(nineView.Intent == AssetGenerationIntent.CharacterNineView, "九视图请求应绑定九视图生产意图");
+    Expect(nineView.NegativePrompt.Contains("不要交换格位"), "九视图负面提示词必须锁定格位");
+
+    var propPlan = NodeAssistPlanner.BuildPlan(canvas, prop);
+    var propIds = propPlan.Suggestions.Select(item => item.Id).ToHashSet();
+    Expect(propIds.Contains("prop-turnaround-3") && propIds.Contains("prop-sheet-9"), "道具应有多视图与九宫格动作");
+    Expect(propIds.Contains("prop-detail-material"), "道具应有材质与结构细节动作");
+    Expect(!propIds.Contains("prop-closeup"), "道具不应再只有旧的特写动作");
+
+    var scenePlan = NodeAssistPlanner.BuildPlan(canvas, scene);
+    var sceneIds = scenePlan.Suggestions.Select(item => item.Id).ToHashSet();
+    Expect(sceneIds.Contains("scene-base-keyframe") && sceneIds.Contains("scene-multi-view"), "场景应有基准图与多角度动作");
+    Expect(sceneIds.Contains("scene-distance-sheet") && sceneIds.Contains("scene-mood-keyframe"), "场景应有远中近景与氛围动作");
+    Expect(scenePlan.Suggestions.Single(item => item.Id == "scene-base-keyframe").Prompt.Contains("环境-only"), "场景基准图必须明确环境-only");
+
+    var storyboardPlan = NodeAssistPlanner.BuildPlan(canvas, storyboard, videoAvailable: true);
+    var storyboardIds = storyboardPlan.Suggestions.Select(item => item.Id).ToHashSet();
+    Expect(storyboardIds.Contains("storyboard-first-frame"), "分镜应先有首帧动作");
+    Expect(storyboardIds.Contains("storyboard-video"), "分镜应有视频动作");
+    Expect(storyboardIds.Contains("storyboard-one-click") && storyboardIds.Contains("generation-audit"), "分镜应有一键出片与自检动作");
+    Expect(storyboardPlan.Suggestions.Single(item => item.Id == "storyboard-video").Prompt.Contains("审核首帧"), "视频动作必须声明先审核首帧");
+    Expect(characterPlan.Suggestions.Single(item => item.Id == "character-turnaround-3").Intent == AssetGenerationIntent.CharacterTurnaround, "角色三视图应绑定角色生产意图");
+    Expect(characterPlan.Suggestions.Single(item => item.Id == "character-turnaround-3").RequiredCapabilities?.Contains(GenerationCapability.ImageSet) == true, "角色三视图应要求组图能力");
+    Expect(scenePlan.Suggestions.Single(item => item.Id == "scene-base-keyframe").Intent == AssetGenerationIntent.SceneBaseKeyframe, "场景基准图应绑定场景生产意图");
+    Expect(storyboardPlan.Suggestions.Single(item => item.Id == "storyboard-first-frame").RequiredCapabilities?.Contains(GenerationCapability.MultiReferenceImage) == true, "分镜首帧应声明多参考图能力");
+    Expect(storyboardPlan.Suggestions.Single(item => item.Id == "storyboard-video").Intent == AssetGenerationIntent.StoryboardVideo, "分镜视频应绑定视频生产意图");
+    Expect(storyboardPlan.Suggestions.Select(item => item.Id).Distinct().Count() == storyboardPlan.Suggestions.Count, "同一节点的动作 ID 不得重复");
 }
 
 /// <summary>
@@ -12804,7 +13420,7 @@ static void ReferenceStalenessDetectsUpdatedSettings()
 		SourceFingerprints = ReferenceStaleness.Snapshot(workflowCanvasState, workflowNode)
 	};
 	workflowNode.Attachments.Add(workflowAttachment);
-	Expect(workflowAttachment.SourceFingerprints.Count == 1, "出图时要记下每条引用的依据");
+	Expect(workflowAttachment.SourceFingerprints.ContainsKey(ReferenceStaleness.KeyOf(item)), "出图时要记下每条引用的依据");
 	Expect(ReferenceStaleness.Of(workflowCanvasState, workflowNode).Count == 0, "内容没变就不该报「过期」");
 	string description = workflowEntityVariant.Description;
 	workflowEntityVariant.Description = "短发，藏青风衣（换装后加了围巾）";
@@ -12838,7 +13454,7 @@ static void ReferenceStalenessDetectsUpdatedSettings()
 		EntityId = workflowEntity2.Id,
 		VariantId = workflowEntityVariant2.Id
 	});
-	Expect(ReferenceStaleness.Of(workflowCanvasState, workflowNode).Count == 0, "出图之后新加的引用不算「设定更新」");
+	Expect(ReferenceStaleness.Of(workflowCanvasState, workflowNode).Count == 1, "出图之后新加的引用使旧首帧过期");
 	WorkflowNode workflowNode2 = new WorkflowNode
 	{
 		Title = "旧分镜",
@@ -13925,6 +14541,146 @@ static void VideoProviderFactoryNeedsEndpointAndModel()
 	Expect(refused.Status == VideoGenerationStatus.NotConfigured && refused.FilePath.Length == 0,
 		"兜底执行方不得产出任何文件");
 	Expect(refused.Error.Contains("视频接口"), "兜底的说法要指明去哪里配：" + refused.Error);
+}
+
+/// <summary>明确选择视频池时，池子的地址、模型与密钥要组成这次执行方，不得被默认配置覆盖。</summary>
+static void VideoProviderFactorySelectsChosenPool()
+{
+	var site = new SiteProfile { Id = "video-site", BaseUrl = "https://pool.example.com/v1", ApiKey = "pool-key" };
+	var pool = new SitePool { Kind = "video", Model = "pool-video-model", Tier = "720p" };
+	var selected = VideoProviderFactory.SelectFor(
+		[GenerationCapability.TextToVideo],
+		ImageSourceChoice.OfPool(new SitePoolChoice(site, pool)),
+		new AiProviderConfig
+		{
+			VideoEndpoint = "https://default.example.com/v1",
+			VideoModel = "default-model",
+			VideoApiKey = "default-key"
+		});
+
+	Expect(selected.Provider is HttpVideoProvider, "明确选视频池必须使用 HTTP 视频 Provider");
+	Expect(selected.Provider.IsConfigured, "池子的地址与模型齐全时执行方应可用");
+	Expect(selected.IsMatch, "视频池应匹配文生视频能力：" + selected.Reason);
+	var config = typeof(HttpVideoProvider)
+		.GetField("config", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+		?.GetValue(selected.Provider) as AiProviderConfig;
+	Expect(config is not null, "测试应能检查池子生成的临时配置");
+	Expect(config!.VideoEndpoint == site.BaseUrl && config.VideoModel == pool.Model && config.VideoApiKey == site.ApiKey,
+		"池子的地址、模型和密钥必须覆盖默认配置");
+}
+
+/// <summary>明确选择 ComfyUI 工作流时，即使 ComfyUI 未配置，也只能得到 ComfyUI 路由的未配置结果。</summary>
+static void VideoProviderFactoryKeepsChosenWorkflow()
+{
+	var site = new SiteProfile { Id = "comfy-site", DisplayName = "ComfyUI 站点", Backend = "comfyui" };
+	var workflow = new SiteWorkflowChoice(site, new SiteWorkflow
+	{
+		Key = "video/ltx.json", Title = "LTX 视频", Kind = "video", PayloadFile = "ltx.json"
+	});
+	var selected = VideoProviderFactory.SelectFor(
+		[GenerationCapability.TextToVideo],
+		ImageSourceChoice.OfWorkflow(workflow),
+		new AiProviderConfig { VideoEndpoint = "https://default.example.com/v1", VideoModel = "default-video" });
+
+	Expect(selected.Provider is not HttpVideoProvider, "明确选 ComfyUI 工作流时不得回退到 HTTP 视频 Provider");
+	Expect(selected.Provider is UnconfiguredVideoProvider, "ComfyUI 地址未配置时应返回 ComfyUI 路由的未配置执行方");
+	Expect(selected.Reason.Contains("ComfyUI", StringComparison.OrdinalIgnoreCase),
+		"来源说明应指出 ComfyUI 路由：" + selected.Reason);
+}
+
+/// <summary>
+/// ComfyUI 能力只能来自已经绑定的真实槽位：提示词、图片入口容量和源视频入口分别决定能力，
+/// 没有明确槽位时不许把标题或节点名猜成高级控制能力。
+/// </summary>
+static void ComfyUiVideoCapabilitiesFollowRealSlots()
+{
+    ComfyUiWorkflowSlots textOnly = new()
+    {
+        PositiveNodeId = "positive"
+    };
+    IReadOnlySet<GenerationCapability> textCapabilities = ComfyUiVideoCapabilityMapper.Map(textOnly);
+    Expect(textCapabilities.Contains(GenerationCapability.TextToVideo), "有正向提示词入口应声明文生视频");
+    Expect(!textCapabilities.Contains(GenerationCapability.ImageToVideo), "没有图片入口不应声明图生视频");
+
+    ComfyUiWorkflowSlots firstFrame = new()
+    {
+        ImageNodeId = "image",
+        ImageNodeIds = new() { "image" },
+        ImageGroups = new() { new() { "image" } }
+    };
+    IReadOnlySet<GenerationCapability> firstFrameCapabilities = ComfyUiVideoCapabilityMapper.Map(firstFrame);
+    Expect(firstFrameCapabilities.Contains(GenerationCapability.ImageToVideo), "单图片入口应声明图生视频");
+    Expect(!firstFrameCapabilities.Contains(GenerationCapability.FirstLastFrameToVideo), "单图片入口不应声明首尾帧");
+
+    ComfyUiWorkflowSlots firstLast = new()
+    {
+        ImageNodeId = "first",
+        ImageNodeIds = new() { "first", "last" },
+        ImageGroups = new() { new() { "first", "last" } },
+        ImageListCapacity = 2
+    };
+    IReadOnlySet<GenerationCapability> firstLastCapabilities = ComfyUiVideoCapabilityMapper.Map(firstLast);
+    Expect(firstLastCapabilities.Contains(GenerationCapability.FirstLastFrameToVideo), "两张图片入口应声明首尾帧");
+    Expect(firstLastCapabilities.Contains(GenerationCapability.MultiReferenceImage), "两张图片入口应声明多参考图");
+
+    ComfyUiWorkflowSlots sourceVideo = new()
+    {
+        VideoNodeIds = new() { "video" },
+        VideoInputs = new() { "video" }
+    };
+    IReadOnlySet<GenerationCapability> sourceVideoCapabilities = ComfyUiVideoCapabilityMapper.Map(sourceVideo);
+    Expect(sourceVideoCapabilities.Contains(GenerationCapability.VideoReference), "源视频入口应声明视频参考");
+    Expect(!sourceVideoCapabilities.Contains(GenerationCapability.TextToVideo), "没有提示词入口的源视频工作流不应声明文生视频");
+
+    ComfyUiWorkflowSlots unknownControls = new()
+    {
+        PositiveNodeId = "positive",
+        Notes = new() { "ControlNet.control_net", "Pose.pose", "Depth.depth", "IP-Adapter.image" }
+    };
+    IReadOnlySet<GenerationCapability> unknownCapabilities = ComfyUiVideoCapabilityMapper.Map(unknownControls);
+    Expect(!unknownCapabilities.Contains(GenerationCapability.ControlNet)
+        && !unknownCapabilities.Contains(GenerationCapability.PoseControl)
+        && !unknownCapabilities.Contains(GenerationCapability.DepthControl)
+        && !unknownCapabilities.Contains(GenerationCapability.IpAdapter)
+        && !unknownCapabilities.Contains(GenerationCapability.BatchOutput),
+        "只有说明文本而没有结构化槽位时，不得猜测控制能力");
+
+    ComfyUiWorkflowSlots structured = new()
+    {
+        ControlSlots = new()
+        {
+            new ComfyUiControlSlot("cn", "image", "controlnet"),
+            new ComfyUiControlSlot("pose", "pose_image", "pose"),
+            new ComfyUiControlSlot("depth", "image", "depth"),
+            new ComfyUiControlSlot("ip", "image", "ip_adapter")
+        },
+        BatchSlots = new()
+        {
+            new ComfyUiBatchSlot("batch", "batch_size", "batch_size", 4)
+        }
+    };
+    IReadOnlySet<GenerationCapability> structuredCapabilities = ComfyUiVideoCapabilityMapper.Map(structured);
+    Expect(structuredCapabilities.Contains(GenerationCapability.ControlNet)
+        && structuredCapabilities.Contains(GenerationCapability.PoseControl)
+        && structuredCapabilities.Contains(GenerationCapability.DepthControl)
+        && structuredCapabilities.Contains(GenerationCapability.IpAdapter)
+        && structuredCapabilities.Contains(GenerationCapability.BatchOutput),
+        "结构化槽位应声明对应的高级控制和批量输出能力");
+}
+
+/// <summary>来源选对不代表能力齐全，能力缺口必须在真正提交前暴露。</summary>
+static void VideoProviderFactoryReportsMissingCapability()
+{
+	var source = ImageSourceChoice.OfPool(new SitePoolChoice(
+		new SiteProfile { Id = "video-site", BaseUrl = "https://pool.example.com" },
+		new SitePool { Kind = "video", Model = "video-model" }));
+	var selected = VideoProviderFactory.SelectFor(
+		[GenerationCapability.FirstLastFrameToVideo], source, new AiProviderConfig());
+
+	Expect(selected.Provider is HttpVideoProvider, "视频池来源仍应使用 HTTP 视频 Provider");
+	Expect(!selected.IsMatch, "不支持首尾帧时不得标记为可提交");
+	Expect(selected.Reason.Contains("首尾帧", StringComparison.Ordinal),
+		"能力缺口说明应点名首尾帧：" + selected.Reason);
 }
 
 /// <summary>
@@ -15752,6 +16508,138 @@ static void ComfyUiConversionRepairsDecoratedComboValues()
 /// 实测动机：认不出的前端节点会被跳过，**下游必填输入整项消失**，而服务端往往还回 success，
 /// 只是那一步不产出——那种错最难看出来。所以要在导入那一刻就说出来。
 /// </summary>
+static void ComfyUiConversionRepairsNunchakuQuantization()
+{
+    const string modelFp4 = "nunchaku/svdq-fp4_r128-qwen-image.safetensors";
+    const string modelInt4 = "nunchaku/svdq-int4_r128-qwen-image.safetensors";
+    const string ui = """
+    {"nodes":[
+      {"id":74,"type":"NunchakuQwenImageDiTLoader","mode":0,"inputs":[],"outputs":[],"widgets_values":["nunchaku/svdq-fp4_r128-qwen-image.safetensors"]},
+      {"id":75,"type":"LoadImage","mode":0,"inputs":[],"outputs":[],"widgets_values":["author-image.png"]}
+    ],"links":[]}
+    """;
+
+    static string BuildObjectInfo(string modelOptions) => $$$$"""
+    {
+      "NunchakuQwenImageDiTLoader":{"input":{"required":{"model_name":["COMBO",{"default":"{{{{modelFp4}}}}","options":[{{{{modelOptions}}}}]}]}}},
+      "LoadImage":{"input":{"required":{"image":["COMBO",{"default":"a.png","options":["a.png","b.png"]}]}}}
+    }
+    """;
+
+    var int4Device = new ComfyUiDeviceCapabilities("NVIDIA RTX A10", ComfyUiNunchakuQuantization.Int4, "/system_stats");
+    var unknownDevice = ComfyUiDeviceCapabilities.Unknown("/system_stats");
+    Expect(ComfyUiDeviceDetector.FromSystemStats("""{"devices":[{"name":"NVIDIA RTX A10"}]}""").NunchakuQuantization == ComfyUiNunchakuQuantization.Int4,
+        "A10 应识别为 int4 策略");
+
+    var both = ComfyUiWorkflowConversion.Convert(ui, BuildObjectInfo($"\"{modelFp4}\", \"{modelInt4}\""), int4Device);
+    Expect(both.ApiWorkflow["74"]!["inputs"]!["model_name"]!.GetValue<string>() == modelInt4,
+        "应从当前站点候选中选择匹配 int4 模型");
+    Expect(both.Notes.Any(note => note.Contains(modelFp4) && note.Contains(modelInt4)),
+        "自动修复应在说明中记录前后模型");
+    Expect(both.ApiWorkflow["75"]!["inputs"]!["image"]!.GetValue<string>() == "author-image.png",
+        "普通文件型 COMBO 不得受量化修复影响");
+
+    var unknown = ComfyUiWorkflowConversion.Convert(ui, BuildObjectInfo($"\"{modelFp4}\", \"{modelInt4}\""), unknownDevice);
+    Expect(unknown.ApiWorkflow["74"]!["inputs"]!["model_name"]!.GetValue<string>() == modelFp4,
+        "设备未知时不得猜测并改写模型");
+
+    var onlyFp4 = ComfyUiWorkflowConversion.Convert(ui, BuildObjectInfo($"\"{modelFp4}\""), int4Device);
+    Expect(onlyFp4.ApiWorkflow["74"]!["inputs"]!["model_name"]!.GetValue<string>() == modelFp4,
+        "站点没有 int4 候选时不得编造模型名");
+    Expect(onlyFp4.Notes.Any(note => note.Contains("没有对应的 int4 候选")),
+        "无法兼容时应明确告警");
+
+    var alreadyInt4Ui = ui.Replace(modelFp4, modelInt4, StringComparison.Ordinal);
+    var alreadyInt4 = ComfyUiWorkflowConversion.Convert(alreadyInt4Ui, BuildObjectInfo($"\"{modelFp4}\", \"{modelInt4}\""), int4Device);
+    Expect(alreadyInt4.ApiWorkflow["74"]!["inputs"]!["model_name"]!.GetValue<string>() == modelInt4,
+        "已选择 int4 的工作流应保持不变");
+    Expect(!alreadyInt4.Notes.Any(note => note.Contains("Nunchaku 在 Turing")),
+        "无需修复时不应产生量化修复记录");
+}
+
+static void ComfyUiImportAuditValidatesActiveDynamicCombo()
+{
+    var definitions = JsonNode.Parse("""
+    {
+      "Resize": {"output_node":true,"input":{"required":{
+        "resize_type":["COMFY_DYNAMICCOMBO_V3",{"options":[
+          {"key":"dimensions","inputs":{"required":{
+            "height":["INT",{"min":0,"max":16384}],
+            "crop":["COMBO",{"options":["disabled","center"]}],
+            "nested":["COMFY_DYNAMICCOMBO_V3",{"options":[
+              {"key":"on","inputs":{"required":{"amount":["FLOAT",{"min":0,"max":1}]},
+                "optional":{"label":["STRING",{}]}}},
+              {"key":"off","inputs":{"required":{"unused":["INT",{}]}}}
+            ]}]
+          }}},
+          {"key":"other","inputs":{"required":{"multiplier":["FLOAT",{}]}}}
+        ]}]
+      }}},
+      "Generate": {"output_node":true,"input":{"required":{
+        "sampling_mode":["COMFY_DYNAMICCOMBO_V3",{"options":[
+          {"key":"on","inputs":{"required":{"top_p":["FLOAT",{"min":0,"max":1}]}}},
+          {"key":"off","inputs":{"required":{}}}
+        ]}]
+      },"optional":{"thinking":["BOOLEAN",{}],"seed":["INT",{"min":0,"max":18446744073709551615}]}}}
+    }
+    """)!.AsObject();
+    var api = JsonNode.Parse("""
+    {
+      "203":{"class_type":"Resize","inputs":{
+        "resize_type":"dimensions","resize_type.height":"center","resize_type.crop":"lanczos",
+        "resize_type.nested":"on","resize_type.nested.amount":2,"resize_type.nested.label":7}},
+      "200":{"class_type":"Generate","inputs":{
+        "sampling_mode":"on","sampling_mode.top_p":3,"thinking":0.7,"seed":18446744073709551615}}
+    }
+    """)!.AsObject();
+    ComfyUiImportAuditReport Audit() => ComfyUiImportAuditor.Inspect(
+        new Dictionary<string, string> { ["H18.json"] = "{}" },
+        new Dictionary<string, string> { ["H18.json"] = api.ToJsonString() }, definitions);
+    var before = api.ToJsonString();
+    var audit = Audit();
+    var invalid = audit.Findings.Where(f => f.Kind == ComfyUiFindingKind.InvalidInput).ToList();
+    Expect(invalid.Count == 6 && invalid.Select(f => f.Input).ToHashSet().SetEquals(new[] {
+        "resize_type.height", "resize_type.crop", "resize_type.nested.amount",
+        "resize_type.nested.label", "sampling_mode.top_p", "thinking" }), "应逐项捕获 H18 错位和嵌套子字段");
+    Expect(invalid.All(f => f.DependentOutputs == 1) && !audit.NeedsAttention,
+        "应保留产物依赖，但值错误不能触发识别虚拟节点的修复入口");
+    Expect(invalid.Single(f => f.Input == "sampling_mode.top_p").Detail.Contains("最大值"), "top_p 应报范围越界");
+    Expect(api.ToJsonString() == before, "审计不得改写 payload");
+    var workflow = new SiteWorkflow { Key = "H18.json" };
+    audit.ApplyTo(new[] { workflow });
+    Expect(workflow.BrokenInputs == 6 && workflow.BrokenInputDetails.Any(s => s.Contains("resize_type.height")),
+        "无效值必须落入现有问题清单，不能继续显示为无问题");
+
+    var resize = api["203"]!["inputs"]!.AsObject();
+    var generate = api["200"]!["inputs"]!.AsObject();
+    resize["resize_type.height"] = 16384;
+    resize["resize_type.crop"] = "center";
+    resize["resize_type.nested.amount"] = 0;
+    resize["resize_type.nested.label"] = "valid";
+    generate["sampling_mode.top_p"] = 1;
+    generate["thinking"] = false;
+    Expect(Audit().Count(ComfyUiFindingKind.InvalidInput) == 0, "合法类型、包含边界及 ulong 种子上限应通过");
+    resize["resize_type.height"] = 0.7;
+    Expect(Audit().Findings.Any(f => f.Input == "resize_type.height" && f.Detail.Contains("INT")), "小数不能充当整数");
+    resize["resize_type.height"] = new JsonArray("source", 0);
+    Expect(Audit().Count(ComfyUiFindingKind.InvalidInput) == 0, "合法连线不能误报为控件类型错误");
+    resize.Remove("resize_type.crop");
+    resize.Remove("resize_type.nested.label");
+    Expect(Audit().Count(ComfyUiFindingKind.InvalidInput) == 1, "活动分支缺失必填应报告，缺失可选不报告");
+    resize["resize_type.crop"] = "disabled";
+    generate["sampling_mode.top_p"] = -0.01;
+    Expect(Audit().Findings.Any(f => f.Input == "sampling_mode.top_p" && f.Detail.Contains("最小值")), "下界越界应捕获");
+    generate["sampling_mode"] = "off";
+    resize["resize_type.nested"] = "off";
+    resize["resize_type.nested.unused"] = 1;
+    Expect(Audit().Count(ComfyUiFindingKind.InvalidInput) == 0, "未选分支残留的越界值不能误报");
+    generate["sampling_mode"] = "unknown";
+    Expect(Audit().Count(ComfyUiFindingKind.InvalidInput) == 1, "非法动态选项只报告父项，不展开任何分支");
+    generate["sampling_mode"] = "off";
+    Audit().ApplyTo(new[] { workflow });
+    Expect(workflow.BrokenInputs == 0 && workflow.BrokenInputDetails.Count == 0, "合法重审应清除旧问题");
+}
+
 static void ComfyUiImportAuditNamesWhatWeDropped()
 {
     const string objectInfo = """
@@ -15954,7 +16842,22 @@ static void ComfyUiImportRepairsThroughTheWholeChain()
     server.Add("T/一份.json", draft);
     using var http = new HttpClient(server.Handler()) { BaseAddress = new Uri("http://127.0.0.1:8188/") };
 
-    var fetched = ComfyUiLibrary.FetchAsync("http://127.0.0.1:8188", http).GetAwaiter().GetResult();
+    var official = ComfyUiLibrary.FetchAsync("http://127.0.0.1:8188", http).GetAwaiter().GetResult();
+    Expect(official.UsesOfficialFrontend && official.Converted == 0,
+        "缺少官方前端宿主必须失败，不得回退到历史 C# 转换器");
+    // 历史草稿修复从显式旧结果进入；新导入不再触发这条链。
+    var raw = JsonNode.Parse(draft)!.AsObject();
+    var defs = JsonNode.Parse(objectInfo)!.AsObject();
+    var legacyApi = ComfyUiWorkflowConversion.Convert(draft, defs).ToJson();
+    var legacyPayloads = new Dictionary<string, string> { ["T/一份.json"] = legacyApi };
+    var legacyDrafts = new Dictionary<string, string> { ["T/一份.json"] = draft };
+    var legacyAudit = ComfyUiImportAuditor.Inspect(legacyDrafts, legacyPayloads, defs);
+    var fetched = new ComfyUiLibraryResult("127", "http://127.0.0.1:8188",
+        new[] { new SiteWorkflow { Key = "T/一份.json", Title = "一份", Folder = "T", PayloadFile = "legacy.json" } },
+        legacyPayloads, Array.Empty<string>())
+    { RawDrafts = legacyDrafts, ObjectInfo = defs, Audit = legacyAudit };
+    Expect(ReferenceEquals(official, ComfyUiLibrary.Reconvert(official, Array.Empty<ComfyUiVirtualNodeRule>())),
+        "官方结果不能进入历史重转链");
     var audit = fetched.Audit!;
     Expect(audit.Count(ComfyUiFindingKind.Unclassified) == 1 && !audit.NeedsAttention,
         "拉下来就该查出那处**判断不了**的（这台服务器上没有 FancyBridge），而不是判成「我们丢了」："
@@ -16159,13 +17062,37 @@ sealed class StubHttpHandler : HttpMessageHandler
 /// 假的 ComfyUI 服务器：按路径发「工作流清单 / 工作流正文 / 节点定义」，并把每次请求的
 /// 「路径+查询」原样记下来（原样很重要——测试要钉住正文地址是整条转义还是按段转义）。
 /// </summary>
+/// <summary>官方前端接口的 fixture 替身；只识别完整 UI 样本，未知输入直接失败。</summary>
+sealed class FixtureComfyUiExporter((JsonObject Ui, JsonObject Api)[] samples) : IComfyUiFrontendExporter
+{
+    public Task<JsonObject> ExportAsync(JsonObject workflow, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var sample = samples.Single(pair => JsonNode.DeepEquals(pair.Ui, workflow));
+        return Task.FromResult(sample.Api.DeepClone().AsObject());
+    }
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
+sealed class ThrowingComfyUiExporter : IComfyUiFrontendExporter
+{
+    public Task<JsonObject> ExportAsync(JsonObject workflow, CancellationToken cancellationToken)
+        => Task.FromException<JsonObject>(new InvalidOperationException("test exporter failure"));
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
 sealed class ComfyUiStubServer
 {
     private readonly Dictionary<string, string> contents = new(StringComparer.Ordinal);
     private readonly List<string> requests = new();
+    private readonly List<HttpMethod> methods = new();
+    public IReadOnlyList<HttpMethod> Methods { get { lock (requests) return methods.ToList(); } }
 
     /// <summary>节点定义（<c>object_info</c>）的返回体。</summary>
     public string ObjectInfo { get; set; } = "{\"SaveImage\":{\"display_name\":\"Save Image\",\"input\":{\"required\":{\"filename_prefix\":[\"STRING\",{}]}}}}";
+
+    /// <summary>设备能力（<c>system_stats</c>）的返回体。</summary>
+    public string SystemStats { get; set; } = "{\"system\":{\"comfyui_version\":\"0.0.0-mock\"},\"devices\":[{\"name\":\"mock-gpu\"}]}";
 
     /// <summary>模拟老版服务器：<c>/api</c> 前缀一律 404，只能读裸路径。</summary>
     public bool WithoutApiPrefix { get; set; }
@@ -16189,7 +17116,7 @@ sealed class ComfyUiStubServer
     public HttpMessageHandler Handler() => new StubHttpHandler(request =>
     {
         var pathAndQuery = request.RequestUri!.PathAndQuery;
-        lock (requests) requests.Add(pathAndQuery);
+        lock (requests) { requests.Add(pathAndQuery); methods.Add(request.Method); }
 
         if (WithoutApiPrefix && pathAndQuery.StartsWith("/api/", StringComparison.Ordinal))
             return new HttpResponseMessage(HttpStatusCode.NotFound);
@@ -16214,6 +17141,7 @@ sealed class ComfyUiStubServer
                 : new HttpResponseMessage(HttpStatusCode.NotFound);
         }
 
+        if (decoded == "/system_stats") return Json(SystemStats);
         if (decoded == "/object_info") return Json(ObjectInfo);
         return new HttpResponseMessage(HttpStatusCode.NotFound);
     });
@@ -16378,6 +17306,14 @@ sealed class RecordingImageProvider : IImageProvider
     public bool IsConfigured => true;
     public string Name => "RecordingImage";
     public ReferenceCapacity ReferenceCapacity => new(0, "测试桩不限制参考图。");
+    public IReadOnlySet<GenerationCapability> Capabilities => new HashSet<GenerationCapability>
+    {
+        GenerationCapability.TextToImage,
+        GenerationCapability.ImageToImage,
+        GenerationCapability.MultiReferenceImage,
+        GenerationCapability.ImageSet,
+        GenerationCapability.BatchOutput
+    };
 
     /// <summary>最近一次请求；没有调用过时为 null。</summary>
     public ImageGenerationRequest? LastRequest { get; private set; }
@@ -16409,6 +17345,11 @@ sealed class RecordingVideoProvider : IVideoProvider
 
     public bool IsConfigured => true;
     public string Name => "RecordingVideo";
+    public IReadOnlySet<GenerationCapability> Capabilities => new HashSet<GenerationCapability>
+    {
+        GenerationCapability.TextToVideo,
+        GenerationCapability.ImageToVideo
+    };
 
     /// <summary>桩不限制张数（真实那条路目前只收一张，见 HttpVideoProvider）。</summary>
     public ReferenceCapacity ReferenceCapacity => new(0, "测试桩不限制参考图。");

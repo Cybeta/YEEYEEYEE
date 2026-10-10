@@ -31,6 +31,31 @@ public sealed record OneClickRunRequest(
 
     /// <summary>这一次真的要出视频（意图是出视频、且确实缺视频）。</summary>
     public bool WantsVideos => Intent == GenerationIntent.Video && VideoCount > 0;
+
+    /// <summary>整批开跑前确认需求；补图尚缺产物时不检查文件，但未知需求必须先阻断。</summary>
+    public IReadOnlyList<string> CheckAssetRequirements(WorkflowCanvasState canvas)
+    {
+        var items = (WantsImages ? ImageItems : Array.Empty<GenerationAuditItem>())
+            .Concat(WantsVideos ? VideoItems : Array.Empty<GenerationAuditItem>()).ToList();
+        var ids = items.Where(item => item.ActionNodeId != Guid.Empty)
+            .Select(item => item.ActionNodeId).ToHashSet();
+        var assets = items.Where(item => item.IsReferenceImage)
+            .Select(item => (item.ReferenceEntityId, item.ReferenceVariantId)).ToHashSet();
+        var errors = new List<string>();
+        foreach (var id in ids.Where(id => canvas.Nodes.All(node => node.Id != id)))
+            errors.Add($"生成节点已不存在：{id:N}，请重新自检。");
+        var shots = canvas.Nodes.Where(node => node.Category == NodeCategory.Storyboard &&
+            (ids.Contains(node.Id) || node.References.Any(reference =>
+                assets.Contains((reference.EntityId, reference.VariantId)))));
+        foreach (var shot in shots)
+        foreach (var kind in Enum.GetValues<EntityKind>())
+        {
+            var need = shot.AssetRequirements?.For(kind) ?? AssetNeed.Unknown;
+            if (need == AssetNeed.Unknown || !Enum.IsDefined(need))
+                errors.Add($"「{shot.Title}」{WorkflowEntity.KindName(kind)}资产需求未知，请先确认；整批尚未开始补图或出视频。");
+        }
+        return errors;
+    }
 }
 
 /// <summary>

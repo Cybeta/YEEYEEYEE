@@ -122,6 +122,9 @@ public sealed class NodeImageBatch
     [JsonIgnore]
     public ImageGenerationRequest? Request { get; set; }
 
+    /// <summary>提交请求时固定的资产依据，采用候选时不得按当前引用重拍。</summary>
+    public Dictionary<string, string> SourceFingerprints { get; set; } = new(StringComparer.Ordinal);
+
     public string Prompt { get; set; } = string.Empty;
 
     public string Negative { get; set; } = string.Empty;

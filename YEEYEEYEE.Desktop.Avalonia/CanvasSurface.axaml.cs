@@ -6,6 +6,7 @@ using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using YEEYEEYEE.Desktop;
 
 namespace YEEYEEYEE.Desktop.Avalonia;
@@ -40,7 +41,7 @@ public partial class CanvasSurface : UserControl
     private const double NodeHeight = 104;
     private const double GridStep = 48;
 
-    public const string ResourceDragFormat = "YEEYEEYEE.ResourceReference";
+    public static readonly DataFormat<string> ResourceDragFormat = DataFormat.CreateInProcessFormat<string>("YEEYEEYEE.ResourceReference");
 
     /// <summary>选择态与品牌光效的主色。种类色见 <see cref="NodeKindPalette"/>（一处定义、三处共用）。</summary>
     private static readonly Color AccentPrimary = Color.Parse("#4D9BFF");
@@ -622,8 +623,18 @@ public partial class CanvasSurface : UserControl
 
     // ---------------------------------------------------------------- rendering
 
+    private static void StopCanvasVideoPlayers(Visual root)
+    {
+        // Stop 会替换播放器内容；先取快照，避免遍历过程中修改视觉树。
+        foreach (var player in root.GetVisualDescendants().OfType<LocalVideoPlayer>().ToList())
+            player.Stop();
+    }
+
     private void ApplyTransform()
     {
+        // 原生子窗口不跟随 RenderTransform：变换前退出画布内播放，恢复播放按钮。
+        // 只遍历当前画布的视觉子树，不触及独立弹窗中的播放器。
+        StopCanvasVideoPlayers(this);
         var group = new TransformGroup();
         group.Children.Add(new TranslateTransform(pan.X, pan.Y));
         group.Children.Add(new ScaleTransform(zoom, zoom));
@@ -1792,11 +1803,12 @@ public partial class CanvasSurface : UserControl
                         ShowOwnMediaMenu(node, captured, tile);
                         return;
                     }
+                    if (!args.GetCurrentPoint(tile).Properties.IsLeftButtonPressed) return;
+                    if (captured.Kind == AttachmentKind.Video && args.ClickCount < 2) return;
                     var path = AssetStore.Resolve(captured.Reference) ?? string.Empty;
                     if (path.Length > 0) OwnMediaActivated?.Invoke(this, (path, node.Title));
                 };
-                // 提示里的动词跟着种类走：视频那一路是交给系统播放器，不是「放大」。
-                ToolTip.SetTip(tile, $"{attachment.Name}\n{attachment.Source}\n（单击{OwnMediaVerb(IsPlayable(attachment.Kind), menu: false)} · 右键可删除）");
+                ToolTip.SetTip(tile, $"{attachment.Name}\n{attachment.Source}\n（{(isVideo ? "双击应用内播放" : "单击放大")} · 右键可删除）");
                 strip.Children.Add(tile);
             }
             content.Children.Add(strip);
@@ -1897,19 +1909,19 @@ public partial class CanvasSurface : UserControl
 
     /// <summary>
     /// 节点下方的「引用预览」：把这条节点引用到的角色 / 场景 / 道具各摆一个小预览框，
-    /// 有图片给缩略图、只有视频给 ▶ 占位，点一下放大 / 播放。
+    /// 图片与视频双击打开应用内大预览；视频单击原位播放。
     ///
     /// 为什么是「一张引用一个框」而不是「一张媒体一个框」：用户问的是「这个节点引用了谁」；
     /// 一个角色挂了三张参考图时摆三个框，会看不出它们其实属于同一个角色。
     /// 多出来的媒体用角标「+N」说明，点开那张框就能逐个看。
     ///
-    /// 用 WrapPanel 按固定格宽排，所以无论几张都是**整齐的网格**（每行 3 个），
+    /// 用 WrapPanel 按固定格宽排，大预览每行一格，
     /// 不会因为名字长短变得参差不齐。
     /// </summary>
     private Control CreateReferencePreviewStrip(WorkflowNode node)
     {
-        const double slotWidth = 62;
-        const double slotHeight = 64;
+        const double slotWidth = 198;
+        const double slotHeight = ReferencePreviewSlotHeight;
         var strip = new WrapPanel
         {
             Orientation = global::Avalonia.Layout.Orientation.Horizontal,
@@ -1925,19 +1937,29 @@ public partial class CanvasSurface : UserControl
             var category = content is null ? node.Category : NodeKindPalette.CategoryOf(content.Entity.Kind);
             var label = content?.Label ?? "引用失效";
 
-            var slot = new StackPanel { Width = slotWidth - 6, Spacing = 3 };
-            slot.Children.Add(CreatePreviewTile(node, content, media, category, label));
-            slot.Children.Add(new TextBlock
+            // 每个媒体各占一格；无媒体/失效引用仍保留一格占位。
+            foreach (var attachment in media.Count == 0
+                ? new WorkflowAttachment?[] { null }
+                : media.Cast<WorkflowAttachment?>())
             {
-                Text = label,
-                // 名字要看得清：9px 的 #93A1B3 在卡片底色上偏暗，扫一眼读不出是谁。
-                Foreground = new SolidColorBrush(Color.Parse("#C6D3E2")),
-                FontSize = 10,
-                MaxLines = 1,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center
-            });
-            strip.Children.Add(slot);
+                var slot = new StackPanel { Width = slotWidth - 6, Spacing = 3 };
+                slot.Children.Add(CreatePreviewTile(attachment, category, label));
+                slot.Children.Add(new TextBlock
+                {
+                    Text = label,
+                    Foreground = new SolidColorBrush(Color.Parse("#C6D3E2")),
+                    FontSize = 10,
+                    MaxLines = 1,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center
+                });
+                // 名称/留白处的双击也不能冒泡成「打开节点」。
+                slot.DoubleTapped += (_, args) => args.Handled = true;
+                // 在冒泡阶段拦住父卡片，保留播放器/按钮自身的按下与 Click 处理。
+                // 不调用 SelectNodeOnly：它同样会 Rebuild 并销毁正在播放的控件。
+                slot.PointerPressed += (_, args) => args.Handled = true;
+                strip.Children.Add(slot);
+            }
         }
         return strip;
     }
@@ -2178,6 +2200,36 @@ public partial class CanvasSurface : UserControl
             }
         });
 
+        if (!faceDown && slot.Status == BatchSlotStatus.Done && slot.Path.Length > 0)
+        {
+            var use = new Button
+            {
+                Content = "用这一张",
+                FontSize = 10,
+                MinHeight = 0,
+                Padding = new Thickness(6, 3),
+                Margin = new Thickness(3),
+                HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = global::Avalonia.Layout.HorizontalAlignment.Center,
+                VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Bottom,
+                Background = new SolidColorBrush(Color.Parse("#193D66")),
+                Foreground = Brushes.White,
+                IsEnabled = batch.CanActOnSlot(index)
+            };
+            // 左键交给按钮完成按下 / 松开；不要冒泡到卡片选择并 Rebuild，避免 Click 前按钮被移除。
+            use.PointerPressed += (_, args) =>
+            {
+                if (args.GetCurrentPoint(use).Properties.IsLeftButtonPressed) args.Handled = true;
+            };
+            use.Click += (_, args) =>
+            {
+                args.Handled = true;
+                BatchActionRequested?.Invoke(node.Id, $"ghost-use:{index}");
+            };
+            ToolTip.SetTip(use, use.IsEnabled ? "采用这张候选图" : batch.SingleActionBlockedNote);
+            face.Children.Add(use);
+        }
+
         frame.Child = face;
 
         // 跑着的那一格：**背后**一圈会呼吸的光晕（和节点卡上那圈同一个做法：BoxShadow + 相位错开）。
@@ -2208,7 +2260,7 @@ public partial class CanvasSurface : UserControl
         else if (faceDown)
             ToolTip.SetTip(frame, batch.IsRunning ? batch.SingleActionBlockedNote : "点一下开奖（这一批的图在揭晓里才露面）");
         else if (slot.Status == BatchSlotStatus.Done)
-            ToolTip.SetTip(frame, "双击看大图 · 右键选用或删除");
+            ToolTip.SetTip(frame, "点击「用这一张」采用 · 双击看大图 · 右键选用或删除");
 
         frame.PointerPressed += (_, args) =>
         {
@@ -2231,9 +2283,11 @@ public partial class CanvasSurface : UserControl
 
             if (point.Properties.IsRightButtonPressed)
             {
-                // 右键作用于「这一张」：先把焦点挪到它身上，再弹菜单。
+                // 右键作用于「这一张」：先同步选择，保留已选中的多选集合。
+                // ghost-focus 会 Refresh/Rebuild 并移除 frame；等本轮指针事件结束后，
+                // 再用稳定的画布承载 Flyout，避免在输入路由 / 重建期间打开弹层。
                 BatchActionRequested?.Invoke(node.Id, $"ghost-focus:{index}");
-                ShowBatchGhostMenu(node, batch, index, frame);
+                Dispatcher.UIThread.Post(() => ShowBatchGhostMenu(node, batch, index), DispatcherPriority.Input);
                 return;
             }
             if (args.ClickCount == 2)
@@ -2252,7 +2306,7 @@ public partial class CanvasSurface : UserControl
         return glow is null ? frame : new Panel { Children = { glow, frame } };
     }
 
-    /// <summary>这一类产物要交给系统播放器打开吗（图走内置预览，视频 / 音频交给系统）。</summary>
+    /// <summary>这一类产物是否可播放（视频内嵌、音频保留系统入口）。</summary>
     private static bool IsPlayable(AttachmentKind kind) => kind is AttachmentKind.Video or AttachmentKind.Audio;
 
     /// <summary>产物在中文里的量词：图是「张」，视频 / 音频是「段」，其余是「个」。</summary>
@@ -2275,7 +2329,8 @@ public partial class CanvasSurface : UserControl
 
         // 视频 / 音频那一条不能写「放大」：放大那一路是解码图片（`new Bitmap(path)`），
         // 对 mp4 只会得到一句「预览打不开」——措辞得跟真正会发生的事一致。
-        var open = new MenuItem { Header = OwnMediaVerb(IsPlayable(attachment.Kind), menu: true) };
+        var open = new MenuItem { Header = attachment.Kind == AttachmentKind.Video
+            ? "应用内播放" : OwnMediaVerb(IsPlayable(attachment.Kind), menu: true) };
         open.Click += (_, _) =>
         {
             var path = AssetStore.Resolve(attachment.Reference) ?? string.Empty;
@@ -2317,10 +2372,16 @@ public partial class CanvasSurface : UserControl
     }
 
     /// <summary>虚影上的右键菜单。画布只说「点了哪一张、要干什么」，规矩都在主窗口。</summary>
-    private void ShowBatchGhostMenu(WorkflowNode node, NodeImageBatch batch, int index, Control anchor)
+    private void ShowBatchGhostMenu(WorkflowNode node, NodeImageBatch batch, int index)
     {
-        var slot = batch.Slots[index];
-        var menu = new ContextMenu();
+        // 延迟期间若切换了画布、批次被替换或这一格被删除，就不打开旧对象的菜单。
+        if (TopLevel.GetTopLevel(this) is null
+            || state?.Nodes.Any(item => ReferenceEquals(item, node)) != true
+            || !ReferenceEquals(ImageBatchOf?.Invoke(node.Id), batch)
+            || batch.SlotAt(index) is not { Removed: false } slot)
+            return;
+
+        var menu = new MenuFlyout();
         // Control 而不是 MenuItem：中间要插 Separator，它不是 MenuItem。
         var items = new List<Control>();
 
@@ -2388,7 +2449,7 @@ public partial class CanvasSurface : UserControl
         items.Add(redo);
 
         foreach (var item in items) menu.Items.Add(item);
-        menu.Open(anchor);
+        menu.ShowAt(this, true);
     }
 
     /// <summary>
@@ -2412,21 +2473,46 @@ public partial class CanvasSurface : UserControl
     }
 
 
-    private Control CreatePreviewTile(
-        WorkflowNode node,
-        ReferenceContent? content,
-        IReadOnlyList<WorkflowAttachment> media,
-        NodeCategory category,
-        string label)
+    // 108px 预览 + 引用名称 + 间距/行间留白。
+    internal const double ReferencePreviewSlotHeight = 132;
+
+    internal static int ReferencePreviewSlotCount(ReferenceContent? content) =>
+        Math.Max(1, MediaOf(content).Count);
+
+    private bool IsPreviewFullyVisible(Control preview)
+    {
+        // Use visual coordinates, not node/world bounds: TransformToVisual includes
+        // NodeCanvas.RenderTransform (pan/zoom) and every intervening layout offset.
+        if (!preview.IsEffectivelyVisible || TopLevel.GetTopLevel(preview) is null
+            || preview.Bounds.Width <= 0 || preview.Bounds.Height <= 0
+            || ViewportHost.Bounds.Width <= 0 || ViewportHost.Bounds.Height <= 0
+            || preview.TransformToVisual(ViewportHost) is not { } transform)
+            return false;
+
+        var viewport = new Rect(ViewportHost.Bounds.Size);
+        var bounds = new Rect(preview.Bounds.Size);
+        // All four corners must be inside; intersection alone accepts clipped previews.
+        return Contains(bounds.TopLeft) && Contains(bounds.TopRight)
+            && Contains(bounds.BottomLeft) && Contains(bounds.BottomRight);
+
+        bool Contains(Point corner)
+        {
+            var point = transform.Transform(corner);
+            return double.IsFinite(point.X) && double.IsFinite(point.Y)
+                && point.X >= viewport.Left && point.X <= viewport.Right
+                && point.Y >= viewport.Top && point.Y <= viewport.Bottom;
+        }
+    }
+
+    private Control CreatePreviewTile(WorkflowAttachment? attachment, NodeCategory category, string label)
     {
         var accent = NodeKindBrushes.ColorOf(category);
-        var first = media.FirstOrDefault();
-        var thumbnail = first is { Kind: AttachmentKind.Image } ? LoadThumbnail(first.Reference) : null;
+        var thumbnail = attachment is { Kind: AttachmentKind.Image } ? LoadThumbnail(attachment.Reference) : null;
 
         var tile = new Border
         {
-            Width = 56,
-            Height = 40,
+            Width = 192,
+            Height = 108,
             CornerRadius = new CornerRadius(6),
             Background = new SolidColorBrush(Color.Parse("#0E141C")),
             BorderBrush = new SolidColorBrush(Color.FromArgb(140, accent.R, accent.G, accent.B)),
@@ -2443,7 +2529,7 @@ public partial class CanvasSurface : UserControl
         {
             // 视频给 ▶、什么都没有给一个「无图」：都不假装有画面。
             // 「无图」原来用半透明的种类色（alpha 150）压在近黑底上，几乎读不出来——改成实色。
-            var empty = first is null;
+            var empty = attachment is null;
             face.Children.Add(new TextBlock
             {
                 Text = empty ? "无图" : "▶",
@@ -2454,36 +2540,34 @@ public partial class CanvasSurface : UserControl
             });
         }
 
-        if (media.Count > 1)
+        void OpenLargePreview()
         {
-            face.Children.Add(new Border
-            {
-                Background = new SolidColorBrush(Color.FromArgb(220, 10, 15, 22)),
-                CornerRadius = new CornerRadius(5),
-                Padding = new Thickness(4, 0),
-                Margin = new Thickness(0, 0, 2, 2),
-                HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Right,
-                VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Bottom,
-                Child = new TextBlock
-                {
-                    Text = $"+{media.Count - 1}",
-                    Foreground = new SolidColorBrush(Color.Parse("#CFE0F2")),
-                    FontSize = 9
-                }
-            });
+            if (attachment is null) return;
+            var path = AssetStore.Resolve(attachment.Reference);
+            if (!string.IsNullOrWhiteSpace(path))
+                Dispatcher.UIThread.Post(() => OwnMediaActivated?.Invoke(this, (path, label)), DispatcherPriority.Input);
         }
-        tile.Child = face;
 
-        // 引用解析不出来（设定被删了 / 项目库里找不到）时不挂点击：点开一个空窗只会更困惑。
-        if (content is not null)
+        tile.Child = attachment is { Kind: AttachmentKind.Video }
+            ? new LocalVideoPlayer(attachment.Reference, () =>
+            {
+                var visible = IsPreviewFullyVisible(tile);
+                if (!visible)
+                    Notice?.Invoke(this, "预览框未完整显示，请将预览框完整移回画布可见区域，或双击视频打开应用内大预览。");
+                return visible;
+            }, posterStretch: global::Avalonia.Media.Stretch.UniformToFill,
+                openLargePreview: OpenLargePreview)
+            : face;
+        tile.DoubleTapped += (_, args) =>
         {
-            tile.Tag = new CanvasReferencePreview(node, content.Entity, content.Variant, media);
-            tile.Cursor = new Cursor(StandardCursorType.Hand);
-            tile.PointerPressed += ReferencePreviewPointerPressed;
-        }
-        ToolTip.SetTip(tile, first is null
-            ? $"{label}：还没有图片或视频（双击节点进引用画布可以补一张）"
-            : $"{label}：{media.Count} 个媒体 · 点击放大 / 播放");
+            args.Handled = true;
+            if (attachment?.Kind == AttachmentKind.Image) OpenLargePreview();
+        };
+        ToolTip.SetTip(tile, attachment is null
+            ? "还没有图片或视频（双击节点进引用画布可以补一张）"
+            : attachment.Kind == AttachmentKind.Video
+                ? $"{attachment.Name}：单击原位播放；双击打开应用内大预览"
+                : $"{attachment.Name}：双击打开应用内大预览");
         return tile;
     }
 
@@ -2802,6 +2886,7 @@ public partial class CanvasSurface : UserControl
     protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
         base.OnPointerPressed(e);
+        if (e.Handled) return;
 
         // 键盘操作（Delete / Esc）打给「有焦点的控件」，画布必须在被点时拿到焦点——
         // 否则焦点还在别处，按 Delete 谁也收不到（这正是「节点按 Del 删不掉」的原因）。
@@ -2864,6 +2949,9 @@ public partial class CanvasSurface : UserControl
                 BeforeCanvasMutation?.Invoke(this, EventArgs.Empty);
                 dragSnapshotRecorded = true;
             }
+            // 首次实际移动前退出该节点的原生播放，避免子窗口留在原位置。
+            if (!dragMoved && draggingCard is not null)
+                StopCanvasVideoPlayers(draggingCard);
             dragMoved = true;
             draggingNode.X = (float)Math.Max(0, nodeOriginX + dx);
             draggingNode.Y = (float)Math.Max(0, nodeOriginY + dy);
@@ -2989,6 +3077,7 @@ public partial class CanvasSurface : UserControl
 
     private void NodePointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        if (e.Handled) return;
         if (sender is not Border border || border.Tag is not WorkflowNode node) return;
         var point = e.GetPosition(NodeCanvas);
         Focus();
@@ -3000,8 +3089,18 @@ public partial class CanvasSurface : UserControl
             selectedNode = node;
             Rebuild();
             SelectedNodeChanged?.Invoke(this, node);
-            NodeContextRequested?.Invoke(this, new CanvasNodeContextRequest(node));
             e.Handled = true;
+            // Rebuild 已移除事件源卡片；等本轮输入路由结束后再打开菜单。
+            var contextState = state;
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (TopLevel.GetTopLevel(this) is null
+                    || !ReferenceEquals(state, contextState)
+                    || !ReferenceEquals(selectedNode, node)
+                    || state?.Nodes.Any(item => ReferenceEquals(item, node)) != true)
+                    return;
+                NodeContextRequested?.Invoke(this, new CanvasNodeContextRequest(node));
+            }, DispatcherPriority.Input);
             return;
         }
 
@@ -3153,13 +3252,13 @@ public partial class CanvasSurface : UserControl
 
     private static void SurfaceDragOver(object? sender, DragEventArgs e)
     {
-        e.DragEffects = e.Data.Contains(ResourceDragFormat) ? DragDropEffects.Copy : DragDropEffects.None;
+        e.DragEffects = e.DataTransfer.Contains(ResourceDragFormat) ? DragDropEffects.Copy : DragDropEffects.None;
         e.Handled = true;
     }
 
     private void SurfaceDrop(object? sender, DragEventArgs e)
     {
-        if (!e.Data.Contains(ResourceDragFormat) || e.Data.Get(ResourceDragFormat) is not string payload)
+        if (e.DataTransfer.TryGetValue(ResourceDragFormat) is not string payload)
             return;
         var values = payload.Split('|');
         if (values.Length < 2 || values.Length > 3 || !Guid.TryParse(values[0], out var entityId) || !Guid.TryParse(values[1], out var variantId))

@@ -40,7 +40,7 @@
           </ComboBox>
           <CheckBox x:Name="UseContextBox" Content="带上画布上下文" IsChecked="True" FontSize="11"
                     Foreground="{StaticResource DfInk2}"
-                    Checked="UseContext_OnChanged" Unchecked="UseContext_OnChanged" />
+                    IsCheckedChanged="UseContext_OnChanged" />
         </StackPanel>
 
         <!-- ===== 对话区 ===== -->

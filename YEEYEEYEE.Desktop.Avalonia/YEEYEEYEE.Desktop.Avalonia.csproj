@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- 单目标框架 net10.0：Windows / macOS / Linux 出同一份代码。
          平台差异（密钥落盘方案、窗口外观）由**运行时**判断，不用条件编译，避免同一份源码在不同 TFM 下行为分叉。 -->
     <TargetFramework>net10.0</TargetFramework>
@@ -9,7 +10,7 @@
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <!-- 版本号的唯一来源：界面标题栏、左栏底部与设置页都读这里（见 AppVersion）。
          改这一行就是改版本号，不需要再去 XAML 里找写死的字符串。 -->
-    <Version>0.1.5</Version>
+    <Version>0.1.5.1</Version>
     <Product>YEEYEEYEE</Product>
     <AssemblyTitle>YEEYEEYEE</AssemblyTitle>
   </PropertyGroup>
@@ -24,16 +25,23 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.3.9" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.3.9" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.9" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.9" />
+    <PackageReference Include="Avalonia" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.0" />
+    <PackageReference Include="Avalonia.Controls.WebView" Version="12.1.0" />
     <!-- 覆盖传递依赖里那个带漏洞的 D-Bus 协议库：Avalonia.Desktop 会带进 Tmds.DBus.Protocol 0.21.2，
          而 GHSA-xrw6-gwf8-vvr9（CVE-2026-39959）影响 < 0.21.3——同一个总线上怀恶意的对端可以伪造信号、
          耗尽文件描述符、或发畸形报文把进程打崩。修好的版本是 0.21.3（0.92.0 那一支也修了）。
          这条洞只在 Linux 桌面上够得着（要有一条 D-Bus 总线），Windows / macOS 上到不了；
          但它就在依赖图里，所以照样升掉。 -->
-    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.94.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Agent\ComfyUi.Guard.js" LogicalName="ComfyUi.Guard.js" />
+    <EmbeddedResource Include="Agent\ComfyUi.Inspect.js" LogicalName="ComfyUi.Inspect.js" />
+    <EmbeddedResource Include="Agent\ComfyUi.Export.js" LogicalName="ComfyUi.Export.js" />
   </ItemGroup>
 
   <!-- 每个厂家一张「形象」（开奖许愿那一拍用，见 ProviderAvatar）。放在仓库根目录的 provider-art/ 下，
@@ -50,6 +58,20 @@
           CopyToOutputDirectory="PreserveNewest"
           Visible="false" />
   </ItemGroup>
+
+  <!-- Ship the tested Windows decoder together with upstream GPL license/build provenance. -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' Or ('$(RuntimeIdentifier)' == '' And '$(OS)' == 'Windows_NT')">
+    <None Include="..\tools\ffmpeg\win-x64\ffmpeg.exe;..\tools\ffmpeg\win-x64\LICENSE;..\tools\ffmpeg\win-x64\README.txt"
+          Link="tools\ffmpeg\win-x64\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Visible="false" />
+  </ItemGroup>
+  <Target Name="RequireWindowsVideoDecoder" BeforeTargets="PrepareForBuild"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64' Or ('$(RuntimeIdentifier)' == '' And '$(OS)' == 'Windows_NT')">
+    <Error Condition="!Exists('..\tools\ffmpeg\win-x64\ffmpeg.exe') Or !Exists('..\tools\ffmpeg\win-x64\LICENSE') Or !Exists('..\tools\ffmpeg\win-x64\README.txt')"
+           Text="Windows video decoder or license missing: restore tools/ffmpeg/win-x64 before building." />
+  </Target>
 
   <!-- 共享界面文案（UiText）由 Desktop.Shared 那边嵌（EmbeddedResource → 网页端项目里的
        src/shared/uiText.json），这一端不再有一条：嵌在共享层是为了让服务端与 Agent 侧读到同一份，

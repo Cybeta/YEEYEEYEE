@@ -11,6 +11,15 @@ public enum ImageGenerationStatus { NotConfigured, Succeeded, Failed }
 
 public sealed class ImageGenerationRequest
 {
+    /// <summary>本次生图的业务生产意图；为空保持旧调用语义。</summary>
+    public AssetGenerationIntent? ProductionIntent { get; init; }
+
+    /// <summary>使用的固定模板标识；为空表示未使用模板。</summary>
+    public string TemplateId { get; init; } = string.Empty;
+
+    /// <summary>模板是否锁定；默认 false 保持旧调用兼容。</summary>
+    public bool TemplateLocked { get; init; }
+
     public string Prompt { get; init; } = string.Empty;
     public string NegativePrompt { get; init; } = string.Empty;
 
@@ -170,6 +179,9 @@ public interface IImageProvider
     /// </summary>
     ReferenceCapacity ReferenceCapacity { get; }
 
+    /// <summary>当前 Provider 能真实执行的生产能力，用于提交前筛选。</summary>
+    IReadOnlySet<GenerationCapability> Capabilities { get; }
+
     Task<ImageGenerationResult> GenerateAsync(ImageGenerationRequest request, CancellationToken cancellationToken = default);
 }
 
@@ -215,7 +227,8 @@ public static class ImageProviderFactory
     /// </summary>
     public static IImageProvider Create(SingleMachineExecutionService? execution = null)
     {
-        if (Override is { } injected) return injected;
+        if (Override is { } injected)
+            return injected;
         var config = AiProviderSettings.Load();
         execution ??= ResolveSharedHost(config);
         if (config.IsComfyUiConfigured && execution is not null)
@@ -230,6 +243,69 @@ public static class ImageProviderFactory
         return config.IsImageConfigured
             ? new OpenAiCompatibleImageProvider(config)
             : new UnconfiguredImageProvider();
+    }
+
+    /// <summary>
+    /// 返回当前配置下可以展示给用户的图像执行方，并附带能力匹配结果。
+    /// 旧的 <see cref="Create"/> 仍负责默认优先级，这里只用于选择和预检。
+    /// </summary>
+    public static IReadOnlyList<GenerationProviderCandidate<IImageProvider>> CandidatesFor(
+        IEnumerable<GenerationCapability>? required,
+        SingleMachineExecutionService? execution = null)
+    {
+        if (Override is { } injected)
+            return [GenerationProviderSelection.Evaluate(injected, required, "override")];
+
+        var config = AiProviderSettings.Load();
+        execution ??= ResolveSharedHost(config);
+        var providers = new List<(string Id, IImageProvider Provider)>();
+        if (config.IsComfyUiConfigured && execution is not null)
+            providers.Add(("comfyui", new ComfyUiImageProvider(execution, config, DesktopSession())));
+        if (config.IsImageConfigured)
+            providers.Add(("openai-compatible", new OpenAiCompatibleImageProvider(config)));
+        if (providers.Count == 0)
+            providers.Add(("unconfigured", new UnconfiguredImageProvider()));
+        return GenerationProviderSelection.EvaluateAll(providers, required);
+    }
+
+    /// <summary>
+    /// 按本次明确选择的来源构造执行方。池子必须走接口 Provider，工作流必须走 ComfyUI Provider，
+    /// 不允许因为默认优先级变化而把一次明确选择静默改成另一条链路。
+    /// </summary>
+    public static IImageProvider CreateForSource(
+        ImageSourceChoice? source,
+        SingleMachineExecutionService? execution = null)
+    {
+        if (Override is { } injected) return injected;
+        var config = AiProviderSettings.Load();
+        if (source?.Workflow is { } workflow)
+        {
+            execution ??= ResolveSharedHost(config);
+            return execution is null
+                ? new UnconfiguredImageProvider($"选了 ComfyUI 的「{workflow.Workflow.Title}」，但 ComfyUI 链路未配置。")
+                : new ComfyUiImageProvider(execution, config, DesktopSession(),
+                    ComfyUiWorkflowInspector.Inspect(workflow.Site, workflow.Workflow).Slots);
+        }
+
+        if (source?.Pool is not null)
+            return new OpenAiCompatibleImageProvider(config);
+
+        return Create(execution);
+    }
+
+    /// <summary>按明确来源或默认候选选择图像 Provider，并返回能力不匹配原因。</summary>
+    public static GenerationProviderCandidate<IImageProvider> SelectFor(
+        IEnumerable<GenerationCapability>? required,
+        ImageSourceChoice? source = null,
+        SingleMachineExecutionService? execution = null)
+    {
+        if (source is not null)
+            return GenerationProviderSelection.Evaluate(
+                CreateForSource(source, execution), required,
+                source.IsWorkflow ? "comfyui-workflow" : "image-pool");
+
+        return CandidatesFor(required, execution).FirstOrDefault(candidate => candidate.IsMatch)
+            ?? CandidatesFor(required, execution).First();
     }
 
     private static DesktopExecutionHost? sharedHost;
@@ -277,6 +353,15 @@ public static class ImageProviderFactory
     internal static SingleMachineExecutionService? SharedExecutionHost(AiProviderConfig config) =>
         ResolveSharedHost(config);
 
+    private static SessionContext DesktopSession() => new()
+    {
+        SessionId = Guid.NewGuid(),
+        UserId = DesktopUserId,
+        ClientType = ClientType.Desktop,
+        Role = MemberRole.Member,
+        ServerClaims = new HashSet<string>(["skill.invoke", "job.cancel"])
+    };
+
     /// <summary>退出时释放共享宿主：任务轮询与数据库连接都要收干净。</summary>
     public static async ValueTask DisposeSharedHostAsync()
     {
@@ -292,18 +377,26 @@ public static class ImageProviderFactory
 
 public sealed class UnconfiguredImageProvider : IImageProvider
 {
+    private readonly string message;
+
+    public UnconfiguredImageProvider(string? message = null) =>
+        this.message = string.IsNullOrWhiteSpace(message)
+            ? "尚未配置图像模型。"
+            : message;
+
     public bool IsConfigured => false;
     public string Name => "未配置";
     public ReferenceCapacity ReferenceCapacity => new(0, "未配置图像模型，无法判断参考图能力。");
+    public IReadOnlySet<GenerationCapability> Capabilities => EmptyCapabilities;
+    private static readonly IReadOnlySet<GenerationCapability> EmptyCapabilities =
+        new HashSet<GenerationCapability>();
 
     public Task<ImageGenerationResult> GenerateAsync(ImageGenerationRequest request, CancellationToken cancellationToken = default) =>
         Task.FromResult(new ImageGenerationResult
         {
             Status = ImageGenerationStatus.NotConfigured,
             Provider = Name,
-            // ComfyUI 的「接上了没有」只看地址；checkpoint 只在内置模板出图时才需要，走工作流不看它。
-            Error = "尚未配置图像模型。请在“设置”中填写 ComfyUI 地址（地址填了就算接上了，"
-                + "走工作流不看 checkpoint；checkpoint 只在内置模板出图时要用），或填写图像模型名称。"
+            Error = message
         });
 }
 
@@ -326,6 +419,20 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
     public string Name => "OpenAiCompatibleImage";
 
     /// <summary>上限来自配置：接口能吃几张取决于所用模型，无法自动探测，因此交给用户声明。</summary>
+    public IReadOnlySet<GenerationCapability> Capabilities =>
+        config.ImageMaxReferenceImages >= 2
+            ? new HashSet<GenerationCapability>
+            {
+                GenerationCapability.TextToImage,
+                GenerationCapability.ImageToImage,
+                GenerationCapability.MultiReferenceImage
+            }
+            : new HashSet<GenerationCapability>
+            {
+                GenerationCapability.TextToImage,
+                GenerationCapability.ImageToImage
+            };
+
     public ReferenceCapacity ReferenceCapacity => new(
         Math.Max(0, config.ImageMaxReferenceImages),
         config.ImageMaxReferenceImages <= 0
@@ -340,9 +447,11 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
         if (string.IsNullOrWhiteSpace(request.Prompt))
             return Failed("图像提示词为空，无法生成。");
 
-        var references = request.ReferenceImages
-            .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
-            .ToList();
+        if (request.ReferenceImages.Any(path => string.IsNullOrWhiteSpace(path) || !File.Exists(path)))
+            return Failed("参考图不存在或路径为空，禁止过滤参考后降级生成。");
+        var references = request.ReferenceImages.ToList();
+        if (references.Count > 0 && (config.ImageMaxReferenceImages <= 0 || references.Count > config.ImageMaxReferenceImages))
+            return Failed("参考图数量超过接口声明容量，禁止裁剪生成。");
         var useReference = references.Count > 0;
         // 每次请求的模型名优先于设置里的默认模型：池子技能靠它把「生图池1 / 生图池2」区分开。
         var model = string.IsNullOrWhiteSpace(request.Model) ? config.ImageModel : request.Model;
@@ -418,13 +527,25 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
                 Provider = Name,
                 Model = model,
                 ReferenceNote = references.Count > 1
-                    ? $"已按 image[] 提交 {references.Count} 张参考图；能否全部生效取决于所用模型（多数模型只使用第一张）。"
+                    ? $"已按接口声明的多参考容量，通过 image[] 完整提交 {references.Count} 张参考图。"
                     : string.Empty
             };
         }
         catch (HttpRequestException error) { return Failed($"图像接口请求失败：{error.Message}", model); }
         catch (TaskCanceledException) { return Failed("图像接口请求超时。", model); }
         catch (IOException error) { return Failed($"保存图片失败：{error.Message}", model); }
+        catch (JsonException error)
+        {
+            return Failed($"图像接口返回的内容不是可识别的 JSON：{error.Message}", model);
+        }
+        catch (FormatException error)
+        {
+            return Failed($"图像接口返回的图片数据格式错误：{error.Message}", model);
+        }
+        catch (InvalidOperationException error)
+        {
+            return Failed($"图像接口返回的数据结构不符合预期：{error.Message}", model);
+        }
     }
 
     private static string ComposePrompt(string prompt, string negativePrompt) =>
@@ -545,18 +666,35 @@ public sealed class ComfyUiImageProvider : IImageProvider
     private readonly AiProviderConfig config;
     private readonly SessionContext session;
 
-    public ComfyUiImageProvider(SingleMachineExecutionService execution, AiProviderConfig config, SessionContext session)
+    private readonly ComfyUiWorkflowSlots? selectedSlots;
+
+    public ComfyUiImageProvider(SingleMachineExecutionService execution, AiProviderConfig config, SessionContext session,
+        ComfyUiWorkflowSlots? selectedSlots = null)
     {
         this.execution = execution;
         this.config = config;
         this.session = session;
+        this.selectedSlots = selectedSlots;
     }
 
     public bool IsConfigured => config.IsComfyUiConfigured;
     public string Name => "ComfyUI";
 
     /// <summary>上限与提交方式由当前工作流模板声明，见 ComfyUiSubmissionProfiles。</summary>
-    public ReferenceCapacity ReferenceCapacity => profile.ReferenceCapacity;
+    public IReadOnlySet<GenerationCapability> Capabilities
+    {
+        get
+        {
+            var capabilities = new HashSet<GenerationCapability> { GenerationCapability.TextToImage };
+            if (ReferenceCapacity.MaxImages > 0) capabilities.Add(GenerationCapability.ImageToImage);
+            if (ReferenceCapacity.MaxImages > 1) capabilities.Add(GenerationCapability.MultiReferenceImage);
+            return capabilities;
+        }
+    }
+
+    public ReferenceCapacity ReferenceCapacity => selectedSlots is null
+        ? profile.ReferenceCapacity
+        : new(selectedSlots.ImageCapacity, "当前工作流识别到的参考图容量。");
 
     private readonly SubmissionProfile profile = ComfyUiSubmissionProfiles.SingleBaseImage;
 
@@ -630,9 +768,13 @@ public sealed class ComfyUiImageProvider : IImageProvider
         if (request.Cfg is { } cfg) inputs["cfg"] = JsonSerializer.SerializeToElement(cfg);
         if (request.Seed is { } seed) inputs["seed"] = JsonSerializer.SerializeToElement(seed);
         // 参考图全部原样交给执行方：由它负责上传到 ComfyUI，工作流决定实际用几张。
-        var references = request.ReferenceImages
-            .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
-            .ToList();
+        if (request.ReferenceImages.Any(path => string.IsNullOrWhiteSpace(path) || !File.Exists(path)))
+            return Failed("参考图不存在或路径为空，禁止过滤参考后降级生成。");
+        var references = request.ReferenceImages.ToList();
+        if (references.Count > (detected?.ImageCapacity ?? profile.ReferenceCapacity.MaxImages))
+            return Failed("当前工作流无法使用全部参考图，禁止忽略或裁剪生成。");
+        if (references.Count > 0 && detected is { CanTakeImage: false })
+            return Failed("当前工作流未识别到参考图入口，禁止降级为文生图。");
         var useReference = references.Count > 0;
         if (useReference)
         {
@@ -709,22 +851,9 @@ public sealed class ComfyUiImageProvider : IImageProvider
     /// </summary>
     private static string ReferenceNote(int referenceCount, ComfyUiWorkflowSlots? slots)
     {
-        if (referenceCount == 0) return string.Empty;
-        if (slots is { CanTakeImage: false })
-            // 「我没认出来」不能说成「它没有」：说错了，用户会去换一份本来就在、本来就能吃参考图的工作流。
-            return slots.HasUnrecognizedImageSlot
-                ? $"这份工作流的底图入口**我没认出来**（{string.Join("、", slots.UnrecognizedImageSlots)}）——"
-                  + $"这 {referenceCount} 张参考图这次没有被使用。请把这几处指给我：哪一处是收参考图的，"
-                  + "认出来之后这类工作流就能吃参考图了。"
-                : $"这份工作流没有底图入口，这 {referenceCount} 张参考图没有被使用（它只能文生图）。"
-                  + "要按参考图出图得换一份带 LoadImage 的工作流。";
-        if (referenceCount > 1)
-            return slots is null
-                ? $"当前 img2img 工作流只支持单张底图，已使用第 1 张，忽略其余 {referenceCount - 1} 张。" +
-                  "要真正合成多角色，需要换成支持多参考的工作流模板（例如 IPAdapter）。"
-                : $"这份工作流只用了第 1 张底图，忽略其余 {referenceCount - 1} 张；"
-                  + "要合成多张参考图得换一份支持多参考的工作流（例如 IPAdapter）。";
-        return string.Empty;
+        return referenceCount > 0
+            ? $"已完整提交 {referenceCount} 张参考图，工作流参考容量为 {slots?.ImageCapacity ?? 1}。"
+            : string.Empty;
     }
 
     private ImageGenerationResult MapResult(ExecutionResult result, string modelLabel, string referenceNote, string workflowNote)

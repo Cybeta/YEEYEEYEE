@@ -14,6 +14,12 @@ public sealed record ComfyUiFileSlot(string NodeId, string Input);
 /// <summary>一个可写的种子输入。输入名不能写死成 seed：部分采样器使用 noise_seed 或中文字段。</summary>
 public sealed record ComfyUiSeedSlot(string NodeId, string Input);
 
+/// <summary>一个已确认的高级控制输入槽。只记录工作流图中真实存在的节点和输入。</summary>
+public sealed record ComfyUiControlSlot(string NodeId, string Input, string Kind);
+
+/// <summary>一个已确认的批量输出控制输入。</summary>
+public sealed record ComfyUiBatchSlot(string NodeId, string Input, string Kind, int? CurrentValue);
+
 /// <summary>
 /// 「文件选择槽」是收哪一类素材。判据来自服务器的节点定义（导入时算出来，见 <c>SiteProfile.FileSlots</c>），
 /// 值就是这三个字符串。
@@ -48,11 +54,27 @@ public sealed class ComfyUiWorkflowSlots
     /// <summary>决定画幅的节点（EmptyLatentImage 这类），要改 width / height。</summary>
     public string LatentNodeId { get; set; } = string.Empty;
 
+    /// <summary>宽高各自的可写入口；为空时兼容旧槽位的 LatentNodeId.width / height。</summary>
+    public ComfyUiFileSlot? WidthSlot { get; set; }
+    public ComfyUiFileSlot? HeightSlot { get; set; }
+
     /// <summary>收种子的采样器节点；出多张时要逐张换种子。保留供旧调用方查看节点 id。</summary>
     public List<string> SeedNodeIds { get; set; } = new();
 
     /// <summary>可写的种子输入，记录真实输入名；固定随机种子节点不会进入这里。</summary>
     public List<ComfyUiSeedSlot> SeedSlots { get; set; } = new();
+
+    /// <summary>结构化 ControlNet / Pose / Depth / IP-Adapter 输入槽。</summary>
+    public List<ComfyUiControlSlot> ControlSlots { get; set; } = new();
+
+    /// <summary>结构化批量输出输入槽，例如 batch_size 或 batch_count。</summary>
+    public List<ComfyUiBatchSlot> BatchSlots { get; set; } = new();
+
+    public bool HasControlNet => ControlSlots.Any(slot => slot.Kind == "controlnet");
+    public bool HasPoseControl => ControlSlots.Any(slot => slot.Kind == "pose");
+    public bool HasDepthControl => ControlSlots.Any(slot => slot.Kind == "depth");
+    public bool HasIpAdapter => ControlSlots.Any(slot => slot.Kind == "ip_adapter");
+    public bool HasBatchOutput => BatchSlots.Count > 0;
 
     /// <summary>收底图的节点（LoadImage 这类），图生图时要把参考图的名字放进去。</summary>
     public string ImageNodeId { get; set; } = string.Empty;
@@ -425,6 +447,7 @@ public static class ComfyUiWorkflowBinder
         ResolveAspect(apiWorkflow, slots);
         AttachAspectOptions(apiWorkflow, slots, optionValues);
         ResolveSeeds(apiWorkflow, slots);
+        ResolveAdvancedControls(apiWorkflow, slots);
         // 先认影音入口再认底图：底图「没找到」时那句说明要能分辨
         // 「这份工作流只能文生图」和「它吃的是片子、不吃图」——那是两回事。
         ResolveMedia(apiWorkflow, slots, fileSlots);
@@ -561,7 +584,31 @@ public static class ComfyUiWorkflowBinder
             if (!seen.Add(nodeId)) return null;
             if (graph[nodeId] is not JsonObject node || node["inputs"] is not JsonObject inputs) return null;
 
-            var writable = WritableTextNames.Where(name => inputs[name] is JsonValue).ToList();
+            // 这些节点的文字路径明确，不能把模型/参数连线或系统提示词当作用户入口。
+            var textPath = ClassTypeOf(node) switch
+            {
+                "CLIPTextEncode" => "text",
+                "VRAMCleanup" or "RAMCleanup" => "anything",
+                "llama_cpp_instruct_adv" => "custom_prompt",
+                "TextConcatenator" => "text1",
+                _ => string.Empty
+            };
+            if (textPath.Length > 0)
+            {
+                // 拼接存在多条有效文字分支时保持保守，空分支不影响 text1 的追踪。
+                if (ClassTypeOf(node) == "TextConcatenator"
+                    && new[] { "text2", "text3", "text4" }.Any(name =>
+                        inputs[name] is not null && (inputs[name] is not JsonValue literal
+                            || !literal.TryGetValue<string>(out var text) || text.Length > 0))) return null;
+                if (inputs[textPath] is JsonValue literalText && literalText.TryGetValue<string>(out _))
+                    return (nodeId, textPath, ClassTypeOf(node));
+                if (ReadLink(inputs, textPath) is not { } textLink) return null;
+                nodeId = textLink.NodeId;
+                continue;
+            }
+
+            var writable = WritableTextNames.Where(name => inputs[name] is JsonValue value
+                && value.TryGetValue<string>(out _)).ToList();
             if (writable.Count == 1) return (nodeId, writable[0], ClassTypeOf(node));
             if (writable.Count > 1) return null;
 
@@ -832,9 +879,36 @@ public static class ComfyUiWorkflowBinder
             return;
         }
 
+        // 宽高可分别来自独立 INTConstant，写常量而不替换载体上的连线。
+        foreach (var (id, node) in carriers)
+        {
+            var inputs = node["inputs"]!.AsObject();
+            var width = ResolveDimensionSlot(graph, id, inputs, "width");
+            var height = ResolveDimensionSlot(graph, id, inputs, "height");
+            if (width is null || height is null || width == height) continue;
+            slots.LatentNodeId = id;
+            slots.WidthSlot = width;
+            slots.HeightSlot = height;
+            slots.Notes.Add($"画幅分别写在 {width.NodeId}:{width.Input} / {height.NodeId}:{height.Input}，保留尺寸连线。");
+            return;
+        }
+
         var fallback = carriers[0];
         slots.Notes.Add(DescribeComputedSize(
             graph, fallback.Node["inputs"]!.AsObject(), fallback.Id, ClassTypeOf(fallback.Node)));
+    }
+
+    /// <summary>识别尺寸字面量或独立 INTConstant.value，保留尺寸载体的连线。</summary>
+    private static ComfyUiFileSlot? ResolveDimensionSlot(JsonObject graph, string nodeId, JsonObject inputs, string dimension)
+    {
+        if (inputs[dimension] is JsonValue literal && literal.TryGetValue<int>(out _))
+            return new(nodeId, dimension);
+        if (ReadLink(inputs, dimension) is not { Slot: 0 } link
+            || graph[link.NodeId] is not JsonObject source
+            || ClassTypeOf(source) != "INTConstant"
+            || source["inputs"]?["value"] is not JsonValue constant
+            || !constant.TryGetValue<int>(out _)) return null;
+        return new(link.NodeId, "value");
     }
 
     /// <summary>
@@ -1220,6 +1294,67 @@ public static class ComfyUiWorkflowBinder
                 + string.Join("；", slots.ImageGroups.Select(group => "[" + string.Join("、", group) + "]"))
                 + "。参考图**按组填**：每组各取「角色 → 道具 → 场景」的前几张（前面那组少拿几张），"
                 + "不再按节点顺序把图平铺到前几个入口上——那样会喂错组。");
+    }
+
+    /// <summary>
+    /// 认结构化高级控制与批量输出槽位。
+    /// 节点类型和明确输入名是工作流图本身的事实；说明文字、标题和 Notes 不参与判断。
+    /// </summary>
+    private static void ResolveAdvancedControls(JsonObject graph, ComfyUiWorkflowSlots slots)
+    {
+        foreach (var pair in graph.OrderBy(pair => pair.Key, NodeIdComparer.Instance))
+        {
+            if (pair.Value is not JsonObject node || node["inputs"] is not JsonObject inputs) continue;
+            var type = ClassTypeOf(node);
+            var flat = new string(type.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+            var outputSide = IsOutputSideNode(type);
+
+            string? controlKind = null;
+            if (flat.Contains("ipadapter", StringComparison.Ordinal)
+                || flat.Contains("ip_adapter", StringComparison.Ordinal))
+                controlKind = "ip_adapter";
+            else if (flat.Contains("controlnet", StringComparison.Ordinal)
+                || flat.Contains("applycontrolnet", StringComparison.Ordinal))
+                controlKind = "controlnet";
+            else if (flat.Contains("openpose", StringComparison.Ordinal)
+                || flat.Contains("posecontrol", StringComparison.Ordinal)
+                || flat.Contains("applypose", StringComparison.Ordinal))
+                controlKind = "pose";
+            else if (flat.Contains("depth", StringComparison.Ordinal)
+                || flat.Contains("depthcontrol", StringComparison.Ordinal))
+                controlKind = "depth";
+
+            if (controlKind is not null)
+            {
+                foreach (var field in inputs)
+                {
+                    // 只登记真正的素材输入。控制节点上的 strength、weight、start_percent
+                    // 等参数虽然也是字面量，但不能被后续上传逻辑当成图片槽位。
+                    if (field.Value is JsonValue value
+                        && value.TryGetValue<string>(out _)
+                        && IsControlMediaInput(field.Key, controlKind))
+                    {
+                        slots.ControlSlots.Add(new ComfyUiControlSlot(pair.Key, field.Key, controlKind));
+                    }
+                }
+            }
+
+            if (outputSide) continue;
+            foreach (var field in inputs)
+            {
+                var name = field.Key.Replace("-", "_", StringComparison.Ordinal).ToLowerInvariant();
+                if (name is not ("batch_size" or "batch_count" or "num_images" or "images_per_prompt")) continue;
+                if (field.Value is not JsonValue value) continue;
+                int? current = value.TryGetValue<int>(out var integer) ? integer : null;
+                slots.BatchSlots.Add(new ComfyUiBatchSlot(pair.Key, field.Key, name, current));
+            }
+        }
+
+        if (slots.ControlSlots.Count > 0)
+            slots.Notes.Add("检测到结构化高级控制槽位："
+                + string.Join("、", slots.ControlSlots.Select(slot => slot.Kind).Distinct()) + "。");
+        if (slots.BatchSlots.Count > 0)
+            slots.Notes.Add($"检测到 {slots.BatchSlots.Count} 个批量输出控制槽位，当前值按工作流原值保留。");
     }
 
     /// <summary>
@@ -1705,13 +1840,15 @@ public static class ComfyUiWorkflowBinder
             SetInput(graph, slots.PositiveNodeId, slots.PositiveInput, JsonValue.Create(
                 MergeIntoPromptTemplate(CurrentText(graph, slots.PositiveNodeId, slots.PositiveInput), values.Prompt)));
 
-        if (slots.NegativeNodeId.Length > 0)
+        if (slots.NegativeNodeId.Length > 0 && values.Negative is not null)
             SetInput(graph, slots.NegativeNodeId, slots.NegativeInput, JsonValue.Create(values.Negative));
 
         if (slots.LatentNodeId.Length > 0)
         {
-            if (values.Width > 0) SetInput(graph, slots.LatentNodeId, "width", JsonValue.Create(values.Width));
-            if (values.Height > 0) SetInput(graph, slots.LatentNodeId, "height", JsonValue.Create(values.Height));
+            var width = slots.WidthSlot ?? new ComfyUiFileSlot(slots.LatentNodeId, "width");
+            var height = slots.HeightSlot ?? new ComfyUiFileSlot(slots.LatentNodeId, "height");
+            if (values.Width > 0) SetInput(graph, width.NodeId, width.Input, JsonValue.Create(values.Width));
+            if (values.Height > 0) SetInput(graph, height.NodeId, height.Input, JsonValue.Create(values.Height));
             // 出多张时 batch_size 交给工作流自己：它是模板作者的决定（有的工作流靠它一次出多张）。
         }
 
@@ -1749,17 +1886,33 @@ public static class ComfyUiWorkflowBinder
             if (values.AudioNames[index].Length > 0)
                 SetInput(graph, slots.AudioNodeIds[index], slots.AudioInputs[index], JsonValue.Create(values.AudioNames[index]));
 
+        // 高级控制素材：只写入 Detect 已确认的真实槽位，按同类槽位顺序对号入座。
+        WriteControlNames(graph, slots, "controlnet", values.ControlNetNames);
+        WriteControlNames(graph, slots, "pose", values.PoseNames);
+        WriteControlNames(graph, slots, "depth", values.DepthNames);
+        WriteControlNames(graph, slots, "ip_adapter", values.IpAdapterNames);
+
+        // 批量输出：只有调用方明确给出数量时才覆盖模板值。
+        if (values.BatchSize > 0)
+            foreach (var slot in slots.BatchSlots)
+                SetInput(graph, slot.NodeId, slot.Input, JsonValue.Create(values.BatchSize));
+
         // 底图：值为空时**不动**原来的那张（工作流里往往自带一张示例图，
         // 清掉会让它连示例都跑不了）；有值时写上传后的名字。
         //
         // 有多个底图入口时按顺序各写一张：参考图的顺序由装配那一侧定死（角色 → 道具 → 场景），
         // 这里只负责照顺序对号入座。给不满就只写前几个入口，多出来的保持它原来的示例图——
         // **不拿同一张图去凑数**，那样等于谎报输入，出来的东西不像还没法解释。
-        var imageNames = values.ImageNames.Count > 0
-            ? values.ImageNames
-            : values.ImageName.Length > 0
-                ? (IReadOnlyList<string>)new[] { values.ImageName }
-                : Array.Empty<string>();
+        var explicitFrames = new[] { values.FirstFrameName, values.LastFrameName }
+            .Where(name => name.Length > 0)
+            .ToArray();
+        var imageNames = explicitFrames.Length > 0
+            ? explicitFrames
+            : values.ImageNames.Count > 0
+                ? values.ImageNames
+                : values.ImageName.Length > 0
+                    ? (IReadOnlyList<string>)new[] { values.ImageName }
+                    : Array.Empty<string>();
         var imageInput = slots.ImageInput.Length > 0 ? slots.ImageInput : "image";
 
         // 合集型（多组并列、每组各带一个输出）要**按组填**，不能平铺：平铺会把图塞进前几个入口，
@@ -1852,6 +2005,23 @@ public static class ComfyUiWorkflowBinder
             + "；选这份工作流就按它自己的设置出图。";
     }
 
+    private static void WriteControlNames(
+        JsonObject graph,
+        ComfyUiWorkflowSlots slots,
+        string kind,
+        IReadOnlyList<string> names)
+    {
+        if (names.Count == 0) return;
+        var targets = slots.ControlSlots
+            .Where(slot => string.Equals(slot.Kind, kind, StringComparison.Ordinal))
+            .ToList();
+        for (var index = 0; index < targets.Count && index < names.Count; index++)
+        {
+            if (names[index].Length == 0) continue;
+            SetInput(graph, targets[index].NodeId, targets[index].Input, JsonValue.Create(names[index]));
+        }
+    }
+
     private static void SetInput(JsonObject graph, string nodeId, string input, JsonNode? value)
     {
         if (input.Length == 0) return;
@@ -1894,6 +2064,32 @@ public static class ComfyUiWorkflowBinder
         return (nodeId, slot);
     }
 
+    private static bool IsControlMediaInput(string input, string kind)
+    {
+        var name = new string(input
+            .Where(char.IsLetterOrDigit)
+            .Select(char.ToLowerInvariant)
+            .ToArray());
+
+        if (name is "image" or "inputimage" or "controlimage" or "controlnetimage"
+            or "hint" or "hintimage")
+            return true;
+
+        return kind switch
+        {
+            "pose" => name.Contains("pose", StringComparison.Ordinal)
+                && (name.Contains("image", StringComparison.Ordinal)
+                    || name is "pose" or "openpose"),
+            "depth" => name.Contains("depth", StringComparison.Ordinal)
+                && (name.Contains("image", StringComparison.Ordinal)
+                    || name is "depth"),
+            "ip_adapter" => name.Contains("ipadapter", StringComparison.Ordinal)
+                && (name.Contains("image", StringComparison.Ordinal)
+                    || name is "ipadapter"),
+            _ => false
+        };
+    }
+
     private static string ClassTypeOf(JsonObject node) =>
         node["class_type"] is JsonValue value && value.TryGetValue<string>(out var type) ? type : string.Empty;
 
@@ -1906,7 +2102,8 @@ public static class ComfyUiWorkflowBinder
 public sealed record ComfyUiBindValues
 {
     public string Prompt { get; init; } = string.Empty;
-    public string Negative { get; init; } = string.Empty;
+    /// <summary>null（含未提供）保留模板反向词；显式空串清空。</summary>
+    public string? Negative { get; init; }
     public int Width { get; init; }
     public int Height { get; init; }
     public long? Seed { get; init; }
@@ -1934,4 +2131,17 @@ public sealed record ComfyUiBindValues
 
     /// <summary>这次要喂的源音频文件名（已上传到 ComfyUI），按顺序对到每个源音频入口。</summary>
     public IReadOnlyList<string> AudioNames { get; init; } = Array.Empty<string>();
+
+    /// <summary>显式首帧和尾帧文件名；为空时由 ImageNames 按顺序填充。</summary>
+    public string FirstFrameName { get; init; } = string.Empty;
+    public string LastFrameName { get; init; } = string.Empty;
+
+    /// <summary>高级控制素材，按对应槽位顺序写入。</summary>
+    public IReadOnlyList<string> ControlNetNames { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> PoseNames { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> DepthNames { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> IpAdapterNames { get; init; } = Array.Empty<string>();
+
+    /// <summary>批量输出数量；小于等于零时保留模板原值。</summary>
+    public int BatchSize { get; init; }
 }

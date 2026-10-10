@@ -9,10 +9,12 @@ public sealed record BuiltInSkill(
 
 public static class BuiltInSkills
 {
+    private const string ResourceProtocol = "角色、场景、道具使用 create_entity / update_entity 与 create_entity_version 写入资源库实体与版本，分镜通过 entityTargets 引用；默认不各建画布节点，用户明确要求铺开画布时才 create_node。";
+    private const string ShotRequirementsProtocol = "每个分镜 create_node / update_node 必须输出 assetRequirements={\"character\":\"required|none|unknown\",\"scene\":\"required|none|unknown\",\"prop\":\"required|none|unknown\"}；required 通过 entityTargets 绑定资产，none 明确无需求，信息不足用 unknown 并 ask 确认，不能把空引用当成无需求。";
     public static IReadOnlyList<BuiltInSkill> All { get; } = new[]
     {
         new BuiltInSkill("node-operations", "节点操作", "新建、修改、删除节点，创建或删除节点连线。", "通过 actions 输出 create_node、update_node、delete_node、create_edge 或 delete_edge。", new[] { "新建节点", "创建节点", "修改节点", "更新节点", "删除节点", "移除节点", "连线", "连接节点" }),
-        new BuiltInSkill("chapter-decomposition", "章节拆解", "读取选中章节内容，批量拆解为剧情、场景、分镜、角色、道具和对白节点，并建立父子关系与制作顺序。", "按章节→剧情→场景→分镜→角色/道具/对白的层级输出完整 actions；每个节点必须有标题、正文和 parentTarget，节点之间使用 create_edge 连接。", new[] { "章节拆解", "拆解章节", "拆分章节", "建立所有节点", "自动建节点", "整章节点", "一键拆解" }),
+        new BuiltInSkill("chapter-decomposition", "章节拆解", "读取选中章节，拆解剧情、分镜和对白节点；角色、场景、道具写入资源库实体与版本，建立制作顺序。", "按章节与剧情归属输出完整 actions；画布节点有标题、正文和 parentTarget，制作顺序用 create_edge。" + ResourceProtocol + ShotRequirementsProtocol, new[] { "章节拆解", "拆解章节", "拆分章节", "建立所有节点", "自动建节点", "整章节点", "一键拆解" }),
         new BuiltInSkill(
             "image-generation",
             "图片生成",
@@ -28,6 +30,7 @@ public static class BuiltInSkills
             "分镜生成",
             "把剧本拆成镜头，补充景别、动作、镜头运动、时长、台词、音效和生成备注。",
             "按【镜号与归属】【景别】…的顺序输出镜头脚本，并把这一镜用到的角色 / 场景 / 道具挂成引用（不各占一个画布节点）。\n"
+            + ResourceProtocol + ShotRequirementsProtocol
             + "引用纪律：同一角色的外观锚点段、同一场景的光源与陈设措辞，在每个镜头里**逐字复制**，"
             + "只替换动作 / 情绪 / 景别 / 光线——换个说法重述是角色漂移的头号原因。\n"
             + $"分镜字段：{PromptBaseline.SectionGuide(NodeCategory.Storyboard)}。\n"
@@ -38,7 +41,7 @@ public static class BuiltInSkills
             "character-generation",
             "角色设定",
             "生成角色小传与外观锚点：身份、体型、面部、发型、标志特征、服装、配饰与神态，并给出参考图与出图提示词。",
-            "设定卡正文**必须**按下面的小标题分段写全，缺段的角色卡在后续镜头里会越画越不像；"
+            ResourceProtocol + "设定卡正文**必须**按下面的小标题分段写全，缺段的角色卡在后续镜头里会越画越不像；"
             + "「标志特征」与「配饰」都要带位置。服装措辞全卡只能有一种说法（前视写「藏青外套」、后视就不能写「深蓝夹克」），"
             + "否则模型会当成两件衣服。写完正文后另附出图提示词。\n"
             + $"角色字段：{PromptBaseline.SectionGuide(NodeCategory.Character)}。\n"
@@ -53,7 +56,7 @@ public static class BuiltInSkills
             "scene-generation",
             "场景设定",
             "生成场景的空间结构、时代地域、时间天气、光源与色温、材质、陈设、色彩基调与机位，并给出基准图与出图提示词。",
-            "「光源来源与色温」**必须**写清来源（例如「天花板暖钨丝灯 3200K 打出几摊光池」「窗外冷月光」），"
+            ResourceProtocol + "「光源来源与色温」**必须**写清来源（例如「天花板暖钨丝灯 3200K 打出几摊光池」「窗外冷月光」），"
             + "禁止「一个舒服的咖啡馆」这类没有信息量的写法——这是场景提示词里最容易被漏、又最影响成片的一项。"
             + "基准图默认不出现主要人物，远中近三档构图成套给出；另出一张只交代光源方向的定调图。"
             + "跨镜头一致性：**光源方向与主要陈设的相对位置**在每个镜头的提示词里逐字复用——"
@@ -66,7 +69,7 @@ public static class BuiltInSkills
             "prop-generation",
             "道具设定",
             "生成关键道具的名称用途、尺寸比例、材质工艺、颜色磨损、关键细节、与角色的关系和剧情功能，并给出特写提示词。",
-            "尺寸比例与材质决定它看起来真不真，剧情功能决定它为什么在这儿，两项都要写。"
+            ResourceProtocol + "尺寸比例与材质决定它看起来真不真，剧情功能决定它为什么在这儿，两项都要写。"
             + "关键细节带位置（例如「盖内压着一枚铜印」）。特写用干净背景、**单一视图**——"
             + "道具特写要把「多个视角、并排、拼图」写进负面（不写的话模型会自作主张排成一排），"
             + "并在画面里放一个尺度参照物（手掌、硬币）交代大小。\n"

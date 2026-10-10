@@ -29,6 +29,8 @@ public sealed record ComfyUiPromptResponse
 {
     [System.Text.Json.Serialization.JsonPropertyName("prompt_id")]
     public string PromptId { get; init; } = string.Empty;
+    [System.Text.Json.Serialization.JsonPropertyName("node_errors")]
+    public JsonElement NodeErrors { get; init; }
 }
 
 public sealed record ComfyUiUploadResponse
@@ -98,6 +100,12 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
         }
 
         var body = await response.Content.ReadFromJsonAsync<ComfyUiPromptResponse>(cancellationToken: cancellationToken).ConfigureAwait(false);
+        // 部分出口被拒时 ComfyUI 仍会返回 HTTP 200 和 prompt_id，不能当作完整校验通过。
+        if (body is not null && HasNodeErrors(body.NodeErrors))
+            throw new InvalidOperationException(
+                $"ComfyUI 节点校验失败（HTTP {(int)response.StatusCode}，prompt_id："
+                + (string.IsNullOrWhiteSpace(body.PromptId) ? "未返回" : body.PromptId)
+                + $"）：node_errors = {body.NodeErrors.GetRawText()}");
         if (body is null || string.IsNullOrWhiteSpace(body.PromptId))
             throw new InvalidOperationException("ComfyUI 未返回 prompt_id");
         return new ExecutionOutput { ExternalTaskId = body.PromptId, AwaitExternalCompletion = true };
@@ -108,6 +116,15 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
     /// 只有配置里才知道，而这条任务失败的答案往往就在「地址变了」这四个字上。
     /// </summary>
     private string Endpoint() => http.BaseAddress?.ToString() ?? "（未配置地址）";
+
+    private static bool HasNodeErrors(JsonElement errors) => errors.ValueKind switch
+    {
+        JsonValueKind.Undefined or JsonValueKind.Null => false,
+        JsonValueKind.Object => errors.EnumerateObject().Any(),
+        JsonValueKind.Array => errors.GetArrayLength() > 0,
+        JsonValueKind.String => !string.IsNullOrWhiteSpace(errors.GetString()),
+        _ => true
+    };
 
     /// <summary>
     /// 「连不上」要说成连不上。
@@ -151,16 +168,37 @@ public sealed class ComfyUiExecutor : IInvocationExecutor
         var images = ReadLocalPaths(invocation, "referenceImages", "referenceImage");
         var videos = ReadLocalPaths(invocation, "referenceVideos", null);
         var audios = ReadLocalPaths(invocation, "referenceAudios", null);
-        if (images.Count == 0 && videos.Count == 0 && audios.Count == 0) return invocation;
+        var controlNet = ReadLocalPaths(invocation, "controlNetImages", null);
+        var pose = ReadLocalPaths(invocation, "poseImages", null);
+        var depth = ReadLocalPaths(invocation, "depthImages", null);
+        var ipAdapter = ReadLocalPaths(invocation, "ipAdapterImages", null);
+        var firstFrame = ReadLocalPaths(invocation, "firstFrame", null);
+        var lastFrame = ReadLocalPaths(invocation, "lastFrame", null);
+        if (images.Count == 0 && videos.Count == 0 && audios.Count == 0
+            && controlNet.Count == 0 && pose.Count == 0 && depth.Count == 0
+            && ipAdapter.Count == 0 && firstFrame.Count == 0 && lastFrame.Count == 0)
+            return invocation;
 
         var uploadedImages = await UploadAllAsync(images, "参考图", cancellationToken).ConfigureAwait(false);
         var uploadedVideos = await UploadAllAsync(videos, "源视频", cancellationToken).ConfigureAwait(false);
         var uploadedAudios = await UploadAllAsync(audios, "源音频", cancellationToken).ConfigureAwait(false);
+        var uploadedControlNet = await UploadAllAsync(controlNet, "ControlNet 素材", cancellationToken).ConfigureAwait(false);
+        var uploadedPose = await UploadAllAsync(pose, "Pose 素材", cancellationToken).ConfigureAwait(false);
+        var uploadedDepth = await UploadAllAsync(depth, "Depth 素材", cancellationToken).ConfigureAwait(false);
+        var uploadedIpAdapter = await UploadAllAsync(ipAdapter, "IP-Adapter 素材", cancellationToken).ConfigureAwait(false);
+        var uploadedFirstFrame = await UploadAllAsync(firstFrame, "首帧", cancellationToken).ConfigureAwait(false);
+        var uploadedLastFrame = await UploadAllAsync(lastFrame, "尾帧", cancellationToken).ConfigureAwait(false);
 
         var inputs = new Dictionary<string, JsonElement>(invocation.Inputs);
         if (uploadedImages.Count > 0) inputs["referenceImages"] = JsonSerializer.SerializeToElement(uploadedImages);
         if (uploadedVideos.Count > 0) inputs["referenceVideos"] = JsonSerializer.SerializeToElement(uploadedVideos);
         if (uploadedAudios.Count > 0) inputs["referenceAudios"] = JsonSerializer.SerializeToElement(uploadedAudios);
+        if (uploadedControlNet.Count > 0) inputs["controlNetImages"] = JsonSerializer.SerializeToElement(uploadedControlNet);
+        if (uploadedPose.Count > 0) inputs["poseImages"] = JsonSerializer.SerializeToElement(uploadedPose);
+        if (uploadedDepth.Count > 0) inputs["depthImages"] = JsonSerializer.SerializeToElement(uploadedDepth);
+        if (uploadedIpAdapter.Count > 0) inputs["ipAdapterImages"] = JsonSerializer.SerializeToElement(uploadedIpAdapter);
+        if (uploadedFirstFrame.Count > 0) inputs["firstFrame"] = JsonSerializer.SerializeToElement(uploadedFirstFrame[0]);
+        if (uploadedLastFrame.Count > 0) inputs["lastFrame"] = JsonSerializer.SerializeToElement(uploadedLastFrame[0]);
         inputs.Remove("referenceImage");
         return invocation with { Inputs = inputs };
     }
@@ -359,10 +397,15 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
             }
         }
 
+        var historySucceeded = history.TryGetProperty("status", out var completionStatus)
+            && completionStatus.TryGetProperty("status_str", out var completionText)
+            && string.Equals(completionText.GetString(), "success", StringComparison.OrdinalIgnoreCase);
+
         if (history.TryGetProperty("outputs", out var outputs)
             && outputs.ValueKind == JsonValueKind.Object)
         {
             var assets = new List<AssetRef>();
+            JsonElement? imageWithoutFilename = null;
             foreach (var node in outputs.EnumerateObject())
             {
                 if (node.Value.ValueKind != JsonValueKind.Object) continue;
@@ -377,13 +420,12 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
                     {
                         if (item.ValueKind != JsonValueKind.Object) continue;
 
-                        // 图片那一路沿用「缺 filename 就报错」的老口径（既有行为，改了会静默少收图）；
-                        // 视频 / 音频这几路是新认的，自定义节点包产出的条目形状不一定一样，
-                        // 缺字段就跳过这一条，不因为一条怪条目把整次任务判死。
-                        var filename = bucket.Key == "images"
-                            ? GetRequiredString(item, "filename")
-                            : GetOptionalString(item, "filename");
-                        if (string.IsNullOrWhiteSpace(filename)) continue;
+                        var filename = GetOptionalString(item, "filename");
+                        if (string.IsNullOrWhiteSpace(filename))
+                        {
+                            if (bucket.Key == "images") imageWithoutFilename = item;
+                            continue;
+                        }
 
                         var subfolder = GetOptionalString(item, "subfolder") ?? string.Empty;
                         var type = GetOptionalString(item, "type") ?? "output";
@@ -397,14 +439,30 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
                 }
             }
 
+            // 保留畸形图片条目的既有报错，但 success 零媒体统一走带执行出口的失败信息。
+            if (imageWithoutFilename is { } invalidImage && (assets.Count > 0 || !historySucceeded))
+                GetRequiredString(invalidImage, "filename");
+            if (assets.Count > 0)
+                return new ExternalTaskUpdate
+                {
+                    ExternalTaskId = externalTaskId,
+                    State = ExternalTaskState.Succeeded,
+                    ProgressPercent = 100,
+                    Outputs = assets
+                };
+        }
+
+        if (historySucceeded)
             return new ExternalTaskUpdate
             {
                 ExternalTaskId = externalTaskId,
-                State = ExternalTaskState.Succeeded,
+                State = ExternalTaskState.Failed,
                 ProgressPercent = 100,
-                Outputs = assets
+                ErrorCode = "COMFYUI_NO_MEDIA_OUTPUT",
+                ErrorMessage = $"ComfyUI history 报告 success，但没有可用媒体产物（prompt_id：{externalTaskId}）。"
+                    + DescribeExecutionOutputs(history)
+                    + "请检查执行出口是否包含保存图片、视频或音频的节点，以及这些节点是否返回带 filename 的媒体条目。"
             };
-        }
 
         return new ExternalTaskUpdate
         {
@@ -414,12 +472,31 @@ public sealed class ComfyUiProvider : IExternalTaskProvider, IExternalTaskCancel
         };
     }
 
-    /// <summary>
-    /// history 的 <c>status.messages</c> 里有没有 <c>execution_interrupted</c>。
-    ///
-    /// 这是 ComfyUI 表示「这个 prompt 是被 /interrupt 打断的」的唯一凭据：它把打断记成
-    /// <c>status_str = "error"</c>，与真正的节点异常共用同一个状态位，所以只能从消息里认。
-    /// </summary>
+    /// <summary>说明 history 实际记录的执行出口，不根据工作流名字猜测。</summary>
+    private static string DescribeExecutionOutputs(JsonElement history)
+    {
+        // history.prompt = [number, prompt_id, workflow, extra_data, outputs_to_execute]。
+        if (!history.TryGetProperty("prompt", out var prompt)
+            || prompt.ValueKind != JsonValueKind.Array || prompt.GetArrayLength() < 5
+            || prompt[4].ValueKind != JsonValueKind.Array)
+            return "服务端 history 未记录执行出口（outputs_to_execute）。";
+
+        var workflow = prompt[2];
+        var exits = new List<string>();
+        foreach (var id in prompt[4].EnumerateArray())
+        {
+            if (id.ValueKind is not (JsonValueKind.String or JsonValueKind.Number)) continue;
+            var nodeId = id.ValueKind == JsonValueKind.String ? id.GetString()! : id.ToString();
+            var nodeType = workflow.ValueKind == JsonValueKind.Object
+                && workflow.TryGetProperty(nodeId, out var node)
+                && node.ValueKind == JsonValueKind.Object ? ReadText(node, "class_type") : null;
+            exits.Add(string.IsNullOrWhiteSpace(nodeType) ? $"节点 {nodeId}" : $"节点 {nodeId}（{nodeType}）");
+        }
+        return exits.Count == 0
+            ? "执行出口（outputs_to_execute）为空。"
+            : $"执行出口（outputs_to_execute）：{string.Join("、", exits)}。";
+    }
+
     private static bool HistoryWasInterrupted(JsonElement status)
     {
         if (!status.TryGetProperty("messages", out var messages) || messages.ValueKind != JsonValueKind.Array)

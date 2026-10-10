@@ -57,6 +57,8 @@ internal static class CanvasTabStore
         public Guid Id { get; set; }
         public string? Path { get; set; }
         public RecentCanvasState? Snapshot { get; set; }
+        // null 表示旧端记录未包含 Dirty，需要比较快照与正式文件。
+        public bool? Dirty { get; set; }
     }
 
     /// <summary>读上次的标签记录。读不到（没记录 / 记录损坏 / 没有项目）一律返回 false，交给调用方走「找最近的画布」。</summary>
@@ -74,15 +76,22 @@ internal static class CanvasTabStore
 
             foreach (var item in file.Tabs)
             {
-                // 快照优先：它可能比画布库里的文件更新（带着未保存的编辑）。快照缺失才回落到画布文件。
+                // 正式文件的递增 Revision 更高时采用正式文件，避免旧标签快照遮住已保存的节点。
+                // 同修订仍保留快照：未保存的编辑不会推进 Revision。
                 var snapshot = item.Snapshot;
-                if (snapshot is null && !string.IsNullOrWhiteSpace(item.Path)) CanvasLibrary.TryLoad(item.Path, out snapshot);
+                RecentCanvasState? saved = null;
+                if (!string.IsNullOrWhiteSpace(item.Path)) CanvasLibrary.TryLoad(item.Path, out saved);
+                var replaced = saved is not null && (snapshot is null || saved.Revision > snapshot.Revision);
+                if (replaced) snapshot = saved;
                 if (snapshot is null) continue;
+                var dirty = !replaced && (item.Dirty ?? (saved is null ||
+                    !CanvasFileWriter.Serialize(snapshot).AsSpan().SequenceEqual(CanvasFileWriter.Serialize(saved))));
 
                 tabs.Add(new CanvasTab(snapshot)
                 {
                     Id = item.Id == Guid.Empty ? Guid.NewGuid() : item.Id,
-                    Path = item.Path
+                    Path = item.Path,
+                    Dirty = dirty
                 });
             }
 
@@ -100,19 +109,33 @@ internal static class CanvasTabStore
     public static bool TrySave(IReadOnlyList<CanvasTab> tabs, Guid activeTabId, out string? error)
     {
         error = null;
+        string? temp = null;
         try
         {
             var file = new TabsFile { ActiveTabId = activeTabId };
             file.Tabs = tabs
-                .Select(tab => new TabItem { Id = tab.Id, Path = tab.Path, Snapshot = tab.Snapshot })
+                .Select(tab => new TabItem { Id = tab.Id, Path = tab.Path, Snapshot = tab.Snapshot, Dirty = tab.Dirty })
                 .ToList();
-            File.WriteAllText(AppPaths.Combine(FileName), JsonSerializer.Serialize(file, Options));
+            var path = System.IO.Path.GetFullPath(AppPaths.Combine(FileName));
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            temp = path + $".{Guid.NewGuid():N}.tmp";
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                JsonSerializer.Serialize(stream, file, Options);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temp, path, overwrite: true);
             return true;
         }
         catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             error = failure.Message;
             return false;
+        }
+        finally
+        {
+            try { if (temp is not null && File.Exists(temp)) File.Delete(temp); }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException) { }
         }
     }
 }

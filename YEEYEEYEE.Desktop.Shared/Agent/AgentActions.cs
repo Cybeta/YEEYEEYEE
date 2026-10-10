@@ -36,6 +36,7 @@ public sealed class AgentAction
     public string WorkTreeTarget { get; set; } = string.Empty;
 
     public string Content { get; set; } = string.Empty;
+    public ShotAssetRequirements? AssetRequirements { get; set; }
 
     /// <summary>实体种类：角色 / 场景 / 道具。</summary>
     public string EntityKind { get; set; } = string.Empty;
@@ -203,6 +204,7 @@ public static class AgentActionParser
                 VariantTarget = Read(item, "variantTarget"),
                 VariantVersion = Read(item, "variantVersion"),
                 EntityTargets = ReadStringArray(item, "entityTargets"),
+                AssetRequirements = ReadAssetRequirements(item),
                 VersionNote = Read(item, "versionNote"),
                 MarkVersionAdopted = item.TryGetProperty("markVersionAdopted", out var adopted)
                     && adopted.ValueKind == JsonValueKind.True,
@@ -210,6 +212,14 @@ public static class AgentActionParser
                 Reason = Read(item, "reason")
             });
         }
+    }
+
+    private static ShotAssetRequirements? ReadAssetRequirements(JsonElement item)
+    {
+        if (!item.TryGetProperty("assetRequirements", out var value) || value.ValueKind != JsonValueKind.Object) return null;
+        AssetNeed Need(string name) => Read(value, name).Trim().ToLowerInvariant() switch
+        { "none" => AssetNeed.None, "required" => AssetNeed.Required, _ => AssetNeed.Unknown };
+        return new ShotAssetRequirements { Character = Need("character"), Scene = Need("scene"), Prop = Need("prop") };
     }
 
     /// <summary>读一个布尔字段；只认 JSON 的 true，不把字符串当真。</summary>
@@ -540,7 +550,8 @@ public static class AgentActionExecutor
                     Content = action.Content ?? string.Empty,
                     Chapter = action.Chapter?.Trim() ?? string.Empty,
                     Category = ParseNodeCategory(action.NodeCategory),
-                    ContentSource = ContentSource.Ai
+                    ContentSource = ContentSource.Ai,
+                    AssetRequirements = action.AssetRequirements ?? new ShotAssetRequirements()
                 };
                 if (node.Category == NodeCategory.StoryPlan && string.IsNullOrWhiteSpace(action.Title))
                     node.Title = "剧情概括";
@@ -564,6 +575,7 @@ public static class AgentActionExecutor
                 if (!string.IsNullOrWhiteSpace(action.NodeCategory)) node.Category = ParseNodeCategory(action.NodeCategory);
                 if (!string.IsNullOrWhiteSpace(action.Content)) node.Content = action.Content;
                 if (!string.IsNullOrWhiteSpace(action.Chapter)) node.Chapter = action.Chapter.Trim();
+                if (action.AssetRequirements is not null) node.AssetRequirements = action.AssetRequirements;
                 if (ApplyReferences(canvas, action, node, replace: true) is { } referenceError) return referenceError;
                 if (!string.IsNullOrWhiteSpace(action.EntityTarget))
                     node.VersionDecision = action.MarkVersionAdopted

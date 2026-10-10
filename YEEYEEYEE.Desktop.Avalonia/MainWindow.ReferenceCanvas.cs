@@ -11,7 +11,7 @@ namespace YEEYEEYEE.Desktop.Avalonia;
 /// 它**复用同一套画布**：同一个 <c>CanvasSurface</c>、同一套工具栏 / 检查器 / 阶段筛选 / 搜索 /
 /// 时间轴 / 剧本视图，唯一不同的是内容与落点：
 /// 内容 = 「源头节点 + 它的引用递归铺成的树」（节点与连线都是**真的画布节点与连线**，可以随便拖、随便改）；
-/// 落点 = **不落盘**（它不是画布库里的画布，也不进标签记录），「保存修订」在这里的含义是
+/// 落点 = **可保存**（它不是独立画布文件，也不进标签记录），「保存修订」在这里的含义是
 /// 「把改动写回设定库，并更新源头节点的引用」。
 ///
 /// 为此进入时把 <c>currentCanvas</c> 指到临时画布上——所有节点级功能因此天然对着屏幕上这张，
@@ -71,7 +71,7 @@ public partial class MainWindow
     /// <summary>
     /// 以某个节点为源头，新建一张临时引用画布并切过去。
     /// 它不走 <c>CanvasTab</c>：标签是画布库里的真画布（有文件名、参与保存与恢复），
-    /// 而这棵树本来就不该落盘——硬塞进标签列表，就得让保存链路学会「哪些标签不写盘」，得不偿失。
+/// 这棵树不单独生成画布文件；「保存修订」通过引用写回链路持久化设定与源头节点。
     ///
     /// **可以在临时画布里再往下钻**：新一层压在栈上，它的「上一层」就是当前这一层；
     /// 于是每层的「保存修订」都写回它下面那一层认得的对象，Esc 一层层退。
@@ -130,7 +130,7 @@ public partial class MainWindow
     /// <summary>
     /// 以某个节点为源头，新建一张临时引用画布并切过去。
     /// 它不走 <c>CanvasTab</c>：标签是画布库里的真画布（有文件名、参与保存与恢复），
-    /// 而这棵树本来就不该落盘——硬塞进标签列表，就得让保存链路学会「哪些标签不写盘」，得不偿失。
+    /// 这棵树不单独生成画布文件；「保存修订」通过引用写回链路持久化设定与源头节点。
     ///
     /// **可以在临时画布里再往下钻**：新一层压在栈上，它的「上一层」就是当前这一层；
     /// 于是每层的「保存修订」都写回它下面那一层认得的对象，Esc 一层层退。
@@ -158,7 +158,7 @@ public partial class MainWindow
         }
 
         // 先把当前编辑收进它自己的标签：返回时换回的是这份实时状态，标签快照必须同步。
-        // 已经在临时画布里时这个调用自己会跳过（临时画布不进标签记录）。
+        // 已经在临时画布里时这个调用自己会跳过（临时画布不进标签记录，但可以保存写回）。
         CaptureActiveTab();
 
         var (state, keys) = BuildReferenceState(owner, tree, currentCanvas.Canvas, sourceKey);
@@ -294,10 +294,10 @@ public partial class MainWindow
         // 为什么只能估：位置必须在建卡片之前定下来，而真实高度要等布局跑完才知道；
         // 估计值取得略宽松——宁可多留几像素，也不让卡片叠在一起（早先固定按 104 排，
         // 卡片一有引用标签就互相压住，那才是真的排版坏掉）。
-        var childCounts = tree.Cards
-            .Where(card => card.ParentId is not null)
+        var childrenByParent = tree.Cards
+            .Where(card => card.ParentId is not null && !card.Blocked)
             .GroupBy(card => card.ParentId!, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
 
         foreach (var column in columns)
         {
@@ -323,7 +323,12 @@ public partial class MainWindow
                 else if (sourceKey is not null) keys[node.Id] = sourceKey;
                 // 逐卡推进（不是整档固定格高）：短卡不必为长卡的空位买单，
                 // 一档里既有叶子又有带预览的卡时，间距才对得上每一张自己的实际高度。
-                y += EstimateCardHeight(childCounts.GetValueOrDefault(card.Id)) + rowGap;
+                var children = childrenByParent.GetValueOrDefault(card.Id);
+                var previewSlots = children?.Sum(child => CanvasSurface.ReferencePreviewSlotCount(
+                    source.ResolveReferenceContent(ReferenceOf(child)))) ?? 0;
+                var ownMediaCount = node.Attachments.Count(item =>
+                    item.Kind is AttachmentKind.Image or AttachmentKind.Video);
+                y += EstimateCardHeight(children?.Count ?? 0, previewSlots, ownMediaCount) + rowGap;
             }
         }
 
@@ -426,13 +431,15 @@ public partial class MainWindow
     /// 一张临时画布卡片的高度**估计**，口径与 CanvasSurface.CreateNodeCard 摆的东西对齐：
     /// 种类色带 + 标题（最多两行）+ 正文两行 + 状态行 + 内边距与间距 ≈ 150；
     /// 每条子引用多一个「引用 · …」标签 ≈ 22；
-    /// 有子引用就还会多一条预览带（每行 3 格、每格 64 高）和一条分隔线。
+    /// 引用预览每个图片/视频各一格，无媒体引用保留占位；每行一格，格高与 CanvasSurface 共用。
+    /// 节点自身附件为 66×48 小图，每行最多两格，另计分隔线与行间距。
     /// 只估不收口的地方：标题特别长时会多出一两行——所以宁可估宽一点，不让卡片叠在一起。
     /// </summary>
-    private static double EstimateCardHeight(int childCount)
+    private static double EstimateCardHeight(int childCount, int previewSlots, int ownMediaCount)
     {
         var height = 150d + childCount * 22d;
-        if (childCount > 0) height += 14 + Math.Ceiling(childCount / 3d) * 64;
+        if (childCount > 0) height += 14 + previewSlots * CanvasSurface.ReferencePreviewSlotHeight;
+        if (ownMediaCount > 0) height += 14 + Math.Ceiling(ownMediaCount / 2d) * 53;
         return height;
     }
 

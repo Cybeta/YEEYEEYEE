@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
@@ -29,6 +30,12 @@ public sealed record ComfyUiLibraryResult(
     IReadOnlyDictionary<string, string> Payloads,
     IReadOnlyList<string> Notes)
 {
+    /// <summary>官方导出结果不允许交给 C# 转换器重转或学习规则。</summary>
+    public bool UsesOfficialFrontend { get; init; }
+
+    /// <summary>仅导入用户选中的工作流；安装时保留同站点未选中的已有条目。</summary>
+    public bool IsPartialImport { get; init; }
+
     public int Converted => Workflows.Count(workflow => workflow.Converted);
 
     public int Failed => Workflows.Count(workflow => !workflow.Converted);
@@ -38,6 +45,10 @@ public sealed record ComfyUiLibraryResult(
 
     /// <summary>这台机器的节点定义（二十多 MB 的那份）。</summary>
     public JsonObject? ObjectInfo { get; init; }
+
+    /// <summary>导入前从该站点 /system_stats 识别出的设备能力。</summary>
+    public ComfyUiDeviceCapabilities DeviceCapabilities { get; init; }
+        = ComfyUiDeviceCapabilities.Unknown();
 
     /// <summary>导入时的体检账。</summary>
     public ComfyUiImportAuditReport? Audit { get; init; }
@@ -116,8 +127,8 @@ public static class ComfyUiSiteActivation
 ///
 /// 这件事以前只能靠人做：在浏览器里打开 ComfyUI，一份一份右键「导出（API）」，再手工导入。
 /// 而导出的全过程（实测 0 个网络请求）是**纯前端**行为——服务端没有对应的接口，
-/// 所以只能把官方前端那段转换逻辑搬到我们这边（见 <see cref="ComfyUiWorkflowConversion"/>），
-/// 再用两个普通 GET 把原料取回来：
+/// 因此由 Avalonia NativeWebView 宿主复用官方前端页面，等待插件注册后调用 loadGraphData 与 graphToPrompt.output。
+/// 清单与正文使用普通 GET 读取，API 格式直接保留：
 ///
 ///   · 清单：<c>GET /api/userdata?dir=workflows&amp;recurse=true&amp;full_info=true</c>
 ///     → <c>[{"path":"T-图像-Krea/T01-….json","size":16547,"modified":…,"created":…}]</c>
@@ -130,9 +141,6 @@ public static class ComfyUiSiteActivation
 /// </summary>
 public static class ComfyUiLibrary
 {
-    /// <summary>同时抓几份正文。这台服务器 315 份，串行跑要一分多钟，6 路并行降到十几秒。</summary>
-    private const int MaxParallelFetches = 6;
-
     /// <summary>单份正文的超时；<c>object_info</c> 单独用更长的超时（它有二十多 MB）。</summary>
     private static readonly TimeSpan WorkflowTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ObjectInfoTimeout = TimeSpan.FromMinutes(3);
@@ -165,14 +173,39 @@ public static class ComfyUiLibrary
         "SaveAudio", "PreviewAudio", "VHS_Audio", "AudioToVideo", "MusicGen", "ACE_Step"
     };
 
+    /// <summary>只读取工作流路径清单，不读取正文、节点定义或初始化前端导出器。</summary>
+    public static async Task<IReadOnlyList<string>> ReadManifestAsync(
+        string baseUrl, HttpClient? http = null, CancellationToken cancellationToken = default)
+    {
+        var normalized = ProviderImporter.NormalizeBaseUrl(baseUrl);
+        if (normalized.Length == 0)
+            throw new InvalidOperationException("ComfyUI 地址为空：请填形如 https://主机:端口 的地址。");
+
+        var owned = http is null;
+        var client = http ?? new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        try
+        {
+            var text = await GetRequiredAsync(
+                client, normalized, ListEndpoint(), WorkflowTimeout, cancellationToken).ConfigureAwait(false);
+            return ParseList(text, new List<string>());
+        }
+        finally
+        {
+            if (owned) client.Dispose();
+        }
+    }
+
     /// <summary>
-    /// 拉取整份工作流目录。**全程只读**：只 GET 清单、正文与节点定义，不发任何生成请求。
+    /// 拉取工作流目录；selectedPaths 为 null 时保持全量读取，否则严格按路径筛选。
+    /// **全程只读**：只 GET 清单、正文与节点定义，不发任何生成请求。
     /// </summary>
     public static async Task<ComfyUiLibraryResult> FetchAsync(
         string baseUrl,
         HttpClient? http = null,
         IProgress<ComfyUiLibraryProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        ComfyUiFrontendExporterFactory? exporterFactory = null,
+        IReadOnlyCollection<string>? selectedPaths = null)
     {
         var normalized = ProviderImporter.NormalizeBaseUrl(baseUrl);
         if (normalized.Length == 0)
@@ -185,13 +218,33 @@ public static class ComfyUiLibrary
             var notes = new List<string>();
 
             var listText = await GetRequiredAsync(
-                client, normalized, "userdata?dir=workflows&recurse=true&full_info=true",
-                WorkflowTimeout, cancellationToken).ConfigureAwait(false);
+                client, normalized, ListEndpoint(), WorkflowTimeout, cancellationToken).ConfigureAwait(false);
             var paths = ParseList(listText, notes);
+            if (selectedPaths is not null)
+            {
+                var selected = selectedPaths.ToHashSet(StringComparer.Ordinal);
+                if (selected.Count == 0)
+                    throw new InvalidOperationException("没有选择工作流，本次不导入。");
+                var available = paths.ToHashSet(StringComparer.Ordinal);
+                var missing = selected.Where(path => !available.Contains(path)).ToList();
+                if (missing.Count > 0)
+                    throw new InvalidOperationException("所选工作流已不在服务器清单中，请重新选择：" + string.Join("、", missing));
+                paths = paths.Where(selected.Contains).ToList();
+                notes.Add($"仅拉取所选的 {paths.Count} 份工作流");
+            }
             if (paths.Count == 0)
                 throw new InvalidOperationException(
                     $"这台 ComfyUI 的 workflows 目录里没有可读的工作流（清单返回 {listText.Length} 字节）。"
                     + "确认地址指向 ComfyUI 本身，而不是它的某个反向代理页面。");
+
+            var systemStatsText = await GetOptionalAsync(
+                client, normalized, "system_stats", ProbeTimeout, cancellationToken).ConfigureAwait(false);
+            var capabilities = systemStatsText is null
+                ? ComfyUiDeviceCapabilities.Unknown("/system_stats 不可用")
+                : ComfyUiDeviceDetector.FromSystemStats(systemStatsText);
+            notes.Add(capabilities.DeviceName is { Length: > 0 } device
+                ? $"设备 {device}，Nunchaku 策略：{capabilities.NunchakuQuantization}"
+                : "未识别站点设备，Nunchaku 模型不自动改写");
 
             progress?.Report(new ComfyUiLibraryProgress(0, paths.Count, "节点定义（object_info）"));
             var objectInfoText = await GetRequiredAsync(
@@ -205,38 +258,45 @@ public static class ComfyUiLibrary
             // 原稿也留着：导入那一刻的体检与「让大模型认一认」都要回原稿看那一处到底连到哪儿，
             // 事后再回来拉一遍不值得（而且那时用户已经在等了）。
             var rawDrafts = new Dictionary<string, string>(StringComparer.Ordinal);
-            using var gate = new SemaphoreSlim(MaxParallelFetches, MaxParallelFetches);
+            var results = new ConcurrentBag<(SiteWorkflow Workflow, string? Payload, string? Raw)>();
+            var next = -1;
             var done = 0;
+            var workerCount = SelectWorkerCount(out var workerDecision);
+            notes.Add(workerDecision);
+            notes.Add(workerCount == 2
+                ? "使用官方 ComfyUI 前端双 worker 动态 FIFO 导出；每个 worker 独立页面，禁止生成和写请求，不应用学习规则。"
+                : "使用官方 ComfyUI 前端单 worker 导出；低内存回退，禁止生成和写请求，不应用学习规则。");
+            if (exporterFactory is null)
+                notes.Add("未提供 Avalonia NativeWebView exporter factory；UI 工作流会明确失败，非 UI/API 工作流仍可直接读取。");
 
-            var tasks = paths.Select(async path =>
+            // 一个 exporter 内部持有可变的 page/context，不能并发复用；每个 worker 独立一个 exporter，
+            // 通过共享索引动态领取下一份，避免固定奇偶分配让一个 worker 提前空闲。
+            var workers = Enumerable.Range(0, workerCount).Select(workerId => Task.Run(async () =>
             {
-                await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                try
+                await using var exporter = exporterFactory?.Invoke(normalized, workerId)
+                    ?? new MissingComfyUiFrontendExporter();
+                while (true)
                 {
-                    var (workflow, payload, raw) = await FetchOneAsync(
-                        client, normalized, path, objectInfo, cancellationToken).ConfigureAwait(false);
-
-                    // 计数器与三个集合一起进锁：并行跑的时候「读-加-写」不是原子的。
-                    // 进度回调刻意放在锁**外面**（回调跑在用户的线程上，握着锁调出去容易变成死锁），
-                    // 所以进度的数值在锁里先取成局部变量，避免锁外再读到半路的值。
-                    int snapshot;
-                    lock (workflows)
-                    {
-                        workflows.Add(workflow);
-                        if (payload is not null) payloads[workflow.Key] = payload;
-                        if (raw is not null) rawDrafts[workflow.Key] = raw;
-                        done++;
-                        snapshot = done;
-                    }
-                    progress?.Report(new ComfyUiLibraryProgress(snapshot, paths.Count, workflow.Title));
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var index = Interlocked.Increment(ref next);
+                    if (index >= paths.Count) break;
+                    var path = paths[index];
+                    progress?.Report(new ComfyUiLibraryProgress(Volatile.Read(ref done), paths.Count, path));
+                    var result = await FetchOneAsync(
+                        client, normalized, path, exporter, cancellationToken).ConfigureAwait(false);
+                    results.Add(result);
+                    var completed = Interlocked.Increment(ref done);
+                    progress?.Report(new ComfyUiLibraryProgress(completed, paths.Count, result.Workflow.Title));
                 }
-                finally
-                {
-                    gate.Release();
-                }
-            }).ToList();
+            }, cancellationToken)).ToArray();
 
-            await Task.WhenAll(tasks).ConfigureAwait(false);
+            await Task.WhenAll(workers).ConfigureAwait(false);
+            foreach (var result in results.OrderBy(item => item.Workflow.Key, StringComparer.Ordinal))
+            {
+                workflows.Add(result.Workflow);
+                if (result.Payload is not null) payloads[result.Workflow.Key] = result.Payload;
+                if (result.Raw is not null) rawDrafts[result.Workflow.Key] = result.Raw;
+            }
 
             var produced = workflows.Select(workflow => workflow.Key).ToHashSet(StringComparer.Ordinal);
             foreach (var path in paths)
@@ -245,7 +305,6 @@ public static class ComfyUiLibrary
 
             // 顺序稳定：按服务器上的相对路径排，重复导入时清单顺序不会跳来跳去。
             var ordered = workflows.OrderBy(workflow => workflow.Key, StringComparer.Ordinal).ToList();
-            MarkRecommended(ordered);
 
             var failed = ordered.Count(workflow => !workflow.Converted);
             if (failed > 0)
@@ -257,13 +316,18 @@ public static class ComfyUiLibrary
             // **不写进 Notes**：Notes 会跟着结果一路带到最后的报告里，而体检在「让大模型认一认」之后
             // 还要重算一遍——两处都写就会出现一份过期的账。
             var audit = ComfyUiImportAuditor.Inspect(rawDrafts, payloads, objectInfo);
+            audit.ApplyTo(ordered);
+            MarkRecommended(ordered);
 
             return new ComfyUiLibraryResult(
                 SiteCatalog.IdFor(normalized), normalized, ordered, payloads, notes)
             {
                 RawDrafts = rawDrafts,
                 ObjectInfo = objectInfo,
-                Audit = audit
+                DeviceCapabilities = capabilities,
+                Audit = audit,
+                UsesOfficialFrontend = true,
+                IsPartialImport = selectedPaths is not null
             };
         }
         finally
@@ -286,13 +350,19 @@ public static class ComfyUiLibrary
         SiteProfile? previous)
     {
         ArgumentNullException.ThrowIfNull(result);
+        lock (SiteCatalog.WriteGate)
+            return InstallCore(result, displayName, checkpoint, previous);
+    }
 
+    private static (SiteProfile? Site, string Error) InstallCore(
+        ComfyUiLibraryResult result, string displayName, string checkpoint, SiteProfile? previous)
+    {
         // 站点标识：同一台（地址一样）就是**重新导入**，沿用原来的 id，用户的取舍也跟着保住；
         // 同一个主机名但**端口不同**（一台机器上跑两个 ComfyUI）不能共用一个 id——那会互相覆盖
         // 整份工作流库。这时只给**新登记的这一台**加后缀，现有站点一个字不改（改名等于连它那份取舍一起换掉）。
         var clash = previous is not null
             && !string.Equals(previous.BaseUrl, result.BaseUrl, StringComparison.OrdinalIgnoreCase);
-        var id = clash ? $"{result.SiteId}-{SiteCatalog.PortOf(result.BaseUrl)}" : result.SiteId;
+        var id = clash ? $"{result.SiteId}-{SiteCatalog.PortOf(result.BaseUrl)}" : previous?.Id ?? result.SiteId;
         // 撞名时那份「上一个站点」是**别的机器**，它的停用/推荐不该被搬过来。
         var carryOver = clash ? null : previous;
 
@@ -326,31 +396,85 @@ public static class ComfyUiLibrary
         var previousByKey = carryOver?.Workflows.ToDictionary(item => item.Key, StringComparer.Ordinal)
             ?? new Dictionary<string, SiteWorkflow>(StringComparer.Ordinal);
 
-        foreach (var workflow in result.Workflows)
+        var preserved = new HashSet<string>(StringComparer.Ordinal);
+        var successfulPayloads = new Dictionary<string, string>(StringComparer.Ordinal);
+        var importedAt = DateTimeOffset.UtcNow;
+        foreach (var original in result.Workflows)
         {
-            // 先清掉「上一轮抓取时的自动结论」，下面按「用户自己的取舍 → 再补默认」重算一遍。
-            // 不清的话，用户手工改选的推荐会和自动选出来的那一份**同时**挂着推荐，两个默认值。
-            workflow.Recommended = false;
-            if (previousByKey.TryGetValue(workflow.Key, out var old))
+            var workflow = Clone(original);
+            var attemptAt = workflow.LastImportAttemptAt ?? importedAt;
+            result.Payloads.TryGetValue(workflow.Key, out var payload);
+            var succeeded = workflow.Error.Length == 0 && payload is not null;
+            previousByKey.TryGetValue(workflow.Key, out var old);
+            if (!succeeded)
             {
-                workflow.Enabled = old.Enabled;
-                if (old.Recommended) workflow.Recommended = true;
+                var attemptError = workflow.Error.Length > 0 ? workflow.Error : "转换结果缺少正文";
+                if (old is not null && old.Converted && SiteCatalog.LoadPayload(id, old.PayloadFile) is not null)
+                {
+                    workflow = Clone(old);
+                    preserved.Add(workflow.Key);
+                }
+                else
+                {
+                    workflow.Error = attemptError;
+                    workflow.PayloadFile = string.Empty;
+                    workflow.Recommended = false;
+                    workflow.ImportedAt = null;
+                }
+                workflow.LastImportAttemptAt = attemptAt;
+                workflow.LastImportError = attemptError;
             }
-            workflow.PayloadFile = result.Payloads.ContainsKey(workflow.Key)
-                ? SiteCatalog.PayloadFileName(workflow.Key)
-                : string.Empty;
+            else
+            {
+                workflow.Recommended = old?.Recommended ?? false;
+                workflow.PayloadFile = SiteCatalog.PayloadFileName(workflow.Key, payload!);
+                workflow.ImportedAt = importedAt;
+                workflow.ConvertedAt = original.ConvertedAt == default ? attemptAt : original.ConvertedAt;
+                workflow.LastImportAttemptAt = attemptAt;
+                workflow.LastImportError = string.Empty;
+                successfulPayloads[workflow.Key] = payload!;
+            }
+            if (old is not null) workflow.Enabled = old.Enabled;
             site.Workflows.Add(workflow);
         }
 
-        // 只有「一个推荐都没有」的组才自动补一份：用户选过的那一组不再插手。
-        MarkRecommended(site.Workflows);
-
-        // 体检的账落到每一份上：选择器里、点下去出片之前都要看得到（报告是一次性的，滑过去就没了）。
-        result.Audit?.ApplyTo(site.Workflows);
-
-        foreach (var pair in result.Payloads)
+        // 失败回退的旧正文仍依赖旧槽位及选项定义。
+        if (preserved.Count > 0 && carryOver is not null)
         {
-            var fileName = SiteCatalog.PayloadFileName(pair.Key);
+            site.OptionValues = MergeOptionValues(carryOver.OptionValues, site.OptionValues);
+            foreach (var pair in carryOver.FileSlots) site.FileSlots.TryAdd(pair.Key, pair.Value);
+            if (result.AppliedRules.Count == 0) site.VirtualNodeRules = carryOver.VirtualNodeRules.ToList();
+        }
+
+        // 部分导入保留未选条目及其正文引用，避免 PrunePayloads 清掉已有文件。
+        var retained = new List<SiteWorkflow>();
+        if (result.IsPartialImport && carryOver is not null)
+        {
+            var imported = result.Workflows.Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
+            retained = carryOver.Workflows.Where(item => !imported.Contains(item.Key)).Select(Clone).ToList();
+            site.Workflows.AddRange(retained);
+            site.Workflows = site.Workflows.OrderBy(item => item.Key, StringComparer.Ordinal).ToList();
+            site.OptionValues = MergeOptionValues(carryOver.OptionValues, site.OptionValues);
+            foreach (var pair in carryOver.FileSlots)
+                site.FileSlots.TryAdd(pair.Key, pair.Value);
+            if (result.AppliedRules.Count == 0) site.VirtualNodeRules = carryOver.VirtualNodeRules.ToList();
+        }
+
+        // 本次体检只作用于所选工作流，不改写未选条目的历史审计。
+        result.Audit?.ApplyTo(site.Workflows.Where(item =>
+            !retained.Contains(item) && !preserved.Contains(item.Key)).ToList());
+
+        // 只有「一个推荐都没有」的组才自动补一份：用户选过的那一组不再插手。
+        // 必须在体检账落盘后再算，缺失 int4 模型/依赖的工作流不能成为推荐项。
+        var unchanged = site.Workflows.Where(item => retained.Contains(item) || preserved.Contains(item.Key)).ToList();
+        var retainedRecommendations = unchanged.Select(item => item.Recommended).ToArray();
+        MarkRecommended(site.Workflows);
+        for (var index = 0; index < unchanged.Count; index++)
+            unchanged[index].Recommended = retainedRecommendations[index];
+
+        foreach (var pair in successfulPayloads)
+        {
+            var fileName = SiteCatalog.PayloadFileName(pair.Key, pair.Value);
             if (!SiteCatalog.SavePayload(site.Id, fileName, pair.Value, out var payloadError))
                 return (null, $"工作流正文写盘失败（{pair.Key}）：{payloadError}");
         }
@@ -445,14 +569,17 @@ public static class ComfyUiLibrary
     /// </summary>
     private static void MarkRecommended(List<SiteWorkflow> workflows)
     {
+        foreach (var workflow in workflows.Where(workflow => !IsHealthyRecommendationCandidate(workflow)))
+            workflow.Recommended = false;
+
         var groups = workflows
-            .Where(workflow => workflow.Enabled && workflow.Converted)
+            .Where(IsHealthyRecommendationCandidate)
             .GroupBy(workflow => (workflow.Kind, workflow.Folder));
 
         foreach (var group in groups)
         {
             var members = group.ToList();
-            if (members.Any(workflow => workflow.Recommended)) continue;
+            if (members.Any(workflow => workflow.Recommended && IsHealthyRecommendationCandidate(workflow))) continue;
 
             var best = members
                 .OrderBy(workflow => workflow.NodeCount)
@@ -462,13 +589,46 @@ public static class ComfyUiLibrary
         }
     }
 
+    private static bool IsHealthyRecommendationCandidate(SiteWorkflow workflow)
+        => workflow.Enabled
+            && workflow.Converted
+            && workflow.DroppedInputs == 0
+            && workflow.BrokenInputs == 0
+            && workflow.UncertainInputs == 0
+            && workflow.MissingFiles == 0;
+
     /// <summary>抓一份工作流并转换。失败**只让这一份失败**，把原因写进它的 Error 里。</summary>
     /// <returns>第三项是原稿（网页格式）：体检与「让大模型认一认」都要回它看那一处连到哪儿。</returns>
+    private static int SelectWorkerCount(out string decision)
+    {
+        const long fourGiB = 4L * 1024 * 1024 * 1024;
+        const long eightGiB = 8L * 1024 * 1024 * 1024;
+        const long oneAndHalfGiB = 1536L * 1024 * 1024;
+
+        var memory = GC.GetGCMemoryInfo();
+        var available = memory.TotalAvailableMemoryBytes;
+        var workingSet = Environment.WorkingSet;
+        var lowAvailable = available > 0 && available < fourGiB;
+        var elevatedProcess = workingSet > oneAndHalfGiB && available > 0 && available < eightGiB;
+
+        if (lowAvailable || elevatedProcess)
+        {
+            decision = $"内存保护：可用内存约 {DescribeBytes(available)}, "
+                + $"进程工作集约 {DescribeBytes(workingSet)}，并发降为 1。";
+            return 1;
+        }
+
+        decision = available > 0
+            ? $"内存检查通过：可用内存约 {DescribeBytes(available)}，保持双 worker。"
+            : "内存检查未返回可用值，保持双 worker；如页面初始化失败将按页面级策略销毁并重建。";
+        return 2;
+    }
+
     private static async Task<(SiteWorkflow Workflow, string? Payload, string? Raw)> FetchOneAsync(
         HttpClient client,
         string baseUrl,
         string path,
-        JsonObject objectInfo,
+        IComfyUiFrontendExporter exporter,
         CancellationToken cancellationToken)
     {
         var title = Path.GetFileNameWithoutExtension(path);
@@ -477,7 +637,8 @@ public static class ComfyUiLibrary
         {
             Key = path,
             Title = title,
-            Folder = folder
+            Folder = folder,
+            LastImportAttemptAt = DateTimeOffset.UtcNow
         };
 
         string? content;
@@ -505,16 +666,30 @@ public static class ComfyUiLibrary
 
         try
         {
-            var converted = ComfyUiWorkflowConversion.Convert(content, objectInfo);
-            workflow.NodeCount = converted.ApiWorkflow.Count;
-            workflow.Note = converted.SkippedSummary;
-            var (kind, reason) = Classify(folder, converted.ApiWorkflow);
+            var source = JsonNode.Parse(content) as JsonObject
+                ?? throw new InvalidOperationException("工作流不是 JSON 对象");
+            var isUi = source["nodes"] is JsonArray;
+            var api = isUi
+                ? await exporter.ExportAsync(source, cancellationToken).ConfigureAwait(false)
+                : source["prompt"] is JsonObject prompt ? prompt : source;
+            if (api.Count == 0 || api.Any(pair => pair.Value is not JsonObject node
+                || node["class_type"] is not JsonValue || node["inputs"] is not JsonObject))
+                throw new InvalidOperationException("工作流不是有效的 API output");
+            workflow.NodeCount = api.Count;
+            workflow.Note = isUi ? "官方前端 graphToPrompt.output" : "API 格式直接读取";
+            var (kind, reason) = Classify(folder, api);
             workflow.Kind = kind;
             workflow.KindReason = reason;
             // 正文文件现在就定下来（哪怕还没落盘）：拉取结果因此是**自洽**的，
             // 谁拿着它都能说出「这一份的正文该在哪个文件里」，而不是非要先落一次盘。
-            workflow.PayloadFile = SiteCatalog.PayloadFileName(path);
-            return (workflow, converted.ToJson(), content);
+            var payload = api.ToJsonString();
+            workflow.ConvertedAt = DateTimeOffset.UtcNow;
+            workflow.PayloadFile = SiteCatalog.PayloadFileName(path, payload);
+            return (workflow, payload, isUi ? content : null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception error)
         {
@@ -539,7 +714,7 @@ public static class ComfyUiLibrary
     {
         ArgumentNullException.ThrowIfNull(result);
         ArgumentNullException.ThrowIfNull(rules);
-        if (result.ObjectInfo is null || result.RawDrafts.Count == 0) return result;
+        if (result.UsesOfficialFrontend || result.ObjectInfo is null || result.RawDrafts.Count == 0) return result;
 
         var payloads = new Dictionary<string, string>(result.Payloads, StringComparer.Ordinal);
         var workflows = new List<SiteWorkflow>(result.Workflows.Count);
@@ -551,15 +726,20 @@ public static class ComfyUiLibrary
             var workflow = Clone(original);
             workflows.Add(workflow);
             if (!result.RawDrafts.TryGetValue(workflow.Key, out var raw)) continue;
+            workflow.LastImportAttemptAt = DateTimeOffset.UtcNow;
             try
             {
-                var converted = ComfyUiWorkflowConversion.Convert(raw, result.ObjectInfo, rules);
+                var converted = ComfyUiWorkflowConversion.Convert(raw, result.ObjectInfo, result.DeviceCapabilities, rules);
                 workflow.NodeCount = converted.ApiWorkflow.Count;
                 workflow.Note = converted.SkippedSummary;
                 var (kind, reason) = Classify(workflow.Folder, converted.ApiWorkflow);
                 workflow.Kind = kind;
                 workflow.KindReason = reason;
                 payloads[workflow.Key] = converted.ToJson();
+                workflow.PayloadFile = SiteCatalog.PayloadFileName(workflow.Key, payloads[workflow.Key]);
+                workflow.Error = string.Empty;
+                workflow.LastImportError = string.Empty;
+                workflow.ConvertedAt = DateTimeOffset.UtcNow;
             }
             catch (Exception error)
             {
@@ -707,7 +887,7 @@ public static class ComfyUiLibrary
     }
 
     /// <summary>把字节数说成人话（object_info 有二十多 MB，写「21778501 字节」没人读得出量级）。</summary>
-    private static string DescribeBytes(int bytes) => bytes >= 1024 * 1024
+    private static string DescribeBytes(long bytes) => bytes >= 1024L * 1024L
         ? (bytes / 1024d / 1024d).ToString("0.#", CultureInfo.InvariantCulture) + " MB"
         : (bytes / 1024d).ToString("0.#", CultureInfo.InvariantCulture) + " KB";
 

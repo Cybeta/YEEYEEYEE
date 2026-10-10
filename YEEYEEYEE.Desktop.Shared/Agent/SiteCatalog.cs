@@ -196,7 +196,17 @@ public sealed class SiteWorkflow
     /// </summary>
     public List<ComfyUiMissingMedia> MissingMedia { get; set; } = new();
 
-    public DateTimeOffset ConvertedAt { get; set; } = DateTimeOffset.Now;
+    /// <summary>当前版本的转换时间；旧清单缺字段时为 default，不虚构读取时间。</summary>
+    public DateTimeOffset ConvertedAt { get; set; }
+
+    /// <summary>当前正文成功导入的时间；失败重导不更新，旧清单可能未知。</summary>
+    public DateTimeOffset? ImportedAt { get; set; }
+
+    /// <summary>最近一次逐项读取/转换尝试时间（UTC）。</summary>
+    public DateTimeOffset? LastImportAttemptAt { get; set; }
+
+    /// <summary>最近尝试的错误；与当前可用版本的 Error 分开，成功后清空。</summary>
+    public string LastImportError { get; set; } = string.Empty;
 
     [JsonIgnore]
     public bool IsVideo => string.Equals(Kind, "video", StringComparison.OrdinalIgnoreCase);
@@ -429,6 +439,11 @@ public sealed record SitePoolChoice(SiteProfile Site, SitePool Pool);
 /// <summary>用户选定的一个工作流：哪一台 ComfyUI、哪一份工作流。</summary>
 public sealed record SiteWorkflowChoice(SiteProfile Site, SiteWorkflow Workflow);
 
+/// <summary>UI 的本地读取结果；可用表示启用、转换成功且正文可读，不保证远端能执行。</summary>
+public sealed record SiteWorkflowStatus(
+    string Key, DateTimeOffset? ImportedAt, DateTimeOffset? LastImportAttemptAt,
+    string LastImportError, bool Converted, bool Enabled, bool PayloadAvailable, bool IsUsable);
+
 /// <summary>
 /// 用户选定的一次出图 / 出视频来源。**两种来源只在这一个地方合流**：
 /// 接口站的池子（一家站 × 一个模型 × 一个档位）与 ComfyUI 的工作流（一台服务器 × 一份节点图）。
@@ -480,6 +495,9 @@ public sealed record ImageSourceChoice(SitePoolChoice? Pool, SiteWorkflowChoice?
 /// </summary>
 public static class SiteCatalog
 {
+    // 导入的正文写入、清单提交和裁剪与单项删除在进程内串行。
+    internal static readonly object WriteGate = new();
+
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = true,
@@ -628,6 +646,58 @@ public static class SiteCatalog
         return workflow is null ? null : new SiteWorkflowChoice(site, workflow);
     }
 
+    /// <summary>读取单项本地状态；旧记录无 ImportedAt 时回退到已知转换时间，否则返回 null。</summary>
+    public static SiteWorkflowStatus ReadWorkflowStatus(SiteProfile site, SiteWorkflow workflow)
+    {
+        ArgumentNullException.ThrowIfNull(site);
+        ArgumentNullException.ThrowIfNull(workflow);
+        var available = LoadPayload(site.Id, workflow.PayloadFile) is not null;
+        return new SiteWorkflowStatus(workflow.Key,
+            workflow.ImportedAt ?? (workflow.Converted && workflow.ConvertedAt != default
+                ? workflow.ConvertedAt : (DateTimeOffset?)null),
+            workflow.LastImportAttemptAt, workflow.LastImportError,
+            workflow.Converted, workflow.Enabled, available,
+            workflow.Enabled && workflow.Converted && available);
+    }
+
+    /// <summary>读取每项时间与可用状态（会逐份读取本地正文，不访问远端）。</summary>
+    public static IReadOnlyList<SiteWorkflowStatus> ReadWorkflowStatuses(SiteProfile site)
+    {
+        ArgumentNullException.ThrowIfNull(site);
+        return site.Workflows.Select(workflow => ReadWorkflowStatus(site, workflow)).ToList();
+    }
+
+    /// <summary>仅删除本地单项：重新读取清单，先原子保存，再尽力裁剪正文；成功后同步传入对象。</summary>
+    public static bool TryDeleteWorkflow(SiteProfile site, string key, out string error)
+    {
+        ArgumentNullException.ThrowIfNull(site);
+        error = string.Empty;
+        if (!IsLocalName(site.Id) || string.IsNullOrWhiteSpace(key))
+        { error = "缺少合法站点标识或工作流键。"; return false; }
+        lock (WriteGate)
+        {
+            try
+            {
+                var path = Path.Combine(Directory, $"{site.Id}.json");
+                var current = JsonSerializer.Deserialize<SiteProfile>(File.ReadAllText(path), Options);
+                if (current is null || current.Id != site.Id || !current.IsComfyUi)
+                { error = "找不到有效的 ComfyUI 站点清单。"; return false; }
+                current.Workflows ??= new();
+                if (current.Workflows.RemoveAll(workflow => string.Equals(workflow.Key, key, StringComparison.Ordinal)) == 0)
+                { error = "找不到这份本地工作流（可能已删除）。"; return false; }
+                // 删除只改清单和时间，原样保留磁盘上的加密密钥。
+                current.UpdatedAt = DateTimeOffset.UtcNow;
+                WriteAtomic(path, JsonSerializer.Serialize(current, Options));
+                site.Workflows = current.Workflows;
+                site.UpdatedAt = current.UpdatedAt;
+                PrunePayloads(current);
+                return true;
+            }
+            catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or JsonException or CryptographicException)
+            { error = failure.Message; return false; }
+        }
+    }
+
     /// <summary>默认显示名：主机名本身（例如 video.example.com）；用户可以改成更好认的名字。</summary>
     public static string DefaultDisplayNameFor(string? url)
     {
@@ -667,11 +737,46 @@ public static class SiteCatalog
         return ascii.Length == 0 ? $"{hash}.json" : $"{ascii}.{hash}.json";
     }
 
-    /// <summary>写一份工作流正文。原文照写，不再包一层——它就是 <c>/prompt</c> 要的东西。</summary>
+    /// <summary>成功正文的版本名：旧键名加完整 SHA-256（按 UTF-8 原文计算，不规范化 JSON）。</summary>
+    public static string PayloadFileName(string key, string apiJson)
+    {
+        var stem = Path.GetFileNameWithoutExtension(PayloadFileName(key));
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(apiJson))).ToLowerInvariant();
+        return $"{stem}.{hash}.json";
+    }
+
+    private static bool IsLocalName(string name) => !string.IsNullOrWhiteSpace(name)
+        && name != "." && name != ".." && !Path.IsPathRooted(name)
+        && name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0
+        && !name.Contains('/') && !name.Contains('\\');
+
+    // 同目录临时文件写完并刷盘，再原子替换目标；提交失败不触碰旧文件。
+    private static void WriteAtomic(string path, string content)
+    {
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                var bytes = Encoding.UTF8.GetBytes(content);
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+            if (File.Exists(path)) File.Replace(temporary, path, null);
+            else File.Move(temporary, path);
+        }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            catch (Exception failure) when (failure is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>原子写一份工作流正文。原文照写，不再包一层。</summary>
     public static bool SavePayload(string siteId, string fileName, string apiJson, out string error)
     {
         error = string.Empty;
-        if (string.IsNullOrWhiteSpace(siteId) || string.IsNullOrWhiteSpace(fileName))
+        if (!IsLocalName(siteId) || !IsLocalName(fileName))
         {
             error = "工作流正文缺少站点或文件名。";
             return false;
@@ -681,7 +786,7 @@ public static class SiteCatalog
         {
             var directory = PayloadDirectory(siteId);
             System.IO.Directory.CreateDirectory(directory);
-            File.WriteAllText(Path.Combine(directory, fileName), apiJson);
+            lock (WriteGate) WriteAtomic(Path.Combine(directory, fileName), apiJson);
             return true;
         }
         catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
@@ -694,7 +799,7 @@ public static class SiteCatalog
     /// <summary>读一份工作流正文；读不到返回 null（由调用方如实报出，不拿默认值顶替一张节点图）。</summary>
     public static string? LoadPayload(string siteId, string fileName)
     {
-        if (string.IsNullOrWhiteSpace(siteId) || string.IsNullOrWhiteSpace(fileName)) return null;
+        if (!IsLocalName(siteId) || !IsLocalName(fileName)) return null;
         try
         {
             var path = Path.Combine(PayloadDirectory(siteId), fileName);
@@ -716,24 +821,27 @@ public static class SiteCatalog
     public static int PrunePayloads(SiteProfile site)
     {
         ArgumentNullException.ThrowIfNull(site);
-        var directory = PayloadDirectory(site.Id);
-        if (!System.IO.Directory.Exists(directory)) return 0;
-
-        var keep = new HashSet<string>(
-            site.Workflows.Select(workflow => workflow.PayloadFile).Where(name => name.Length > 0),
-            StringComparer.OrdinalIgnoreCase);
-        var removed = 0;
-        foreach (var path in System.IO.Directory.EnumerateFiles(directory, "*.json"))
+        lock (WriteGate)
         {
-            if (keep.Contains(Path.GetFileName(path))) continue;
+            var removed = 0;
             try
             {
-                File.Delete(path);
-                removed++;
+                if (!IsLocalName(site.Id)) return 0;
+                var directory = PayloadDirectory(site.Id);
+                if (!System.IO.Directory.Exists(directory)) return 0;
+                var keep = new HashSet<string>(
+                    site.Workflows.Select(workflow => workflow.PayloadFile).Where(name => name.Length > 0),
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (var path in System.IO.Directory.EnumerateFiles(directory, "*.json"))
+                {
+                    if (keep.Contains(Path.GetFileName(path))) continue;
+                    try { File.Delete(path); removed++; }
+                    catch (Exception failure) when (failure is IOException or UnauthorizedAccessException) { }
+                }
             }
-            catch (Exception failure) when (failure is IOException or UnauthorizedAccessException) { }
+            catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
+            return removed;
         }
-        return removed;
     }
 
     /// <summary>读取全部站点；单个文件出错只记录它，不影响其它站点。</summary>
@@ -773,21 +881,32 @@ public static class SiteCatalog
     {
         error = string.Empty;
         ArgumentNullException.ThrowIfNull(site);
-        if (string.IsNullOrWhiteSpace(site.Id)) { error = "站点缺少标识，无法保存。"; return false; }
+        if (!IsLocalName(site.Id)) { error = "站点标识不是合法的本地文件名，无法保存。"; return false; }
+        lock (WriteGate) return SaveCore(site, out error);
+    }
 
+    private static bool SaveCore(SiteProfile site, out string error)
+    {
+        error = string.Empty;
+        var oldUpdatedAt = site.UpdatedAt;
+        var oldProtectedKey = site.ProtectedApiKey;
+        var oldUnreadable = site.ApiKeyUnreadable;
         try
         {
-            site.UpdatedAt = DateTimeOffset.Now;
+            site.UpdatedAt = DateTimeOffset.UtcNow;
             var path = Path.Combine(EnsureDirectory(), $"{site.Id}.json");
             // 密钥加密后写盘，但内存里始终留明文：**明文才是这一份的来源**。
             // 顺手把内存也换成密文的话，下一次保存会把密文再加密一遍，密钥就废了。
             site.ProtectedApiKey = site.ApiKey.Length > 0 ? SecretProtector.Protect(site.ApiKey) : string.Empty;
             site.ApiKeyUnreadable = false;
-            File.WriteAllText(path, JsonSerializer.Serialize(site, Options));
+            WriteAtomic(path, JsonSerializer.Serialize(site, Options));
             return true;
         }
-        catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or JsonException or CryptographicException)
         {
+            site.UpdatedAt = oldUpdatedAt;
+            site.ProtectedApiKey = oldProtectedKey;
+            site.ApiKeyUnreadable = oldUnreadable;
             error = failure.Message;
             return false;
         }

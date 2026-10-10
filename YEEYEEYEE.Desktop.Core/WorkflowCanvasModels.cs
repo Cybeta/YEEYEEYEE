@@ -14,6 +14,17 @@ public enum NodeCategory
 public enum NodeExecutionStatus { Draft, WaitingForUser, Generating, Completed, Failed, NeedsReview }
 public enum AttachmentKind { Image, Video, Audio, Other }
 
+// 缺字段的旧项目保持 Unknown，不从引用数量或提示词推断需求。
+public enum AssetNeed { Unknown, None, Required }
+public sealed class ShotAssetRequirements
+{
+    public AssetNeed Character { get; set; }
+    public AssetNeed Scene { get; set; }
+    public AssetNeed Prop { get; set; }
+    public AssetNeed For(EntityKind kind) => kind switch
+    { EntityKind.Character => Character, EntityKind.Scene => Scene, _ => Prop };
+}
+
 public sealed class WorkflowAttachment
 {
     public const string SourceComposition = "合成底图";
@@ -125,6 +136,7 @@ public sealed class WorkflowNode
     public Guid? GenerationId { get; set; }
     public bool IsCollapsed { get; set; }
     public List<NodeReference> References { get; set; } = new();
+    public ShotAssetRequirements AssetRequirements { get; set; } = new();
     [JsonPropertyName("EntityId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Guid? LegacyEntityId { get; set; }

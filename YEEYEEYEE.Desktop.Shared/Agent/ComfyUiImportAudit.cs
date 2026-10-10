@@ -51,7 +51,10 @@ public enum ComfyUiFindingKind
     ///
     /// 但它**不等于「没事」**：真缺了必填输入，提交照样会被 ComfyUI 拒收，所以选择器里仍然要挂记号。
     /// </summary>
-    Unclassified
+    Unclassified,
+
+    /// <summary>正文里的控件值不符合服务器声明的类型、候选或范围（含活动动态分支）。</summary>
+    InvalidInput
 }
 
 /// <summary>
@@ -152,7 +155,12 @@ public sealed record ComfyUiImportAuditReport(
             ? $"\u26a0 有 **{dropped} 处**可能是我们转换时丢的（分布在 {AffectedWorkflows} 份里）："
               + "源头是个活着的后端节点，本该接得上。缺的是**必填**输入，所以提交时**会被 ComfyUI 拒收**"
               + "（HTTP 400，它会点名缺哪一处）——那几份现在用不了。"
-            : "\u2713 没有发现「我们转换时丢掉的输入」——这几百份的转换是干净的。");
+            : "\u2713 没有发现「我们转换时丢掉的输入」。");
+
+        var invalid = Count(ComfyUiFindingKind.InvalidInput);
+        if (invalid > 0)
+            lines.Add($"· 另有 {invalid} 处控件值不符合服务器声明的类型、候选或范围（含活动动态 COMBO 子字段）；"
+                + "具体节点、输入及原因已记入工作流的问题清单，需重新核对正文。");
 
         var muted = Count(ComfyUiFindingKind.MutedOrBypassed);
         if (muted > 0)
@@ -229,7 +237,8 @@ public sealed record ComfyUiImportAuditReport(
             .Where(item => item.Kind is ComfyUiFindingKind.DroppedByConversion
                 or ComfyUiFindingKind.BrokenInSource
                 or ComfyUiFindingKind.MissingOnServer
-                or ComfyUiFindingKind.Unclassified)
+                or ComfyUiFindingKind.Unclassified
+                or ComfyUiFindingKind.InvalidInput)
             .GroupBy(item => item.WorkflowKey, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
 
@@ -248,7 +257,7 @@ public sealed record ComfyUiImportAuditReport(
                     .Select(item => item.ShortLabel)
                     .ToList();
                 workflow.BrokenInputDetails = found
-                    .Where(item => item.Kind == ComfyUiFindingKind.BrokenInSource)
+                    .Where(item => item.Kind is ComfyUiFindingKind.BrokenInSource or ComfyUiFindingKind.InvalidInput)
                     .Select(item => item.ShortLabel)
                     .ToList();
                 // 「判断不了」也要落在条目上：它**不代表这份没问题**（真缺了必填输入照样被拒收），
@@ -428,6 +437,10 @@ public static class ComfyUiImportAuditor
                 var classType = body["class_type"]?.GetValue<string>() ?? string.Empty;
                 if (classType.Length == 0 || objectInfo[classType] is not JsonObject definition) continue;
 
+                ValidateControlInputs(definition, inputs, string.Empty, (name, detail) =>
+                    findings.Add(new ComfyUiImportFinding(ComfyUiFindingKind.InvalidInput, pair.Key, title,
+                        node.Key, classType, name, detail) { DependentOutputs = Depends(node.Key) }));
+
                 foreach (var field in inputs)
                 {
                     if (field.Value is not JsonValue value || !value.TryGetValue<string>(out var current)) continue;
@@ -485,6 +498,87 @@ public static class ComfyUiImportAuditor
             .ToList();
 
         return new ComfyUiImportAuditReport(scanned, nodeTotal, findings, types, unreadable);
+    }
+
+    // 动态 COMBO 的输入仍是扁平的点号键；只沿实际选中的 option.inputs 递归，
+    // 不能把未选分支的必填项算成缺失。连线值由服务端按输出类型校验，这里只查字面控件值。
+    private static void ValidateControlInputs(JsonObject definition, JsonObject inputs, string prefix,
+        Action<string, string> report)
+    {
+        foreach (var group in new[] { "required", "optional" })
+        {
+            if (definition["input"]?[group] is not JsonObject fields) continue;
+            foreach (var field in fields)
+            {
+                if (field.Value is not JsonArray spec || spec.Count == 0) continue;
+                var name = prefix + field.Key;
+                if (!inputs.TryGetPropertyValue(name, out var current))
+                {
+                    if (prefix.Length > 0 && group == "required")
+                        report(name, "活动动态 COMBO 分支缺少必填输入");
+                    continue; // 顶层缺失已有原稿归因检查。
+                }
+                if (current is JsonArray link && link.Count == 2
+                    && link[0] is JsonValue origin && origin.TryGetValue<string>(out _)
+                    && link[1] is JsonValue slot && slot.TryGetValue<int>(out var index) && index >= 0)
+                    continue;
+
+                var declared = spec[0] is JsonValue type && type.TryGetValue<string>(out var text) ? text : null;
+                var options = spec.Count > 1 ? spec[1] as JsonObject : null;
+                var choices = spec[0] as JsonArray ?? options?["options"] as JsonArray;
+                if (spec[0] is JsonArray || declared?.Contains("COMBO", StringComparison.Ordinal) == true)
+                {
+                    if (choices is not { Count: > 0 }) continue; // 未知候选形状仍由原有统计报告。
+                    JsonObject? selected = null;
+                    var matched = false;
+                    foreach (var choice in choices)
+                    {
+                        var key = choice is JsonObject option ? option["key"] : choice;
+                        if (key is null || !JsonNode.DeepEquals(key, current)) continue;
+                        matched = true;
+                        selected = choice as JsonObject;
+                        break;
+                    }
+                    // 文件候选保留现有 MissingOnServer 分类与素材替换语义。
+                    if (!matched && FileOptions(definition, field.Key) is null)
+                        report(name, $"值 {current?.ToJsonString() ?? "null"} 不在服务器声明的候选清单中");
+                    if (selected?["inputs"] is JsonObject children)
+                        ValidateControlInputs(new JsonObject { ["input"] = children.DeepClone() }, inputs,
+                            name + ".", report);
+                    continue;
+                }
+
+                if (declared is not ("INT" or "FLOAT" or "BOOLEAN" or "STRING")) continue;
+                var value = current as JsonValue;
+                var valid = declared switch
+                {
+                    "BOOLEAN" => value is not null && value.TryGetValue<bool>(out _),
+                    "STRING" => value is not null && value.TryGetValue<string>(out _),
+                    _ => TryControlNumber(current, out var number)
+                        && (declared != "INT" || decimal.Truncate(number) == number)
+                };
+                if (!valid)
+                {
+                    report(name, $"值 {current?.ToJsonString() ?? "null"} 不符合服务器声明的 {declared} 类型");
+                    continue;
+                }
+                if (declared is "INT" or "FLOAT" && TryControlNumber(current, out var numeric))
+                {
+                    if (TryControlNumber(options?["min"], out var min) && numeric < min)
+                        report(name, $"值 {numeric} 小于服务器声明的最小值 {min}");
+                    else if (TryControlNumber(options?["max"], out var max) && numeric > max)
+                        report(name, $"值 {numeric} 大于服务器声明的最大值 {max}");
+                }
+            }
+        }
+    }
+
+    private static bool TryControlNumber(JsonNode? node, out decimal number)
+    {
+        number = 0;
+        return node is JsonValue value && value.GetValueKind() == System.Text.Json.JsonValueKind.Number
+            && decimal.TryParse(value.ToJsonString(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out number);
     }
 
     /// <summary>原稿里那一处输入连到哪儿了。</summary>

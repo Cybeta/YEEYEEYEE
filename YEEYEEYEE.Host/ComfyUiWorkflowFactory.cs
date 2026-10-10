@@ -298,7 +298,14 @@ public sealed class ComfyUiWorkflowFactory
             // 源视频 / 源音频（已经上传过的服务器侧文件名）：视频二创、对口型、视频修复那一支吃的是
             // **一段片子**（对口型还要一段音），底图那条路对它们没用。
             VideoNames = GetStringList(invocation, "referenceVideos"),
-            AudioNames = GetStringList(invocation, "referenceAudios")
+            AudioNames = GetStringList(invocation, "referenceAudios"),
+            FirstFrameName = GetString(invocation, "firstFrame") ?? string.Empty,
+            LastFrameName = GetString(invocation, "lastFrame") ?? string.Empty,
+            ControlNetNames = GetStringList(invocation, "controlNetImages"),
+            PoseNames = GetStringList(invocation, "poseImages"),
+            DepthNames = GetStringList(invocation, "depthImages"),
+            IpAdapterNames = GetStringList(invocation, "ipAdapterImages"),
+            BatchSize = GetInt(invocation, "batchSize", 0, 0, 64)
         });
 
         return JsonDocument.Parse(bound.ToJsonString()).RootElement.Clone();

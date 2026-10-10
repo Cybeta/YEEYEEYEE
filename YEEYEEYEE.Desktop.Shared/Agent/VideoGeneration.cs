@@ -43,6 +43,19 @@ public sealed class VideoGenerationRequest
     /// <summary>参考帧的本机绝对路径列表（图生视频用；文生视频为空）。</summary>
     public IReadOnlyList<string> ReferenceImages { get; init; } = Array.Empty<string>();
 
+    /// <summary>显式首帧和尾帧；为空时兼容使用 ReferenceImages 的前两项。</summary>
+    public string FirstFrame { get; init; } = string.Empty;
+    public string LastFrame { get; init; } = string.Empty;
+
+    /// <summary>ControlNet、Pose、Depth、IP-Adapter 对应的本机素材。</summary>
+    public IReadOnlyList<string> ControlNetImages { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> PoseImages { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> DepthImages { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> IpAdapterImages { get; init; } = Array.Empty<string>();
+
+    /// <summary>批量输出数量；0 表示沿用工作流模板值。</summary>
+    public int BatchSize { get; init; }
+
     /// <summary>
     /// 源视频的本机绝对路径列表：影视二创、对口型、视频修复、补帧超分那一支工作流吃的是
     /// **一段片子**，不是一张图——首帧那条路对它们没用（它们真正的入口是 `VHS_LoadVideo.video` 这类）。
@@ -125,6 +138,9 @@ public interface IVideoProvider
     /// </summary>
     ReferenceCapacity ReferenceCapacity { get; }
 
+    /// <summary>当前 Provider 能真实执行的生产能力，用于提交前筛选。</summary>
+    IReadOnlySet<GenerationCapability> Capabilities { get; }
+
     Task<VideoGenerationResult> GenerateAsync(VideoGenerationRequest request, CancellationToken cancellationToken = default);
 }
 
@@ -140,8 +156,12 @@ public sealed class UnconfiguredVideoProvider : IVideoProvider
 
     public bool IsConfigured => false;
     public string Name => "出视频未配置";
+    public string ConfigurationDetail => detail;
 
     public ReferenceCapacity ReferenceCapacity => new(0, "还没配出视频链路，无从判断能收几张参考图。");
+    public IReadOnlySet<GenerationCapability> Capabilities => EmptyCapabilities;
+    private static readonly IReadOnlySet<GenerationCapability> EmptyCapabilities =
+        new HashSet<GenerationCapability>();
 
     public Task<VideoGenerationResult> GenerateAsync(VideoGenerationRequest request, CancellationToken cancellationToken = default) =>
         Task.FromResult(new VideoGenerationResult
@@ -192,6 +212,100 @@ public static class VideoProviderFactory
                 + "分镜节点右键的「出这一镜的视频」就能真的跑。");
     }
 
+    /// <summary>按用户明确选中的视频来源构造执行方，不允许静默切换到另一条链路。</summary>
+    public static IVideoProvider CreateForSource(
+        ImageSourceChoice? source,
+        AiProviderConfig? config = null)
+    {
+        if (Override is { } injected) return injected;
+
+        var effective = config ?? AiProviderSettings.Load();
+        if (source?.Workflow is { } workflow)
+        {
+            var workflowConfig = CopyConfig(effective);
+            if (!string.IsNullOrWhiteSpace(workflow.Site.BaseUrl))
+                workflowConfig.ComfyUiBaseUrl = workflow.Site.BaseUrl;
+            if (!string.IsNullOrWhiteSpace(workflow.Site.Checkpoint))
+                workflowConfig.ComfyUiCheckpoint = workflow.Site.Checkpoint;
+            return Create(workflowConfig, workflow);
+        }
+
+        if (source?.Pool is { } pool)
+        {
+            var poolConfig = CopyConfig(effective);
+            poolConfig.VideoEndpoint = pool.Site.BaseUrl;
+            poolConfig.VideoModel = pool.Pool.Model;
+            poolConfig.VideoApiKey = pool.Site.ApiKey;
+            return Create(poolConfig);
+        }
+
+        return Create(effective);
+    }
+
+    /// <summary>按明确来源或默认配置选择视频执行方，并附带能力匹配结果。</summary>
+    public static GenerationProviderCandidate<IVideoProvider> SelectFor(
+        IEnumerable<GenerationCapability>? required,
+        ImageSourceChoice? source = null,
+        AiProviderConfig? config = null)
+    {
+        var provider = CreateForSource(source, config);
+        return GenerationProviderSelection.Evaluate(
+            provider,
+            required,
+            source?.IsWorkflow == true ? "comfyui-workflow" : "video-pool");
+    }
+
+    /// <summary>返回当前默认配置和指定工作流下的候选视频执行方。</summary>
+    public static IReadOnlyList<GenerationProviderCandidate<IVideoProvider>> CandidatesFor(
+        IEnumerable<GenerationCapability>? required,
+        AiProviderConfig? config = null,
+        SiteWorkflowChoice? workflow = null)
+    {
+        var source = workflow is null ? null : ImageSourceChoice.OfWorkflow(workflow);
+        return [SelectFor(required, source, config)];
+    }
+
+    /// <summary>
+    /// 从站点目录枚举视频池和 ComfyUI 工作流候选。工作流按家族去重，具体规则由
+    /// <see cref="VideoRouteOptions"/> 统一维护；每个候选都保留稳定来源键，供选择器和诊断展示。
+    /// </summary>
+    public static IReadOnlyList<GenerationProviderCandidate<IVideoProvider>> CandidatesFor(
+        IEnumerable<GenerationCapability>? required,
+        IReadOnlyList<SiteProfile> sites,
+        AiProviderConfig? config = null,
+        bool inspectWorkflowPayloads = true)
+    {
+        ArgumentNullException.ThrowIfNull(sites);
+
+        var routes = VideoRouteOptions.Build(sites, inspectWorkflowPayloads);
+        return routes
+            .Select(route =>
+            {
+                var candidate = SelectFor(required, route.ToChoice(), config);
+                return candidate with { Id = route.Key };
+            })
+            .ToArray();
+    }
+
+    private static AiProviderConfig CopyConfig(AiProviderConfig source) => new()
+    {
+        Endpoint = source.Endpoint,
+        ApiKey = source.ApiKey,
+        Model = source.Model,
+        ImageEndpoint = source.ImageEndpoint,
+        ImageModel = source.ImageModel,
+        ImageApiKey = source.ImageApiKey,
+        VideoEndpoint = source.VideoEndpoint,
+        VideoModel = source.VideoModel,
+        VideoApiKey = source.VideoApiKey,
+        ComfyUiBaseUrl = source.ComfyUiBaseUrl,
+        ComfyUiCheckpoint = source.ComfyUiCheckpoint,
+        ComfyUiClientId = source.ComfyUiClientId,
+        AssetDirectory = source.AssetDirectory,
+        VideoMaxReferenceImages = source.VideoMaxReferenceImages,
+        VideoDefaultSeconds = source.VideoDefaultSeconds
+    };
+
     /// <summary>桌面端的会话上下文：与出图那条链用的是同一份口径，别各写一套。</summary>
     private static SessionContext DesktopSession() => new()
     {
@@ -201,6 +315,50 @@ public static class VideoProviderFactory
         Role = MemberRole.Member,
         ServerClaims = new HashSet<string>(["skill.invoke", "job.cancel"])
     };
+}
+
+/// <summary>
+/// 将 ComfyUI 工作流已经确认的真实素材入口映射为视频能力。
+/// 这里只消费绑定器的事实，不根据节点名称或工作流标题猜 ControlNet、姿态、深度、IP-Adapter
+/// 或批量输出；这些能力需要后续在绑定器中增加明确槽位后才能声明。
+/// </summary>
+public static class ComfyUiVideoCapabilityMapper
+{
+    public static IReadOnlySet<GenerationCapability> Map(ComfyUiWorkflowSlots? slots)
+    {
+        var capabilities = new HashSet<GenerationCapability>();
+        if (slots is null) return capabilities;
+
+        if (slots.PositiveNodeId.Length > 0)
+            capabilities.Add(GenerationCapability.TextToVideo);
+
+        var imageCapacity = slots.ImageCapacity;
+        if (imageCapacity > 0)
+        {
+            capabilities.Add(GenerationCapability.ImageToVideo);
+            if (imageCapacity >= 2)
+            {
+                capabilities.Add(GenerationCapability.FirstLastFrameToVideo);
+                capabilities.Add(GenerationCapability.MultiReferenceImage);
+            }
+        }
+
+        if (slots.CanTakeVideo)
+            capabilities.Add(GenerationCapability.VideoReference);
+
+        if (slots.HasControlNet)
+            capabilities.Add(GenerationCapability.ControlNet);
+        if (slots.HasPoseControl)
+            capabilities.Add(GenerationCapability.PoseControl);
+        if (slots.HasDepthControl)
+            capabilities.Add(GenerationCapability.DepthControl);
+        if (slots.HasIpAdapter)
+            capabilities.Add(GenerationCapability.IpAdapter);
+        if (slots.HasBatchOutput)
+            capabilities.Add(GenerationCapability.BatchOutput);
+
+        return capabilities;
+    }
 }
 
 /// <summary>
@@ -246,6 +404,9 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
     public bool IsConfigured => config.IsComfyUiConfigured;
     public string Name => "ComfyUI";
 
+    public IReadOnlySet<GenerationCapability> Capabilities =>
+        ComfyUiVideoCapabilityMapper.Map(slots);
+
     /// <summary>
     /// 这份工作流吃不吃首帧：true / false / null（正文读不到，判断不了）。
     /// 单列出来是给界面用的——「首帧会不会被用上」必须在点下去之前就写在窗口上，
@@ -259,8 +420,11 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
     /// </summary>
     public ReferenceCapacity ReferenceCapacity => slots is null
         ? new ReferenceCapacity(0, $"读不到工作流「{choice.Workflow.Title}」的正文，无从判断它能收几张参考图。")
-        : slots.CanTakeImage
-            ? new ReferenceCapacity(1, "图生视频这份工作流收一张底图（= 这一镜的首帧）。")
+        : slots.ImageCapacity > 0
+            ? new ReferenceCapacity(slots.ImageCapacity,
+                slots.ImageCapacity == 1
+                    ? "图生视频这份工作流收一张底图（= 这一镜的首帧）。"
+                    : $"这份工作流有 {slots.ImageCapacity} 个参考图入口，按顺序写入首帧、尾帧或多参考图。")
             : new ReferenceCapacity(0, slots.HasUnrecognizedImageSlot
                 // 「认不出入口」和「它没有入口」是两回事：没认出来的时候不能说它只文生视频。
                 ? "这份工作流的底图入口**我没认出来**（"
@@ -339,11 +503,23 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         if (detected.CanTextToImage && string.IsNullOrWhiteSpace(request.Prompt))
             return Failed("视频提示词为空，无法生成。");
 
-        var references = request.ReferenceImages
+        var explicitFrames = new[] { request.FirstFrame, request.LastFrame }
             .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
             .ToList();
-        var useReference = references.Count > 0 && detected.CanTakeImage;
+        var references = explicitFrames.Count > 0
+            ? explicitFrames
+            : request.ReferenceImages
+                .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                .ToList();
+        var referenceCapacity = detected.ImageCapacity;
+        var useReference = references.Count > 0 && referenceCapacity > 0;
+        var useFirstLast = explicitFrames.Count >= 2 && referenceCapacity >= 2;
         var promptBound = detected.CanTextToImage;
+        var referenceCapability = useFirstLast
+            ? GenerationCapability.FirstLastFrameToVideo
+            : useReference
+                ? GenerationCapability.ImageToVideo
+                : GenerationCapability.TextToVideo;
 
         // 源视频 / 源音频：影视二创、对口型、视频修复那一支吃的是**一段片子**（对口型还要一段音）。
         // 与参考图同一条规矩：本机找不到的**不静默丢掉**，直接说清（真正上传与写槽位在 Host 那一侧做）。
@@ -520,6 +696,20 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
         // 源视频 / 源音频：Host 那一侧会先把它们传到 ComfyUI 的 input 目录，再按文件名写进对应入口。
         if (sourceVideos.Count > 0) inputs["referenceVideos"] = JsonSerializer.SerializeToElement(sourceVideos);
         if (sourceAudios.Count > 0) inputs["referenceAudios"] = JsonSerializer.SerializeToElement(sourceAudios);
+        if (request.ControlNetImages.Count > 0)
+            inputs["controlNetImages"] = JsonSerializer.SerializeToElement(request.ControlNetImages);
+        if (request.PoseImages.Count > 0)
+            inputs["poseImages"] = JsonSerializer.SerializeToElement(request.PoseImages);
+        if (request.DepthImages.Count > 0)
+            inputs["depthImages"] = JsonSerializer.SerializeToElement(request.DepthImages);
+        if (request.IpAdapterImages.Count > 0)
+            inputs["ipAdapterImages"] = JsonSerializer.SerializeToElement(request.IpAdapterImages);
+        if (request.FirstFrame.Length > 0)
+            inputs["firstFrame"] = JsonSerializer.SerializeToElement(request.FirstFrame);
+        if (request.LastFrame.Length > 0)
+            inputs["lastFrame"] = JsonSerializer.SerializeToElement(request.LastFrame);
+        if (request.BatchSize > 0)
+            inputs["batchSize"] = JsonSerializer.SerializeToElement(request.BatchSize);
 
         // 只吃素材、不收文字的那类工作流：不写提示词，但必须说出来——
         // 不说的话，用户会以为画面是自己那句话决定的，出了偏差只会怪模型。
@@ -540,8 +730,18 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
 
         var invocation = new Invocation
         {
-            Tool = useReference ? "image-to-video" : "text-to-video",
-            Capability = useReference ? Capability.ImageToVideo : Capability.TextToVideo,
+            Tool = referenceCapability switch
+            {
+                GenerationCapability.FirstLastFrameToVideo => "first-last-frame-to-video",
+                GenerationCapability.ImageToVideo => "image-to-video",
+                _ => "text-to-video"
+            },
+            Capability = referenceCapability switch
+            {
+                GenerationCapability.FirstLastFrameToVideo => Capability.ImageToVideo,
+                GenerationCapability.ImageToVideo => Capability.ImageToVideo,
+                _ => Capability.TextToVideo
+            },
             Channel = "comfyui",
             Inputs = inputs
         };
@@ -770,6 +970,12 @@ public sealed class HttpVideoProvider : IVideoProvider
 
     public bool IsConfigured => config.IsVideoConfigured;
     public string Name => "OpenAiCompatibleVideo";
+
+    public IReadOnlySet<GenerationCapability> Capabilities => new HashSet<GenerationCapability>
+    {
+        GenerationCapability.TextToVideo,
+        GenerationCapability.ImageToVideo
+    };
 
     /// <summary>
     /// 一次只收一张图。**不是保守，是接口就这样**：提交时只有一个 <c>image</c> 字段（见 SubmitAsync）。

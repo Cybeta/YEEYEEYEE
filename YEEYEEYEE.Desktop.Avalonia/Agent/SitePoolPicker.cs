@@ -221,66 +221,152 @@ internal static class SitePoolPicker
         recommendNote.TextWrapping = TextWrapping.Wrap;
         var workflowDetail = Note(string.Empty);
         workflowDetail.TextWrapping = TextWrapping.Wrap;
+        var candidateOverview = Note(string.Empty);
+        candidateOverview.TextWrapping = TextWrapping.Wrap;
+        candidateOverview.MaxHeight = 180;
+
+        string DescribeVideoCandidates()
+        {
+            var routes = VideoRouteOptions.Build(sites, inspectWorkflowPayloads: false)
+                .Where(route => route.Kind == VideoRouteKind.Pool
+                    ? route.Pool?.IsVideo == true
+                    : route.Workflow?.IsVideo == true)
+                .ToList();
+            if (routes.Count == 0)
+                return "没有可用于出视频的候选路由。";
+
+            var lines = new List<string>
+            {
+                $"统一候选 {routes.Count} 条（能力诊断按空请求检查配置；实际出片前还会按本镜能力再次校验）："
+            };
+            foreach (var route in routes)
+            {
+                var candidate = VideoProviderFactory.SelectFor(
+                    Array.Empty<GenerationCapability>(), route.ToChoice());
+                var capabilities = candidate.Provider.Capabilities.Count == 0
+                    ? "能力集合：未声明"
+                    : "能力集合：" + string.Join("、", candidate.Provider.Capabilities
+                        .OrderBy(capability => capability)
+                        .Select(GenerationCapabilityMatching.DisplayName));
+                var health = route.Workflow is { } workflow
+                    ? ComfyUiWorkflowHealth.Describe(workflow)
+                    : string.Empty;
+                var healthLine = health.Length == 0 ? "健康：正常" : "健康：有风险，见工作流详情";
+                lines.Add($"{(candidate.IsMatch ? "✓" : "⚠")} {route.FullLabel}｜Provider：{candidate.Name}｜{healthLine}");
+                lines.Add($"  {capabilities}｜诊断：{candidate.Reason}｜来源键：{route.Key}");
+            }
+            return string.Join("\n", lines);
+        }
+
+        var candidateOverviewVersion = 0;
+        async Task RefreshVideoCandidatesAsync()
+        {
+            var version = ++candidateOverviewVersion;
+            candidateOverview.Text = "正在检查视频候选…";
+            try
+            {
+                // 批量构造 provider 会读取、解析工作流，不能占用 UI 线程。
+                var description = await Task.Run(DescribeVideoCandidates);
+                if (version == candidateOverviewVersion) candidateOverview.Text = description;
+            }
+            catch (Exception error)
+            {
+                if (version == candidateOverviewVersion)
+                    candidateOverview.Text = $"检查视频候选时出错：{error.Message}";
+            }
+        }
 
         var workflows = new List<SiteWorkflow>();
         var comfyLoading = false;
+        CancellationTokenSource? workflowInspectCancellation = null;
+        var workflowInspectVersion = 0;
 
         SiteWorkflow? CurrentWorkflow() =>
             workflowBox.SelectedIndex >= 0 && workflowBox.SelectedIndex < workflows.Count
                 ? workflows[workflowBox.SelectedIndex]
                 : null;
 
-        void DescribeWorkflow()
+        async Task DescribeWorkflowAsync()
         {
             var workflow = CurrentWorkflow();
-            if (workflow is null) { workflowDetail.Text = string.Empty; return; }
-
             var siteIndex = comfySiteBox.SelectedIndex;
-            if (siteIndex < 0 || siteIndex >= comfySites.Count) { workflowDetail.Text = string.Empty; return; }
-            var site = comfySites[siteIndex];
+            var version = ++workflowInspectVersion;
+            workflowInspectCancellation?.Cancel();
+            workflowInspectCancellation = null;
 
-            // **在选之前就把这份工作流能收到什么说清**：认不出收提示词的位置时，选它出图会以失败告终
-            // （那是正确的做法——静默把提示词丢掉、跑出导出时那张图才是最坏的）。
-            // 与其等人跑一次才知道，不如在挑选这一刻就把话说出来。
-            var (slots, error) = ComfyUiWorkflowInspector.Inspect(site, workflow);
-            if (slots is null)
+            if (workflow is null || siteIndex < 0 || siteIndex >= comfySites.Count)
             {
-                workflowDetail.Text = $"这份用不了：{error}";
+                workflowDetail.Text = string.Empty;
                 return;
             }
 
-            var lines = new List<string>
-            {
-                // Describe() 里就有「时长✓（121 帧 × 24fps）/ 比例✓ / 画幅✗」这类结论，以及
-                // 「提示词—（只吃首帧）」——挑的时候就该看出哪一份能改时长、哪一份只吃首帧。
-                $"这份工作流能收到：{slots.Describe()}",
-                workflow.Note.Length > 0 ? "转换时的说明：" + workflow.Note : "转换时没有被跳过的节点。"
-            };
+            var site = comfySites[siteIndex];
+            var cancellation = new CancellationTokenSource();
+            workflowInspectCancellation = cancellation;
+            workflowDetail.Text = "正在检查工作流…";
 
-            // 体检的结论放在**最前面**：它决定的是「要不要选这一份」，比「它能收到什么」更该先看到。
-            // 这两种问题都会让出片缺东西，而服务端往往还回 success、只是产出为空——那时用户只会怪模型。
-            var health = ComfyUiWorkflowHealth.Describe(workflow);
-            if (health.Length > 0) lines.Insert(0, health);
-            if (slots.IsFrameDriven)
-                lines.Add("这一份只吃首帧、不收文字提示词（SVD / 动作迁移 / 人物替换这一类，是正当用法）："
-                    + "画面由首帧与它自己的运动参数决定，你写的提示词不会进工作流。");
-            // 「这份要几张图」在这一刻就要答——选之前答了，用户才知道要不要先去把参考图备够。
-            // 只在真的不止一格时才多说这一句：一格的那种人人默认，单占一行反而把要看的那几行挤下去。
-            if (slots.ImageCapacity > 1)
-                lines.Add($"这一份能同时收 {slots.ImageCapacity} 张底图（多图参考）：给几张就按顺序填前面几格，"
-                    + "没给满的格子保持原样。");
-            foreach (var note in slots.Notes.Take(3)) lines.Add("· " + note);
-            if (slots.Notes.Count > 3) lines.Add($"· （另有 {slots.Notes.Count - 3} 条说明，出图 / 出视频时在结果里能看到）");
-            lines.Add("底模与步数由它自己决定；提示词、负面词、画幅、比例、时长与种子能收到哪几样，上面那一行已经写出来了——"
-                + "改不动的那几样，出视频时会在窗口里讲清为什么。");
-            workflowDetail.Text = string.Join("\n", lines);
+            try
+            {
+                // 工作流正文可能很大，读取和 JSON 解析不能阻塞 Avalonia UI 线程。
+                var inspection = await Task.Run(
+                    () => ComfyUiWorkflowInspector.Inspect(site, workflow),
+                    cancellation.Token);
+                cancellation.Token.ThrowIfCancellationRequested();
+                if (version != workflowInspectVersion || !ReferenceEquals(CurrentWorkflow(), workflow)) return;
+
+                var (slots, error) = inspection;
+                if (slots is null)
+                {
+                    workflowDetail.Text = $"这份用不了：{error}";
+                    return;
+                }
+
+                var lines = new List<string>
+                {
+                    $"这份工作流能收到：{slots.Describe()}",
+                    workflow.Note.Length > 0 ? "转换时的说明：" + workflow.Note : "转换时没有被跳过的节点。"
+                };
+                var health = ComfyUiWorkflowHealth.Describe(workflow);
+                if (health.Length > 0) lines.Insert(0, health);
+                if (slots.IsFrameDriven)
+                    lines.Add("这一份只吃首帧、不收文字提示词（SVD / 动作迁移 / 人物替换这一类，是正当用法）："
+                        + "画面由首帧与它自己的运动参数决定，你写的提示词不会进工作流。");
+                if (slots.ImageCapacity > 1)
+                    lines.Add($"这一份能同时收 {slots.ImageCapacity} 张底图（多图参考）：给几张就按顺序填前面几格，"
+                        + "没给满的格子保持原样。");
+                foreach (var note in slots.Notes.Take(3)) lines.Add("· " + note);
+                if (slots.Notes.Count > 3) lines.Add($"· （另有 {slots.Notes.Count - 3} 条说明，出图 / 出视频时在结果里能看到）");
+                lines.Add("底模与步数由它自己决定；提示词、负面词、画幅、比例、时长与种子能收到哪几样，上面那一行已经写出来了——"
+                    + "改不动的那几样，出视频时会在窗口里讲清为什么。");
+                workflowDetail.Text = string.Join("\n", lines);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+            }
+            catch (Exception error)
+            {
+                if (version == workflowInspectVersion)
+                    workflowDetail.Text = $"检查这份工作流时出错：{error.Message}";
+            }
+            finally
+            {
+                if (ReferenceEquals(workflowInspectCancellation, cancellation))
+                    workflowInspectCancellation = null;
+                cancellation.Dispose();
+            }
         }
 
         void RefreshWorkflows()
         {
+            // Avalonia 在清空 ComboBox.Items 时可能先处理旧的选中项；如果旧索引已经
+            // 超出新集合范围，SelectionModel 会在内部枚举 SelectedItems 时直接抛异常。
+            // 先显式取消两个下拉的选中状态，避免切换工作流文件夹时让整个桌面进程退出。
+            var previousFolderIndex = folderBox.SelectedIndex;
             comfyLoading = true;
             try
             {
+                workflowBox.SelectedIndex = -1;
+                folderBox.SelectedIndex = -1;
                 workflowBox.Items.Clear();
                 workflows = new List<SiteWorkflow>();
                 var index = comfySiteBox.SelectedIndex;
@@ -293,7 +379,7 @@ internal static class SitePoolPicker
 
                 var site = comfySites[index];
                 folderBox.Items.Clear();
-                var folderIndex = folderBox.SelectedIndex;
+                var folderIndex = previousFolderIndex;
                 var folders = WorkflowsOf(site)
                     .GroupBy(workflow => workflow.Folder.Length == 0 ? "（根目录）" : workflow.Folder)
                     .OrderBy(group => group.Key, StringComparer.Ordinal)
@@ -329,12 +415,12 @@ internal static class SitePoolPicker
                       + "理由：节点越少，能出错的地方越少，也更可能是这个家族的正路用法。";
             }
             finally { comfyLoading = false; }
-            DescribeWorkflow();
+            _ = DescribeWorkflowAsync();
         }
 
         comfySiteBox.SelectionChanged += (_, _) => { if (!comfyLoading) RefreshWorkflows(); };
         folderBox.SelectionChanged += (_, _) => { if (!comfyLoading) RefreshWorkflows(); };
-        workflowBox.SelectionChanged += (_, _) => { if (!comfyLoading) DescribeWorkflow(); };
+        workflowBox.SelectionChanged += (_, _) => { if (!comfyLoading) _ = DescribeWorkflowAsync(); };
 
         foreach (var site in comfySites)
             comfySiteBox.Items.Add($"{site.Label}（图像 {site.ImageWorkflows.Count} / 视频 {site.VideoWorkflows.Count}）");
@@ -384,6 +470,11 @@ internal static class SitePoolPicker
         var body = new StackPanel { Margin = new Thickness(20), Spacing = 8 };
         body.Children.Add(Header($"给「{nodeTitle}」选一个接口"));
         body.Children.Add(note);
+        if (video == true)
+        {
+            body.Children.Add(Header("所有视频候选诊断"));
+            body.Children.Add(candidateOverview);
+        }
         if (channels.Count > 1)
         {
             body.Children.Add(Header("从哪儿出"));
@@ -426,6 +517,7 @@ internal static class SitePoolPicker
         };
 
         var dialog = DialogShell.Create("运行技能 · 选一个接口", Layout(body, Footer(buttons)), 660, 560);
+        dialog.Closed += (_, _) => ++candidateOverviewVersion;
 
         cancel.Click += (_, _) => dialog.Close();
         confirm.Click += (_, _) =>
@@ -509,6 +601,7 @@ internal static class SitePoolPicker
         channelBox.SelectedIndex = poolSites.Count > 0 ? ChannelPool : comfyChannelIndex;
         ApplyChannel();
         ApplyPreset();
+        if (video == true) _ = RefreshVideoCandidatesAsync();
         await dialog.ShowDialog(owner);
         return (picked, pickedMode);
     }

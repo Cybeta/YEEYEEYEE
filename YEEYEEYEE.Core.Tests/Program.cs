@@ -36,6 +36,8 @@ var tests = new (string Name, Action Run)[]
     ("外部任务轮询器", ExternalTaskPolling),
     ("WebSocket 进度监听和释放", ExternalTaskProgressListening),
     ("ComfyUI 工作流、队列、取消和文件下载", ComfyUiWorkflowAndDownloadFlow),
+    ("ComfyUI HTTP 200 节点校验失败保留详情与 prompt_id", ComfyUiPromptNodeErrorsFail),
+    ("ComfyUI history success 零媒体失败并说明执行出口", ComfyUiEmptyMediaFails),
 ("HTTP 回调签名防重放", SignedCallbackSecurity),
     };
 
@@ -941,6 +943,80 @@ static void ComfyUiWorkflowAndDownloadFlow()
     {
         if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
     }
+}
+
+static void ComfyUiPromptNodeErrorsFail()
+{
+    var session = new SessionContext { UserId = Guid.NewGuid(), ServerClaims = new HashSet<string>(["skill.invoke"]) };
+    const string nodeErrors = """
+        {"17":{"class_type":"CheckpointLoaderSimple","errors":[{"type":"value_not_in_list","message":"Value not in list","details":"ckpt_name: missing.safetensors","extra_info":{"input_name":"ckpt_name"}}],"dependent_outputs":["92"]},"92":{"class_type":"SaveVideo","errors":[{"type":"required_input_missing","message":"Required input is missing","details":"video"}]}}
+        """;
+    foreach (var promptField in new[] { "\"prompt_id\":\"partial-42\",", "" })
+    {
+        using var http = new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("{" + promptField + "\"node_errors\":" + nodeErrors + "}")
+        })) { BaseAddress = new Uri("http://comfy.local/") };
+        var executor = new ComfyUiExecutor(http, _ => JsonSerializer.SerializeToElement(new { }));
+        var service = new SingleMachineExecutionService(executor);
+        var result = service.StartAsync(session, new Invocation { Tool = "txt2img" }, Guid.NewGuid().ToString()).GetAwaiter().GetResult();
+        Expect(result.State == JobState.Failed, "200 + node_errors 不得进入成功或等待轮询状态");
+        Expect(service.TryGet(result.JobId, out var failed), "失败任务未保留");
+        var message = failed!.ErrorMessage ?? "";
+        foreach (var detail in new[] { "HTTP 200", "prompt_id", promptField.Length > 0 ? "partial-42" : "未返回", "17", "CheckpointLoaderSimple", "missing.safetensors", "input_name", "92", "SaveVideo", "required_input_missing" })
+            Expect(message.Contains(detail, StringComparison.Ordinal), "节点校验失败丢失详情：" + detail + "；" + message);
+    }
+
+    // 正常提交允许 node_errors 缺省、null、空对象或空数组。
+    foreach (var field in new[] { "", ",\"node_errors\":null", ",\"node_errors\":{}", ",\"node_errors\":[]" })
+    {
+        using var http = new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"prompt_id\":\"valid-42\"" + field + "}")
+        })) { BaseAddress = new Uri("http://comfy.local/") };
+        var executor = new ComfyUiExecutor(http, _ => JsonSerializer.SerializeToElement(new { }));
+        var output = executor.ExecuteAsync(session, new Invocation { Tool = "txt2img" }, new Job(Guid.NewGuid(), session.UserId, "valid"), CancellationToken.None).GetAwaiter().GetResult();
+        Expect(output.ExternalTaskId == "valid-42" && output.AwaitExternalCompletion, "空 node_errors 不应拒绝合法提交");
+    }
+}
+
+static void ComfyUiEmptyMediaFails()
+{
+    const string prompt = """
+        [0,"empty-42",{"17":{"class_type":"PreviewText"},"92":{"class_type":"SaveVideo"}},{},["17",92]]
+        """;
+    foreach (var outputs in new[] { "", ",\"outputs\":null", ",\"outputs\":{}", ",\"outputs\":{\"17\":{\"text\":[\"done\"]}}", ",\"outputs\":{\"17\":{\"images\":[{}]}}", ",\"outputs\":{\"92\":{\"images\":[],\"gifs\":[],\"videos\":[{}],\"audio\":[]}}" })
+    {
+        var handler = new StubHttpHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"empty-42\":{\"status\":{\"status_str\":\"success\",\"completed\":true},\"prompt\":" + prompt + outputs + "}}")
+        });
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("http://comfy.local/") };
+        var update = new ComfyUiProvider(http).GetStatusAsync("empty-42", CancellationToken.None).GetAwaiter().GetResult();
+        Expect(update.State == ExternalTaskState.Failed && update.ErrorCode == "COMFYUI_NO_MEDIA_OUTPUT"
+            && update.ProgressPercent == 100 && update.Outputs.Count == 0, "success 零媒体必须失败：" + outputs);
+        foreach (var detail in new[] { "empty-42", "执行出口", "17", "PreviewText", "92", "SaveVideo", "filename" })
+            Expect(update.ErrorMessage?.Contains(detail, StringComparison.Ordinal) == true, "零媒体错误未说明执行出口：" + detail);
+        Expect(handler.Requests.Count == 1, "终态零媒体不应访问 queue 或下载伪产物");
+    }
+
+    foreach (var promptField in new[] { "", ",\"prompt\":[0,\"empty-42\",{},{},[]]" })
+    {
+        using var http = new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"empty-42\":{\"status\":{\"status_str\":\"success\"}" + promptField + "}}")
+        })) { BaseAddress = new Uri("http://comfy.local/") };
+        var update = new ComfyUiProvider(http).GetStatusAsync("empty-42", CancellationToken.None).GetAwaiter().GetResult();
+        Expect(update.State == ExternalTaskState.Failed && update.ErrorMessage!.Contains(promptField.Length == 0 ? "未记录执行出口" : "执行出口（outputs_to_execute）为空"), "出口缺失或为空应如实说明");
+    }
+
+    // 尚未成功且零产物仍可继续轮询。
+    using var runningHttp = new HttpClient(new StubHttpHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+    {
+        Content = new StringContent("{\"running-42\":{\"status\":{\"status_str\":\"running\"},\"outputs\":{}}}")
+    })) { BaseAddress = new Uri("http://comfy.local/") };
+    Expect(new ComfyUiProvider(runningHttp).GetStatusAsync("running-42", CancellationToken.None).GetAwaiter().GetResult().State == ExternalTaskState.Running,
+        "进行中零产物不能假成功或提前失败");
 }
 
 /// <summary>

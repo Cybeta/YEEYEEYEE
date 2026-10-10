@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Input.Platform;
 using System.Text.Json;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -59,6 +60,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     private bool lastVideoWasCancelled;
     private Point workTreeDragOrigin;
     private bool workTreeDragStarted;
+    private PointerPressedEventArgs? workTreeDragPress;
 
     /// <summary>正在拖的那条窗口边（North / South / East / West / 四角），null = 没在拖。</summary>
     private string? resizeEdge;
@@ -192,9 +194,9 @@ public partial class MainWindow : Window, IAgentSessionHost
         };
         CanvasSurfaceControl.ReferenceSelected += CanvasSurface_OnReferenceSelected;
         CanvasSurfaceControl.ReferenceDoubleClicked += CanvasSurface_OnReferenceTagDoubleClicked;
-        // 点了节点下方的引用预览框：图片放大看、视频交给系统播放器放。
+        // 引用图片进画廊；引用视频使用原位播放器。
         CanvasSurfaceControl.ReferencePreviewActivated += (_, preview) => ShowReferenceMedia(preview);
-        // 点节点**自己**出的产物：图放大看，视频 / 音频交给系统播放器。
+        // 节点产物：图放大看，视频应用内播放，音频保留原来的系统入口。
         // 早先这里一律走 ShowImagePreview，而它是 `new Bitmap(path)`——点开一段视频（含刚拼出来的成片）
         // 只会得到一句「图已存好，但预览打不开」，看着像缺陷。判种类用附件那套现成规则，不另立一套。
         CanvasSurfaceControl.OwnMediaActivated += (_, media) => ShowOwnMedia(media.Path, media.Title);
@@ -1020,7 +1022,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                 VerticalAlignment = VerticalAlignment.Center,
                 Child = chipContent
             };
-            ToolTip.SetTip(chip, "临时引用画布：不落盘、不进标签记录。「保存修订」= 把改动写回设定库与源头节点");
+            ToolTip.SetTip(chip, "临时引用画布：不生成独立文件、不进标签记录。「保存修订」= 把改动写回设定库与源头节点");
             CanvasTabStrip.Children.Add(chip);
         }
         UpdateTabOverflowHint();
@@ -1128,6 +1130,7 @@ public partial class MainWindow : Window, IAgentSessionHost
 
     private async void SaveCanvas_OnClick(object? sender, RoutedEventArgs e)
     {
+        if (savingCanvas) return;
         // 保存期间来的推送不当成「可以重载」：那会儿内存里的画布正要落盘，替换掉它是最坏的事。
         savingCanvas = true;
         try
@@ -1167,11 +1170,37 @@ public partial class MainWindow : Window, IAgentSessionHost
         var session = collaboration;
         if (session is null || !session.IsSignedIn) return null;
 
+        // 握手前固定提交身份与内容；之后不能从「当前画布」重新取提交数据。
+        CanvasSurfaceControl.Refresh();
+        var submittedTab = activeCanvasTab;
+        var submittedCanvas = currentCanvas;
+        var submittedPath = currentCanvasPath;
+        var submittedProject = ProjectLibrary.FilePath;
+        var originalBytes = CanvasFileWriter.Serialize(submittedCanvas);
+        var candidate = CanvasCloner.Clone(submittedCanvas);
+        bool IsSubmittedCanvasActive() => referenceCanvas is null &&
+            ReferenceEquals(activeCanvasTab, submittedTab) && currentCanvas is not null &&
+            string.Equals(currentCanvasPath, submittedPath, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(ProjectLibrary.FilePath, submittedProject, StringComparison.OrdinalIgnoreCase);
+        bool IsSubmittedCanvasUnchanged() => IsSubmittedCanvasActive() &&
+            originalBytes.AsSpan().SequenceEqual(CanvasFileWriter.Serialize(currentCanvas!));
+
         long localRevision;
-        try { localRevision = CanvasRevision.OfFile(currentCanvasPath); }
+        try
+        {
+            var localBytes = File.ReadAllBytes(submittedPath);
+            var saved = JsonSerializer.Deserialize<RecentCanvasState>(localBytes);
+            if (saved is null) return "画布文件内容为空，已拒绝覆盖保存。请重新打开画布。";
+            if (saved.Revision > candidate.Revision)
+                return "正式画布已有更高修订，已拒绝用旧快照覆盖。请重新打开画布后再保存。";
+            localRevision = CanvasRevision.Of(localBytes);
+        }
+        catch (JsonException error) { return "画布文件无法读取，已拒绝覆盖保存：" + error.Message; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return null; }
 
         var (serverRevision, handshakeError) = await session.CanvasRevisionAsync();
+        if (!IsSubmittedCanvasUnchanged() || !ReferenceEquals(collaboration, session) || !canEdit)
+            return "握手期间画布或会话已变化，本次未提交；未保存标记保留，请再次保存。";
         if (serverRevision is null)
         {
             // 自动同步这条路上**不许**退回本地写：打开那个开关的人要的是「推给协作者」，
@@ -1188,14 +1217,13 @@ public partial class MainWindow : Window, IAgentSessionHost
             return "服务端上这张画布的修订和你本地这份对不上：可能别人刚改过，也可能这台服务器管的不是这张画布。"
                  + "先到「设置 → 协作」核对服务器地址，或重新打开这张画布，再保存。";
 
-        CanvasSurfaceControl.Refresh();
         // 与本地保存同样的准备：托管实体先发布到项目库（服务端会校验画布的实体引用）。
         // 发布过的实体留在库里无害（没被引用的实体不影响任何东西），所以失败时不必回滚。
         try
         {
-            foreach (var entity in currentCanvas.Canvas.Entities.Where(entity => entity.ManagedByProject))
+            foreach (var entity in candidate.Canvas.Entities.Where(entity => entity.ManagedByProject))
                 if (!ProjectEntityScope.TryPublish(entity, out var publishError)) return $"项目库写入失败：{publishError}";
-            ProjectEntityScope.RefreshSnapshots(currentCanvas.Canvas);
+            ProjectEntityScope.RefreshSnapshots(candidate.Canvas);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
@@ -1203,8 +1231,9 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
 
         // 修订由服务端推进，所以送出去的是**没自己 +1 的那份**，字节与本地保存时逐字节一致。
-        AssetStore.Normalize(currentCanvas.Canvas);
-        var result = await session.SaveCanvasAsync(localRevision, CanvasFileWriter.Serialize(currentCanvas));
+        AssetStore.Normalize(candidate.Canvas);
+        var submittedBytes = CanvasFileWriter.Serialize(candidate);
+        var result = await session.SaveCanvasAsync(localRevision, submittedBytes);
         if (!result.Ok)
         {
             if (result.Holder is { } holder)
@@ -1212,32 +1241,65 @@ public partial class MainWindow : Window, IAgentSessionHost
             return "保存到服务端失败：" + result.Message;
         }
 
-        long written;
-        try { written = CanvasRevision.OfFile(currentCanvasPath); }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        { return "服务端说存好了，但读不回本地文件：" + error.Message; }
-        if (written != result.Revision)
-            return "服务端说存好了，可你本地这份文件没变——它管的不是这张画布（到「设置 → 协作」核对地址与部署）。";
-
-        // 服务端写完，本地这份就是新的：把内存修订与标签状态对齐，别让「未保存」的标记骗人。
-        currentCanvas = currentCanvas with { Revision = currentCanvas.Revision + 1 };
-        if (activeCanvasTab is not null)
+        RecentCanvasState formal;
+        try
         {
-            activeCanvasTab.Dirty = false;
-            activeCanvasTab.Snapshot = CanvasCloner.Clone(currentCanvas);
+            // 响应 Revision 是文件字节修订；同一份字节既核对响应，也读取正式画布的递增 Revision。
+            var writtenBytes = File.ReadAllBytes(submittedPath);
+            if (CanvasRevision.Of(writtenBytes) != result.Revision)
+                return "服务端说存好了，可你本地这份文件修订不符——请核对服务器部署或重新打开画布。";
+            formal = JsonSerializer.Deserialize<RecentCanvasState>(writtenBytes)
+                ?? throw new JsonException("正式画布内容为空");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        { return "服务端说存好了，但读不回本地文件：" + error.Message; }
+
+        // 只更新提交标签。活动画布的内容或身份变化后，绝不能清除后来编辑的 Dirty。
+        var sameProject = string.Equals(ProjectLibrary.FilePath, submittedProject, StringComparison.OrdinalIgnoreCase);
+        var sameTab = sameProject && submittedTab is not null && canvasTabs.Contains(submittedTab) &&
+            string.Equals(submittedTab.Path, submittedPath, StringComparison.OrdinalIgnoreCase);
+        var unchanged = IsSubmittedCanvasUnchanged();
+        if (sameTab)
+        {
+            if (IsSubmittedCanvasActive())
+            {
+                currentCanvas = unchanged ? CanvasCloner.Clone(formal) : currentCanvas! with { Revision = formal.Revision };
+                submittedTab!.Dirty = !unchanged;
+                submittedTab.Snapshot = CanvasCloner.Clone(currentCanvas);
+                CanvasSurfaceControl.State = currentCanvas.Canvas;
+                CanvasSurfaceControl.Refresh();
+                UpdateCanvasUi(submittedPath);
+                AgentWorkbenchPanel.SyncHostState();
+            }
+            else
+            {
+                // 切走后的快照属于原标签，比较它而不是现在正在编辑的另一张画布。
+                unchanged = originalBytes.AsSpan().SequenceEqual(CanvasFileWriter.Serialize(submittedTab!.Snapshot));
+                submittedTab.Snapshot = unchanged ? CanvasCloner.Clone(formal) :
+                    submittedTab.Snapshot with { Revision = formal.Revision };
+                submittedTab.Dirty = !unchanged;
+            }
+            submittedTab!.Title = submittedTab.Snapshot.Title;
+            RebuildCanvasTabStrip();
+            PersistCanvasTabs(reportFailure: false);
         }
 
         // 服务端那边用的是整棵树锁，它会把我们自己的节点锁吸收掉：还在编辑就把节点锁占回来。
-        if (CanvasSurfaceControl.SelectedNode is { } editing &&
+        if (IsSubmittedCanvasActive() && ReferenceEquals(collaboration, session) &&
+            CanvasSurfaceControl.SelectedNode is { } editing &&
             (InspectorNameText.IsFocused || InspectorSummaryText.IsFocused))
         {
             var again = await session.AcquireNodeLeaseAsync(editing.Id);
-            if (again.Ok) EnsureCollaborationHeartbeat().Start();
-            else if (again.Holder is { } blocker)
-                SetCollaborationHint($"{DescribeHolder(blocker)}正在编辑这个节点，你现在的改动可能会盖掉他的。");
+            if (IsSubmittedCanvasActive() && ReferenceEquals(collaboration, session) &&
+                CanvasSurfaceControl.SelectedNode?.Id == editing.Id)
+            {
+                if (again.Ok) EnsureCollaborationHeartbeat().Start();
+                else if (again.Holder is { } blocker)
+                    SetCollaborationHint($"{DescribeHolder(blocker)}正在编辑这个节点，你现在的改动可能会盖掉他的。");
+            }
         }
 
-        return result.Message;
+        return result.Message + (sameTab && !unchanged ? "（保存期间的新编辑仍未保存）" : string.Empty);
     }
 
     /// <summary>
@@ -1263,6 +1325,24 @@ public partial class MainWindow : Window, IAgentSessionHost
             return false;
         }
 
+        // 用同一份字节检查递增修订并作为锁内保存前提，检查后若文件再变也不能覆盖。
+        byte[] expectedBytes;
+        try
+        {
+            expectedBytes = File.ReadAllBytes(currentCanvasPath);
+            var saved = JsonSerializer.Deserialize<RecentCanvasState>(expectedBytes);
+            if (saved is null || saved.Revision > currentCanvas.Revision)
+            {
+                message = "正式画布为空或已有更高修订，已拒绝用旧快照覆盖。请重新打开画布后再保存。";
+                return false;
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            message = $"画布文件无法读取，已拒绝覆盖保存：{error.Message}";
+            return false;
+        }
+
         CanvasSurfaceControl.Refresh();
         var canvasBeforeSave = JsonSerializer.Serialize(currentCanvas, SnapshotOptions);
         var candidate = currentCanvas with { Revision = currentCanvas.Revision + 1 };
@@ -1275,7 +1355,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             foreach (var entity in candidate.Canvas.Entities.Where(entity => entity.ManagedByProject))
                 if (!ProjectEntityScope.TryPublish(entity, out var publishError)) throw new IOException($"项目库写入失败：{publishError}");
             ProjectEntityScope.RefreshSnapshots(candidate.Canvas);
-            var savedPath = CanvasLibrary.Save(candidate, currentCanvasPath);
+            var savedPath = CanvasSaveService.Save(candidate, currentCanvasPath, expectedBytes).Path;
             currentCanvas = candidate;
             currentCanvasPath = savedPath;
             // 存过了就把标签上的未保存标记撤掉，并把新的标题 / 路径记进标签：不然标签会一直挂着 *，
@@ -1288,6 +1368,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                 activeCanvasTab.Snapshot = CanvasCloner.Clone(candidate);
                 RebuildCanvasTabStrip();
             }
+            PersistCanvasTabs(reportFailure: false);
             UpdateCanvasUi(savedPath);
             message = $"画布已保存：{currentCanvas.Title}";
             return true;
@@ -1472,6 +1553,7 @@ public partial class MainWindow : Window, IAgentSessionHost
 
     /// <summary>程序化选中左栏某一行时置上：避免「画布→左栏」又立刻触发「左栏→画布」来回弹。</summary>
     private bool suppressTreeLocate;
+    private int storyRevealVersion;
 
     private void RememberStoryExpansion(string key, bool expanded)
     {
@@ -1563,27 +1645,29 @@ public partial class MainWindow : Window, IAgentSessionHost
             return;
         }
 
-        // 左栏若停在「项目文件」上，先切回工作树：这一步之后树里才会有这一行。
-        if (resourceView != ResourceViewMode.WorkTree) SetResourceView(ResourceViewMode.WorkTree);
-
-        // 先把祖先链展开（写进展开记忆，重建后也保持展开），再重建左栏让行出现。
-        foreach (var row in path) expandedStoryRows.Add(row.Key);
-        BuildWorkTreeList();
-
-        // **重建之后**再按 Key 找那一行：新树里的对象才是能被选中、能找到容器的那个。
-        if (WorkTreeView.ItemsSource is not IEnumerable<WorkTreeViewNode> refreshed) return;
-        var target = FindViewRowByKey(refreshed, path[^1].Key);
-        if (target is null) return;
-
+        var version = ++storyRevealVersion;
         suppressTreeLocate = true;
         try
         {
+            // 切换视图与重建也可能触发选中回调，整个过程都要抑制反向定位。
+            if (resourceView != ResourceViewMode.WorkTree) SetResourceView(ResourceViewMode.WorkTree);
+
+            // 先把祖先链展开（写进展开记忆，重建后也保持展开），再重建左栏让行出现。
+            foreach (var row in path) expandedStoryRows.Add(row.Key);
+            BuildWorkTreeList();
+
+            // **重建之后**再按 Key 找那一行：新树里的对象才是能被选中、能找到容器的那个。
+            if (WorkTreeView.ItemsSource is not IEnumerable<WorkTreeViewNode> refreshed) return;
+            var target = FindViewRowByKey(refreshed, path[^1].Key);
+            if (target is null) return;
+
             WorkTreeView.SelectedItem = target;
 
             // 展开后的容器要等布局跑完才存在，所以延后一拍再滚；滚动本身失败不算错。
             for (var attempt = 0; attempt < 3; attempt++)
             {
                 await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
+                if (version != storyRevealVersion) return;
                 if (FindTreeContainer(target) is not { } container) continue;
                 container.BringIntoView();
                 return;
@@ -1592,7 +1676,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
         finally
         {
-            suppressTreeLocate = false;
+            if (version == storyRevealVersion) suppressTreeLocate = false;
         }
     }
 
@@ -1794,6 +1878,7 @@ public partial class MainWindow : Window, IAgentSessionHost
 
     private void WorkTree_OnPointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        workTreeDragPress = e;
         workTreeDragOrigin = e.GetPosition(WorkTreeView);
         workTreeDragStarted = e.GetCurrentPoint(WorkTreeView).Properties.IsLeftButtonPressed;
     }
@@ -1809,9 +1894,10 @@ public partial class MainWindow : Window, IAgentSessionHost
             ? resource?.Variants.FirstOrDefault(candidate => candidate.Id == sourceVariantId)
             : resource?.Variants.FirstOrDefault();
         if (resource is null || variant is null || item.Kind is not (WorkTreeKind.Resource or WorkTreeKind.Appearance)) return;
-        var data = new DataObject();
-        data.Set(CanvasSurface.ResourceDragFormat, $"{resource.Id}|{variant.Id}|{item.Id}");
-        await DragDrop.DoDragDrop(e, data, DragDropEffects.Copy);
+        if (workTreeDragPress is not { } press || !e.GetCurrentPoint(WorkTreeView).Properties.IsLeftButtonPressed) return;
+        using var data = new DataTransfer();
+        data.Add(DataTransferItem.Create(CanvasSurface.ResourceDragFormat, $"{resource.Id}|{variant.Id}|{item.Id}"));
+        await DragDrop.DoDragDropAsync(press, data, DragDropEffects.Copy);
         e.Handled = true;
     }
 
@@ -2146,7 +2232,7 @@ public partial class MainWindow : Window, IAgentSessionHost
 
     /// <summary>
     /// 「预览引用节点」开关：勾上之后，有引用的节点卡下方按引用顺序排出一串小小的预览框
-    /// （图片给缩略图、视频给 ▶ 占位），点预览放大图片 / 播放视频。
+    /// 双击图片或视频打开应用内大预览，单击视频原位播放。
     ///
     /// 它只是**画法**开关：关掉不删任何东西，节点上的「引用 · …」标签照旧在，
     /// 引用浮层与双击进临时画布这些入口也都不受影响。
@@ -2156,7 +2242,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         var enabled = ReferencePreviewToggle.IsChecked == true;
         CanvasSurfaceControl.ShowReferencePreviews = enabled;
         StatusText.Text = enabled
-            ? "已打开引用预览：有引用的节点下方会排出它引用的媒体，点一下放大 / 播放"
+            ? "已打开引用预览：双击图片或视频打开应用内大预览，单击视频原位播放"
             : "已关闭引用预览（关掉的只是画法，引用本身没动）";
     }
 
@@ -2436,30 +2522,46 @@ public partial class MainWindow : Window, IAgentSessionHost
                 ToolTip.SetTip(item, suggestion.Blocked);
             }
             var chosen = suggestion;
-            item.Click += async (_, _) => await RunNodeAssistAsync(request.Node, chosen);
+            item.Click += async (_, _) =>
+            {
+                try
+                {
+                    await RunNodeAssistAsync(request.Node, chosen);
+                }
+                catch (Exception error)
+                {
+                    StatusText.Text = $"「{chosen.Title}」执行失败：{error.Message}";
+                }
+            };
             menu.Items.Add(item);
         }
 
         // 站点池子那条路：先问「用哪个接口」，再走与「Agent 协助 · 出图」同一套提示词与参考图逻辑。
-        // 它和上面那几条建议并列，而不是被藏进设置里——「这一镜用哪个池子」是每次出图都要回答的问题。
+        // 它和上面几条建议并列，而不是被藏进设置里。
         menu.Items.Add(new Separator());
         var runSkill = new MenuItem { Header = "运行技能：选一个池子…" };
         var sites = SiteCatalog.Load().Sites;
-        if (sites.All(site => site.UsablePools.Count == 0))
+        if (sites.All(site => site.UsablePools.Count == 0 && site.UsableWorkflows.Count == 0))
         {
             runSkill.IsEnabled = false;
-            ToolTip.SetTip(runSkill, "还没有可用的池子：到「设置 → 生图与生视频」用顶端的「智能导入」导入一个接口说明网页");
+            ToolTip.SetTip(runSkill, "还没有可用的工作流或接口：到「设置 → 生图与生视频」用「智能导入」连接 ComfyUI 或导入接口说明网页");
         }
         var targetNode = request.Node;
         runSkill.Click += async (_, _) => await RunSitePoolAsync(targetNode, sites);
         menu.Items.Add(runSkill);
 
-        // 自检：把这条依赖链上缺什么、缺多少、要花多少钱一次列清楚（只读，不生成）。
+        // 自检：把这条依赖链上缺什么、缺多少、要花多少钱一次列清楚。
         // 它和上面那条并排，因为「这一镜/这一章到底能不能开工」是每次动手前都要问一遍的问题。
         var audit = new MenuItem { Header = "自检：这条链缺什么…" };
         var auditNode = request.Node;
         audit.Click += async (_, _) => await RunGenerationAuditAsync(auditNode);
         menu.Items.Add(audit);
+        if (auditNode.Category == NodeCategory.Storyboard)
+        {
+            var requirements = new MenuItem { Header = "确认这一镜的资产需求…" };
+            requirements.Click += async (_, _) => await ConfirmShotAssetsAsync(auditNode);
+            menu.Items.Add(requirements);
+        }
 
         menu.Items.Add(new Separator());
         var edit = new MenuItem { Header = UiText.Text("nodeMenu.edit") };
@@ -2472,6 +2574,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             await ShowNodeEditorAsync(request.Node);
         };
         menu.Items.Add(edit);
+        menu.Items.Add(new Separator());
         var remove = new MenuItem { Header = UiText.Text("nodeMenu.delete") };
         remove.Click += (_, _) =>
         {
@@ -2491,10 +2594,27 @@ public partial class MainWindow : Window, IAgentSessionHost
     }
 
     /// <summary>
-    /// 「运行技能」：先让用户从已登记站点的池子里挑一个，再走与「Agent 协助 · 出图」**同一套**
-    /// 提示词与参考图逻辑——只是模型、接口地址、画幅换成选定池子的。
-    ///
-    /// 提示词仍然要过一遍那个可改的窗口：出图前让人看到会发出去的话，是这条链路一直守着的规矩。
+    /// 从节点检查器为当前选中节点打开工作流或接口选择器。
+    /// </summary>
+    private async void InspectorRunSkill_OnClick(object? sender, RoutedEventArgs e)
+    {
+        if (CanvasSurfaceControl.SelectedNode is not { } node)
+        {
+            StatusText.Text = "请先在画布上选择一个节点。";
+            return;
+        }
+        try
+        {
+            if (node.Category == NodeCategory.Product)
+                await ShowProductVideoDialogAsync(node);
+            else
+                await RunSitePoolAsync(node, SiteCatalog.Load().Sites);
+        }
+        catch (Exception error) { StatusText.Text = $"运行技能失败：{error.Message}"; }
+    }
+
+    /// <summary>
+    /// 选择已登记的工作流或接口，然后进入可编辑的提示词与参考图准备界面。
     /// </summary>
     private async Task RunSitePoolAsync(WorkflowNode node, IReadOnlyList<SiteProfile> sites)
     {
@@ -2584,7 +2704,10 @@ public partial class MainWindow : Window, IAgentSessionHost
             initialVideoSource: videoSource,
             initialSeconds: secondsWanted,
             resolveVideoRoute: mode => ResolveVideoRouteAsync(
-                node, LatestImageAttachmentPath(node).Length > 0, secondsWanted, mode));
+                node, LatestImageAttachmentPath(node).Length > 0, secondsWanted, mode),
+            checkAssetRequirements: request => currentCanvas is null
+                ? new[] { "画布已关闭，请重新自检。" }
+                : request.CheckAssetRequirements(currentCanvas.Canvas));
 
         if (outcome.Run is { } request)
         {
@@ -2604,15 +2727,37 @@ public partial class MainWindow : Window, IAgentSessionHost
     }
 
     /// <summary>
-    /// 一键把清单上要补的东西出完：**先补图，再逐镜出视频**。
-    ///
-    /// 三条规矩：
-    /// ① **先补图**：每一镜的视频都要一个首帧，缺图直接出视频等于让模型凭空编。
-    ///    用户没勾补齐时不硬拦，但会把「这次是文生视频、画面由模型自己编」写进状态栏；
-    /// ② **一条一条串行跑**：每一步都真花钱，串行才能让状态栏逐条报「第几步、在给谁出」，
-    ///    也不必给接口同时压上十几路并发；
-    /// ③ **如实收尾**：成几条、败几条、败的是谁与为什么，一次说清——不把「跑完了」说成「全成了」。
+    /// 持久化这一镜逐类资产需求，未知需求在首帧与视频提交前均会阻断。
     /// </summary>
+    private async Task ConfirmShotAssetsAsync(WorkflowNode node)
+    {
+        if (!canEdit || node.IsLocked || currentCanvas is null || BlockedByOtherEditor(node.Id)) return;
+        var canvas = currentCanvas;
+        var requirement = node.AssetRequirements ?? new ShotAssetRequirements();
+        var character = new ComboBox { ItemsSource = new[] { "未知", "明确无角色", "需要角色资产" }, SelectedIndex = (int)requirement.Character };
+        var scene = new ComboBox { ItemsSource = new[] { "未知", "明确无场景资产", "需要场景资产" }, SelectedIndex = (int)requirement.Scene };
+        var prop = new ComboBox { ItemsSource = new[] { "未知", "明确无道具", "需要道具资产" }, SelectedIndex = (int)requirement.Prop };
+        var save = AgentDialogUi.Primary("保存需求确认");
+        var cancel = AgentDialogUi.Secondary("取消");
+        var body = new StackPanel { Spacing = 12 };
+        body.Children.Add(AgentDialogUi.Note("逐类确认这一镜的资产需求。未知会阻断生成；需要资产时必须绑定可用参考。"));
+        body.Children.Add(character); body.Children.Add(scene); body.Children.Add(prop);
+        body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { cancel, save } });
+        var dialog = DialogShell.Create("资产需求 · " + node.Title, body, 500, 320);
+        cancel.Click += (_, _) => dialog.Close();
+        save.Click += (_, _) =>
+        {
+            if (currentCanvas != canvas || node.IsLocked || !canEdit) { dialog.Close(); return; }
+            RecordSnapshot();
+            node.AssetRequirements = new ShotAssetRequirements
+            { Character = (AssetNeed)character.SelectedIndex, Scene = (AssetNeed)scene.SelectedIndex, Prop = (AssetNeed)prop.SelectedIndex };
+            MarkCanvasDirty();
+            StatusText.Text = "已保存这一镜的资产需求确认，记得保存修订。";
+            dialog.Close();
+        };
+        await dialog.ShowDialog(this);
+    }
+
     private async Task RunOneClickAsync(OneClickRunRequest request)
     {
         if (currentCanvas is null) return;
@@ -2622,6 +2767,13 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 核出来的缺失会让相关引用解析不出来，于是那些节点会按缺失报错——**不会拿旧内容照跑**。
         var authority = RecheckSharedAuthority(canvas.Canvas);
         if (authority.Length > 0) StatusText.Text = authority;
+
+        var assetErrors = request.CheckAssetRequirements(canvas.Canvas);
+        if (assetErrors.Count > 0)
+        {
+            StatusText.Text = string.Join("；", assetErrors);
+            return;
+        }
 
         var total = (request.WantsImages ? request.ImageCount : 0) + (request.WantsVideos ? request.VideoCount : 0);
         if (total == 0)
@@ -2634,14 +2786,43 @@ public partial class MainWindow : Window, IAgentSessionHost
         var imagesDone = 0;
         var videosDone = 0;
         var failures = new List<string>();
+        var failedAssets = new HashSet<(Guid EntityId, Guid VariantId)>();
+        var failedFrames = new HashSet<Guid>();
 
         // ---------- ① 补图 ----------
         if (request.WantsImages)
         {
-            foreach (var item in request.ImageItems)
+            foreach (var item in request.ImageItems.OrderBy(item => item.Stage))
             {
                 if (currentCanvas != canvas) return;   // 中途换了画布：不再往旧画布上写
                 step++;
+
+                if (item.IsReferenceImage)
+                {
+                    var entity = canvas.Canvas.FindEntity(item.ReferenceEntityId);
+                    var variant = entity?.Variants.FirstOrDefault(candidate => candidate.Id == item.ReferenceVariantId);
+                    if (entity is null || variant is null)
+                    {
+                        failures.Add($"{item.Display}：引用画廊里的实体或变体已经不存在");
+                        continue;
+                    }
+
+                    StatusText.Text = $"一键补图 {step}/{total}：正在给引用「{item.Display}」出设定图…";
+                    var galleryItem = new GalleryItem(entity, variant, null, string.Empty);
+                    var outcome = await GenerateSettingImageAsync(
+                        galleryItem,
+                        SettingPrompt.Compose(entity, variant),
+                        SettingPrompt.Negative(entity),
+                        message => StatusText.Text = message);
+                    if (currentCanvas != canvas) return;
+                    if (outcome == SettingImageOutcome.Succeeded) imagesDone++;
+                    else
+                    {
+                        failedAssets.Add((entity.Id, variant.Id));
+                        failures.Add($"{item.Display}：引用画廊补图没有完成");
+                    }
+                    continue;
+                }
 
                 var target = canvas.Canvas.Nodes.FirstOrDefault(candidate => candidate.Id == item.ActionNodeId);
                 if (target is null)
@@ -2650,6 +2831,18 @@ public partial class MainWindow : Window, IAgentSessionHost
                     continue;
                 }
 
+                if (GenerationAudit.DependsOnFailedAssets(canvas.Canvas, target, failedAssets))
+                {
+                    failedFrames.Add(target.Id);
+                    failures.Add($"{target.Title}：本轮依赖资产生成失败，未提交首帧");
+                    continue;
+                }
+                failedFrames.Add(target.Id);
+                var settingAssets = item.Stage == GenerationStage.SettingImage
+                    ? target.References.Select(reference => (reference.EntityId, reference.VariantId)).ToArray()
+                    : Array.Empty<(Guid EntityId, Guid VariantId)>();
+                foreach (var asset in settingAssets) failedAssets.Add(asset);
+                imageBatches.TryGetValue(target.Id, out var previousBatch);
                 StatusText.Text = $"一键出图 {step}/{total}：正在给「{target.Title}」出图（{item.Target}）…";
                 var plan = NodeAssistPlanner.BuildPlan(canvas.Canvas, target);
                 var suggestion = plan.Suggestions.FirstOrDefault(candidate => candidate.Kind == NodeAssistKind.Image);
@@ -2663,14 +2856,20 @@ public partial class MainWindow : Window, IAgentSessionHost
                     forcedApproach: null, source: request.ImageSource, count: 1);
                 if (currentCanvas != canvas) return;
 
-                if (AdoptSingleResult(target)) imagesDone++;
+                if (imageBatches.TryGetValue(target.Id, out var newBatch) &&
+                    !ReferenceEquals(previousBatch, newBatch) && AdoptSingleResult(target))
+                {
+                    failedFrames.Remove(target.Id);
+                    foreach (var asset in settingAssets) failedAssets.Remove(asset);
+                    imagesDone++;
+                }
                 else failures.Add($"{target.Title}：这一张没出来（把鼠标停在节点上方那排格子上能看到原因）");
             }
         }
         else if (request.Intent == GenerationIntent.Video && request.ImageCount > 0)
         {
-            // 没勾补齐：如实说清「这次的视频会没有首帧」，但不拦——用户可能就是要文生视频。
-            StatusText.Text = $"这次不补图：还有 {request.ImageCount} 处缺图，接下来的视频会按**文生视频**出，画面由模型自己编。";
+            // 没勾补齐仍须逐镜检查，不能隐式降级。
+            StatusText.Text = $"这次不补图：还有 {request.ImageCount} 处缺图；有引用的分镜缺采用首帧时将阻断视频提交。";
         }
 
         // ---------- ② 出视频 ----------
@@ -2686,18 +2885,46 @@ public partial class MainWindow : Window, IAgentSessionHost
                 return;
             }
 
-            IVideoProvider provider;
-            try { provider = VideoProviderFactory.Create(workflow: request.VideoSource?.Workflow); }
+            // 先按本次所有待出镜头的能力并集选执行方，不能用空集合让第一镜替整批做决定。
+            // 每镜下面仍会再次 Evaluate，保证动态首帧和工作流输入变化不会绕过能力阻断。
+            var batchRequiredCapabilities = new HashSet<GenerationCapability>();
+            foreach (var item in request.VideoItems)
+            {
+                var target = canvas.Canvas.Nodes.FirstOrDefault(candidate => candidate.Id == item.ActionNodeId);
+                if (target is null) continue;
+
+                var plan = NodeAssistPlanner.BuildPlan(canvas.Canvas, target, videoAvailable: true);
+                var suggestion = plan.Suggestions.FirstOrDefault(candidate => candidate.Kind == NodeAssistKind.Video);
+                if (suggestion is null) continue;
+
+                var frame = LatestImageAttachmentPath(target);
+                foreach (var capability in suggestion.RequiredCapabilities ?? Array.Empty<GenerationCapability>())
+                {
+                    if (capability == GenerationCapability.ImageToVideo && frame.Length == 0)
+                        continue;
+                    batchRequiredCapabilities.Add(capability);
+                }
+            }
+
+            GenerationProviderCandidate<IVideoProvider> videoProviderMatch;
+            try
+            {
+                videoProviderMatch = VideoProviderFactory.SelectFor(
+                    batchRequiredCapabilities,
+                    request.VideoSource);
+            }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
             {
                 StatusText.Text = $"出视频链路创建不出来：{error.Message}";
                 return;
             }
+
+            var provider = videoProviderMatch.Provider;
             if (!provider.IsConfigured)
             {
                 StatusText.Text = request.VideoSource?.IsWorkflow == true
                     ? "这次只补了图，视频没跑：这份 ComfyUI 工作流要的那台服务器地址还没填（地址填了就能走工作流）。"
-                    : "出视频链路没配好：请在「设置 → 生图与生视频 → 视频接口」里填上地址与模型。这次只补了图。";
+                    : $"出视频链路没配好：{videoProviderMatch.Reason}。这次只补了图。";
                 return;
             }
 
@@ -2713,6 +2940,12 @@ public partial class MainWindow : Window, IAgentSessionHost
                     continue;
                 }
 
+                if (failedFrames.Contains(target.Id) ||
+                    GenerationAudit.DependsOnFailedAssets(canvas.Canvas, target, failedAssets))
+                {
+                    failures.Add($"{target.Title}：本轮资产或首帧失败，未提交视频");
+                    continue;
+                }
                 var plan = NodeAssistPlanner.BuildPlan(canvas.Canvas, target, videoAvailable: true);
                 var suggestion = plan.Suggestions.FirstOrDefault(candidate => candidate.Kind == NodeAssistKind.Video);
                 if (suggestion is null || !suggestion.CanRun)
@@ -2721,9 +2954,40 @@ public partial class MainWindow : Window, IAgentSessionHost
                     continue;
                 }
 
+                var frame = LatestImageAttachmentPath(target);
+                RecheckSharedAuthority(canvas.Canvas);
+                var check = GenerationAudit.CheckVideoAssets(canvas.Canvas, target, LocateAttachment, frame);
+                if (check.Errors.Count > 0)
+                {
+                    failures.Add($"{target.Title}：" + string.Join("；", check.Errors));
+                    continue;
+                }
+                var confirmedUnlocked = false;
+                if (check.Warning.Length > 0)
+                {
+                    confirmedUnlocked = await AgentDialogUi.ConfirmAsync(this, $"未锁定基准资产 · {target.Title}",
+                        check.Warning + "\n" + GenerationAudit.SingleImageVideoNote, "我确认，直接生成这一镜");
+                    if (currentCanvas != canvas) return;
+                    if (!confirmedUnlocked)
+                    {
+                        failures.Add($"{target.Title}：未确认直接生成，未提交视频");
+                        continue;
+                    }
+                }
+                var requiredVideoCapabilities = (suggestion.RequiredCapabilities ?? Array.Empty<GenerationCapability>())
+                    .Where(capability => capability != GenerationCapability.ImageToVideo || frame.Length > 0)
+                    .ToArray();
+                var videoMatch = GenerationProviderSelection.Evaluate(provider, requiredVideoCapabilities);
+                if (!videoMatch.IsMatch)
+                {
+                    failures.Add($"{target.Title}：{videoMatch.Reason}");
+                    continue;
+                }
+
                 StatusText.Text = $"一键出视频 {step}/{total}：正在给「{target.Title}」出视频（异步任务，可能要等几分钟）…";
-                await RunVideoAsync(target, suggestion.Prompt, LatestImageAttachmentPath(target),
-                    request.Seconds, request.VideoSource, provider, request.AspectRatio, request.Megapixels);
+                var succeeded = await RunVideoAsync(target, suggestion.Prompt, frame,
+                    request.Seconds, request.VideoSource, provider, request.AspectRatio, request.Megapixels,
+                    confirmedWithoutReferences: confirmedUnlocked);
                 if (currentCanvas != canvas) return;
                 if (lastVideoWasCancelled)
                 {
@@ -2731,9 +2995,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                     break;
                 }
 
-                if (target.Attachments.Any(attachment =>
-                        attachment.Kind == AttachmentKind.Video && AssetStore.Exists(attachment.Reference)))
-                    videosDone++;
+                if (succeeded) videosDone++;
                 else
                     failures.Add($"{target.Title}：视频没出来（状态栏上有接口给的原因）");
             }
@@ -2903,24 +3165,31 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         if (currentCanvas is null) return;
 
-        var config = AiProviderSettings.Load();
-        // 走站点池子时，地址 / 模型 / 密钥由**池子**说了算（它自带这三样）：
-        // 在配置的一份临时副本上覆盖，出视频那条链就按这一家去打——设置里那份只是兜底。
-        // 走 ComfyUI 工作流时这三样都不参与：底模与地址由那台服务器与那份工作流决定。
-        if (source?.Pool is { } pool)
+        RecheckSharedAuthority(currentCanvas.Canvas);
+        var initialCheck = GenerationAudit.CheckVideoAssets(currentCanvas.Canvas, node, LocateAttachment);
+        if (initialCheck.Errors.Count > 0)
         {
-            config.VideoEndpoint = pool.Site.BaseUrl;
-            config.VideoModel = pool.Pool.Model;
-            config.VideoApiKey = pool.Site.ApiKey;
+            StatusText.Text = string.Join("\n", initialCheck.Errors);
+            return;
         }
-
-        IVideoProvider provider;
-        try { provider = VideoProviderFactory.Create(config, source?.Workflow); }
+        var config = AiProviderSettings.Load();
+        // 走站点池子时，地址 / 模型 / 密钥由池子决定；工作流则严格走 ComfyUI。
+        GenerationProviderCandidate<IVideoProvider> videoProviderMatch;
+        try
+        {
+            // provider 构造也会读取、解析工作流，必须与显式检查一样放到后台。
+            videoProviderMatch = await Task.Run(() => VideoProviderFactory.SelectFor(
+                suggestion.RequiredCapabilities ?? Array.Empty<GenerationCapability>(),
+                source,
+                config));
+        }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             StatusText.Text = $"出视频链路创建不出来：{error.Message}";
             return;
         }
+
+        var provider = videoProviderMatch.Provider;
         if (!provider.IsConfigured)
         {
             // ComfyUI 的「接上了没有」**只看地址**（IsComfyUiConfigured）：checkpoint 只在内置模板出图时才需要，
@@ -2937,6 +3206,23 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
 
         var frame = LatestImageAttachmentPath(node);
+        var preflight = GenerationAudit.CheckVideoAssets(currentCanvas.Canvas, node, LocateAttachment, frame);
+        if (preflight.Errors.Count > 0)
+        {
+            StatusText.Text = string.Join("\n", preflight.Errors);
+            return;
+        }
+        var requiredVideoCapabilities = (suggestion.RequiredCapabilities ?? Array.Empty<GenerationCapability>())
+            .Where(capability => capability != GenerationCapability.ImageToVideo || frame.Length > 0)
+            .ToArray();
+        var videoMatch = GenerationProviderSelection.Evaluate(provider, requiredVideoCapabilities);
+        if (!videoMatch.IsMatch)
+        {
+            StatusText.Text = $"「{videoMatch.Name}」不能执行「{suggestion.Title}」：{videoMatch.Reason}。"
+                + "请改选支持图生视频的模型或 ComfyUI 工作流。";
+            return;
+        }
+
         var seconds = config.VideoDefaultSeconds;
         // 走工作流时报那份工作流的名字（报 checkpoint 会让人以为跑的是设置里那个底模）。
         var model = source?.Workflow is { } workflow
@@ -2949,7 +3235,8 @@ public partial class MainWindow : Window, IAgentSessionHost
         ComfyUiWorkflowSlots? slots = null;
         var slotsError = string.Empty;
         if (workflowChoice is not null)
-            (slots, slotsError) = ComfyUiWorkflowInspector.Inspect(workflowChoice.Site, workflowChoice.Workflow);
+            (slots, slotsError) = await Task.Run(() =>
+                ComfyUiWorkflowInspector.Inspect(workflowChoice.Site, workflowChoice.Workflow));
 
         var prompt = new TextBox
         {
@@ -2971,6 +3258,13 @@ public partial class MainWindow : Window, IAgentSessionHost
             FontWeight = FontWeight.SemiBold
         });
         body.Children.Add(prompt);
+        body.Children.Add(AgentDialogUi.Note(GenerationAudit.SingleImageVideoNote));
+        var confirmUnlocked = new CheckBox { Content = "我确认这一镜未锁定基准资产，仍直接生成", IsChecked = false };
+        if (preflight.Warning.Length > 0)
+        {
+            body.Children.Add(AgentDialogUi.Note(preflight.Warning, AgentNoteLevel.Warning));
+            body.Children.Add(confirmUnlocked);
+        }
         // 首帧这一句要**按这一条链的实际情况**说：一份 ComfyUI 工作流有没有底图入口是问得出来的，
         // 所以「首帧用不上」这种情况必须在点下去之前写在窗口上，而不是等出完了才发现画面跟这一镜无关。
         var workflowTakesFrame = (provider as ComfyUiVideoProvider)?.TakesFirstFrame;
@@ -3170,9 +3464,15 @@ public partial class MainWindow : Window, IAgentSessionHost
                     + "先在窗口里选一段本机视频再点。不选的话它会拿它自己示例里的片段跑。";
                 return;
             }
+            var check = GenerationAudit.CheckVideoAssets(currentCanvas!.Canvas, node, LocateAttachment, frame);
+            if (!check.CanSubmit(confirmUnlocked.IsChecked == true))
+            {
+                StatusText.Text = string.Join("\n", check.Errors.Append(check.Warning));
+                return;
+            }
             dialog.Close();
             _ = RunVideoAsync(node, text, frame, CurrentSeconds(), source, provider, CurrentAspect(), CurrentMegapixels(),
-                sourceVideoPaths, sourceAudioPaths);
+                sourceVideoPaths, sourceAudioPaths, confirmUnlocked.IsChecked == true);
         };
         await dialog.ShowDialog(this);
     }
@@ -3183,12 +3483,29 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// 与出图不同，这里**没有「一批」也没有「挑一张」**：一次就是一版、按次计费，
     /// 所以成功就挂上去；失败就如实说失败，不留下半个文件冒充产物。
     /// </summary>
-    private async Task RunVideoAsync(
+    private async Task<bool> RunVideoAsync(
         WorkflowNode node, string prompt, string frame, int seconds, ImageSourceChoice? source, IVideoProvider provider,
         string aspectRatio = "", double megapixels = 0,
-        IReadOnlyList<string>? sourceVideos = null, IReadOnlyList<string>? sourceAudios = null)
+        IReadOnlyList<string>? sourceVideos = null, IReadOnlyList<string>? sourceAudios = null,
+        bool confirmedWithoutReferences = false)
     {
-        if (currentCanvas is null) return;
+        if (currentCanvas is null) return false;
+        RecheckSharedAuthority(currentCanvas.Canvas);
+        var check = GenerationAudit.CheckVideoAssets(currentCanvas.Canvas, node, LocateAttachment, frame);
+        if (!check.CanSubmit(confirmedWithoutReferences))
+        {
+            StatusText.Text = string.Join("\n", check.Errors.Append(check.Warning));
+            return false;
+        }
+        if (node.Category == NodeCategory.Storyboard && node.References.Count > 0)
+        {
+            var capability = GenerationProviderSelection.Evaluate(provider, new[] { GenerationCapability.ImageToVideo });
+            if (!capability.IsMatch || (provider as ComfyUiVideoProvider)?.TakesFirstFrame == false)
+            {
+                StatusText.Text = "有引用的分镜必须使用采用首帧：" + capability.Reason;
+                return false;
+            }
+        }
 
         using var cancellation = new CancellationTokenSource();
         activeVideoCancellation = cancellation;
@@ -3233,6 +3550,8 @@ public partial class MainWindow : Window, IAgentSessionHost
             AspectRatio = aspectRatio,
             Megapixels = megapixels,
             ReferenceImages = frames,
+            // 显式标记首帧，ComfyUI 工作流可据此区分首尾帧语义；普通参考图仍保留在列表中兼容旧工作流。
+            FirstFrame = frame,
             // 源视频 / 源音频：那一支工作流吃的是**一段片子**（对口型还要一段音）。
             // 首帧照旧带上——有些工作流两样都要（例如「按参考片做动作迁移、用首帧定外观」）。
             SourceVideos = sourceVideos ?? Array.Empty<string>(),
@@ -3279,7 +3598,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
 
         // 等结果的这几分钟里用户可能已经换了画布：那时不该再往旧画布上挂东西。
-        if (currentCanvas is null) return;
+        if (currentCanvas is null) return false;
 
         // 执行方说「有几张没吃下」就写在最前面：这话比「成功」更重要——不说的话，
         // 用户会以为设定图生效了，然后一直纳闷为什么不像。
@@ -3293,7 +3612,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             StatusText.Text = lastVideoWasCancelled
                 ? "视频任务已取消。"
                 : referenceNote + $"出视频没成（{result.Provider}）：{result.Error}";
-            return;
+            return false;
         }
 
         var reference = AssetStore.ToReference(result.FilePath);
@@ -3322,6 +3641,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             await ShowVideoResultNoteAsync(node.Title, result.Note);
 
         StatusText.Text = referenceNote + $"已出视频并挂到「{node.Title}」：{Path.GetFileName(result.FilePath)} —— 记得点「保存修订」";
+        return true;
     }
 
     private void CancelVideo_OnClick(object? sender, RoutedEventArgs e)
@@ -3416,10 +3736,10 @@ public partial class MainWindow : Window, IAgentSessionHost
 
                 var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto") };
                 row.Children.Add(AgentDialogUi.Note(line));
-                var play = AgentDialogUi.Secondary("播放这一版");
+                var play = AgentDialogUi.Secondary("应用内播放这一版");
                 Grid.SetColumn(play, 1);
                 play.Margin = new Thickness(6, 0, 0, 0);
-                play.Click += (_, _) => OpenInShell(path, "视频");
+                play.Click += (_, _) => ShowVideoPreview(path, $"{node.Title} · {version.Label}");
                 row.Children.Add(play);
                 var locate = AgentDialogUi.Secondary("打开所在文件夹");
                 Grid.SetColumn(locate, 2);
@@ -4019,12 +4339,18 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// </summary>
     private ImageGenerationRequest BuildImageRequest(
         string prompt, string negative, ImageSourceChoice? source,
-        NodeImageDecision decision, IReadOnlyList<string> references, double? denoise)
+        NodeImageDecision decision, IReadOnlyList<string> references, double? denoise,
+        AssetGenerationIntent? intent = null, string templateId = "", bool templateLocked = false)
     {
         var canvas = currentCanvas!;
         var pool = source?.Pool;
         return new ImageGenerationRequest
         {
+            ProductionIntent = intent,
+            TemplateId = templateId.Length > 0
+                ? templateId
+                : intent == AssetGenerationIntent.CharacterNineView ? CharacterNineViewTemplate.TemplateId : string.Empty,
+            TemplateLocked = templateLocked || intent == AssetGenerationIntent.CharacterNineView,
             Prompt = prompt,
             NegativePrompt = negative,
             // 走站点池子时，模型 / 接口 / 画幅 / **密钥**都由选定的那个池子说了算——
@@ -4092,8 +4418,24 @@ public partial class MainWindow : Window, IAgentSessionHost
         WorkflowNode node, string prompt, string negative, string modeNote,
         IImageProvider provider, ImageSourceChoice? source, NodeImageDecision decision,
         IReadOnlyList<string> references, double? denoise, int count,
-        string sourceLabel = "")
+        string sourceLabel = "", AssetGenerationIntent? intent = null,
+        string templateId = "", bool templateLocked = false)
     {
+        if (currentCanvas is null) return;
+        RecheckSharedAuthority(currentCanvas.Canvas);
+        var errors = GenerationAudit.CheckImageSubmission(currentCanvas.Canvas, node, LocateAttachment,
+            references, ResolveReferenceCap(source).Cap, source?.PoolItem?.SupportsReference != false);
+        if (errors.Count > 0)
+        {
+            StatusText.Text = "未提交首帧（没有产生费用）：" + string.Join("；", errors);
+            return;
+        }
+        var required = references.Count > 1
+            ? new[] { GenerationCapability.MultiReferenceImage }
+            : references.Count > 0 ? new[] { GenerationCapability.ImageToImage } : Array.Empty<GenerationCapability>();
+        var match = GenerationProviderSelection.Evaluate(provider, required);
+        if (!match.IsMatch) { StatusText.Text = "未提交首帧：" + match.Reason; return; }
+
         // 这一批马上要画那排候选卡了，先按磁盘上的配置取一次「出图观感」开关：
         // 这样改了设置之后，即使没重开窗口，新发起的一批也立刻是新样子。
         RefreshRevealPreferences();
@@ -4113,7 +4455,8 @@ public partial class MainWindow : Window, IAgentSessionHost
             ModeNote = modeNote,
             SourceLabel = sourceLabel,
             Source = source,
-            Request = BuildImageRequest(prompt, negative, source, decision, references, denoise)
+            SourceFingerprints = ReferenceStaleness.Snapshot(currentCanvas.Canvas, node),
+            Request = BuildImageRequest(prompt, negative, source, decision, references, denoise, intent, templateId, templateLocked)
         };
         for (var index = 0; index < count; index++) batch.Slots.Add(new BatchSlot());
         imageBatches[node.Id] = batch;
@@ -4324,6 +4667,19 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         try
         {
+            if (node.Category == NodeCategory.Storyboard)
+            {
+                if (currentCanvas is null) throw new InvalidOperationException("画布已关闭，未提交首帧。");
+                RecheckSharedAuthority(currentCanvas.Canvas);
+                var errors = GenerationAudit.CheckImageSubmission(currentCanvas.Canvas, node, LocateAttachment,
+                    batch.Request!.ReferenceImages, ResolveReferenceCap(batch.Source).Cap,
+                    batch.Source?.PoolItem?.SupportsReference != false);
+                var current = ReferenceStaleness.Snapshot(currentCanvas.Canvas, node);
+                if (current.Count != batch.SourceFingerprints.Count || current.Any(pair =>
+                    !batch.SourceFingerprints.TryGetValue(pair.Key, out var previous) || previous != pair.Value))
+                    throw new InvalidOperationException("资产依据在提交后发生变化，请重新发起首帧生成。");
+                if (errors.Count > 0) throw new InvalidOperationException(string.Join("；", errors));
+            }
             var result = await provider.GenerateAsync(batch.Request!);
 
             // 等结果的这段时间里，这一批可能已经被丢掉了（「全部不要，重做」，或者将来别的新路径）。
@@ -4351,9 +4707,10 @@ public partial class MainWindow : Window, IAgentSessionHost
             slot.Path = savedPath;
             slot.Status = BatchSlotStatus.Done;
         }
-        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or IOException
-            or InvalidOperationException or UnauthorizedAccessException or ArgumentException)
+        catch (Exception error)
         {
+            // 生成是从 Avalonia 菜单的 async 事件发起的：任何漏掉的异常都会表现成「确认后没反应」。
+            // 每个槽位都把异常落成失败卡，整批仍能结束并把原因显示在候选图上。
             slot.Status = BatchSlotStatus.Failed;
             slot.Error = error.Message;
         }
@@ -4634,19 +4991,43 @@ public partial class MainWindow : Window, IAgentSessionHost
     private async Task RerunBatchAsync(WorkflowNode node, NodeImageBatch previous)
     {
         if (currentCanvas is null || previous.Request is null) return;
-        IImageProvider provider;
-        try { provider = ImageProviderFactory.Create(); }
+        var decision = NodeImageModePlanner.Decide(currentCanvas.Canvas, node);
+        var approach = previous.Request.ReferenceImages.Count > 0 ? NodeImageApproach.ImageToImage : NodeImageApproach.TextToImage;
+        var requiredCapabilities = new List<GenerationCapability> { GenerationCapability.TextToImage };
+        if (approach == NodeImageApproach.ImageToImage)
+            requiredCapabilities.Add(GenerationCapability.ImageToImage);
+        if (previous.Request.ProductionIntent is AssetGenerationIntent.CharacterNineView
+            or AssetGenerationIntent.CharacterExplorationSheet
+            or AssetGenerationIntent.PropExplorationSheet
+            or AssetGenerationIntent.SceneMultiView
+            or AssetGenerationIntent.SceneDistanceSheet)
+            requiredCapabilities.Add(GenerationCapability.ImageSet);
+        if (previous.Count > 1)
+            requiredCapabilities.Add(GenerationCapability.BatchOutput);
+
+        GenerationProviderCandidate<IImageProvider> providerMatch;
+        try
+        {
+            providerMatch = ImageProviderFactory.SelectFor(requiredCapabilities, previous.Source);
+        }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
         {
             StatusText.Text = $"重做失败：图像链路创建不出来（{error.Message}）";
             return;
         }
-        var decision = NodeImageModePlanner.Decide(currentCanvas.Canvas, node);
-        var approach = previous.Request.ReferenceImages.Count > 0 ? NodeImageApproach.ImageToImage : NodeImageApproach.TextToImage;
+        if (!providerMatch.IsMatch)
+        {
+            StatusText.Text = $"重做失败：「{providerMatch.Name}」不能执行上一批请求：{providerMatch.Reason}";
+            return;
+        }
+        var provider = providerMatch.Provider;
         // 来源直接从上一批取（含站点与密钥）：不靠显示文案反推，改一次文案就不会悄悄失效。
         await RunImageBatchAsync(node, previous.Prompt, previous.Negative, previous.ModeNote, provider, previous.Source,
             decision with { Approach = approach }, previous.Request.ReferenceImages, previous.Request.Denoise, previous.Count,
-            sourceLabel: previous.SourceLabel);
+            sourceLabel: previous.SourceLabel,
+            intent: previous.Request.ProductionIntent,
+            templateId: previous.Request.TemplateId,
+            templateLocked: previous.Request.TemplateLocked);
     }
 
     /// <summary>
@@ -4663,9 +5044,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         var sourceLabel = batch.SourceLabel.Length > 0 ? batch.SourceLabel : "Agent 协助 · 出图";
         // 记下「这张是照着哪一版设定做的」：以后设定换了图，卡片上就能提示这一镜该重出。
         // 必须**在出图的这一刻**记——只有此刻才知道当时用的是哪一版（判定见 ReferenceStaleness）。
-        var fingerprints = currentCanvas is null
-            ? new Dictionary<string, string>()
-            : ReferenceStaleness.Snapshot(currentCanvas.Canvas, node);
+        var fingerprints = new Dictionary<string, string>(batch.SourceFingerprints, StringComparer.Ordinal);
         if (!node.Attachments.Any(item => item.Reference == reference))
             node.Attachments.Add(new WorkflowAttachment
             {
@@ -4821,16 +5200,33 @@ public partial class MainWindow : Window, IAgentSessionHost
         NodeImageApproach? forcedApproach = null, ImageSourceChoice? source = null, int count = 1,
         IReadOnlyCollection<string>? handPickedReferences = null)
     {
-        if (currentCanvas is null || string.IsNullOrWhiteSpace(prompt)) return;
+        if (currentCanvas is null)
+        {
+            StatusText.Text = "尚未创建画布，无法出图";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            StatusText.Text = "提示词是空的，没有发出任何请求";
+            return;
+        }
         if (!canEdit)
         {
             StatusText.Text = "项目只读：可以复制提示词到别处出图，但结果写不回这个项目";
             return;
         }
 
+        RecheckSharedAuthority(currentCanvas.Canvas);
+        var assetCap = ResolveReferenceCap(source);
+        var assetErrors = GenerationAudit.CheckImageAssets(currentCanvas.Canvas, node, LocateAttachment,
+            assetCap.Cap, handPickedReferences, source?.PoolItem?.SupportsReference != false);
+        if (assetErrors.Count > 0)
+        {
+            StatusText.Text = "未提交首帧（没有产生费用）：" + string.Join("；", assetErrors);
+            return;
+        }
         var decision = NodeImageModePlanner.Decide(currentCanvas.Canvas, node);
         var candidates = NodeImageModePlanner.BaseCandidates(currentCanvas.Canvas, node);
-        var approved = true;
         if (forcedApproach == NodeImageApproach.TextToImage)
         {
             decision = decision with
@@ -4856,8 +5252,8 @@ public partial class MainWindow : Window, IAgentSessionHost
                 };
             if (!decision.UsesBaseImage)
             {
-                approved = false;
-                decision = decision with { Approach = NodeImageApproach.TextToImage, Reason = "手动指定图生图，但手上没有能当底图的图。" };
+                StatusText.Text = "未提交图生图：没有可用底图，禁止降级为文生图。";
+                return;
             }
         }
 
@@ -4870,15 +5266,8 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
         else if (decision.UsesBaseImage)
         {
-            // 判定是图生图，但底图文件在项目里已经找不到了：如实退回文生图，而不是发一张空参考图去骗模型。
-            decision = decision with
-            {
-                Approach = NodeImageApproach.TextToImage,
-                BaseImageReference = string.Empty,
-                BaseImageLabel = string.Empty,
-                Denoise = 0,
-                Reason = "原来要用的底图在项目里找不到了，退回文生图。"
-            };
+            StatusText.Text = "未提交图生图：底图文件已丢失，禁止降级为文生图。";
+            return;
         }
 
         // 文生图时把**引用的设定图**带上：角色 / 道具 / 场景的图是跨镜一致性的来源，
@@ -4886,7 +5275,18 @@ public partial class MainWindow : Window, IAgentSessionHost
         //（`docs/spec-参考图与设定锁定.md`）。图生图那条路不带：那时底图已经占住参考位，
         // 混进去会改变它的语义。
         var referenceNote = string.Empty;
-        if (!decision.UsesBaseImage && node.References.Count > 0)
+        if (node.Category == NodeCategory.Storyboard && node.References.Count > 0)
+        {
+            var necessary = ReferenceImagePicker.Candidates(currentCanvas.Canvas, node, LocateAttachment)
+                .Select(candidate => candidate.Path).ToArray();
+            references = references.Concat(necessary).Distinct(StringComparer.Ordinal).ToArray();
+            if (references.Length > assetCap.Cap)
+            {
+                StatusText.Text = "未提交首帧：底图和必要参考超过当前上限，禁止裁剪。";
+                return;
+            }
+        }
+        else if (!decision.UsesBaseImage && node.References.Count > 0)
         {
             if (source?.PoolItem is { SupportsReference: false } refusing)
             {
@@ -4920,8 +5320,6 @@ public partial class MainWindow : Window, IAgentSessionHost
             return;
         }
 
-        if (!approved && references.Length == 0)
-            StatusText.Text = "没有可用底图：这个节点和它的引用里都没有现成的图，这一张按文生图出。";
         // 带了什么、丢了什么，都要写在看得见的地方：悄悄丢图等于悄悄降一致性。
         if (referenceNote.Length > 0)
             StatusText.Text = referenceNote + (StatusText.Text is { Length: > 0 } previous ? " " + previous : string.Empty);
@@ -4935,10 +5333,26 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (source is { } chosen)
             modeNote = $"{chosen.Label} · {modeNote}";
 
-        IImageProvider provider;
+        // ImageSet / BatchOutput 是桌面端的编排能力：组图提示词和多槽位并行由本地批次完成，
+        // 不是 ComfyUI 工作流必须声明的单次执行能力。工作流只需要匹配本次真正发给它的文生图、图生图和参考图能力。
+        var requiredCapabilities = (suggestion.RequiredCapabilities ?? Array.Empty<GenerationCapability>())
+            .Where(capability => capability switch
+            {
+                GenerationCapability.ImageSet => false,
+                GenerationCapability.BatchOutput => false,
+                GenerationCapability.ImageToImage => decision.UsesBaseImage,
+                GenerationCapability.MultiReferenceImage => references.Length >= 2,
+                _ => true
+            })
+            .Concat(references.Length > 1 ? new[] { GenerationCapability.MultiReferenceImage }
+                : references.Length == 1 ? new[] { GenerationCapability.ImageToImage }
+                : Array.Empty<GenerationCapability>())
+            .Distinct().ToArray();
+
+        GenerationProviderCandidate<IImageProvider> providerMatch;
         try
         {
-            provider = ImageProviderFactory.Create();
+            providerMatch = ImageProviderFactory.SelectFor(requiredCapabilities, source);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
         {
@@ -4946,9 +5360,16 @@ public partial class MainWindow : Window, IAgentSessionHost
             return;
         }
 
+        var provider = providerMatch.Provider;
         if (!provider.IsConfigured)
         {
-            StatusText.Text = "还没配置图像模型：在设置里填「图像接口地址 / 图像模型」（或设 YEEYEEYEE_IMAGE_MODEL），也可以先用「复制提示词」到别处出图";
+            StatusText.Text = $"还没配置图像模型：{providerMatch.Reason}。也可以先用「复制提示词」到别处出图";
+            return;
+        }
+        if (!providerMatch.IsMatch)
+        {
+            StatusText.Text = $"「{providerMatch.Name}」不能执行「{suggestion.Title}」：{providerMatch.Reason}。"
+                + "请改选支持这些能力的模型、接口或 ComfyUI 工作流。";
             return;
         }
 
@@ -4961,11 +5382,14 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 1 张和 6 张是同一套观感（判定、参考图、池子覆盖本来就已经完全共用了）。
         await RunImageBatchAsync(node, prompt, negative, modeNote, provider, source, decision,
             references, denoise, count,
-            sourceLabel: $"Agent 协助 · {suggestion.Title}");
+            sourceLabel: $"Agent 协助 · {suggestion.Title}",
+            intent: suggestion.Intent,
+            templateId: suggestion.TemplateId,
+            templateLocked: suggestion.TemplateLocked);
     }
 
     /// <summary>
-    /// 节点自己出的一个产物，按**文件本身的种类**决定怎么打开：图放大看，视频 / 音频交给系统播放器。
+    /// 节点产物按文件种类打开：图片放大、视频应用内播放、音频保留系统播放器。
     ///
     /// 种类走 <see cref="WorkflowAttachment.KindOf"/>（按扩展名，与附件落库时同一份规则），
     /// 不按「它挂在哪个节点上」猜——分镜节点上同时可能有图和视频。认不出的种类如实说没有内置预览，
@@ -4974,7 +5398,12 @@ public partial class MainWindow : Window, IAgentSessionHost
     private void ShowOwnMedia(string path, string title)
     {
         var kind = WorkflowAttachment.KindOf(path);
-        if (kind is AttachmentKind.Video or AttachmentKind.Audio)
+        if (kind == AttachmentKind.Video)
+        {
+            ShowVideoPreview(path, title);
+            return;
+        }
+        if (kind == AttachmentKind.Audio)
         {
             OpenInShell(path, WorkflowAttachment.DisplayName(kind));
             return;
@@ -4987,6 +5416,18 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
 
         ShowImagePreview(path, title);
+    }
+
+    private void ShowVideoPreview(string path, string title)
+    {
+        var player = new LocalVideoPlayer(path) { Height = 440 };
+        var close = AgentDialogUi.Primary("关闭");
+        var dialog = DialogShell.Create($"视频 · {title}",
+            AgentDialogUi.Layout(player, AgentDialogUi.Footer(close)), 820, 520);
+        close.Click += (_, _) => dialog.Close();
+        dialog.Closed += (_, _) => player.Dispose();
+        dialog.ShowDialog(this);
+        player.StartFromUserAction();
     }
 
     /// <summary>出完图给一眼能看到的结果：不然「生成成功」只体现在状态栏和文件里。</summary>
@@ -5047,9 +5488,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// 分三节：**本设定**（这条引用自己的媒体，可逐张切换）/ **它引用的**（子引用：角色挂的道具、服装）/
     /// **同一节点上的其他引用**（这个分镜还引用了谁）。点缩略图就地换大图，所以一个窗口就能把这一簇看完。
     ///
-    /// **为什么不内嵌播放器**：Avalonia 自己不带视频解码，要在窗口里播 mp4 就得引入 LibVLCSharp
-    /// 这类上百 MB 的原生依赖——为一个「看一眼」的入口不值当。「真的能播放」比「嵌在窗口里」重要，
-    /// 所以视频走系统播放器：点一下就开始放，只是不在我们这个窗口里。
+    /// 视频复用 NativeWebView 的 HTML video，切换媒体或关闭窗口会释放播放器。
     /// </summary>
     private void ShowReferenceMedia(CanvasReferencePreview preview)
     {
@@ -5057,6 +5496,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         var all = sections.SelectMany(section => section.Items).ToList();
 
         var mainHost = new Panel();
+        LocalVideoPlayer? galleryPlayer = null;
         var captionHost = new StackPanel { Spacing = 6 };
 
         // 提示词区跟着「当前在看哪个设定」走：同一个窗口里既看得到图，也改得了这条提示词、重新出图。
@@ -5123,8 +5563,12 @@ public partial class MainWindow : Window, IAgentSessionHost
         void Show(GalleryItem item)
         {
             current = item;
+            galleryPlayer?.Dispose();
+            galleryPlayer = null;
             mainHost.Children.Clear();
-            mainHost.Children.Add(BuildGalleryMain(item));
+            var main = BuildGalleryMain(item);
+            galleryPlayer = (main as Border)?.Child as LocalVideoPlayer;
+            mainHost.Children.Add(main);
             captionHost.Children.Clear();
             captionHost.Children.Add(BuildGalleryCaption(item));
             LoadPrompt(item);
@@ -5152,7 +5596,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             body.Children.Add(BuildGalleryStrip(title, items, Show));
         }
         body.Children.Add(AgentDialogUi.Note(
-            "点下面的缩略图就地换大图；视频用系统播放器播放。缩略图右下角标着它属于哪个设定。"));
+            "点下面的缩略图就地切换；视频在当前预览区播放。缩略图右下角标着它属于哪个设定。"));
         body.Children.Add(new Border
         {
             Height = 1,
@@ -5178,6 +5622,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             AgentDialogUi.Layout(body, AgentDialogUi.Footer(buttons)),
             760,
             560);
+        dialog.Closed += (_, _) => galleryPlayer?.Dispose();
         close.Click += (_, _) => dialog.Close();
 
         resetPrompt.Click += (_, _) =>
@@ -5301,19 +5746,38 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (string.IsNullOrWhiteSpace(prompt)) { report("提示词是空的，先写点什么"); return SettingImageOutcome.Failed; }
         if (!canEdit) { report("项目只读：可以复制提示词到别处出图，但结果写不回这个项目"); return SettingImageOutcome.Failed; }
 
-        IImageProvider provider;
+        var requiredCapabilities = item.Entity.Kind switch
+        {
+            EntityKind.Character => new[] { GenerationCapability.TextToImage },
+            EntityKind.Prop => new[] { GenerationCapability.TextToImage },
+            EntityKind.Scene => new[] { GenerationCapability.TextToImage },
+            _ => Array.Empty<GenerationCapability>()
+        };
+        var rememberedWorkflow = RememberedWorkflow();
+        var source = rememberedWorkflow is null
+            ? null
+            : ImageSourceChoice.OfWorkflow(rememberedWorkflow);
+
+        GenerationProviderCandidate<IImageProvider> providerMatch;
         try
         {
-            provider = ImageProviderFactory.Create();
+            providerMatch = ImageProviderFactory.SelectFor(requiredCapabilities, source);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
         {
             report($"图像链路创建失败：{error.Message}");
             return SettingImageOutcome.Failed;
         }
+        var provider = providerMatch.Provider;
         if (!provider.IsConfigured)
         {
-            report("还没配置图像模型：在设置里填「图像接口地址 / 图像模型」（或设 YEEYEEYEE_IMAGE_MODEL），也可以先「复制提示词」到别处出图");
+            report($"还没配置图像模型：{providerMatch.Reason}。也可以先「复制提示词」到别处出图");
+            return SettingImageOutcome.Failed;
+        }
+
+        if (!providerMatch.IsMatch)
+        {
+            report($"「{providerMatch.Name}」不能执行设定出图：{providerMatch.Reason}");
             return SettingImageOutcome.Failed;
         }
 
@@ -5321,9 +5785,15 @@ public partial class MainWindow : Window, IAgentSessionHost
         ImageGenerationResult result;
         try
         {
-            var rememberedWorkflow = RememberedWorkflow();
             result = await provider.GenerateAsync(new ImageGenerationRequest
             {
+                ProductionIntent = item.Entity.Kind switch
+                {
+                    EntityKind.Character => AssetGenerationIntent.CharacterTurnaround,
+                    EntityKind.Prop => AssetGenerationIntent.PropTurnaround,
+                    EntityKind.Scene => AssetGenerationIntent.SceneBaseKeyframe,
+                    _ => null
+                },
                 Prompt = prompt,
                 NegativePrompt = negative,
                 Width = currentCanvas.Width,
@@ -5477,22 +5947,8 @@ public partial class MainWindow : Window, IAgentSessionHost
         var path = AssetStore.Resolve(item.Media.Reference);
         if (item.Media.Kind == AttachmentKind.Video)
         {
-            frame.Height = 190;
-            frame.Child = new TextBlock
-            {
-                Text = "▶",
-                FontSize = 34,
-                Foreground = AgentDialogUi.Brush("DfPrimary"),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            // 那块 ▶ 本身就是播放按钮：从「点预览」到「开始放」只隔一次点击。
-            if (path is not null)
-            {
-                frame.Cursor = new Cursor(StandardCursorType.Hand);
-                ToolTip.SetTip(frame, "点击用系统播放器播放");
-                frame.PointerPressed += (_, _) => OpenInShell(path, "视频");
-            }
+            frame.Height = 320;
+            frame.Child = new LocalVideoPlayer(item.Media.Reference);
             return frame;
         }
 
@@ -5528,14 +5984,6 @@ public partial class MainWindow : Window, IAgentSessionHost
         var path = item.Media is null ? null : AssetStore.Resolve(item.Media.Reference);
         if (path is null) return caption;
 
-        if (item.Media!.Kind == AttachmentKind.Video)
-        {
-            var play = AgentDialogUi.Primary("用系统播放器播放");
-            Grid.SetColumn(play, 1);
-            play.Margin = new Thickness(8, 0, 0, 0);
-            caption.Children.Add(play);
-            play.Click += (_, _) => OpenInShell(path, "视频");
-        }
         var open = AgentDialogUi.Secondary("打开所在文件夹");
         Grid.SetColumn(open, 2);
         open.Margin = new Thickness(6, 0, 0, 0);
@@ -5545,7 +5993,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     }
 
     /// <summary>
-    /// 一节缩略图带：固定格宽（74×78）所以是整齐的网格，点一格就地换上面的大图。
+    /// 一节缩略图带：固定格宽（144×124），点一格就地换上面的大图。
     /// 格子右下角标着它属于哪个设定：跨节看下来（本设定 / 子引用 / 同节点的其他引用）才分得清谁是谁。
     /// </summary>
     private Control BuildGalleryStrip(string title, IReadOnlyList<GalleryItem> items, Action<GalleryItem> onPick)
@@ -5562,16 +6010,16 @@ public partial class MainWindow : Window, IAgentSessionHost
         var strip = new WrapPanel
         {
             Orientation = Orientation.Horizontal,
-            ItemWidth = 74,
-            ItemHeight = 78
+            ItemWidth = 144,
+            ItemHeight = 124
         };
         foreach (var item in items)
         {
-            var slot = new StackPanel { Width = 68, Spacing = 3 };
+            var slot = new StackPanel { Width = 136, Spacing = 3 };
             var tile = new Border
             {
-                Width = 68,
-                Height = 48,
+                Width = 136,
+                Height = 96,
                 CornerRadius = new CornerRadius(6),
                 Background = new SolidColorBrush(Color.Parse("#0E141C")),
                 BorderBrush = AgentDialogUi.Brush("DfLine"),
@@ -5928,13 +6376,14 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (session is null ||
             !AutoSync.ShouldPush(autoSyncEnabled, session.IsConfigured, session.IsSignedIn, dirty, busy)) return;
 
+        var submittedTab = activeCanvasTab;
         savingCanvas = true;
         string? message;
         try { message = await TrySaveCanvasThroughServerAsync(allowLocalFallback: false); }
         finally { savingCanvas = false; }
 
         // 「成了没有」看未保存标记有没有被撤掉——比去嗅一句话的内容可靠。
-        var ok = activeCanvasTab?.Dirty != true;
+        var ok = submittedTab?.Dirty == false;
         if (!ok) autoSyncBackoffUntil = DateTimeOffset.UtcNow.AddSeconds(30);
         if (message is not null && message != autoSyncLastNote)
         {
@@ -6064,7 +6513,7 @@ public partial class MainWindow : Window, IAgentSessionHost
     /// 拿不到锁时**只有一种情况要说话**：别人正占着。其余（没配服务器、没登录、连不上服务器）
     /// 都只是不占——桌面端是本地优先的，协作不可用不该让画布变得不能改。
     /// </summary>
-    private async void InspectorField_OnGotFocus(object? sender, GotFocusEventArgs e)
+    private async void InspectorField_OnGotFocus(object? sender, FocusChangedEventArgs e)
     {
         if (!canEdit || CanvasSurfaceControl.SelectedNode is not { } node) return;
 
@@ -7204,10 +7653,10 @@ public partial class MainWindow : Window, IAgentSessionHost
     public AgentCommitReport Commit(IReadOnlyList<AgentAction> actions)
     {
         if (actions.Count == 0) return new AgentCommitReport(0, "这批改动是空的。", Array.Empty<string>());
-        if (referenceCanvas is not null)
-            return new AgentCommitReport(0, "这里是临时引用画布：它不是一张会落盘的画布，Agent 的改动没有落点。先点标签条上的「返回原画布」，再让 Agent 改。", Array.Empty<string>());
-        if (currentCanvas is null || string.IsNullOrWhiteSpace(currentCanvasPath))
+        if (currentCanvas is null)
             return new AgentCommitReport(0, "还没有打开画布：先新建或载入一张画布，Agent 才能把改动落到画布上。", Array.Empty<string>());
+        if (referenceCanvas is null && string.IsNullOrWhiteSpace(currentCanvasPath))
+            return new AgentCommitReport(0, "这张画布还没有落到磁盘上，无法保存。", Array.Empty<string>());
         if (!canEdit)
             return new AgentCommitReport(0, "项目或项目库不可写（当前为只读），这批改动没有写入。", Array.Empty<string>());
 

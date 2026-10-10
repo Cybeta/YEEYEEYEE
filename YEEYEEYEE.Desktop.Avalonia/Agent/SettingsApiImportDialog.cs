@@ -73,6 +73,7 @@ internal sealed class SettingsApiImportDialog
     private long? lastTestCost;
     private bool wroteSite;
     private bool savedConfig;
+    private int deletedWorkflowCount;
     private string returnedMediaPath = string.Empty;
 
     // ---------- 控件 ----------
@@ -218,6 +219,14 @@ internal sealed class SettingsApiImportDialog
         window.Closing += (_, e) =>
         {
             if (closing) return;
+            if (comfyImportCancellation is not null)
+            {
+                e.Cancel = true;
+                closeAfterComfyImport = true;
+                comfyImportCancellation.Cancel();
+                comfySelectionWindow?.Close();
+                return;
+            }
             e.Cancel = true;
             closing = true;
             window.Close(BuildSummary());
@@ -252,7 +261,7 @@ internal sealed class SettingsApiImportDialog
                 new TextBlock
                 {
                     Text = "贴 ComfyUI 地址也可以（例如 https://主机:端口 或 http://127.0.0.1:8188）："
-                        + "那会走另一条路——登记成 ComfyUI 站点，并把那台服务器上的工作流整份拉下来。"
+                        + "那会先读取服务器上的工作流清单，由你勾选所需工作流，仅导入所选项，再登记成 ComfyUI 站点并保存设置。"
                         + "\n文档站抓不到正文时（页面由前端脚本渲染），在浏览器里打开该文档，把接口段落粘到下面。",
                     FontSize = 10,
                     TextWrapping = TextWrapping.Wrap,
@@ -503,7 +512,7 @@ internal sealed class SettingsApiImportDialog
     /// <summary>给调用方的一行结论。**什么都没写成时返回 null**，让外壳知道不必刷新、也不必报「导入成功」。</summary>
     private string? BuildSummary()
     {
-        if (!wroteSite && !savedConfig) return null;
+        if (!wroteSite && !savedConfig && deletedWorkflowCount == 0) return null;
 
         var parts = new List<string>();
         if (installedComfySite is { } comfy)
@@ -518,6 +527,7 @@ internal sealed class SettingsApiImportDialog
             parts.Add($"站点已登记（{SiteCatalog.Directory}）");
         }
 
+        if (deletedWorkflowCount > 0) parts.Add($"已删除 {deletedWorkflowCount} 份本地工作流");
         if (savedConfig) parts.Add("接口地址 / 模型 / 密钥已保存");
         if (returnedMediaPath.Length > 0) parts.Add($"最小测试产出 {Path.GetFileName(returnedMediaPath)}");
         if (lastTestCost is { } cost && cost != 0) parts.Add($"本次测试消耗 {cost} 积分");
@@ -656,7 +666,7 @@ internal sealed class SettingsApiImportDialog
         lines.Add(string.Empty);
         lines.Add("点下面的按钮会做两件事：");
         lines.Add("· 把地址与 checkpoint 写进设置（并登记成一个 ComfyUI 站点，地址以站点文件为准）；");
-        lines.Add("· 把服务器 workflows 目录里的工作流**整份**拉下来，逐份转成 API 格式存好——");
+        lines.Add("· 先读取服务器 workflows 清单，勾选少量工作流后，仅拉取所选项并转成 API 格式存好——");
         lines.Add("  这等价于在浏览器里一份一份右键「导出（API）」，只是不用你点。");
         lines.Add("  拉取过程只读：只问清单、正文与节点定义，不发任何生成请求。");
         reportText.Text = string.Join(Environment.NewLine, lines);
@@ -672,8 +682,38 @@ internal sealed class SettingsApiImportDialog
         EnterStep(ApiWizardStep.Document);
     }
 
+    private CancellationTokenSource? comfyImportCancellation;
+    private bool closeAfterComfyImport;
+    private Window? comfySelectionWindow;
+    private SelectableTextBlock? comfySelectionStatus;
+    private TextBlock? comfyTimingText;
+    private ProgressBar? comfyProgressBar;
+    private Stopwatch? comfyWatch;
+    private Stopwatch? comfyFetchWatch;
+    private int comfySelectedCount;
+    private int comfyCompleted;
+    private double? comfySecondsPerItem;
+    private bool comfyFetchActive;
+    private string comfyPhase = string.Empty;
+
+    private static string FormatComfyDuration(TimeSpan value) =>
+        $"{(int)value.TotalHours:00}:{value.Minutes:00}:{value.Seconds:00}";
+
+    private void UpdateComfyTiming()
+    {
+        if (comfyTimingText is null || comfyWatch is null) return;
+        var remaining = comfyFetchActive
+            ? comfySecondsPerItem is { } seconds
+                ? $"预计拉取剩余 {FormatComfyDuration(TimeSpan.FromSeconds(Math.Max(0, comfySelectedCount - comfyCompleted) * seconds))}（按实际完成速率；审核与保存另计）"
+                : "预计剩余：估算中（初始化／尚无完成样本）"
+            : comfyPhase == "完成" ? "预计剩余 00:00:00" : comfyPhase;
+        comfyTimingText.Text = $"已用 {FormatComfyDuration(comfyWatch.Elapsed)}｜{remaining}"
+            + (comfyImportCancellation?.IsCancellationRequested == true && comfyWatch.IsRunning
+                ? "｜已请求取消，等待当前操作安全结束" : string.Empty);
+    }
+
     /// <summary>
-    /// ComfyUI 分支的落地动作：写设置 → 拉整份工作流目录 → 转成 API 格式 → 登记成一个站点。
+    /// ComfyUI 分支的落地动作：读清单 → 选择工作流 → 拉取并审核所选项 → 安装站点 → 保存设置。
     ///
     /// 为什么在这一步就把工作流拉下来，而不是等出图时再说：转换要用服务器的
     /// <c>object_info</c>，而实测那有 **21.8 MB**；每次提交前去拉一次既慢又不稳。
@@ -693,29 +733,73 @@ internal sealed class SettingsApiImportDialog
 
         busy = true;
         createButton.IsEnabled = false;
+        using var budget = new CancellationTokenSource(TimeSpan.FromHours(2));
+        comfyImportCancellation = budget;
         try
         {
-            var applied = ProviderImporter.Apply(config, comfyDraft);
-            if (applied.Count > 0 && !AiProviderSettings.Save(config))
-            {
-                SetStatus("配置写入失败（配置文件可能不可写或磁盘只读），本次没有生效："
-                    + Environment.NewLine + string.Join(Environment.NewLine, applied.Select(item => "· " + item)));
-                return;
-            }
-            if (applied.Count > 0) savedConfig = true;
-
             SetStatus("正在读取工作流清单…");
-            // Progress<T> 在界面线程上构造，回调就回到界面线程——直接改 TextBlock 是安全的。
-            var progress = new Progress<ComfyUiLibraryProgress>(item => SetStatus(item.Describe()));
-            // 二十多 MB 的节点定义 + 三百多份正文，给足时间；超时也要如实说出来。
-            using var budget = new CancellationTokenSource(TimeSpan.FromMinutes(20));
+            var manifest = await ComfyUiLibrary.ReadManifestAsync(comfyDraft.BaseUrl, cancellationToken: budget.Token);
+            await SelectComfyUiWorkflowsAsync(manifest, budget);
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus("工作流导入已取消或达到总时限。");
+        }
+        catch (Exception error)
+        {
+            SetStatus("读取工作流清单失败：" + error.Message);
+        }
+        finally
+        {
+            comfyImportCancellation = null;
+            busy = false;
+            createButton.IsEnabled = true;
+            if (closeAfterComfyImport)
+            {
+                closing = true;
+                window?.Close(BuildSummary());
+            }
+        }
+    }
 
+    private async Task ImportSelectedComfyUiAsync(IReadOnlyCollection<string> selectedPaths, CancellationToken token)
+    {
+        try
+        {
+            // Progress<T> 在界面线程上构造，回调就回到界面线程——直接改 TextBlock 是安全的。
+            var progress = new Progress<ComfyUiLibraryProgress>(item =>
+            {
+                if (!comfyFetchActive) return;
+                if (item.Done > comfyCompleted && comfyFetchWatch is { } watch)
+                {
+                    comfyCompleted = item.Done;
+                    comfySecondsPerItem = watch.Elapsed.TotalSeconds / comfyCompleted;
+                }
+                if (comfyProgressBar is { } bar)
+                {
+                    bar.IsIndeterminate = item.Done == 0;
+                    bar.Maximum = Math.Max(1, item.Total);
+                    bar.Value = comfyCompleted;
+                }
+                SetStatus(item.Describe());
+                UpdateComfyTiming();
+            });
             ComfyUiLibraryResult fetched;
             try
             {
-                fetched = await ComfyUiLibrary.FetchAsync(comfyDraft.BaseUrl, null, progress, budget.Token);
+                SetStatus($"正在拉取所选的 {selectedPaths.Count} 份工作流…");
+                var webViewService = (global::Avalonia.Application.Current as YEEYEEYEE.Desktop.Avalonia.App)?.ComfyUiWebViewService
+                    ?? throw new InvalidOperationException("Avalonia NativeWebView 官方前端宿主尚未初始化。");
+                fetched = await ComfyUiLibrary.FetchAsync(
+                    comfyDraft!.BaseUrl, null, progress, token, webViewService.Factory, selectedPaths);
+                token.ThrowIfCancellationRequested();
             }
-            catch (Exception error) when (error is HttpRequestException or TaskCanceledException or InvalidOperationException)
+            catch (OperationCanceledException)
+            {
+                SetStatus("工作流导入已取消或达到总时限，未登记站点。");
+                return;
+            }
+            catch (Exception error) when (error is HttpRequestException or InvalidOperationException)
             {
                 SetStatus("拉取工作流失败：" + error.Message + Environment.NewLine
                     + "· 确认地址指向 ComfyUI 本身（控制台首页），并且那台机器上的 ComfyUI 正在运行；"
@@ -723,13 +807,23 @@ internal sealed class SettingsApiImportDialog
                     + "· 本次**没有登记站点**，也没有改动出图 / 出视频的设置。");
                 return;
             }
+            finally
+            {
+                comfyFetchActive = false;
+            }
+            comfyPhase = "审核中（剩余时间估算中）";
+            if (comfyProgressBar is { } auditBar) auditBar.IsIndeterminate = true;
+            UpdateComfyTiming();
 
-            // 同一个地址重新导入是**覆盖**：把上一轮用户的取舍（停用了哪几份、推荐改了哪一份）带过去。
-            var previous = SiteCatalog.Load().Sites.FirstOrDefault(item =>
-                string.Equals(item.Id, fetched.SiteId, StringComparison.OrdinalIgnoreCase));
+            // 优先按地址找到同一站点（包括端口撞名后带后缀的站点），部分导入保留未选工作流。
+            var existingSites = SiteCatalog.Load().Sites;
+            var previous = existingSites.FirstOrDefault(item => item.IsComfyUi &&
+                string.Equals(item.BaseUrl, fetched.BaseUrl, StringComparison.OrdinalIgnoreCase))
+                ?? existingSites.FirstOrDefault(item =>
+                    string.Equals(item.Id, fetched.SiteId, StringComparison.OrdinalIgnoreCase));
 
             // 上次这台机器上学到的「前端节点规则」接着用——同一台机器不该每导一次就再认一遍。
-            if (previous is { VirtualNodeRules.Count: > 0 })
+            if (!fetched.UsesOfficialFrontend && previous is { VirtualNodeRules.Count: > 0 })
             {
                 SetStatus($"正在按上次学到的 {previous.VirtualNodeRules.Count} 条前端节点规则重转…");
                 fetched = ComfyUiLibrary.Reconvert(fetched, previous.VirtualNodeRules);
@@ -744,12 +838,16 @@ internal sealed class SettingsApiImportDialog
             var repairSummary = string.Empty;
 
             var audit = fetched.Audit;
-            if (audit is { NeedsAttention: true })
+            if (fetched.UsesOfficialFrontend && audit is { NeedsAttention: true })
+                SetStatus("官方前端导出后的体检发现问题（保留审计，不应用 C# 学习重转）："
+                    + Environment.NewLine + audit.Describe());
+            if (!fetched.UsesOfficialFrontend && audit is { NeedsAttention: true })
             {
                 SetStatus("体检发现问题：" + Environment.NewLine + audit.Describe());
                 switch (await AskRepairAsync(audit))
                 {
                     case ComfyUiRepairChoice.Cancel:
+                        comfyImportCancellation?.Cancel();
                         SetStatus("已取消这次导入：**没有登记站点**，也没有改动出图 / 出视频的设置。"
                             + Environment.NewLine + audit.Describe());
                         return;
@@ -760,7 +858,7 @@ internal sealed class SettingsApiImportDialog
                             fetched,
                             jsonCompleter!,
                             known,
-                            message => SetStatus(message));
+                            message => SetStatus(message), token);
                         // 只采用**验证过**的规则（照它重转之后「我们丢了」真的变少、且没多出判断不了的）。
                         fetched = ComfyUiLibrary.Reconvert(fetched, learning.Accepted);
                         repairSummary = learning.Describe();
@@ -775,11 +873,18 @@ internal sealed class SettingsApiImportDialog
                 }
             }
 
-            var (installed, failure) = ComfyUiLibrary.Install(
+            token.ThrowIfCancellationRequested();
+            comfyPhase = "保存中（安装站点与保存配置，剩余时间估算中）";
+            UpdateComfyTiming();
+            var previousKeys = previous?.Workflows.Select(item => item.Key).ToHashSet(StringComparer.Ordinal)
+                ?? new HashSet<string>(StringComparer.Ordinal);
+            var updatedCount = selectedPaths.Count(previousKeys.Contains);
+            // Install 不支持中途取消；一旦开始写入，等待站点和配置保存安全结束。
+            var (installed, failure) = await Task.Run(() => ComfyUiLibrary.Install(
                 fetched,
                 previous?.DisplayName ?? string.Empty,
-                comfyDraft.Checkpoint,
-                previous);
+                comfyDraft!.Checkpoint,
+                previous));
             if (installed is null)
             {
                 SetStatus("工作流拉回来了，但站点没能落盘：" + failure + Environment.NewLine
@@ -793,7 +898,12 @@ internal sealed class SettingsApiImportDialog
             // 站点文件为准：按刚落盘的站点回写配置，两边不会各说一套。
             config.ComfyUiBaseUrl = installed.BaseUrl;
             if (installed.Checkpoint.Length > 0) config.ComfyUiCheckpoint = installed.Checkpoint;
-            AiProviderSettings.Save(config);
+            if (!await Task.Run(() => AiProviderSettings.Save(config)))
+            {
+                SetStatus("所选工作流已安装，但配置保存失败，请检查配置文件权限后重试。");
+                return;
+            }
+            savedConfig = true;
 
             var picks = installed.UsableWorkflows.Count(workflow => workflow.Recommended);
             var lines = new List<string>
@@ -801,7 +911,7 @@ internal sealed class SettingsApiImportDialog
                 $"站点「{installed.Label}」已登记：图像 {installed.ImageWorkflows.Count} 份、视频 {installed.VideoWorkflows.Count} 份工作流。",
                 $"· 地址：{installed.BaseUrl}"
                     + (installed.Checkpoint.Length > 0 ? $"｜checkpoint {installed.Checkpoint}" : "｜没填 checkpoint"),
-                $"· 清单来自 ComfyUI 的 workflows 目录：共 {installed.Workflows.Count} 份，转成 {fetched.Converted} 份",
+                $"· 本次选择 {selectedPaths.Count} 份（新增 {selectedPaths.Count - updatedCount}／更新 {updatedCount}），转成 {fetched.Converted} 份；站点现有 {installed.Workflows.Count} 份（保留未选的已有工作流）",
                 $"· 每个家族（服务器上的顶层文件夹）各推了一份默认：共 {picks} 份",
                 $"· 正文按份落盘：{SiteCatalog.PayloadDirectory(installed.Id)}（站点文件本身不带正文，选择器不必读大文件）"
             };
@@ -827,28 +937,388 @@ internal sealed class SettingsApiImportDialog
             SetStatus(string.Join(Environment.NewLine, lines));
             EnterStep(ApiWizardStep.Done);
 
-            // 拉取是这一步里最花时间、也最容易「点完就去干别的」的动作：把它当面说清楚，
-            // 并把「以后去哪儿管这一台」一起交代掉——只写在状态区里，用户往往已经不在看那一格了。
-            await ShowCompletionDialogAsync("ComfyUI 导入完成", new List<string>
+            comfyPhase = "完成";
+            if (comfyProgressBar is { } completedBar)
             {
-                $"站点「{installed.Label}」已登记。",
-                $"· 图像工作流 {installed.ImageWorkflows.Count} 份、视频工作流 {installed.VideoWorkflows.Count} 份"
-                    + $"（服务器上共 {installed.Workflows.Count} 份，转换成功 {fetched.Converted} 份"
-                    + (fetched.Failed > 0 ? $"，{fetched.Failed} 份没转成" : string.Empty) + "）",
-                $"· 地址：{installed.BaseUrl}"
-                    + (installed.Checkpoint.Length > 0 ? $"｜checkpoint {installed.Checkpoint}" : string.Empty),
-                $"· 每个家族各推了一份默认，共 {installed.UsableWorkflows.Count(workflow => workflow.Recommended)} 份标为推荐",
-                string.Empty,
-                "以后要换工作流、改推荐、停用某几份，或看这一台还有哪些：",
-                "设置 → 技能管理 → 站点与池子（「生图与生视频」页也有同一个入口）。",
-                "出图 / 出视频时会先让你在这台服务器的工作流里挑一份。"
-            });
+                completedBar.IsIndeterminate = false;
+                completedBar.Value = completedBar.Maximum;
+            }
         }
+        catch (OperationCanceledException)
+        {
+            SetStatus("工作流导入已取消或达到总时限。"
+                + (wroteSite ? "站点已写入，请检查配置保存结果。" : "本次未登记站点或保存配置。"));
+        }
+        catch (Exception error)
+        {
+            SetStatus("导入失败：" + error.Message
+                + (wroteSite ? "\n站点已写入，请检查配置保存结果。" : "\n本次未保存配置；若安装已开始，请检查站点目录。"));
+        }
+    }
+
+    private async Task SelectComfyUiWorkflowsAsync(IReadOnlyList<string> paths, CancellationTokenSource cancellation)
+    {
+        if (window is null) return;
+        SetStatus("正在后台读取本地工作流状态…");
+        var local = await Task.Run(() =>
+        {
+            // 只按完整地址匹配，不能把同主机不同端口的另一站点当成本地记录。
+            var existing = SiteCatalog.Load().Sites.FirstOrDefault(item => item.IsComfyUi &&
+                string.Equals(item.BaseUrl.TrimEnd('/'), comfyDraft!.BaseUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase));
+            var statuses = existing is null ? Array.Empty<SiteWorkflowStatus>()
+                : SiteCatalog.ReadWorkflowStatuses(existing).ToArray();
+            return (Site: existing, Statuses: statuses);
+        }, cancellation.Token);
+        cancellation.Token.ThrowIfCancellationRequested();
+        var statuses = local.Statuses.ToDictionary(item => item.Key, StringComparer.Ordinal);
+        var remotePaths = paths.Distinct(StringComparer.Ordinal).ToArray();
+        var remoteKeys = remotePaths.ToHashSet(StringComparer.Ordinal);
+        var choices = new StackPanel { Spacing = 4 };
+        var boxes = new List<(string Path, CheckBox Box, Grid Row, bool Remote)>();
+        var groups = new List<(CheckBox Box, Expander View, List<CheckBox> Items)>();
+        var count = Note(string.Empty);
+        var confirm = Primary("导入所选工作流");
+        var cancel = Secondary("取消");
+        var all = Secondary("全选可见项");
+        var none = Secondary("取消全选");
+        var unimported = Secondary("选择未导入");
+        var filter = new ComboBox { MinWidth = 100, FontSize = 12 };
+        filter.ItemsSource = new[] { "全部", "未导入", "已导入" };
+        filter.SelectedIndex = 0;
+        var deletionStatus = Note(string.Empty);
+        var deleting = false;
+        bool IsVisible(string path) => filter.SelectedIndex switch
+        {
+            1 => !statuses.ContainsKey(path),
+            2 => statuses.ContainsKey(path),
+            _ => true
+        };
+        string DescribeStatus(string path)
+        {
+            if (!statuses.TryGetValue(path, out var status)) return "未导入";
+            var text = status.IsUsable ? "已导入" : "需修复";
+            text += "｜ImportedAt：" + (status.ImportedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz") ?? "未知（旧记录）");
+            if (status.LastImportError.Length > 0)
+                text += (status.IsUsable ? "｜更新失败，旧版可用：" : "｜上次导入失败：") + status.LastImportError;
+            if (!status.Enabled) text += "｜已停用";
+            if (!status.Converted) text += "｜转换未成功";
+            if (!status.PayloadAvailable) text += "｜本地正文缺失或不可读";
+            return text;
+        }
+        var syncing = false;
+        var running = false;
+        var started = false;
+        var closeRequested = false;
+        void SyncSelection()
+        {
+            if (syncing) return;
+            syncing = true;
+            try
+            {
+                foreach (var item in boxes) item.Row.IsVisible = IsVisible(item.Path);
+                var visibleBoxes = boxes.Where(item => item.Row.IsVisible).Select(item => item.Box).ToHashSet();
+                foreach (var group in groups)
+                {
+                    var visible = group.Items.Where(visibleBoxes.Contains).ToList();
+                    var selectable = visible.Where(box => box.IsEnabled).ToList();
+                    var n = selectable.Count(box => box.IsChecked == true);
+                    group.Box.IsChecked = n == 0 ? false : n == selectable.Count ? true : null;
+                    group.Box.IsEnabled = selectable.Count > 0;
+                    group.View.IsVisible = visible.Count > 0;
+                }
+                var selected = boxes.Where(item => item.Remote && item.Box.IsChecked == true).ToList();
+                var selectedCount = selected.Count;
+                var updates = selected.Count(item => statuses.ContainsKey(item.Path));
+                count.Text = $"远端清单 {remotePaths.Length} 份，仅本地已有 {boxes.Count(item => !item.Remote)} 份；可见 {boxes.Count(item => item.Row.IsVisible)} 份。已选 {selectedCount} 份（新增 {selectedCount - updates}／更新 {updates}）。"
+                    + (selectedCount == 0
+                        ? " 请选择工作流后查看预计耗时。"
+                        : $" 初始粗估：约 {FormatComfyDuration(TimeSpan.FromSeconds(60 + selectedCount * 15))}～{FormatComfyDuration(TimeSpan.FromSeconds(120 + selectedCount * 30))}（含首次前端加载预留 1～2 分钟及每份 15～30 秒；仅供参考，运行后按实际速率更新；审核与保存另计）。");
+                confirm.IsEnabled = !started && !deleting && selectedCount > 0;
+            }
+            finally { syncing = false; }
+        }
+        void SelectAll(bool value)
+        {
+            syncing = true;
+            try
+            {
+                foreach (var item in boxes.Where(item => item.Remote && (!value || item.Row.IsVisible)))
+                    item.Box.IsChecked = value;
+            }
+            finally { syncing = false; }
+            SyncSelection();
+        }
+        // 使用完整父目录；a/x 与 b/x、a 与 a/sub 分别成组，保留原路径提交给 Fetch。
+        foreach (var folder in remotePaths.Concat(statuses.Keys.Where(key => !remoteKeys.Contains(key)))
+            .GroupBy(path =>
+            {
+                var normalized = path.Replace('\\', '/');
+                var separator = normalized.LastIndexOf('/');
+                return (LocalOnly: !remoteKeys.Contains(path), Folder: separator < 0 ? string.Empty : normalized[..separator]);
+            }).OrderBy(group => group.Key.LocalOnly).ThenBy(group => group.Key.Folder, StringComparer.Ordinal))
+        {
+            var groupName = $"{(folder.Key.LocalOnly ? "仅本地已有 · " : string.Empty)}{(folder.Key.Folder.Length == 0 ? "（根目录）" : folder.Key.Folder)}";
+            var groupTitle = new TextBlock { Text = $"{groupName}（{folder.Count()} 份）", TextWrapping = TextWrapping.Wrap };
+            var groupBox = new CheckBox
+            {
+                IsThreeState = true, IsChecked = false, Content = groupTitle
+            };
+            var children = new StackPanel { Spacing = 3, Margin = new Thickness(20, 0, 0, 0) };
+            var items = new List<CheckBox>();
+            foreach (var path in folder.OrderBy(path => path, StringComparer.Ordinal))
+            {
+                var box = new CheckBox
+                {
+                    IsChecked = false, IsEnabled = !folder.Key.LocalOnly,
+                    Content = new TextBlock { Text = path.Replace('\\', '/').Split('/')[^1], TextWrapping = TextWrapping.Wrap },
+                    HorizontalAlignment = HorizontalAlignment.Stretch
+                };
+                ToolTip.SetTip(box, path);
+                var detail = Note(DescribeStatus(path));
+                var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 8 };
+                row.Children.Add(new StackPanel { Spacing = 2, Children = { box, detail } });
+                var remove = Secondary("删除本地");
+                remove.IsVisible = statuses.ContainsKey(path);
+                Grid.SetColumn(remove, 1);
+                row.Children.Add(remove);
+                boxes.Add((path, box, row, !folder.Key.LocalOnly));
+                items.Add(box);
+                box.IsCheckedChanged += (_, _) => SyncSelection();
+                remove.Click += async (_, _) =>
+                {
+                    if (started || deleting || local.Site is null || comfySelectionWindow is null) return;
+                    deleting = true;
+                    confirm.IsEnabled = false;
+                    cancel.IsEnabled = false;
+                    try
+                    {
+                        if (!await ConfirmAsync(comfySelectionWindow, "删除本地工作流",
+                            $"确定删除「{path}」的本地记录与不再被引用的正文吗？\n远端工作流与已经生成的图像、视频不受影响。\n"
+                            + "旧画布对工作流的引用无法完全检测；删除后，依赖它的旧画布可能无法再次生成。\n"
+                            + "对应的图像、视频选择偏好也会清理。", "删除本地")) return;
+                        if (cancellation.IsCancellationRequested || closeRequested) return;
+                        var deleted = await Task.Run(() =>
+                        {
+                            var success = SiteCatalog.TryDeleteWorkflow(local.Site, path, out var error);
+                            return (Success: success, Error: error);
+                        });
+                        if (!deleted.Success)
+                        {
+                            deletionStatus.Text = "删除失败：" + deleted.Error;
+                            return;
+                        }
+                        deletedWorkflowCount++;
+                        var cleanup = await ClearDeletedWorkflowPreferencesAsync(local.Site.Id, path);
+                        statuses.Remove(path);
+                        box.IsChecked = false;
+                        remove.IsVisible = false;
+                        detail.Text = DescribeStatus(path);
+                        if (folder.Key.LocalOnly)
+                        {
+                            boxes.RemoveAll(item => item.Box == box);
+                            items.Remove(box);
+                            children.Children.Remove(row);
+                            groupTitle.Text = $"{groupName}（{items.Count} 份）";
+                        }
+                        deletionStatus.Text = $"已删除本地工作流「{path}」。" + cleanup;
+                    }
+                    catch (Exception error) { deletionStatus.Text = "删除或偏好清理失败：" + error.Message; }
+                    finally
+                    {
+                        deleting = false;
+                        cancel.IsEnabled = true;
+                        SyncSelection();
+                        if (closeRequested) comfySelectionWindow?.Close();
+                    }
+                };
+                children.Children.Add(row);
+            }
+            groupBox.IsCheckedChanged += (_, _) =>
+            {
+                if (syncing) return;
+                // 三态只用于显示汇总；用户把选中态点到 null 时视为取消全组。
+                var value = groupBox.IsChecked == true;
+                syncing = true;
+                try
+                {
+                    foreach (var box in items.Where(box => box.IsEnabled && boxes.Any(item => item.Box == box && item.Row.IsVisible)))
+                        box.IsChecked = value;
+                }
+                finally { syncing = false; }
+                SyncSelection();
+            };
+            var view = new Expander
+            {
+                Header = groupBox, Content = children, IsExpanded = false,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Stretch
+            };
+            groups.Add((groupBox, view, items));
+            choices.Children.Add(view);
+        }
+        all.Click += (_, _) => SelectAll(true);
+        none.Click += (_, _) => SelectAll(false);
+        unimported.Click += (_, _) =>
+        {
+            syncing = true;
+            try
+            {
+                foreach (var item in boxes) item.Box.IsChecked = item.Remote && !statuses.ContainsKey(item.Path);
+            }
+            finally { syncing = false; }
+            SyncSelection();
+        };
+        filter.SelectionChanged += (_, _) => SyncSelection();
+        SyncSelection();
+        var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { filter, unimported, all, none } };
+        var selection = new StackPanel
+        {
+            Spacing = 8, Children = { count, toolbar,
+                Note("已导入筛选包含需修复项。筛选保留已勾选项；全选与分组选择仅作用于可见的远端项。选择未导入会替换当前选择。\n仅本地已有项只能删除，不能导入。可用状态只表示本地正文可读，不保证远端执行成功。"),
+                deletionStatus, choices }
+        };
+        var result = CodeText();
+        result.TextWrapping = TextWrapping.Wrap;
+        var timing = Note("尚未开始；确认后在此窗口显示进度与结果。");
+        var bar = new ProgressBar { Minimum = 0, Maximum = 1, Height = 6, IsVisible = false };
+        var body = new Grid { Margin = new Thickness(20), RowDefinitions = new RowDefinitions("*,Auto,Auto"), RowSpacing = 10 };
+        var scroll = new ScrollViewer { Content = selection, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        body.Children.Add(scroll);
+        Grid.SetRow(bar, 1);
+        body.Children.Add(bar);
+        Grid.SetRow(timing, 2);
+        body.Children.Add(timing);
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Right, Children = { cancel, confirm }
+        };
+        var root = new Grid { RowDefinitions = new RowDefinitions("*,Auto") };
+        root.Children.Add(body);
+        var footer = Footer(buttons);
+        Grid.SetRow(footer, 1);
+        root.Children.Add(footer);
+        var dialog = DialogShell.Create("选择并导入 ComfyUI 工作流", root, 820, 600);
+        comfySelectionWindow = dialog;
+        comfySelectionStatus = result;
+        comfyTimingText = timing;
+        comfyProgressBar = bar;
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        timer.Tick += (_, _) => UpdateComfyTiming();
+        void CancelRunning()
+        {
+            cancellation.Cancel();
+            cancel.IsEnabled = false;
+            cancel.Content = "正在取消…";
+            timing.Text = "已请求取消，正在等待当前操作安全结束（保存已开始时会完成保存）。";
+        }
+        dialog.Closing += (_, e) =>
+        {
+            if (!running && !deleting) return;
+            e.Cancel = true;
+            closeRequested = true;
+            if (running) CancelRunning();
+        };
+        cancel.Click += (_, _) => { if (running) CancelRunning(); else dialog.Close(); };
+        confirm.Click += async (_, _) =>
+        {
+            if (started || deleting) return;
+            var selected = boxes.Where(item => item.Remote && item.Box.IsChecked == true).Select(item => item.Path).ToArray();
+            if (selected.Length == 0) return;
+            started = running = true;
+            confirm.IsEnabled = false;
+            selection.IsEnabled = false;
+            scroll.Content = result;
+            bar.IsVisible = true;
+            bar.IsIndeterminate = true;
+            comfySelectedCount = selected.Length;
+            comfyCompleted = 0;
+            comfySecondsPerItem = null;
+            comfyPhase = "拉取中";
+            comfyFetchActive = true;
+            comfyWatch = Stopwatch.StartNew();
+            comfyFetchWatch = Stopwatch.StartNew();
+            timer.Start();
+            UpdateComfyTiming();
+            try { await ImportSelectedComfyUiAsync(selected, cancellation.Token); }
+            finally
+            {
+                running = false;
+                comfyFetchActive = false;
+                timer.Stop();
+                comfyWatch.Stop();
+                comfyFetchWatch.Stop();
+                bar.IsIndeterminate = false;
+                if (comfyPhase != "完成") comfyPhase = cancellation.IsCancellationRequested ? "已取消／操作已安全结束" : "操作结束，请查看结果";
+                UpdateComfyTiming();
+                cancel.Content = "关闭";
+                cancel.IsEnabled = true;
+                confirm.IsVisible = false;
+                if (closeRequested) dialog.Close();
+            }
+        };
+        using var registration = cancellation.Token.Register(() => Dispatcher.UIThread.Post(() =>
+        {
+            if (running) CancelRunning();
+            else if (!started) dialog.Close();
+        }));
+        try { await dialog.ShowDialog(window); }
         finally
         {
-            busy = false;
-            createButton.IsEnabled = true;
+            timer.Stop();
+            comfySelectionWindow = null;
+            comfySelectionStatus = null;
+            comfyTimingText = null;
+            comfyProgressBar = null;
+            comfyWatch = null;
+            comfyFetchWatch = null;
         }
+    }
+
+    // 使用现有配置接口清理偏好；内存工作副本也同步清空，避免关闭设置页时重新保存旧引用。
+    private async Task<string> ClearDeletedWorkflowPreferencesAsync(string siteId, string key)
+    {
+        bool MatchesImage(AiProviderConfig settings) =>
+            string.Equals(settings.LastImageWorkflowSiteId, siteId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(settings.LastImageWorkflowKey, key, StringComparison.Ordinal);
+        if (MatchesImage(config))
+        {
+            config.LastImageWorkflowSiteId = string.Empty;
+            config.LastImageWorkflowKey = string.Empty;
+        }
+        return await Task.Run(() =>
+        {
+            var warnings = new List<string>();
+            try
+            {
+                var stored = AiProviderSettings.Load();
+                if (MatchesImage(stored))
+                {
+                    stored.LastImageWorkflowSiteId = string.Empty;
+                    stored.LastImageWorkflowKey = string.Empty;
+                    if (!AiProviderSettings.Save(stored)) warnings.Add("图像偏好保存失败，请重新保存设置");
+                }
+            }
+            catch (Exception error) { warnings.Add("图像偏好清理失败：" + error.Message); }
+            try
+            {
+                var preference = VideoRoutePreferenceStore.Load();
+                var routeKey = $"flow|{siteId}|{key}";
+                if (string.Equals(preference.Key, routeKey, StringComparison.Ordinal))
+                {
+                    // Remember 失去目标后回到每次询问；Auto 仍保持自动选择。
+                    if (preference.ModeKind == VideoRouteMode.Remember) preference.Mode = "ask";
+                    preference.Key = string.Empty;
+                    preference.Label = string.Empty;
+                    VideoRoutePreferenceStore.Save(preference);
+                    // Save 无返回值且会吞掉 IO 错误，重新读取确认不能假报成功。
+                    if (VideoRoutePreferenceStore.Load().Key == routeKey)
+                        warnings.Add("视频偏好保存失败，请检查配置文件权限");
+                }
+            }
+            catch (Exception error) { warnings.Add("视频偏好清理失败：" + error.Message); }
+            return warnings.Count == 0 ? "相关选择偏好已清理。" : "正文已删除，但" + string.Join("；", warnings) + "。";
+        });
     }
 
     /// <summary>体检发现问题时用户的选择。</summary>
@@ -911,7 +1381,10 @@ internal sealed class SettingsApiImportDialog
         repair.Click += (_, _) => { choice = ComfyUiRepairChoice.Repair; question.Close(); };
         asIs.Click += (_, _) => { choice = ComfyUiRepairChoice.ImportAsIs; question.Close(); };
         cancel.Click += (_, _) => { choice = ComfyUiRepairChoice.Cancel; question.Close(); };
-        if (window is not null) await question.ShowDialog(window);
+        var owner = comfySelectionWindow ?? window;
+        using var registration = comfyImportCancellation?.Token.Register(() =>
+            Dispatcher.UIThread.Post(() => question.Close()));
+        if (owner is not null) await question.ShowDialog(owner);
         return choice;
     }
 
@@ -1600,12 +2073,18 @@ internal sealed class SettingsApiImportDialog
     /// 「Call from invalid thread」，**把整个应用带走**（实测：点「让大模型认一认」必崩；而无头测试
     /// 看不见这个，因为探针那条路的回调写的是 Console）。所以这里统一兜一层：不在 UI 线程就 Post 回去写。
     /// </summary>
-    private void SetStatus(string text) => OnUiThread(() => statusText.Text = text);
+    private void SetStatus(string text) => OnUiThread(() =>
+    {
+        statusText.Text = text;
+        if (comfySelectionStatus is { } target) target.Text = text;
+    });
 
     /// <summary>往状态区追加一行（保留已有内容，便于看到完整过程）。</summary>
-    private void AppendStatus(string line) => OnUiThread(() => statusText.Text = statusText.Text.Length == 0
-        ? line
-        : statusText.Text + Environment.NewLine + line);
+    private void AppendStatus(string line) => OnUiThread(() =>
+    {
+        statusText.Text = string.IsNullOrEmpty(statusText.Text) ? line : statusText.Text + Environment.NewLine + line;
+        if (comfySelectionStatus is { } target) target.Text = statusText.Text;
+    });
 
     /// <summary>在 UI 线程上执行；已经在上面就直接跑，免得每次进度更新都被推迟一拍。</summary>
     private static void OnUiThread(Action action)
