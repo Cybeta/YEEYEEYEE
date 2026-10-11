@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client'
-import { WebCanvasApp } from './WebCanvasApp'
+import { ProjectWorkbench } from './ProjectWorkbench'
 
 /**
  * 唯一入口：网页端工作台。
@@ -9,4 +9,4 @@ import { WebCanvasApp } from './WebCanvasApp'
  * 仓库里没有任何 WebView 宿主（整个 `YEEYEEYEE.Desktop.Avalonia` 里搜不到 WebView），
  * 那条分支**永远进不去**，却让每次构建都多打进一份完整的前端。
  */
-createRoot(document.getElementById('root')!).render(<WebCanvasApp />)
+createRoot(document.getElementById('root')!).render(<ProjectWorkbench />)

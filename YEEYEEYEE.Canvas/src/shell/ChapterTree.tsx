@@ -21,21 +21,24 @@ export type ChapterTreeProps = {
   onSelect: (recordId: string) => void
   /** 在指定章节里新建一个节点。没给就不显示那个入口。 */
   onCreate?: (chapterId: string, recordType: string) => void
+  onSync?: () => void
+  onSplit?: () => void
 }
 
-export function ChapterTree({ groups, activeChapter, selectedId, onChapter, onSelect, onCreate }: ChapterTreeProps) {
+export function ChapterTree({ groups, activeChapter, selectedId, onChapter, onSelect, onCreate, onSync, onSplit }: ChapterTreeProps) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [newKind, setNewKind] = useState(CREATABLE_RECORD_TYPES[0].recordType)
   const total = groups.reduce((sum, group) => sum + group.records.length, 0)
 
-  if (groups.length === 0) return <div className="df-notice">这张画布还没有章节或节点。</div>
-
   return (
     <div className="df-section" style={{ gap: 2 }}>
+      {onSync && <button className="df-mini-button" onClick={onSync}>预览工作树同步</button>}
+      {onSplit && <button className="df-mini-button" onClick={onSplit}>将所选正文拆为章节</button>}
       {/* 新建入口放在树的顶上：它建的就是「当前这一章」里的节点，
           没选章节（看全部）时建在未分章里——建在哪一章是这一屏唯一需要交代的事。 */}
       {onCreate && (
         <div className="df-section" style={{ gap: 4, marginBottom: 6 }}>
+          <button type="button" className="df-mini-button" onClick={() => onCreate(ALL_CHAPTERS_ID, 'chapter')}>新建章节</button>
           <span className="df-label">新建节点</span>
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             <select

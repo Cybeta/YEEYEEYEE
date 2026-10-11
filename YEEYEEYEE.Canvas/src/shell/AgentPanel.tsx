@@ -1,5 +1,5 @@
 /**
- * Agent 协作面板：本机技能与任务。
+ * Agent 协作面板：持久对话、本机技能与任务。
  *
  * 桌面端的 AgentPanel 是 1106 行，装着 13 个动作、导入向导、抽卡这些流程。
  * 网页端目前能拿到的是服务端**已预授权**的技能目录，以及任务队列的查询/取消/重试，
@@ -8,12 +8,16 @@
  */
 
 import { useState } from 'react'
+import { canvasUrl } from '../api'
+import { ChatPanel } from './ChatPanel'
 import { VIDEO_FRAMES_PER_SECOND, VIDEO_SIZE_OPTIONS, videoEffectiveSeconds, videoFramesForSeconds, type VideoParams } from './videoParams'
 
 export type WebSkill = { id: string; name: string; capability: string }
 
 export type WebJob = {
   jobId: string
+  targetNodeId?: string | null
+  attachmentState?: string
   state: string
   progressPercent: number
   errorCode?: string | null
@@ -26,6 +30,15 @@ export type WebJob = {
 }
 
 export type AgentPanelProps = {
+  userId: string
+  canChat: boolean
+  chapterId?: string
+  nodeId?: string
+  baseRevision?: number
+  canCommit: boolean
+  onChanged: () => Promise<void>
+  onChatInvoke: (skillId: string, prompt: string) => Promise<WebJob>
+  onChatRetry: (id: string) => Promise<WebJob>
   skills: WebSkill[]
   jobs: WebJob[]
   prompt: string
@@ -47,6 +60,8 @@ export function AgentPanel(props: AgentPanelProps) {
   const [mediaErrors, setMediaErrors] = useState<Record<string, boolean>>({})
   return (
     <div className="df-section" style={{ gap: 16 }}>
+      <ChatPanel key={props.userId} userId={props.userId} canChat={props.canChat} chapterId={props.chapterId} nodeId={props.nodeId} baseRevision={props.baseRevision} canCommit={props.canCommit} onChanged={props.onChanged} skills={skills} jobs={jobs} onInvoke={props.onChatInvoke} onCancelJob={onCancel} onRetryJob={props.onChatRetry} />
+      <hr className="df-divider" />
       <div className="df-section">
         <div className="df-row-between">
           <span className="df-heading" style={{ fontSize: 12 }}>本机技能</span>
@@ -140,9 +155,10 @@ export function AgentPanel(props: AgentPanelProps) {
               <span className="df-muted" style={{ fontSize: 11 }}>{job.state} · {job.progressPercent}%</span>
             </div>
             <span className="df-dim" style={{ fontSize: 10 }}>第 {job.attempt} 次{retryNote(job)}</span>
+            {job.targetNodeId && <span className="df-dim">回挂节点 {job.targetNodeId} · {job.attachmentState}</span>}
             {job.errorCode && <span className="df-notice is-error">{job.errorCode}：{job.errorMessage || '任务失败'}</span>}
             {job.outputs?.map((output, index) => {
-              const outputUrl = `/api/web/jobs/${job.jobId}/outputs/${index}`
+              const outputUrl = canvasUrl(`/api/web/jobs/${job.jobId}/outputs/${index}`)
               if (output.role === 'video') {
                 return (
                   <div key={index} className="df-section" style={{ gap: 6 }}>
@@ -164,10 +180,19 @@ export function AgentPanel(props: AgentPanelProps) {
                   </div>
                 )
               }
+              if (output.role === 'image') {
+                return <div key={index} className="df-section" style={{ gap: 6 }}>
+                  {mediaErrors[outputUrl]
+                    ? <span className="df-notice is-error">图片加载失败，可下载文件检查。</span>
+                    : <img src={outputUrl} alt="任务生成图片" loading="lazy" style={{ width: '100%', maxHeight: 280, objectFit: 'contain' }}
+                        onError={() => setMediaErrors(current => ({ ...current, [outputUrl]: true }))} />}
+                  <a className="df-mini-button" href={outputUrl} download>下载图片</a>
+                </div>
+              }
               return (
-                <span key={index} className="df-dim df-mono" style={{ fontSize: 10, wordBreak: 'break-all' }}>
-                  {output.role}：{output.ref}
-                </span>
+                <a key={index} href={outputUrl} download className="df-dim df-mono" style={{ fontSize: 10, wordBreak: 'break-all' }}>
+                  {output.role}：下载产物
+                </a>
               )
             })}
             <div className="df-row" style={{ gap: 6 }}>

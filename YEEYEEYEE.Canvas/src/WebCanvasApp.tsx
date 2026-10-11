@@ -9,6 +9,7 @@ import { AgentPanel, type WebJob, type WebSkill } from './shell/AgentPanel'
 import { DEFAULT_VIDEO_PARAMS, buildInvocationBody, type VideoParams } from './shell/videoParams'
 import { ChapterTree } from './shell/ChapterTree'
 import { InspectorPanel } from './shell/InspectorPanel'
+import { EntityManager } from './shell/EntityManager'
 import { parseLayoutPlan, type LayoutPlan, type LayoutScope } from './shell/layoutPlan'
 import { describeLease, leaseCovering, shouldHoldNodeLease, clientLabel } from './shell/locks'
 import { buildNodeMenu, parseNodeAssist, type NodeAssistPlan, type NodeMenuItem } from './shell/nodeMenu'
@@ -16,7 +17,7 @@ import { RightDock } from './shell/RightDock'
 import { SettingsPanel } from './shell/SettingsPanel'
 import {
   canvasBounds, chapterGroups, isEditableRecord, kindOf, NODE_KINDS, nodeX, nodeY, parseScene, recordContent,
-  recordTitle, type ShellScene, type ViewRecord
+  recordTitle, PLANNING_GROUP_ID, UNFILED_GROUP_ID, type ShellScene, type ViewRecord
 } from './shell/records'
 import { canvasChangeText, followAction, hasUnsavedDraft, isOtherRevision, type PresencePerson } from './shell/serverEvents'
 import { useLeases } from './shell/useLeases'
@@ -51,7 +52,7 @@ type Notice = { kind: 'success' | 'error' | 'info'; message: string }
 /** 任务跑完了的三种结局。到这一步之后它不会再变，界面也该停了。 */
 const TERMINAL_JOB_STATES = ['Succeeded', 'Failed', 'Cancelled']
 
-export function WebCanvasApp() {
+export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: boolean) => void } = {}) {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [authFailure, setAuthFailure] = useState('')
   const [scene, setScene] = useState<ShellScene | null>(null)
@@ -63,6 +64,8 @@ export function WebCanvasApp() {
   const [notice, setNotice] = useState<Notice>({ kind: 'info', message: '登录后加载画布。' })
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [editHistoryState, setEditHistoryState] = useState<{ revision: number; undo: number; redo: number } | null>(null)
+  const historyInFlight = useRef(false)
   const [skills, setSkills] = useState<WebSkill[]>([])
   const [jobs, setJobs] = useState<WebJob[]>([])
   const [prompt, setPrompt] = useState('')
@@ -111,6 +114,15 @@ export function WebCanvasApp() {
   const groups = useMemo(() => chapterGroups(records), [records])
   const selected = useMemo(() => records.find((item) => item.recordId === selectedId) ?? null, [records, selectedId])
   const dirty = !!selected && (title !== recordTitle(selected) || content !== recordContent(selected))
+  useEffect(() => {
+    onSwitchBlocked?.(dirty || saving || loading || layoutBusy || taskBusy)
+  }, [dirty, saving, loading, layoutBusy, taskBusy, onSwitchBlocked])
+  useEffect(() => {
+    if (!dirty) return
+    const prevent = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', prevent)
+    return () => window.removeEventListener('beforeunload', prevent)
+  }, [dirty])
   const readOnly = scene?.readOnly === true
   const role = auth?.user?.role ?? 'Viewer'
   const editable = canEdit(role) && !readOnly
@@ -312,6 +324,36 @@ export function WebCanvasApp() {
     setTaskNotice(`任务 ${job.jobId}：${job.state}${job.errorMessage ? ` · ${job.errorMessage}` : ''}`)
   }, [jobs, noticeJobId])
 
+  // 历史数量只对相同修订有效；外部修改、登录切换和本地提交均重新读取。
+  useEffect(() => {
+    setEditHistoryState(null)
+    if (!auth?.user || !scene || !editable) return
+    let active = true
+    void request<{ revision: number; undo: number; redo: number }>('/api/web/canvas/history')
+      .then(value => {
+        if (active && value.revision === scene.revision && Number.isInteger(value.undo) && Number.isInteger(value.redo))
+          setEditHistoryState(value)
+      }).catch(() => { /* 不支持普通历史的独立场景保持按钮禁用。 */ })
+    return () => { active = false }
+  }, [auth?.user?.id, scene?.revision, editable, saving])
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target
+      if (event.defaultPrevented || event.isComposing || event.altKey || !(event.ctrlKey || event.metaKey) ||
+          (target instanceof HTMLElement && (target.isContentEditable || target.closest('input, textarea, select, [role="textbox"]')))) return
+      const key = event.key.toLowerCase()
+      const operation = key === 'z' ? (event.shiftKey ? 'redo' : 'undo') : key === 'y' && !event.shiftKey ? 'redo' : null
+      if (!operation || !scene || !editable || saving || loading || layoutBusy || dirty ||
+          !editHistoryState || editHistoryState.revision !== scene.revision || editHistoryState[operation] === 0 ||
+          leases.some(lease => lease.userId !== myUserId)) return
+      event.preventDefault()
+      void editHistory(operation)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [scene, editable, saving, loading, layoutBusy, dirty, editHistoryState, leases, myUserId, selectedId])
+
   // Esc 退出连接模式。只退模式、**不清选中**：清选中会牵出「未保存的修改要不要放弃」那一问，
   // 而按 Esc 的人想停的是「连线」这件事，不是想丢掉手上的草稿。
   useEffect(() => {
@@ -333,6 +375,12 @@ export function WebCanvasApp() {
       setTaskNotice(`任务 ${result.jobId}：${result.state}${result.errorMessage ? ` · ${result.errorMessage}` : ''}`)
     } catch (error) { if (run === generation.current) setTaskNotice(`任务操作失败：${errorMessage(error)}`) }
     finally { setTaskBusy(false) }
+  }
+
+  async function chatTaskAction(path: string, body?: object): Promise<WebJob> {
+    const result = await request<WebJob>(path, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
+    setJobs(current => [result, ...current.filter(j => j.jobId !== result.jobId)])
+    return result
   }
 
   async function save() {
@@ -587,7 +635,7 @@ export function WebCanvasApp() {
   }
 
   /**
-   * 结构级写入：删掉一个节点（连带它的连线）。删之前问一句——服务端那边没有撤销。
+   * 结构级写入：删掉一个节点（连带它的连线），确认后保存到普通编辑历史。
    *
    * `targetRecordId` 只有右键菜单会给（它作用于**被右键的那一张**，不是「当前选中的那张」）：
    * 菜单里点「删除节点」时选中的确实是它，但把「删谁」说清楚比依赖那次选中可靠。
@@ -601,7 +649,7 @@ export function WebCanvasApp() {
       setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
       return
     }
-    if (!window.confirm(`删掉「${recordTitle(target)}」？它的连线会一并删掉，服务端没有撤销。`)) return
+    if (!window.confirm(`删掉「${recordTitle(target)}」？它的连线会一并删掉。`)) return
 
     setSaving(true)
     setNotice({ kind: 'info', message: '正在删除…' })
@@ -669,12 +717,16 @@ export function WebCanvasApp() {
       return
     }
     if (item.action === 'runImage') {
-      // **不直接出图**：桌面端这条路的规矩是「出图前让人看到会发出去的话」，
-      // 网页端的出图入口就是 Agent 面板，所以这里只把提示词填好并切过去，由人点「生成」。
+      const imageSkill = skills.find(skill => skill.capability === 'TextToImage')
+      if (!imageSkill || taskBusy || !suggestion.prompt.trim()) {
+        setNotice({ kind: 'error', message: '没有可调用的文生图技能，或已有任务正在提交。' })
+        return
+      }
       setPrompt(suggestion.prompt)
       setDockOpen(true)
       setDockMode('agent')
-      setNotice({ kind: 'info', message: '提示词已填进 Agent 面板：确认后再点生成。' })
+      await taskAction(`/api/web/skills/${encodeURIComponent(imageSkill.id)}/invoke`,
+        { ...buildInvocationBody(imageSkill.id, suggestion.prompt, videoParams, crypto.randomUUID()), targetNodeId: menu.recordId })
     }
   }
 
@@ -713,14 +765,14 @@ export function WebCanvasApp() {
     }
   }
 
-  /** 结构级写入：断开一根连线。断开之前问一句——服务端那边没有撤销。 */
+  /** 结构级写入：确认后断开连线并保存到普通编辑历史。 */
   async function disconnectEdge(edgeId: string) {
     if (!scene) return
     if (!canEdit(role)) {
       setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
       return
     }
-    if (!window.confirm('断开这条连线？服务端没有撤销。')) return
+    if (!window.confirm('断开这条连线？')) return
 
     setSaving(true)
     setNotice({ kind: 'info', message: '正在断开…' })
@@ -860,6 +912,56 @@ export function WebCanvasApp() {
     }
   }
 
+  async function splitChapters() {
+    if (!scene || !selected || !editable || saving || dirty) return
+    if (!window.confirm('按所选节点的真实正文追加章节和出场节点？重复执行会追加另一批章节。')) return
+    setSaving(true)
+    try {
+      await request('/api/web/worktree/split', { method: 'POST', body: JSON.stringify({ baseRevision: scene.revision, sourceId: selected.recordId }) })
+      await loadScene({ select: selected.recordId })
+      setNotice({ kind: 'success', message: '已按真实正文拆章并保存工作树。' })
+    } catch (error) { setNotice({ kind: 'error', message: errorMessage(error) }) }
+    finally { setSaving(false) }
+  }
+
+  async function syncWorkTree() {
+    if (!scene || !editable || saving || dirty) return
+    setSaving(true)
+    try {
+      const preview = await request<{ revision: number; plan: { baselineHash: string; changes: { reason: string; before: string; after: string; requiresConfirmation: boolean }[]; conflicts: { detail: string; blocking: boolean }[] } }>('/api/web/worktree/plan?direction=Both')
+      const lines = preview.plan.changes.map(c => `${c.requiresConfirmation ? '待确认：' : ''}${c.reason}\n${c.before} → ${c.after}`)
+      lines.push(...preview.plan.conflicts.map(c => `冲突：${c.detail}`))
+      if (preview.plan.conflicts.some(c => c.blocking)) {
+        setNotice({ kind: 'error', message: lines.join('\n') })
+        return
+      }
+      if (!preview.plan.changes.length) {
+        setNotice({ kind: 'success', message: '工作树与画布已同步。' })
+        return
+      }
+      if (!window.confirm(`应用以下同步计划？\n${lines.join('\n')}`)) return
+      await request('/api/web/worktree/apply', { method: 'POST', body: JSON.stringify({ baseRevision: preview.revision, direction: 'Both', baselineHash: preview.plan.baselineHash, confirmed: true }) })
+      await loadScene({ select: selectedId })
+      setNotice({ kind: 'success', message: '工作树同步已保存。' })
+    } catch (error) { setNotice({ kind: 'error', message: errorMessage(error) }) }
+    finally { setSaving(false) }
+  }
+
+  async function editHistory(operation: 'undo' | 'redo') {
+    if (!scene || !editable || saving || loading || layoutBusy || dirty || historyInFlight.current ||
+        !editHistoryState || editHistoryState.revision !== scene.revision || editHistoryState[operation] <= 0 ||
+        leases.some(lease => lease.userId !== myUserId)) return
+    historyInFlight.current = true
+    setSaving(true)
+    setEditHistoryState(null)
+    try {
+      await request(`/api/web/canvas/history/${operation}`, { method: 'POST', body: JSON.stringify({ baseRevision: scene.revision }) })
+      await loadScene({ select: selectedId })
+      setNotice({ kind: 'success', message: operation === 'undo' ? '已撤销普通编辑。' : '已重做普通编辑。' })
+    } catch (error) { setNotice({ kind: 'error', message: errorMessage(error) }) }
+    finally { historyInFlight.current = false; setSaving(false) }
+  }
+
   return (
     <>
     <WorkbenchShell
@@ -874,7 +976,9 @@ export function WebCanvasApp() {
           selectedId={selectedId}
           onChapter={setActiveChapter}
           onSelect={selectRecord}
-          onCreate={(chapterId, recordType) => void createNode(chapterId, recordType)}
+          onCreate={editable && !saving ? (chapterId, recordType) => void createNode(chapterId === PLANNING_GROUP_ID || chapterId === UNFILED_GROUP_ID ? ALL_CHAPTERS_ID : chapterId, recordType) : undefined}
+          onSync={editable && !saving && !dirty ? () => void syncWorkTree() : undefined}
+          onSplit={editable && !saving && !dirty && selected && isEditableRecord(selected) && !!recordContent(selected).trim() ? () => void splitChapters() : undefined}
         />
       )}
       workspace={(
@@ -912,6 +1016,11 @@ export function WebCanvasApp() {
           // 单个节点还会再看锁——那一条在画布里判，因为它要看每张卡各自的锁。
           draggable={editable}
           onMove={(recordId, x, y) => void moveNode(recordId, x, y)}
+          onCreate={editable ? recordType => void createNode(groups.some(g => g.id === activeChapter) && activeChapter !== PLANNING_GROUP_ID && activeChapter !== UNFILED_GROUP_ID ? activeChapter : ALL_CHAPTERS_ID, recordType) : undefined}
+          onDelete={editable && selected && isEditableRecord(selected) ? () => void deleteNode() : undefined}
+          editBusy={saving || loading || layoutBusy}
+          onUndo={editable && !dirty && editHistoryState?.revision === scene?.revision && (editHistoryState?.undo ?? 0) > 0 && !leases.some(lease => lease.userId !== myUserId) ? () => void editHistory('undo') : undefined}
+          onRedo={editable && !dirty && editHistoryState?.revision === scene?.revision && (editHistoryState?.redo ?? 0) > 0 && !leases.some(lease => lease.userId !== myUserId) ? () => void editHistory('redo') : undefined}
         />
       )}
       dock={dockOpen ? (
@@ -947,9 +1056,18 @@ export function WebCanvasApp() {
               />
             )
             : dockMode === 'settings'
-              ? (<SettingsPanel />)
+              ? (<><SettingsPanel canManage={role === 'Admin'} /><EntityManager canEdit={canEdit(role)} onChanged={async () => { const result = await request('/api/web/assets'); setAssets(mapAssets(result).entities); setAssetsReady(true) }} /></>)
               : (
                 <AgentPanel
+                userId={myUserId}
+                canChat={canEdit(role)}
+                chapterId={activeChapter === ALL_CHAPTERS_ID ? undefined : activeChapter}
+                nodeId={selected && isEditableRecord(selected) ? selected.recordId : undefined}
+                baseRevision={scene?.revision}
+                canCommit={editable && !dirty}
+                onChanged={async () => { const next = parseScene(await request('/api/web/scene')); setScene(next); setRemoteChange(null); await refreshLeases() }}
+                onChatInvoke={(skillId, chatPrompt) => chatTaskAction(`/api/web/skills/${encodeURIComponent(skillId)}/invoke`, { ...buildInvocationBody(skillId, chatPrompt, videoParams, crypto.randomUUID()), ...(selected ? { targetNodeId: selected.recordId } : {}) })}
+                onChatRetry={jobId => chatTaskAction(`/api/web/jobs/${jobId}/retry`)}
                 skills={skills}
                 jobs={jobs}
                 prompt={prompt}
@@ -959,7 +1077,7 @@ export function WebCanvasApp() {
                 notice={taskNotice}
                 onPrompt={setPrompt}
                 onVideoParams={setVideoParams}
-                onInvoke={(skillId) => void taskAction(`/api/web/skills/${encodeURIComponent(skillId)}/invoke`, buildInvocationBody(skillId, prompt, videoParams, crypto.randomUUID()))}
+                onInvoke={(skillId) => void taskAction(`/api/web/skills/${encodeURIComponent(skillId)}/invoke`, { ...buildInvocationBody(skillId, prompt, videoParams, crypto.randomUUID()), ...(selected && isEditableRecord(selected) ? { targetNodeId: selected.recordId } : {}) })}
                 onCancel={(jobId) => void taskAction(`/api/web/jobs/${jobId}/cancel`)}
                 onRetry={(jobId) => void taskAction(`/api/web/jobs/${jobId}/retry`)}
               />
@@ -976,7 +1094,7 @@ export function WebCanvasApp() {
       <NodeContextMenu
         x={nodeMenu.x}
         y={nodeMenu.y}
-        items={buildNodeMenu(nodeMenu.plan, { imageSkillId: skills[0]?.id ?? null })}
+        items={buildNodeMenu(nodeMenu.plan, { imageSkillId: skills.find(skill => skill.capability === 'TextToImage')?.id ?? null })}
         onPick={(item) => void runNodeMenuItem(item)}
         onClose={() => setNodeMenu(null)}
       />

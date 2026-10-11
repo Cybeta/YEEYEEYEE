@@ -373,7 +373,7 @@ public static class AiProviderSettings
         Encoder = JavaScriptEncoder.Create(UnicodeRanges.All)
     };
 
-    public static AiProviderConfig Load()
+    public static AiProviderConfig Load(bool migrateSecrets = true)
     {
         var config = new AiProviderConfig();
         var onDiskKey = string.Empty;
@@ -404,13 +404,14 @@ public static class AiProviderSettings
 
         // 多份配置：先把每一份的密钥解开，再把「当前选中的那一份」投影到顶层。
         // 顺序不能反——环境变量要能压过一切，所以放在投影**之后**（见 ApplyEnvironmentOverrides）。
+        config.Profiles ??= new List<AiProviderProfile>();
         DecryptProfiles(config);
         EnsureProfiles(config);
         var selected = ResolveSelected(config);
         if (selected is not null) ApplyProfile(config, selected);
         ApplyEnvironmentOverrides(config, selected);
 
-        MigratePlaintextSecret(config);
+        if (migrateSecrets) MigratePlaintextSecret(config);
         return config;
     }
 
@@ -624,6 +625,8 @@ public static class AiProviderSettings
         var imagePlaintext = config.ImageApiKey;
         var videoPlaintext = config.VideoApiKey;
         var profileSecrets = new Dictionary<AiProviderProfile, string>();
+        config.Profiles ??= new List<AiProviderProfile>();
+        var profiles = config.Profiles;
         try
         {
             // 顶层与「当前选中」的同步，顺序**不能反**：
@@ -647,7 +650,7 @@ public static class AiProviderSettings
             // 密钥就是这么丢的：**第一次保存其实写对了，第二次把它擦掉**——用户看到的是
             // 「我填了、也保存了，可它就是不生效」。
             topLevelPlaintext = config.ApiKey;
-            foreach (var profile in config.Profiles) profileSecrets[profile] = profile.ApiKey;
+            foreach (var profile in profiles) profileSecrets[profile] = profile.ApiKey;
 
             // 解不开的密钥**不许被清掉**——这是这条链上唯一会造成永久损失的一步。
             //
@@ -671,7 +674,7 @@ public static class AiProviderSettings
                 : SecretProtector.Protect(topLevelPlaintext);
             config.ImageApiKey = ProtectOptional(imagePlaintext);
             config.VideoApiKey = ProtectOptional(videoPlaintext);
-            foreach (var profile in config.Profiles)
+            foreach (var profile in profiles)
             {
                 var kept = profilesToKeep.Contains(profile.Id)
                     ? onDisk?.Profiles?.FirstOrDefault(item => item.Id == profile.Id)?.ApiKey
@@ -688,7 +691,7 @@ public static class AiProviderSettings
             // （ReloadForm 按这个标记决定回不回显），用户看到的是「我填了、保存了，可它还是说解不开」
             // ——于是又填一遍，或者干脆以为存上了。这一步必须和写盘同时发生。
             if (!keepTopLevelCipher) config.ApiKeyUnreadable = false;
-            foreach (var profile in config.Profiles)
+            foreach (var profile in profiles)
             {
                 if (!profilesToKeep.Contains(profile.Id)) profile.ApiKeyUnreadable = false;
             }

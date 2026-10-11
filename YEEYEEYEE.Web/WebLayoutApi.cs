@@ -15,6 +15,8 @@ namespace YEEYEEYEE.Web;
 /// </summary>
 internal static class WebLayoutApi
 {
+    private static ProjectCanvasSceneStore? store => WebProjectApi.Current is { } mode ? WebProjectApi.Store(mode) : null;
+    private static EditLeaseStore? leases => WebProjectApi.Current is { } mode ? WebProjectApi.Leases(mode) : null;
     public sealed record PlanRequest(string? Scope, bool? OverrideManual);
 
     public sealed record ApplyRequest(long BaseRevision, string? Scope, bool? OverrideManual, string? Client);
@@ -40,13 +42,7 @@ internal static class WebLayoutApi
     {
         var mode = WebCanvasMode.Resolve(app.Configuration);
         // 只有项目画布才有章节与泳道。独立场景是一份裸 JSON，引擎要的状态它没有。
-        var store = mode is { IsProject: true, CanvasPath: not null }
-            ? new ProjectCanvasSceneStore(mode.CanvasPath, mode.EntitiesPath)
-            : null;
-        // 锁与编辑锁接口共用同一份 TTL 规则，所以走 EditLeaseApi.LifetimeOf。
-        var leases = mode.CanvasPath is null
-            ? null
-            : new EditLeaseStore(mode.CanvasPath, EditLeaseApi.LifetimeOf(app.Configuration));
+
         var hub = app.Services.GetRequiredService<CanvasEventHub>();
 
         app.MapPost("/api/web/layout/plan", (PlanRequest body, HttpContext context) =>

@@ -21,7 +21,7 @@ permissions:
 jobs:
   dotnet:
     name: .NET 构建与测试
-    # 必须是 Windows：桌面端与四个测试项目的目标框架是 net10.0-windows。
+    # 四个回归项目目标为 net10.0-windows，在 Windows 上验证桌面依赖。
     runs-on: windows-latest
     env:
       # 关掉 Avalonia 构建服务的遥测写入，省得构建日志里混进无关噪音。
@@ -33,7 +33,7 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      # 解决方案含全部 12 个项目（7 个生产 + 5 个测试），所以这一步同时是「测试项目自己编得过吗」。
+      # 解决方案含 13 个项目（7 个生产、1 个验收工具、5 个测试），同时编译测试项目。
       # 只负责编，不负责跑——下面那五条各自跑。
       - name: 构建解决方案
         run: dotnet build YEEYEEYEE.slnx

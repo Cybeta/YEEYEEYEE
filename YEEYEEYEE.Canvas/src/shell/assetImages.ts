@@ -10,6 +10,8 @@
  * 拼错了不会报错，只会静默显示不出图，所以它单独成文件、有测试。
  */
 
+import { canvasUrl } from '../api'
+
 /** `GET /api/web/entities/{entityId}/thumb`：可选带 variantId / versionId。 */
 export function entityThumbUrl(entityId: string, variantId?: string | null, versionId?: string | null): string {
   const query = new URLSearchParams()
@@ -18,10 +20,10 @@ export function entityThumbUrl(entityId: string, variantId?: string | null, vers
   if (variantId) query.set('variantId', variantId)
   if (versionId) query.set('versionId', versionId)
   const suffix = query.toString()
-  return `/api/web/entities/${encodeURIComponent(entityId)}/thumb${suffix ? `?${suffix}` : ''}`
+  return canvasUrl(`/api/web/entities/${encodeURIComponent(entityId)}/thumb${suffix ? `?${suffix}` : ''}`)
 }
 
 /** `GET /api/web/records/{recordId}/attachments/{attachmentId}/file`：节点某个产物的图片字节。 */
 export function attachmentFileUrl(recordId: string, attachmentId: string): string {
-  return `/api/web/records/${encodeURIComponent(recordId)}/attachments/${encodeURIComponent(attachmentId)}/file`
+  return canvasUrl(`/api/web/records/${encodeURIComponent(recordId)}/attachments/${encodeURIComponent(attachmentId)}/file`)
 }

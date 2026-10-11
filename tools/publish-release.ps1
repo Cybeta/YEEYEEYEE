@@ -57,14 +57,12 @@ if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXIT
 
 $exe = Join-Path $publishDir 'YEEYEEYEE.Desktop.Avalonia.exe'
 if (-not (Test-Path $exe -PathType Leaf)) { throw "publish output has no main executable: $exe" }
-if ($Runtime -eq 'win-x64') {
-    foreach ($relativePath in @('tools\ffmpeg\win-x64\ffmpeg.exe', 'tools\ffmpeg\win-x64\LICENSE', 'tools\ffmpeg\win-x64\README.txt')) {
-        $requiredFile = Join-Path $publishDir $relativePath
-        if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf) -or
-            (Get-Item -LiteralPath $requiredFile).Length -eq 0) {
-            throw "publish output is missing a required FFmpeg file or it is empty: $requiredFile"
-        }
-    }
+# Symbols from every project/dependency must be excluded, including nested runtime assets.
+Get-ChildItem -LiteralPath $publishDir -Recurse -File -Filter '*.pdb' | Remove-Item -Force
+$forbidden = @(Get-ChildItem -LiteralPath $publishDir -Recurse -Force |
+    Where-Object { $_.Extension -ieq '.pdb' -or $_.Name -match '(?i)ffmpeg' })
+if ($forbidden.Count -gt 0) {
+    throw ('publish output contains forbidden symbols or FFmpeg: ' + ($forbidden.FullName -join ', '))
 }
 
 # Ship a README next to the exe so a recipient of the zip knows what this is.
@@ -72,7 +70,7 @@ $readme = @(
     'YEEYEEYEE ' + $Version,
     '',
     'Run YEEYEEYEE.Desktop.Avalonia.exe to start.',
-    'Requirement: Windows with the .NET 10 runtime.',
+    'Requirement: Windows with the .NET 10 runtime and Microsoft Edge WebView2 Runtime.',
     'The in-app updater replaces this folder, so keep it somewhere writable',
     '(do not install under Program Files).'
 ) -join [Environment]::NewLine

@@ -30,6 +30,18 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
 
     public Uri BaseAddress { get; private set; } = null!;
     public int InterruptCount { get; private set; }
+    public string LastPrompt { get; private set; } = string.Empty;
+    private static readonly JsonElement ImportedWorkflow = JsonDocument.Parse("""
+        {
+          "1":{"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"test.safetensors"}},
+          "2":{"class_type":"CLIPTextEncode","inputs":{"text":"template prompt","clip":["1",1]}},
+          "3":{"class_type":"EmptyLatentImage","inputs":{"width":512,"height":512,"batch_size":2}},
+          "4":{"class_type":"KSampler","inputs":{"model":["1",0],"positive":["2",0],"negative":["8",0],"latent_image":["3",0],"seed":1,"steps":2,"cfg":7,"sampler_name":"euler","scheduler":"normal","denoise":1}},
+          "5":{"class_type":"VAEDecode","inputs":{"samples":["4",0],"vae":["1",2]}},
+          "7":{"class_type":"VHS_VideoCombine","inputs":{"images":["5",0],"frame_rate":8,"loop_count":0,"filename_prefix":"http_test","format":"video/h264-mp4","pingpong":false,"save_output":true}},
+          "8":{"class_type":"CLIPTextEncode","inputs":{"text":"","clip":["1",1]}}
+        }
+        """).RootElement.Clone();
 
     public Task StartAsync()
     {
@@ -60,8 +72,15 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
         {
             var segments = (context.Request.Url?.AbsolutePath.Trim('/') ?? string.Empty)
                 .Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (segments.FirstOrDefault() == "api") segments = segments.Skip(1).ToArray();
             switch (context.Request.HttpMethod, segments.FirstOrDefault())
             {
+                case ("GET", "userdata"):
+                    if (segments.Length == 1) await JsonAsync(context, new[] { new { path = "video/api.json" }, new { path = "video/ui.json" } });
+                    else if (Uri.UnescapeDataString(context.Request.Url!.AbsolutePath).EndsWith("ui.json", StringComparison.Ordinal)) await JsonAsync(context, new { nodes = Array.Empty<object>() });
+                    else await JsonAsync(context, ImportedWorkflow);
+                    break;
+                case ("GET", "object_info"): await JsonAsync(context, new { }); break;
                 case ("POST", "prompt"): await PromptAsync(context); break;
                 case ("GET", "system_stats"): await SystemStatsAsync(context); break;
                 case ("GET", "queue"): await QueueAsync(context); break;
@@ -94,7 +113,9 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
     {
         using var document = await JsonDocument.ParseAsync(context.Request.InputStream);
         var workflow = document.RootElement.GetProperty("prompt");
-        var promptText = workflow.GetProperty("2").GetProperty("inputs").GetProperty("local_prompt").GetString() ?? string.Empty;
+        var promptInputs = workflow.GetProperty("2").GetProperty("inputs");
+        var promptText = (promptInputs.TryGetProperty("local_prompt", out var localPrompt) ? localPrompt : promptInputs.GetProperty("text")).GetString() ?? string.Empty;
+        LastPrompt = promptText;
         var id = $"mock-{Interlocked.Increment(ref nextId)}";
         var key = promptText.Trim();
         var attempt = promptAttempts.TryGetValue(key, out var previous) ? previous + 1 : 1;

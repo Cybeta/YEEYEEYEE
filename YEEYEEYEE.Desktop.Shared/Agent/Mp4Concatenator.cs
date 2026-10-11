@@ -58,8 +58,16 @@ public static class Mp4Concatenator
     /// </summary>
     private static int PrimingSamplesToDrop(Track track)
     {
-        if (track.HasCompositionOffsets) return 0;      // 有 ctts：media_time 是合成偏移，不剪
-        if (track.EditMediaTime <= 0) return 0;
+        if (track.EditMediaTime < 0)
+            throw new InvalidDataException("编辑起点为负数，这一版不支持空编辑");
+        if (track.HasCompositionOffsets)
+        {
+            // 只支持实测的合成偏移原点；有 ctts 并不代表任意编辑起点都可保留。
+            if (track.Samples.Count == 0 || track.EditMediaTime != track.Samples[0].CompositionOffset)
+                throw new InvalidDataException("编辑起点与首样本合成偏移不一致，无法无损拼接");
+            return 0;
+        }
+        if (track.EditMediaTime == 0) return 0;
 
         var remaining = track.EditMediaTime;
         var dropped = 0;
@@ -69,8 +77,11 @@ public static class Mp4Concatenator
             remaining -= sample.Duration;
             dropped++;
         }
-        // 编辑列表说的起点超过了整轨长度：这份文件本身就不正常，别剪，交给播放器。
-        return remaining <= 0 ? dropped : 0;
+        if (dropped >= track.Samples.Count)
+            throw new InvalidDataException("编辑起点会剪掉整轨，无法无损拼接");
+        if (remaining != 0)
+            throw new InvalidDataException("编辑起点不在样本边界，无法无损剪头");
+        return dropped;
     }
 
     /// <summary>
@@ -107,29 +118,14 @@ public static class Mp4Concatenator
                     top.Any(box => box.Type == "moof") ? "是分片 mp4，moov 不在文件里" : "没有 moov", bytes);
 
             var children = Mp4File.Boxes(data, moov.PayloadStart, moov.PayloadEnd);
-            var version = 0;
-            uint movieTimescale = 0;
-            ulong movieDuration = 0;
-            if (children.FirstOrDefault(box => box.Type == "mvhd") is { } mvhd)
-            {
-                version = data[mvhd.PayloadStart];
-                var timescaleAt = mvhd.PayloadStart + (version == 1 ? 20 : 12);
-                var durationAt = mvhd.PayloadStart + (version == 1 ? 24 : 16);
-                if (durationAt + (version == 1 ? 8 : 4) <= mvhd.PayloadEnd)
-                {
-                    movieTimescale = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(timescaleAt, 4));
-                    movieDuration = version == 1
-                        ? BinaryPrimitives.ReadUInt64BigEndian(data.AsSpan(durationAt, 8))
-                        : BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(durationAt, 4));
-                }
-            }
+            var movieSeconds = children.FirstOrDefault(box => box.Type == "mvhd") is { } mvhd
+                ? ReadDurationSeconds(data, mvhd) : 0d;
 
             var tracks = 0;
             var width = 0;
             var height = 0;
             var frames = 0;
-            var videoTimescale = 0u;
-            ulong videoDuration = 0;
+            var videoSeconds = 0d;
             foreach (var trak in children.Where(box => box.Type == "trak"))
             {
                 tracks++;
@@ -139,11 +135,8 @@ public static class Mp4Concatenator
                 if (mdiaBoxes.FirstOrDefault(box => box.Type == "hdlr") is not { } hdlr || hdlr.PayloadStart + 12 > hdlr.PayloadEnd) continue;
                 if (Encoding.ASCII.GetString(data, hdlr.PayloadStart + 8, 4) != "vide") continue;
 
-                if (mdiaBoxes.FirstOrDefault(box => box.Type == "mdhd") is { } mdhd && mdhd.PayloadStart + 16 <= mdhd.PayloadEnd)
-                {
-                    videoTimescale = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(mdhd.PayloadStart + 12, 4));
-                    videoDuration = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(mdhd.PayloadStart + 16, 4));
-                }
+                if (mdiaBoxes.FirstOrDefault(box => box.Type == "mdhd") is { } mdhd)
+                    videoSeconds = ReadDurationSeconds(data, mdhd);
                 if (mdiaBoxes.FirstOrDefault(box => box.Type == "minf") is not { } minf) continue;
                 if (Mp4File.Boxes(data, minf.PayloadStart, minf.PayloadEnd).FirstOrDefault(box => box.Type == "stbl") is not { } stbl) continue;
                 var stblBoxes = Mp4File.Boxes(data, stbl.PayloadStart, stbl.PayloadEnd);
@@ -160,13 +153,8 @@ public static class Mp4Concatenator
                 height = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(entry.PayloadStart + 26, 2));
             }
 
-            // mvhd 的时长优先；到顶值（0xFFFFFFFF，有些封装器在收尾前就这么写）或读不到时，
-            // 退到视频轨自己的 mdhd —— 两条都不行才认「时长读不出来」。
-            var seconds = movieTimescale > 0 && movieDuration is > 0 and not uint.MaxValue
-                ? (double)movieDuration / movieTimescale
-                : 0d;
-            if (seconds <= 0 && videoTimescale > 0)
-                seconds = (double)videoDuration / videoTimescale;
+            // 未知时长的全 1 哨兵按字段宽度判断；无有效电影时长时回退到视频轨。
+            var seconds = movieSeconds > 0 ? movieSeconds : videoSeconds;
             if (seconds <= 0)
                 return Mp4FilmInfo.Unreadable("容器里的时长是空的（mvhd 与视频轨的 mdhd 都没给出有效时长）", bytes);
 
@@ -177,6 +165,23 @@ public static class Mp4Concatenator
         {
             return Mp4FilmInfo.Unreadable(exception.Message, bytes);
         }
+    }
+
+    private static double ReadDurationSeconds(byte[] data, Box box)
+    {
+        if (box.PayloadEnd - box.PayloadStart < 4) return 0;
+        var version = data[box.PayloadStart];
+        if (version is not (0 or 1)) return 0;
+        var timescaleOffset = version == 1 ? 20 : 12;
+        var durationOffset = version == 1 ? 24 : 16;
+        var durationBytes = version == 1 ? 8 : 4;
+        if (box.PayloadEnd - box.PayloadStart < durationOffset + durationBytes) return 0;
+        var timescale = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(box.PayloadStart + timescaleOffset, 4));
+        var duration = version == 1
+            ? BinaryPrimitives.ReadUInt64BigEndian(data.AsSpan(box.PayloadStart + durationOffset, 8))
+            : BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(box.PayloadStart + durationOffset, 4));
+        var unknown = version == 1 ? ulong.MaxValue : uint.MaxValue;
+        return timescale > 0 && duration > 0 && duration != unknown ? (double)duration / timescale : 0;
     }
 
     public static Mp4ConcatResult Concat(IReadOnlyList<string> inputs, string outputPath)
@@ -340,6 +345,7 @@ public static class Mp4Concatenator
         foreach (var file in files)
         {
             ulong longest = 0;
+            var trackSeconds = new List<double>();
             for (var t = 0; t < file.Tracks.Count; t++)
             {
                 var track = file.Tracks[t];
@@ -348,18 +354,18 @@ public static class Mp4Concatenator
                 droppedPerTrack[t] += skip;
                 var kept = track.Samples.Skip(skip).ToList();
                 var duration = (ulong)kept.Sum(sample => (long)sample.Duration);
+                trackSeconds.Add(duration / (double)track.Timescale);
                 var inMovieTime = (ulong)Math.Round(duration * (double)movieTimescale / track.Timescale);
                 if (inMovieTime > longest) longest = inMovieTime;
 
-                var isFirstOfSegment = true;
-                foreach (var sample in kept)
-                {
-                    // 每段第一帧原来是关键帧的话，接缝处必须仍然算关键帧——
-                    // 否则从接缝往前跳会解不出来（播放器跳过去只看到花屏）。
-                    merged[t].Add(sample with { IsSync = sample.IsSync || isFirstOfSegment });
-                    isFirstOfSegment = false;
-                }
+                if (kept.Count > 0 && !kept[0].IsSync)
+                    throw new InvalidDataException($"{track.Handler} 轨保留后的首样本不是同步样本，无法无损拼接");
+                merged[t].AddRange(kept);
+
             }
+            // 并表会让各轨独立连续播放，不能用最长轨掩盖每段时长差，否则偏差会逐段累积。
+            if (trackSeconds.Max() - trackSeconds.Min() > 1d / movieTimescale)
+                throw new InvalidDataException("剪头后各轨时长不一致，接段会造成音画失步，无法无损拼接");
             segmentDurations.Add(longest);
         }
 
@@ -518,7 +524,8 @@ public static class Mp4Concatenator
         payload.Write(Box("stsd", track.StsdPayload));
         payload.Write(Box("stts", BuildStts(samples)));
         if (track.HasCompositionOffsets) payload.Write(Box("ctts", BuildCtts(samples)));
-        if (track.HasSyncTable) payload.Write(Box("stss", BuildStss(samples)));
+        if (track.HasSyncTable || samples.Any(sample => !sample.IsSync))
+            payload.Write(Box("stss", BuildStss(samples)));
         payload.Write(Box("stsc", BuildStsc(chunks)));
         payload.Write(Box("stsz", BuildStsz(samples)));
         payload.Write(Box("stco", BuildStco(chunks)));
@@ -743,7 +750,10 @@ internal sealed class Mp4File
 
         var children = Boxes(data, moov.PayloadStart, moov.PayloadEnd);
         var mvhd = children.FirstOrDefault(box => box.Type == "mvhd") ?? throw new InvalidDataException("没有 mvhd");
+        if (mvhd.PayloadEnd - mvhd.PayloadStart < 100 || data[mvhd.PayloadStart] != 0)
+            throw new InvalidDataException("mvhd 长度或版本不受当前拼接支持");
         var timescale = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(mvhd.PayloadStart + 12, 4));
+        if (timescale == 0) throw new InvalidDataException("影片时间刻度为 0");
         var nextTrackId = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(mvhd.PayloadStart + 96, 4));
 
         return new Mp4File
@@ -775,7 +785,10 @@ internal sealed class Mp4File
         var stbl = minfBoxes.FirstOrDefault(box => box.Type == "stbl") ?? throw new InvalidDataException("没有 stbl");
         var stblChildren = Boxes(data, stbl.PayloadStart, stbl.PayloadEnd);
 
+        if (mdhd.PayloadEnd - mdhd.PayloadStart < 24 || data[mdhd.PayloadStart] != 0)
+            throw new InvalidDataException("mdhd 长度或版本不受当前拼接支持");
         var timescale = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(mdhd.PayloadStart + 12, 4));
+        if (timescale == 0) throw new InvalidDataException("轨道时间刻度为 0");
         var handler = Encoding.ASCII.GetString(data, hdlr.PayloadStart + 8, 4);
 
         var stsd = stblChildren.FirstOrDefault(box => box.Type == "stsd") ?? throw new InvalidDataException("没有 stsd");

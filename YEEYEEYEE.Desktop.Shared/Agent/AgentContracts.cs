@@ -36,7 +36,7 @@ public sealed record AgentContext(
     /// <paramref name="maxCharacters"/> 是模型上下文窗口换算出的大致字符预算（0 表示未声明、不截断）：
     /// 只截画布上下文，**操作协议永远保留**——协议被截掉比上下文不全严重得多。
     /// </summary>
-    public string Describe(int maxCharacters = 0)
+    public string Describe(int maxCharacters = 0, bool includeDesktopSkills = true)
     {
         var lines = new List<string>
         {
@@ -72,7 +72,7 @@ public sealed record AgentContext(
             + "（不支持的模型请把负面词改写成正向描述）");
         if (!string.IsNullOrWhiteSpace(PendingSummary))
             lines.Add($"- **Agent 最近一批改动（已经显示在画布上，尚未保存到画布文件）**：\n{PendingSummary}\n这些改动已经作为当前最新版本提供给你；后续创建节点时可以用它们的标题作为 parentTarget、source 或 target，不要重复创建同名节点。");
-        lines.Add("- **可调用的生成技能清单**（本程序提供的生成流程，与工作树里的「角色能力」是两回事）：\n" + BuiltInSkills.DescribeForAgent());
+        if (includeDesktopSkills) lines.Add("- **可调用的生成技能清单**（本程序提供的生成流程，与工作树里的「角色能力」是两回事）：\n" + BuiltInSkills.DescribeForAgent());
         lines.Add("- 调用**生成技能**时先说明：正在调用技能：技能名称。节点操作必须使用 actions；章节拆解按上面四步执行（默认先工作树条目再节点；用户明确要求生成节点时，节点批次必须在同一次回复里给出），节点批次内部按 章节→剧情→分镜→成品 的顺序输出（**角色/场景/道具不建节点，只写进资源视觉内容并在节点上用 entityTargets 引用**），每个节点写入 nodeCategory、完整 content、parentTarget、workTreeTarget，用到角色/场景/道具时写 entityTargets，并用 create_edge 建立关系；图片和视频必须说明参考图、画幅、时长与当前模型能力。");
 
         var head = string.Join("\n", lines);
@@ -82,7 +82,10 @@ public sealed record AgentContext(
             head = head[..maxCharacters] + $"\n（以上内容按模型上下文窗口截断，省略了约 {omitted} 个字符；需要细节时请问我）";
         }
 
-        return string.Join("\n", new[] { head, string.Empty, ActionProtocol });
+        var protocol = includeDesktopSkills ? ActionProtocol : ActionProtocol.Replace(
+            "你的改动会先应用到当前画布。自动模式会直接保存；审批模式会在画布中显示改动，并在审批列表中等待用户选择保存或撤销。",
+            "Web审批模式只在副本预检预览，用户批准后才提交；自动模式预检通过且没有ask时提交。只读模式不提交。ask显示在聊天中供用户回答。");
+        return string.Join("\n", new[] { head, string.Empty, protocol });
     }
 
     /// <summary>

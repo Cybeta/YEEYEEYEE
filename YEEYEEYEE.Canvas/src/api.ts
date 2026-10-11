@@ -42,10 +42,16 @@ export function apiBody(error: unknown): unknown {
   return error instanceof ApiError ? error.body : null
 }
 
+export function canvasUrl(path: string): string {
+  const canvas = new URLSearchParams(typeof window === 'undefined' ? '' : window.location.search).get('canvas')
+  return canvas && path.startsWith('/api/web/') && !path.startsWith('/api/web/projects')
+    ? `${path}${path.includes('?') ? '&' : '?'}canvas=${encodeURIComponent(canvas)}` : path
+}
+
 export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers)
-  if (options?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-  const response = await fetch(path, {
+  if (options?.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  const response = await fetch(canvasUrl(path), {
     ...options,
     credentials: 'same-origin',
     headers,

@@ -12,21 +12,37 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
     private readonly IVideoProvider videoProvider;
     private readonly ComfyUiExecutor comfyUiExecutor;
     private readonly bool comfyUiVideoBackend;
+    private readonly HttpClient workflowHttp;
+    private readonly IConfiguration configuration;
 
     public WebInvocationExecutor(
         IInvocationExecutor imageExecutor,
         IVideoProvider videoProvider,
         ComfyUiExecutor comfyUiExecutor,
-        bool comfyUiVideoBackend)
+        bool comfyUiVideoBackend, HttpClient workflowHttp, IConfiguration configuration)
     {
         this.imageExecutor = imageExecutor;
         this.videoProvider = videoProvider;
         this.comfyUiExecutor = comfyUiExecutor;
         this.comfyUiVideoBackend = comfyUiVideoBackend;
+        this.workflowHttp = workflowHttp;
+        this.configuration = configuration;
     }
 
     public async Task<ExecutionOutput> ExecuteAsync(SessionContext session, Invocation invocation, Job job, CancellationToken cancellationToken)
     {
+        if (WebWorkflowCatalog.IsWorkflow(invocation.Tool))
+        {
+            if (!session.ServerClaims.Contains("skill.invoke") || configuration["WebWorkflowApprovalMode"] != "preapproved-local-workflows")
+                throw new InvalidOperationException("工作流未获服务端预授权");
+            var entry = WebWorkflowCatalog.Load(workflowHttp.BaseAddress!.ToString()).FirstOrDefault(e => e.Id == invocation.Tool)
+                ?? throw new InvalidOperationException("工作流已停用、删除或输入声明不可用");
+            var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(entry.Payload)));
+            if (!invocation.Inputs.TryGetValue("workflowRevision", out var revision) || revision.GetString() != hash)
+                throw new InvalidOperationException("工作流正文已变化，请重新调用");
+            return await new ComfyUiExecutor(workflowHttp, call => WebWorkflowCatalog.Bind(entry, call))
+                .ExecuteAsync(session, invocation, job, cancellationToken).ConfigureAwait(false);
+        }
         if (!string.Equals(invocation.Tool, VideoTool, StringComparison.Ordinal))
             return await imageExecutor.ExecuteAsync(session, invocation, job, cancellationToken).ConfigureAwait(false);
 

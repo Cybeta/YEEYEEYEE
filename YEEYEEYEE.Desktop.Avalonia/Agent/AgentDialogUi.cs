@@ -23,7 +23,7 @@ internal static class AgentDialogUi
              FontSize = 12,
              Background = Brush("DfSurface2"),
              Foreground = Brush("DfInk"),
-             Watermark = watermark
+             PlaceholderText = watermark
          });
 
     public static TextBlock Header(string text) => new()

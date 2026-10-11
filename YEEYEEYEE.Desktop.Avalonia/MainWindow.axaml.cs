@@ -3289,7 +3289,7 @@ public partial class MainWindow : Window, IAgentSessionHost
 
         StackPanel SourceMediaRow(string label, string pickTitle, string[] patterns, List<string> sink, string hint, int capacity)
         {
-            var box = new TextBox { Width = 300, FontSize = 12, IsReadOnly = true, Watermark = "还没选" };
+            var box = new TextBox { Width = 300, FontSize = 12, IsReadOnly = true, PlaceholderText = "还没选" };
             var pick = AgentDialogUi.Secondary("选文件…");
             var clear = AgentDialogUi.Secondary("清空");
             // 这份工作流有几个入口就收几份，按顺序填进前几个槽位。
@@ -6172,7 +6172,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         InspectorSummaryText.Text = node.Content;
         // 这一格空的时候就靠占位文字说明「这是什么节点、为什么空」：正文空的引用卡（引用失效、
         // 或这个设定还没写描述）点开只看一个空框，很容易被误当成「面板没跟着换」。
-        InspectorSummaryText.Watermark = string.IsNullOrWhiteSpace(node.Chapter)
+        InspectorSummaryText.PlaceholderText = string.IsNullOrWhiteSpace(node.Chapter)
             ? "这个节点还没有内容；可以直接在这一格里写"
             : $"这个节点还没有内容（{node.Chapter}）；可以直接在这一格里写";
         // 说明里带上**正在看哪一个节点**：正文只有一行字的时候，「面板到底跟着选中变了没有」
@@ -6220,7 +6220,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         InspectorNameText.Text = card.Title;
         InspectorChapterText.Text = string.IsNullOrWhiteSpace(card.Subtitle) ? card.Kind : $"{card.Kind} · {card.Subtitle}";
         InspectorSummaryText.Text = content is null ? $"引用失效：{card.BlockedReason}" : content.Description;
-        InspectorSummaryText.Watermark = "这个设定还没有描述；可以直接在这一格里写";
+        InspectorSummaryText.PlaceholderText = "这个设定还没有描述；可以直接在这一格里写";
 
         // 锁定到某个版本快照的引用是**只读**的：改它会让人以为改到了那一版。
         var locked = card.VersionId is not null;
@@ -6253,7 +6253,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         InspectorNameText.Text = "未选择节点";
         InspectorSummaryText.Text = string.Empty;
         // 占位文字也要跟着回到「还没选」：它是上一个节点留下的，不清掉会让人以为还看着那个节点。
-        InspectorSummaryText.Watermark = "在画布上点一个节点，这里会显示它的内容，并可以直接修改";
+        InspectorSummaryText.PlaceholderText = "在画布上点一个节点，这里会显示它的内容，并可以直接修改";
         InspectorChapterText.Text = "—";
         SetInspectorEditable(false, "在画布上点一个节点，这里就能直接改它的名称与内容");
     }
@@ -7660,7 +7660,7 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (!canEdit)
             return new AgentCommitReport(0, "项目或项目库不可写（当前为只读），这批改动没有写入。", Array.Empty<string>());
 
-        var canvasPath = currentCanvasPath;
+        var canvasPath = currentCanvasPath ?? string.Empty;
         var canvas = currentCanvas.Canvas;
         var before = JsonSerializer.Serialize(canvas, SnapshotOptions);
         var fileSnapshots = new List<FileSnapshot>();

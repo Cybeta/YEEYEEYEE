@@ -82,7 +82,7 @@ internal static class SettingsModelPage
             FontSize = 12,
             Background = Brush("DfSurface2"),
             Foreground = Brush("DfInk"),
-            Watermark = "sk-…（此处只显示首尾各 4 位；粘贴一整个新密钥会覆盖它）"
+            PlaceholderText = "sk-…（此处只显示首尾各 4 位；粘贴一整个新密钥会覆盖它）"
         };
         // 一聚焦就全选：不然在 sk-c…e7ec 后面接着敲，会拼出一个「半截旧值 + 新值」的怪东西。
         apiKey.GotFocus += (_, _) => apiKey.SelectAll();

@@ -37,6 +37,8 @@ services:
       #    这条路**不需要**宿主上的任何准备，适合先跑起来看看；代价是它编辑的不是桌面项目里的画布。
       YEEYEEYEE__AllowStandaloneWebScene: "true"
       YEEYEEYEE__WebScenePath: "/data/scene.json"
+      # 工作台创建/打开项目使用同一持久卷里的可写父目录。
+      YEEYEEYEE__WebProjectsDirectory: "/data/projects"
 
       # 若要改成**编辑桌面项目里的真画布**（浏览器与桌面端编辑同一份），做三件事：
       #   1) 注释掉上面那两行；

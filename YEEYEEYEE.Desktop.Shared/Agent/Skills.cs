@@ -363,6 +363,8 @@ public static class SkillLibrary
                 error = "技能文件不是一个 JSON 对象，无法改写。";
                 return false;
             }
+            foreach (var key in node.Select(p => p.Key).Where(key => string.Equals(key, "Enabled", StringComparison.OrdinalIgnoreCase)).ToArray())
+                node.Remove(key);
             node["Enabled"] = enabled;
             // Encoder 必须显式放宽：默认编码器会把中文全部转成 \uXXXX，技能名字、提示词、描述全变码点，
             // 文件从此没法读也没法 diff——技能 JSON 本来就是给人改的。

@@ -30,6 +30,7 @@ internal sealed class CanvasEventHub
     };
 
     private readonly ConcurrentDictionary<Guid, Channel<CanvasEventMessage>> subscribers = new();
+    private readonly ConcurrentDictionary<Guid, string> scopes = new();
     private readonly PresenceRegistry presence;
 
     public CanvasEventHub(PresenceRegistry presence)
@@ -66,6 +67,7 @@ internal sealed class CanvasEventHub
             if (presence.Join(user, name, client, id)) PresenceChanged("join", name);
         }
 
+        scopes[id] = WebProjectApi.Scope;
         subscribers[id] = channel;
         return (id, channel.Reader);
     }
@@ -74,6 +76,7 @@ internal sealed class CanvasEventHub
     {
         // 先移出订阅表，再注销在线：离开的这个人收不到自己的那条「下线」，别的订阅者收得到。
         if (subscribers.TryRemove(id, out var channel)) channel.Writer.TryComplete();
+        scopes.TryRemove(id, out _);
         if (presence.Leave(id) is { } gone && !presence.HasUser(gone.UserId))
             PresenceChanged("leave", gone.DisplayName);
     }
@@ -89,7 +92,9 @@ internal sealed class CanvasEventHub
         node["type"] = type;
         node["at"] = DateTimeOffset.UtcNow.ToString("O");
         var message = new CanvasEventMessage(type, node.ToJsonString(Options));
-        foreach (var channel in subscribers.Values) channel.Writer.TryWrite(message);
+        foreach (var entry in subscribers)
+            if (type == "presence.changed" || scopes.TryGetValue(entry.Key, out var scope) && string.Equals(scope, WebProjectApi.Scope, StringComparison.OrdinalIgnoreCase))
+                entry.Value.Writer.TryWrite(message);
     }
 
     /// <summary>

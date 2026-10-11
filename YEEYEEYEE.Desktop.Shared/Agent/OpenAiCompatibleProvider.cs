@@ -247,8 +247,8 @@ public sealed class OpenAiCompatibleProvider : IAiProvider, ICompositionPlanner,
 
             var text = delta.TryGetProperty("content", out var content) ? content.GetString() ?? string.Empty : string.Empty;
             var thinking = delta.TryGetProperty("reasoning_content", out var reasoning) ? reasoning.GetString() ?? string.Empty : string.Empty;
-            // 有的实现在同一块里既给思考又给正文，那时只认正文，避免思考混入。
-            return text.Length > 0 ? (text, string.Empty) : (string.Empty, thinking);
+            // 同一块里的正文与思考也分别回调，不丢弃字段、不互相拼接。
+            return (text, thinking);
         }
         catch (JsonException) { return (string.Empty, string.Empty); }
     }

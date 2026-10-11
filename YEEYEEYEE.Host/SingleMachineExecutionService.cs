@@ -91,6 +91,10 @@ public sealed class SingleMachineExecutionService
             job = jobs.Values.SingleOrDefault(candidate => candidate.UserId == userId && string.Equals(candidate.ExternalTaskId, update.ExternalTaskId, StringComparison.Ordinal));
         }
         if (job is null) return false;
+        if (update.State == ExternalTaskState.Succeeded && job.Inputs.TryGetValue("declaredOutputRole", out var declared) &&
+            (update.Outputs.Count == 0 || update.Outputs.Any(output => output.Role != declared.GetString())))
+            update = update with { State = ExternalTaskState.Failed, Outputs = Array.Empty<AssetRef>(),
+                ErrorCode = "WORKFLOW_OUTPUT_NOT_DECLARED", ErrorMessage = "工作流产物不符合服务端输出声明" };
         job.ApplyExternalUpdate(update);
         Publish(job.ToResult());
         if (job.State is JobState.Succeeded or JobState.Failed or JobState.Cancelled)

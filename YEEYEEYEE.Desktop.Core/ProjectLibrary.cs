@@ -72,12 +72,42 @@ public static class ProjectLibrary
     /// <summary>
     /// 写入项目库（原子写 + 写前备份）。失败时返回 false 并给出原因，**旧库文件保持原样**。
     /// </summary>
+    public static bool TrySave(ProjectEntityFile file, string filePath, byte[] expectedBytes, out string error)
+    {
+        error = string.Empty;
+        var directory = Path.GetDirectoryName(Path.GetFullPath(filePath))!;
+        var temporary = Path.Combine(directory, $".entities.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using var lease = new FileStream(filePath + ".write-lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            if (!File.ReadAllBytes(filePath).SequenceEqual(expectedBytes))
+            { error = "项目资源库修订冲突，请重新加载"; return false; }
+            var backups = Path.Combine(directory, "backups");
+            System.IO.Directory.CreateDirectory(backups);
+            File.Copy(filePath, Path.Combine(backups, $"entities-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.json"));
+            file.FormatVersion = CurrentFormat;
+            file.UpdatedAt = DateTimeOffset.Now;
+            File.WriteAllText(temporary, JsonSerializer.Serialize(file, Options));
+            File.Move(temporary, filePath, overwrite: true);
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        { error = exception.Message; return false; }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
     public static bool TrySave(ProjectEntityFile file, out string error)
     {
         ArgumentNullException.ThrowIfNull(file);
         error = string.Empty;
         try
         {
+            if (File.Exists(FilePath))
+                return TrySave(file, FilePath, File.ReadAllBytes(FilePath), out error);
             System.IO.Directory.CreateDirectory(Directory);
             if (File.Exists(FilePath) && !TryBackup(out var backupError))
             {

@@ -27,7 +27,7 @@ internal static class NewProjectDialog
         {
             FontSize = 12,
             Text = initialName ?? string.Empty,
-            Watermark = "项目名称，例如：雾港来信（留空则按时间命名）",
+            PlaceholderText = "项目名称，例如：雾港来信（留空则按时间命名）",
             Background = Brush("DfSurface2"),
             Foreground = Brush("DfInk")
         };

@@ -49,7 +49,10 @@ export function useNodeLease(options: { recordId: string; wanted: boolean; onCha
           body: JSON.stringify({ scope: 'node', targetId: recordId, client: 'web' })
         })
         const lease = parseLease(body?.lease)
-        if (cancelled) return
+        if (cancelled) {
+          if (lease) void request(`/api/web/edits/${lease.leaseId}`, { method: 'DELETE', keepalive: true }).catch(() => {})
+          return
+        }
         if (!lease) {
           leaseId.current = ''
           setHeld(false)
@@ -112,7 +115,7 @@ export function useNodeLease(options: { recordId: string; wanted: boolean; onCha
       if (stale.length > 0) {
         // 还锁是「说一声就好」的事：失败了也不该在界面上留个错误——
         // 真没还成，服务端两分钟后会自己回收。
-        void request(`/api/web/edits/${stale}`, { method: 'DELETE' }).catch(() => {})
+        void request(`/api/web/edits/${stale}`, { method: 'DELETE', keepalive: true }).catch(() => {})
         onChanged.current?.()
       }
     }

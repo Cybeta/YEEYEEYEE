@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { canvasUrl } from '../api'
 import { parseServerEvent, type CanvasChangedEvent, type EditsChangedEvent, type PresenceChangedEvent } from './serverEvents'
 
 /**
@@ -24,7 +25,7 @@ export function useServerEvents(options: {
 
   useEffect(() => {
     if (!options.enabled || typeof EventSource === 'undefined') return
-    const source = new EventSource('/api/web/events')
+    const source = new EventSource(canvasUrl('/api/web/events'))
 
     source.onopen = () => { setConnected(true); setError('') }
     source.onerror = () => {

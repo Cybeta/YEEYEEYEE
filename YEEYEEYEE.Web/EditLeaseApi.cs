@@ -15,6 +15,7 @@ namespace YEEYEEYEE.Web;
 /// </summary>
 internal static class EditLeaseApi
 {
+    private static EditLeaseStore? store => WebProjectApi.Current is { } mode ? WebProjectApi.Leases(mode) : null;
     /// <summary>申请。请求体的字段名沿用仓库里其他接口的写法（camelCase，由框架按 Web 默认规则绑定）。</summary>
     public sealed record AcquireRequest(string? Scope, Guid? TargetId, string? Client, bool? Force);
 
@@ -72,10 +73,26 @@ internal static class EditLeaseApi
     {
         // 锁文件挨着画布放，所以必须和场景接口解出同一张画布——两边共用 WebCanvasMode。
         var mode = WebCanvasMode.Resolve(app.Configuration);
-        var store = mode.CanvasPath is null ? null : new EditLeaseStore(mode.CanvasPath, LifetimeOf(app.Configuration));
-        var lifetimeSeconds = (int)(store?.Lifetime ?? EditLeaseStore.DefaultLifetime).TotalSeconds;
+
+        var lifetimeSeconds = (int)LifetimeOf(app.Configuration).TotalSeconds;
         var hub = app.Services.GetRequiredService<CanvasEventHub>();
 
+        app.MapPost("/api/web/edits/mine/release", (HttpContext context) =>
+        {
+            var user = WebAccessGuard.CurrentUser(context);
+            if (user is null) return Error(403, "EDIT_LEASE_REQUIRES_SESSION", "必须用账号登录");
+            if (!WebAccessGuard.Permissions(context).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+            if (store is null) return Results.Json(new { released = 0 });
+            var own = store.List().Where(l => l.UserId == user.Id && l.Client == EditClient.Web).ToArray();
+            foreach (var lease in own)
+            {
+                var result = store.Release(lease.LeaseId, user, false);
+                if (result.Status != EditLeaseStatus.Ok && result.Status != EditLeaseStatus.NotFound && result.Status != EditLeaseStatus.Expired) return Failure(result);
+            }
+            if (own.Length > 0) hub.EditsChanged("release", WebAccessGuard.ActorName(context));
+            return Results.Json(new { released = own.Length });
+        });
         app.MapGet("/api/web/edits", () =>
             store is null
                 ? mode.Error!

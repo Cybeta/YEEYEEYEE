@@ -1,8 +1,8 @@
 import type { OperationRecord } from './Protocol/VersionedMessages'
 
-export type Version = { id: string; number?: number; label?: string }
-export type Variant = { id: string; name?: string; versions?: Version[] }
-export type Asset = { id: string; name: string; kind?: string; variants?: Variant[] }
+export type Version = { id: string; number?: number; label?: string; note?: string; description?: string }
+export type Variant = { id: string; name?: string; description?: string; currentVersion?: number; hasUncommittedChanges?: boolean; attachments?: AttachmentSummary[]; versions?: Version[] }
+export type Asset = { id: string; name: string; core?: string; aliases?: string; kind?: string; variants?: Variant[] }
 export type Reference = { entityId: string; name?: string; kind?: string; variantId?: string; variantVersionId?: string | null }
 
 function hasId(value: unknown): value is { id: string; [key: string]: unknown } {
@@ -15,11 +15,20 @@ export function mapAssets(value: unknown): { entities: Asset[]; invalidCount: nu
   const raw = (value as { entities: unknown[] }).entities
   const entities = raw.filter((item): item is Asset => hasId(item) && typeof item.name === 'string').map((item) => ({
     id: item.id, name: item.name, kind: typeof item.kind === 'string' ? item.kind : undefined,
+    core: typeof item.core === 'string' ? item.core : '', aliases: typeof item.aliases === 'string' ? item.aliases : '',
     variants: Array.isArray(item.variants) ? item.variants.filter(hasId).map((variant) => ({
       id: variant.id, name: typeof variant.name === 'string' ? variant.name : undefined,
+      description: typeof variant.description === 'string' ? variant.description : '',
+      currentVersion: typeof variant.currentVersion === 'number' ? variant.currentVersion : undefined,
+      hasUncommittedChanges: variant.hasUncommittedChanges === true,
+      attachments: Array.isArray(variant.attachments) ? variant.attachments.filter(hasId).map(a => ({
+        id: a.id, name: typeof a.name === 'string' ? a.name : '', kind: typeof a.kind === 'string' ? a.kind : String(a.kind), source: typeof a.source === 'string' ? a.source : ''
+      })) : [],
       versions: Array.isArray(variant.versions) ? variant.versions.filter(hasId).map((version) => ({
         id: version.id, number: typeof version.number === 'number' ? version.number : undefined,
-        label: typeof version.label === 'string' ? version.label : undefined
+        label: typeof version.label === 'string' ? version.label : undefined,
+        note: typeof version.note === 'string' ? version.note : undefined,
+        description: typeof version.description === 'string' ? version.description : undefined
       })) : undefined
     })) : undefined
   }))

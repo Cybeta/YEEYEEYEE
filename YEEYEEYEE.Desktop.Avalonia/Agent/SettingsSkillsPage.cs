@@ -141,7 +141,7 @@ internal static class SettingsSkillsPage
                 // 全局只有一把的话，导入第二家站会把第一家的密钥覆盖掉，第一家那批池子从此全部 401。
                 var keyBox = new TextBox
                 {
-                    Watermark = "粘贴这一家的 API Key（保存后加密落盘，界面不回显）",
+                    PlaceholderText = "粘贴这一家的 API Key（保存后加密落盘，界面不回显）",
                     PasswordChar = '●',
                     FontSize = 11,
                     Background = Brush("DfSurface2"),

@@ -8,6 +8,8 @@ namespace YEEYEEYEE.Web;
 
 internal static class WebSceneApi
 {
+    private static ProjectCanvasSceneStore? projectStore => WebProjectApi.Current is { } mode ? WebProjectApi.Store(mode) : null;
+    private static EditLeaseStore? structureLeases => WebProjectApi.Current is { } mode ? WebProjectApi.Leases(mode) : null;
     private static IResult Error(int status, string code, string message) =>
         Results.Json(new { code, message }, statusCode: status);
 
@@ -19,13 +21,12 @@ internal static class WebSceneApi
         // to it when a project canvas is requested (or when no editor mode was selected).
         var mode = WebCanvasMode.Resolve(app.Configuration);
         WebSceneStore? store = null;
-        ProjectCanvasSceneStore? projectStore = null;
+
         var unavailable = mode.Error;
         if (mode.Error is null)
         {
             // 解析在 WebCanvasMode 里（编辑锁接口共用同一份规则），这里只负责按模式建对应的存储。
-            if (mode.IsProject) projectStore = new ProjectCanvasSceneStore(mode.CanvasPath!, mode.EntitiesPath);
-            else store = new WebSceneStore(mode.CanvasPath!);
+            if (!mode.IsProject) store = new WebSceneStore(mode.CanvasPath!);
         }
         // 变更推送的中枢：写成功之后往它发一条「画布变了」。
         var hub = app.Services.GetRequiredService<CanvasEventHub>();
@@ -52,9 +53,7 @@ internal static class WebSceneApi
 
         // 结构级写入（新建 / 删除节点）要**整棵树锁**：它们改的是画布结构（多一个节点、少几条连线），
         // 别人正占着任何节点时都可能被这次改动影响——与整理布局同一条规矩。
-        var structureLeases = mode.CanvasPath is null
-            ? null
-            : new EditLeaseStore(mode.CanvasPath, EditLeaseApi.LifetimeOf(app.Configuration));
+
 
         // 新建节点：position 由服务端算（见 ProjectCanvasSceneStore.CreateNode），
         // 客户端只说「在哪一章建一个什么类别的」。
@@ -359,19 +358,90 @@ internal static class WebSceneApi
                     ? projectStore.AttachmentFile(recordId, attachmentId)
                     : Error(409, "CANVAS_REQUIRES_PROJECT", "产物图要的是项目画布；当前配置的是独立 Web 场景"));
 
+        app.MapPost("/api/web/entities/manage", (HttpContext context, JsonElement input) =>
+        {
+            if (!WebAccessGuard.Permissions(context).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "需要画布编辑权限");
+            if (WebProjectApi.Current is not { IsProject: true, EntitiesPath: { } libraryPath })
+                return Error(409, "CANVAS_REQUIRES_PROJECT", "资源管理需要项目画布");
+            if (input.ValueKind != JsonValueKind.Object || !input.TryGetProperty("baseRevision", out var revision) || !revision.TryGetInt64(out var baseline) ||
+                !input.TryGetProperty("name", out var name) || name.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(name.GetString()) || name.GetString()!.Length > 200 ||
+                !TryOptionalGuid(input, "entityId", out var entityId) || !TryOptionalGuid(input, "variantId", out var variantId) ||
+                !input.TryGetProperty("operation", out var operation) || operation.ValueKind != JsonValueKind.String)
+                return Error(400, "INVALID_REQUEST", "需要操作、名称和资源库基准修订");
+            try
+            {
+                var bytes = File.ReadAllBytes(libraryPath);
+                if (YEEYEEYEE.Desktop.CanvasRevision.Of(bytes) != baseline)
+                    return Error(409, "LIBRARY_REVISION_CONFLICT", "资源库已变化，请重新加载");
+                var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
+                var library = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.ProjectEntityFile>(bytes, options);
+                if (library is null || library.FormatVersion != YEEYEEYEE.Desktop.ProjectLibrary.CurrentFormat)
+                    return Error(409, "LIBRARY_INVALID", "资源库格式不可编辑");
+                var entity = library.Entities.FirstOrDefault(e => e.Id == entityId);
+                switch (operation.GetString())
+                {
+                    case "createEntity":
+                        if (!input.TryGetProperty("kind", out var kind) || kind.ValueKind != JsonValueKind.String ||
+                            !Enum.TryParse<YEEYEEYEE.Desktop.EntityKind>(kind.GetString(), out var entityKind) || !Enum.IsDefined(entityKind))
+                            return Error(400, "INVALID_REQUEST", "实体类型无效");
+                        entity = new YEEYEEYEE.Desktop.WorkflowEntity { Name = name.GetString()!.Trim(), Kind = entityKind, ManagedByProject = true };
+                        entity.CreateVariant("默认"); library.Entities.Add(entity); break;
+                    case "renameEntity":
+                        if (entity is null) return Error(404, "ENTITY_NOT_FOUND", "实体不存在");
+                        entity.Name = name.GetString()!.Trim(); break;
+                    case "createVariant":
+                        if (entity is null) return Error(404, "ENTITY_NOT_FOUND", "实体不存在");
+                        entity.CreateVariant(name.GetString()!.Trim()); break;
+                    case "renameVariant":
+                        var variant = entity?.Variants.FirstOrDefault(v => v.Id == variantId);
+                        if (variant is null) return Error(404, "VARIANT_NOT_FOUND", "变体不存在");
+                        variant.Name = name.GetString()!.Trim(); break;
+                    default: return Error(400, "INVALID_REQUEST", "资源操作不支持");
+                }
+                if (!YEEYEEYEE.Desktop.ProjectLibrary.TrySave(library, libraryPath, bytes, out var error))
+                    return Error(409, "LIBRARY_SAVE_CONFLICT", error);
+                return Results.Json(new { saved = true });
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            { return Error(503, "LIBRARY_UNAVAILABLE", "资源库无法安全保存"); }
+        });
+
         app.MapGet("/api/web/assets", () =>
         {
-            var entitiesPath = LegacyConfig.Text(app.Configuration, "ProjectEntitiesPath");
+            var entitiesPath = (WebProjectApi.Current ?? mode).EntitiesPath;
             if (string.IsNullOrWhiteSpace(entitiesPath))
                 return Error(503, "ASSETS_NOT_CONFIGURED", "项目库 entities.json 路径未配置");
             try
             {
-                using var document = JsonDocument.Parse(File.ReadAllText(entitiesPath));
+                var bytes = File.ReadAllBytes(entitiesPath);
+                using var document = JsonDocument.Parse(bytes);
                 if (document.RootElement.ValueKind != JsonValueKind.Object ||
                     !document.RootElement.TryGetProperty("entities", out var entities) ||
                     entities.ValueKind != JsonValueKind.Array)
                     return Error(500, "ASSETS_INVALID", "项目库 entities.json 格式无效");
-                return Results.Json(new { entities = entities.Clone() });
+                var safe = JsonNode.Parse(entities.GetRawText())!.AsArray();
+                JsonNode? Field(JsonObject owner, string name) => owner.FirstOrDefault(p => string.Equals(p.Key, name, StringComparison.OrdinalIgnoreCase)).Value;
+                foreach (var entity in safe.OfType<JsonObject>())
+                    if (Field(entity, "variants") is JsonArray variants)
+                        foreach (var variant in variants.OfType<JsonObject>())
+                        {
+                            void Sanitize(JsonObject owner, string? version)
+                            {
+                                if (Field(owner, "attachments") is not JsonArray attachments) return;
+                                foreach (var attachment in attachments.OfType<JsonObject>())
+                                {
+                                    var entityId = Field(entity, "id")?.ToString(); var variantId = Field(variant, "id")?.ToString(); var attachmentId = Field(attachment, "id")?.ToString();
+                                    foreach (var key in attachment.Select(p => p.Key).Where(k => string.Equals(k, "reference", StringComparison.OrdinalIgnoreCase)).ToArray()) attachment.Remove(key);
+                                    attachment["reference"] = Guid.TryParse(entityId, out _) && Guid.TryParse(variantId, out _) && Guid.TryParse(attachmentId, out _) && (version is null || Guid.TryParse(version, out _))
+                                        ? $"/api/web/entities/{entityId}/variants/{variantId}/media/{attachmentId}" + (version is null ? "" : $"?versionId={version}") : "";
+                                }
+                            }
+                            Sanitize(variant, null);
+                            if (Field(variant, "versions") is JsonArray versions)
+                                foreach (var version in versions.OfType<JsonObject>()) Sanitize(version, Field(version, "id")?.ToString());
+                        }
+                return Results.Json(new { entities = safe, revision = YEEYEEYEE.Desktop.CanvasRevision.Of(bytes) });
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
             {

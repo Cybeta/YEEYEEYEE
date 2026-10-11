@@ -1,5 +1,6 @@
 import { parseReferenceOption, recordAttachments, recordReferences, referenceOptions, resolveReference, type Asset } from '../assets'
 import { attachmentFileUrl } from './assetImages'
+import { FilmPanel } from './FilmPanel'
 import { chapterIdOf } from '../ChapterView'
 import { describeLease, type Lease } from './locks'
 import {
@@ -89,6 +90,7 @@ export function InspectorPanel(props: InspectorProps) {
 
   return (
     <div className="df-section" style={{ gap: 16 }}>
+      {selected && kindOf(selected.recordType) === 'product' && <FilmPanel nodeId={selected.recordId} canEdit={editable} />}
       {/* 结构级动作与「改标题内容」分开摆：它动的是画布结构，服务端按结构级对待（要整棵树锁）。 */}
       {selected && (props.onDelete || connections.length > 0) && (
         <div className="df-section" style={{ gap: 6 }}>
@@ -277,9 +279,13 @@ export function InspectorPanel(props: InspectorProps) {
                           onError={(event) => { event.currentTarget.style.display = 'none' }}
                         />
                       )
-                      : <span className="df-attachment-kind">{attachment.kind}</span>}
+                      : attachment.kind === 'Video'
+                        ? <video controls preload="metadata" style={{ width: '100%' }} src={attachmentFileUrl(selected.recordId, attachment.id)} />
+                        : attachment.kind === 'Audio'
+                          ? <audio controls preload="metadata" src={attachmentFileUrl(selected.recordId, attachment.id)} />
+                          : <span className="df-attachment-kind">{attachment.kind}</span>}
                     <div className="df-attachment-meta">
-                      <span className="df-attachment-name">{attachment.name}</span>
+                      <a className="df-attachment-name" href={attachmentFileUrl(selected.recordId, attachment.id)} download={attachment.name}>下载 {attachment.name}</a>
                       <span className="df-dim" style={{ fontSize: 10 }}>{attachment.source || '来源未记'}</span>
                     </div>
                   </div>

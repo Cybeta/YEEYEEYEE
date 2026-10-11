@@ -9,8 +9,12 @@ namespace YEEYEEYEE.Web;
 /// 两边必须解出同一个答案——否则锁会记到另一份文件上，表现成「锁了却没人看见」。
 /// 解析规则与失败口径原样保留（连错误码都没改）。
 /// </summary>
-internal sealed record WebCanvasMode(string? CanvasPath, string? EntitiesPath, bool IsProject, IResult? Error)
+internal sealed record WebCanvasMode(string? DefaultCanvasPath, string? DefaultEntitiesPath, bool DefaultIsProject, IResult? DefaultError)
 {
+    public string? CanvasPath => WebProjectApi.Current?.DefaultCanvasPath ?? DefaultCanvasPath;
+    public string? EntitiesPath => WebProjectApi.Current is { } current ? current.DefaultEntitiesPath : DefaultEntitiesPath;
+    public bool IsProject => WebProjectApi.Current?.DefaultIsProject ?? DefaultIsProject;
+    public IResult? Error => WebProjectApi.Current is { } current ? current.DefaultError : DefaultError;
     private static IResult Fail(int status, string code, string message) =>
         Results.Json(new { code, message }, statusCode: status);
 
@@ -42,6 +46,6 @@ internal sealed record WebCanvasMode(string? CanvasPath, string? EntitiesPath, b
             return new WebCanvasMode(null, null, false,
                 Fail(503, "SCENE_PATH_NOT_CONFIGURED", "独立 Web 场景需配置绝对路径"));
 
-        return new WebCanvasMode(Path.GetFullPath(standalonePath), null, false, null);
+        return new WebCanvasMode(Path.GetFullPath(standalonePath), LegacyConfig.Text(configuration, "ProjectEntitiesPath"), false, null);
     }
 }

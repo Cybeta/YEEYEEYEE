@@ -23,7 +23,7 @@ public static class CollaborationEvents
     {
         if (!IsCanvasChanged(type)) return null;
         var frame = Parse(type, data);
-        return frame is null ? null : new CanvasChangedNotice(frame.Revision, frame.RecordId, frame.Actor, frame.Scope);
+        return frame is null ? null : new CanvasChangedNotice(frame.Revision, frame.RecordId, frame.Actor ?? "有人", frame.Scope ?? "record");
     }
 
     /// <summary>这条帧是不是我们认得出来的 <c>edits.changed</c>（认不出就当没有）。</summary>

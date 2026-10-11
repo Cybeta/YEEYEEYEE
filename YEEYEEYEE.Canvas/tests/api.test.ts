@@ -1,7 +1,19 @@
 import { describe, expect, it, vi } from 'vitest'
-import { request } from '../src/api'
+import { canvasUrl, request } from '../src/api'
 
 describe('HTTP request headers', () => {
+  it('binds scene, lease, history, chat, SSE and media URLs to the selected canvas', () => {
+    vi.stubGlobal('window', { location: { search: '?canvas=canvas-A' } })
+    try {
+      for (const path of ['/api/web/scene', '/api/web/edits', '/api/web/canvas/history', '/api/web/chat/sessions', '/api/web/events', '/api/web/records/node/attachments/image/file']) {
+        expect(canvasUrl(path)).toBe(`${path}?canvas=canvas-A`)
+      }
+      expect(canvasUrl('/api/web/entities/entity/thumb?variantId=v')).toBe('/api/web/entities/entity/thumb?variantId=v&canvas=canvas-A')
+      expect(canvasUrl('/api/web/projects')).toBe('/api/web/projects')
+      expect(canvasUrl('/api/auth/me')).toBe('/api/auth/me')
+    } finally { vi.unstubAllGlobals() }
+  })
+
   it('merges custom setup headers without putting the setup token in the JSON body', async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       expect(init?.headers).toBeInstanceOf(Headers)

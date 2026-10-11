@@ -7,8 +7,10 @@ namespace YEEYEEYEE.Web;
 /// <summary>Web adapter for the desktop canvas file; never persists a projected scene.</summary>
 internal sealed class ProjectCanvasSceneStore
 {
-    private readonly string path;
-    private readonly string entitiesPath;
+    private readonly string defaultPath;
+    private readonly string defaultEntitiesPath;
+    private string path => WebProjectApi.Current?.CanvasPath ?? defaultPath;
+    private string entitiesPath => WebProjectApi.Current?.EntitiesPath ?? defaultEntitiesPath;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>
@@ -20,13 +22,19 @@ internal sealed class ProjectCanvasSceneStore
     /// 新内容的哈希不保证比旧的大，拿它比「变大了没有」等于掷硬币。
     /// 所以另给一个单调递增的序号当判据，修订号只当推送载荷用（它就是接口回报给客户端的那个数）。
     /// </summary>
-    public (long Serial, long Revision) LastCommit { get; private set; }
+    private readonly AsyncLocal<CommitState?> commit = new();
+    private sealed class CommitState { public (long Serial, long Revision) Value; }
+    public (long Serial, long Revision) LastCommit
+    {
+        get { commit.Value ??= new CommitState(); return commit.Value.Value; }
+        private set { commit.Value ??= new CommitState(); commit.Value.Value = value; }
+    }
 
     private static IResult Error(int status, string code, string message) =>
         Results.Json(new { code, message }, statusCode: status);
 
     public ProjectCanvasSceneStore(string canvasPath, string? configuredEntitiesPath) =>
-        (path, entitiesPath) = ResolvePaths(canvasPath, configuredEntitiesPath);
+        (defaultPath, defaultEntitiesPath) = ResolvePaths(canvasPath, configuredEntitiesPath);
 
     /// <summary>
     /// 校验并规范化画布与资源路径。**构造函数与「这张实例在看哪张画布」的解析共用这一处**，
@@ -157,6 +165,41 @@ internal sealed class ProjectCanvasSceneStore
                 targetId = edge.TargetNodeId.ToString()
             })
             .ToList();
+    }
+
+    public (long Revision, string Context) AgentContextSnapshot(string? chapterId, string? nodeId)
+    {
+        var current = Load(); CheckProjectAuthority(current.State);
+        var canvas = current.State.Canvas;
+        var selected = canvas.Nodes.FirstOrDefault(n => n.Id.ToString() == nodeId);
+        if (!string.IsNullOrEmpty(chapterId) && !Guid.TryParse(chapterId, out _)) throw new InvalidDataException("章节ID无效");
+        Guid? chapter = Guid.TryParse(chapterId, out var id) ? id : null;
+        if (chapter is not null && CanvasChapters.List(canvas).All(c => c.Id != chapter)) throw new InvalidDataException("当前章节不存在");
+        if (!string.IsNullOrEmpty(nodeId) && selected is null) throw new InvalidDataException("选中节点不存在");
+        var nodes = canvas.Nodes.Where(n => chapter is null || CanvasChapters.ResolveChapterId(canvas, n) == chapter).Take(100);
+        var context = new AgentContext(selected?.Title ?? "", selected?.Content ?? "",
+            string.Join("\n", nodes.Select(n => $"{n.Id} | {n.Category} | {n.Title} | {n.Content}")),
+            string.Join("\n", canvas.Entities.Select(e => $"{e.Id} | {e.Name}")), "", "",
+            JsonSerializer.Serialize(canvas.WorkTree));
+        return (current.Revision, $"当前章节ID：{chapterId ?? "全部"}；基准修订：{current.Revision}\n" + context.Describe(24000, includeDesktopSkills: false) + "\nWeb能力边界：生成技能使用Web聊天提供的invoke_skill协议与服务端预授权；模型不能声称调用了桌面技能或任务已完成。write_file不支持。审批模式只预览，用户提交后才写盘。实体修改受项目资源权威校验约束。");
+    }
+
+    public (long Revision, byte[] Before, byte[] After, string?[] Hints, string[] Errors) PreviewActions(IReadOnlyList<AgentAction> actions)
+    {
+        var current = Load(); CheckProjectAuthority(current.State);
+        if (current.Open.UnsupportedFormat || current.Open.Validation.HasErrors || current.Open.Migration.Ambiguities.Count > 0)
+            throw new InvalidDataException("画布只读或有未解决校验问题");
+        if (actions.Count is < 1 or > 100) throw new InvalidDataException("动作数量必须为1至100");
+        if (actions.Any(a => a.Kind == "write_file")) throw new InvalidDataException("Web事务不支持write_file，请改为画布动作");
+        var canvas = CanvasPreviewBuilder.Clone(current.State.Canvas);
+        var hints = AgentActionExecutor.PrecheckBatch(actions, canvas, null, path).ToArray();
+        var result = AgentActionExecutor.Apply(actions, canvas, null, FileWriteMode.Skip, canvasPath: path);
+        var next = current.State with { Canvas = canvas };
+        var errors = result.Errors.ToList();
+        if (CanvasIdentityValidator.Validate(canvas).HasErrors) errors.Add("预览画布引用或身份校验失败");
+        try { CheckProjectAuthority(next); }
+        catch (InvalidDataException) { errors.Add("动作违反项目资源库权威约束"); }
+        return (current.Revision, current.Bytes, JsonSerializer.SerializeToUtf8Bytes(next), hints, errors.ToArray());
     }
 
     public IResult Read()
@@ -328,9 +371,8 @@ internal sealed class ProjectCanvasSceneStore
             if (node is null) return Error(404, "RECORD_NOT_FOUND", "这条记录不在这张画布里");
             var attachment = node.Attachments.FirstOrDefault(item => item.Id == attachmentId);
             if (attachment is null) return Error(404, "ASSET_ATTACHMENT_NOT_FOUND", "这个产物不在这条记录上");
-            // 只服务图片：视频 / 音频网页端还没有播放器，说清楚比丢一段读不了的字节好。
-            if (attachment.Kind != AttachmentKind.Image)
-                return Error(409, "ASSET_NOT_IMAGE", "这个产物不是图片（网页端暂时只显示图片）");
+            if (attachment.Kind is not (AttachmentKind.Image or AttachmentKind.Video or AttachmentKind.Audio))
+                return Error(409, "ASSET_NOT_MEDIA", "这个产物不是可预览的图片、视频或音频");
             return AttachmentBytes(attachment);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
@@ -343,11 +385,32 @@ internal sealed class ProjectCanvasSceneStore
     /// 把一个附件引用变成字节：**两种形式在这里收口**——内嵌的 data URL，与项目内的文件。
     /// 文件那一路带着「只服务允许目录」的闸，见 <see cref="InsideAllowedRoots"/>。
     /// </summary>
+    public IResult EntityAttachmentFile(Guid entityId, Guid variantId, Guid attachmentId, Guid? versionId)
+    {
+        try
+        {
+            var current = Load();
+            CheckProjectAuthority(current.State);
+            var library = JsonSerializer.Deserialize<ProjectEntityFile>(File.ReadAllBytes(entitiesPath), JsonOptions);
+            var variant = library?.Entities.FirstOrDefault(e => e.Id == entityId)?.Variants.FirstOrDefault(v => v.Id == variantId);
+            var attachments = versionId is { } id ? variant?.FindVersion(id)?.Attachments : variant?.Attachments;
+            var attachment = attachments?.FirstOrDefault(a => a.Id == attachmentId);
+            return attachment is null ? Error(404, "ASSET_ATTACHMENT_NOT_FOUND", "媒体附件不存在") : AttachmentBytes(attachment);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+        { return Error(503, "LIBRARY_UNAVAILABLE", "资源库无法安全读取"); }
+    }
+
     private IResult AttachmentBytes(WorkflowAttachment attachment)
     {
         if (AgentAttachmentLoader.SplitDataUrl(attachment.Reference) is { } inline)
         {
-            try { return Results.Bytes(Convert.FromBase64String(inline.Data), inline.MediaType); }
+            try
+            {
+                var bytes = Convert.FromBase64String(inline.Data);
+                return WebEntityApi.ValidMedia(bytes, inline.MediaType) ? Results.Bytes(bytes, inline.MediaType)
+                    : Error(415, "ASSET_SIGNATURE_INVALID", "媒体内容与声明格式不符");
+            }
             catch (FormatException) { return Error(500, "ASSET_INLINE_INVALID", "内嵌图片的 base64 解不开"); }
         }
 
@@ -358,7 +421,31 @@ internal sealed class ProjectCanvasSceneStore
         if (!InsideAllowedRoots(file))
             return Error(403, "ASSET_OUTSIDE_PROJECT",
                 "这张图不在允许的目录里（共享素材目录或项目目录），拒绝服务");
-        return Results.File(file, AgentAttachmentLoader.ImageMediaType(file) ?? "application/octet-stream");
+        var mediaType = AgentAttachmentLoader.ImageMediaType(file) ?? Path.GetExtension(file).ToLowerInvariant() switch
+        {
+            ".mp4" => "video/mp4",
+            ".webm" => "video/webm",
+            ".mov" => "video/quicktime",
+            ".mp3" => "audio/mpeg",
+            ".wav" => "audio/wav",
+            ".ogg" => "audio/ogg",
+            ".m4a" => "audio/mp4",
+            ".flac" => "audio/flac",
+            _ => "application/octet-stream"
+        };
+        using (var stream = File.OpenRead(file))
+        {
+            var signature = new byte[Math.Min(32L, stream.Length)];
+            stream.ReadExactly(signature);
+            if (mediaType == "image/jpeg" && signature.Length >= 4)
+            {
+                stream.Seek(-2, SeekOrigin.End);
+                stream.ReadExactly(signature.AsSpan(signature.Length - 2));
+            }
+            if (!WebEntityApi.ValidMedia(signature, mediaType))
+                return Error(415, "ASSET_SIGNATURE_INVALID", "媒体内容与声明格式不符");
+        }
+        return Results.File(file, mediaType, enableRangeProcessing: true);
     }
 
     /// <summary>
@@ -393,7 +480,8 @@ internal sealed class ProjectCanvasSceneStore
     private IResult Write(
         long baseRevision,
         Func<RecentCanvasState, (WorkflowCanvasState? Canvas, IResult? Result)> mutate,
-        Func<RecentCanvasState, byte[], object> respond)
+        Func<RecentCanvasState, byte[], object> respond,
+        Action? onCommitted = null)
     {
         var committed = false;
         try
@@ -423,6 +511,7 @@ internal sealed class ProjectCanvasSceneStore
             catch (CanvasSaveAbortedException ex) when (ex.Message.Contains("其他进程", StringComparison.Ordinal))
             { return Error(409, "SCENE_REVISION_CONFLICT", ex.Message); }
             committed = true;
+            onCommitted?.Invoke();
             // 只在这里记：**落盘之后**才知道这次提交算数。调用方拿序号前后比一次就知道写没写；
             // 修订号取的是刚落盘那份字节的哈希，与 respond 回给客户端的 `revision` 是同一个数——
             // 客户端就是拿它和自己手上的比「谁更新」的，两边必须是同一把尺子。
@@ -436,6 +525,108 @@ internal sealed class ProjectCanvasSceneStore
             return Error(503, committed ? "PROJECT_CANVAS_COMMITTED" : "PROJECT_CANVAS_WRITE_FAILED",
                 committed ? "项目画布已保存，但无法确认提交后的读取：" + ex.Message : "项目画布未安全保存：" + ex.Message);
         }
+    }
+
+    private string? LocateMedia(string reference)
+    {
+        var file = AssetStore.Resolve(reference);
+        return file is not null && InsideAllowedRoots(file) ? file : null;
+    }
+
+    public IResult FilmPlan(Guid nodeId)
+    {
+        try
+        {
+            var current = Load();
+            CheckProjectAuthority(current.State);
+            var product = current.State.Canvas.Nodes.FirstOrDefault(n => n.Id == nodeId && n.Category == NodeCategory.Product);
+            if (product is null) return Error(404, "PRODUCT_NOT_FOUND", "成品节点不存在");
+            var plan = ProductVideoAssembly.Plan(current.State.Canvas, product, LocateMedia);
+            var ledger = ProductVersions.For(current.State.Canvas, product, LocateMedia);
+            var films = product.Attachments.Where(a => a.Source == WorkflowAttachment.SourceFilmJoin && a.Kind == AttachmentKind.Video).ToList();
+            return Results.Json(new { revision = current.Revision, plan.CanConcat, plan.Note, plan.MissingTitles,
+                shots = plan.Shots.Select(s => new { s.Index, s.NodeId, s.Title }),
+                versions = ledger.Versions.Select((v, i) => new { v.Index, v.Label, v.FileName, v.AddedAt, v.IsLatest, v.Shots, v.FactsText,
+                    url = $"/api/web/records/{nodeId}/attachments/{films[i].Id}/file" }), ledger.LatestChanges });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+        { return Error(503, "FILM_READ_FAILED", "成片计划无法读取"); }
+    }
+
+    public IResult ConcatFilm(long baseRevision, Guid nodeId, IReadOnlyList<Guid> selectedShots)
+    {
+        string? output = null;
+        var committed = false;
+        try
+        {
+        return Write(baseRevision, current =>
+        {
+            var canvas = current.Canvas;
+            var product = canvas.Nodes.FirstOrDefault(n => n.Id == nodeId && n.Category == NodeCategory.Product);
+            if (product is null) return (null, Error(404, "PRODUCT_NOT_FOUND", "成品节点不存在"));
+            if (product.IsLocked) return (null, Error(409, "NODE_LOCKED", "节点已锁定"));
+            var plan = ProductVideoAssembly.Plan(canvas, product, LocateMedia);
+            if (selectedShots.Count < 2 || selectedShots.Distinct().Count() != selectedShots.Count ||
+                selectedShots.Any(id => plan.Shots.All(s => s.NodeId != id)))
+                return (null, Error(400, "FILM_SELECTION_INVALID", "请选择至少两镜已有视频的分镜"));
+            var shots = plan.Shots.Where(s => selectedShots.Contains(s.NodeId)).ToList();
+            output = Path.Combine(AssetStore.EnsureDirectory(), $"film-{Guid.NewGuid():N}.mp4");
+            var result = Mp4Concatenator.Concat(shots.Select(s => s.Path).ToList(), output);
+            if (!result.Ok) return (null, Error(409, "FILM_CONCAT_FAILED", result.Error));
+            product.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Video, Reference = AssetStore.ToReference(result.FilePath),
+                Name = product.Title + "-成片.mp4", Source = WorkflowAttachment.SourceFilmJoin,
+                ShotList = string.Join("、", shots.Select(s => s.Title)), ShotRefs = string.Join("、", shots.Select(s => s.NodeId)) });
+            product.ExecutionStatus = NodeExecutionStatus.Completed;
+            return (canvas, null);
+        }, (next, bytes) => new { revision = Revision(bytes), record = ProjectRecord(next.Canvas, nodeId.ToString()) }, () => committed = true);
+        }
+        finally
+        {
+            if (!committed && output is not null)
+            {
+                try { File.Delete(output); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
+        }
+    }
+
+    public IResult AttachJobOutputs(YEEYEEYEE.Core.ExecutionResult job, Guid nodeId)
+    {
+        if (!job.Inputs.TryGetValue("targetBaseRevision", out var baseline) || !baseline.TryGetInt64(out var revision))
+            return Error(409, "TARGET_REVISION_REQUIRED", "任务缺少提交时修订，产物保留在任务中");
+        var snapshot = Load();
+        var existingNode = snapshot.State.Canvas.Nodes.FirstOrDefault(n => n.Id == nodeId);
+        if (existingNode is not null && job.Outputs.Count > 0 && job.Outputs.Select((_, index) =>
+                new Guid(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"web-job:{job.JobId}:{index}"))[..16]))
+            .All(id => existingNode.Attachments.Any(a => a.Id == id)))
+            return Results.Json(new { attached = true });
+        return Write(revision, current =>
+        {
+            var node = current.Canvas.Nodes.FirstOrDefault(n => n.Id == nodeId);
+            if (node is null) return (null, Error(404, "TARGET_NOT_FOUND", "任务目标节点已删除"));
+            if (node.IsLocked) return (null, Error(409, "TARGET_LOCKED", "任务目标节点已锁定"));
+            var added = false;
+            for (var index = 0; index < job.Outputs.Count; index++)
+            {
+                var output = job.Outputs[index];
+                var attachmentId = new Guid(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"web-job:{job.JobId}:{index}"))[..16]);
+                if (node.Attachments.Any(a => a.Id == attachmentId)) continue;
+                var file = AssetStore.Resolve(output.Ref);
+                if (file is null || !InsideAllowedRoots(file)) return (null, Error(409, "OUTPUT_UNAVAILABLE", "成功产物文件不可安全读取"));
+                var kind = WorkflowAttachment.KindOf(file);
+                if (kind is not (AttachmentKind.Image or AttachmentKind.Video)) return (null, Error(409, "OUTPUT_UNSUPPORTED", "产物不是支持的图片或视频"));
+                node.Attachments.Insert(0, new WorkflowAttachment
+                {
+                    Id = attachmentId, Kind = kind, Reference = output.Ref,
+                    Name = $"{WorkflowAttachment.DisplayName(kind)} · {job.JobId.ToString()[..8]} · {index + 1}",
+                    Source = job.Tool, Prompt = job.Inputs.TryGetValue("prompt", out var prompt) ? prompt.GetString() ?? "" : ""
+                });
+                added = true;
+            }
+            if (!added) return (null, Results.Json(new { attached = true }));
+            node.ExecutionStatus = NodeExecutionStatus.Completed;
+            return (current.Canvas, null);
+        }, (_, bytes) => new { attached = true, revision = Revision(bytes) });
     }
 
     public async Task<IResult> Update(string recordId, HttpRequest request)
@@ -560,6 +751,63 @@ internal sealed class ProjectCanvasSceneStore
     /// 所以只读闸门、迁移歧义、项目库权威校验、备份与原子落盘一个都没绕开——
     /// 与「改一个节点」和「整理布局」走的是同一条 <see cref="Write"/> 通道，修订也由这里推进。
     /// </summary>
+    public IResult SplitChapters(long baseRevision, Guid sourceId) =>
+        Write(baseRevision, current =>
+        {
+            var canvas = current.Canvas;
+            var source = canvas.Nodes.FirstOrDefault(n => n.Id == sourceId);
+            if (source is null) return (null, Error(404, "RECORD_NOT_FOUND", "拆章源节点不存在"));
+            if (source.IsLocked) return (null, Error(409, "NODE_LOCKED", "源节点已锁定"));
+            var split = ChapterSplitPlanner.Split(source.Content);
+            if (split.IsEmpty) return (null, Error(400, "CHAPTER_SOURCE_EMPTY", split.Note));
+            var row = 0;
+            var order = canvas.WorkTree.Where(i => i.Kind == WorkTreeKind.Chapter).Select(i => i.Order).DefaultIfEmpty(0).Max();
+            foreach (var draft in split.Chapters)
+            {
+                var item = new WorkTreeItem { Kind = WorkTreeKind.Chapter, Name = draft.Title, Chapter = draft.Title, Order = checked(order + draft.Order), Prompt = draft.Content };
+                canvas.WorkTree.Add(item);
+                var chapter = UnifiedWorkTree.CreateNode(canvas, item, Math.Max(0, source.X) + 420, Math.Max(0, source.Y) + row++ * 320);
+                canvas.Edges.Add(new WorkflowEdge { SourceNodeId = source.Id, TargetNodeId = chapter.Id });
+                var slot = 0;
+                foreach (var entity in ChapterSplitPlanner.MatchEntities(canvas, draft.Content))
+                {
+                    // Project entities are authoritative: never create a canvas-only variant.
+                    var variant = entity.Variants.FirstOrDefault();
+                    if (variant is null) continue;
+                    var appearance = UnifiedWorkTree.AddAppearance(canvas, entity.Id, item.Id, variant.Id);
+                    var node = UnifiedWorkTree.CreateNode(canvas, appearance, chapter.X + 420, chapter.Y + slot++ * 160);
+                    canvas.Edges.Add(new WorkflowEdge { SourceNodeId = chapter.Id, TargetNodeId = node.Id });
+                }
+            }
+            return (canvas, null);
+        }, (next, bytes) => new { revision = Revision(bytes), chapters = next.Canvas.WorkTree.Count(i => i.Kind == WorkTreeKind.Chapter) });
+
+    public IResult WorkTreePlan(SyncDirection direction)
+    {
+        try
+        {
+            var current = Load();
+            CheckProjectAuthority(current.State);
+            return Results.Json(new { revision = current.Revision, plan = CanvasWorkTreeSync.Plan(current.State.Canvas, direction) });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+        { return Error(503, "WORKTREE_READ_FAILED", "工作树无法安全读取：" + ex.Message); }
+    }
+
+    public IResult ApplyWorkTree(long baseRevision, SyncDirection direction, string baselineHash, bool confirmed) =>
+        Write(baseRevision, current =>
+        {
+            var plan = CanvasWorkTreeSync.Plan(current.Canvas, direction);
+            if (!string.Equals(plan.BaselineHash, baselineHash, StringComparison.Ordinal))
+                return (null, Error(409, "SYNC_PLAN_STALE", "同步计划已过期，请重新预览"));
+            var applied = CanvasWorkTreeSync.Apply(current.Canvas, plan, confirmed);
+            if (applied.Refused)
+                return (null, Results.Json(new { code = "SYNC_CONFLICT", message = applied.ToText(), conflicts = applied.Conflicts }, statusCode: 409));
+            if (!applied.Changed)
+                return (null, Results.Json(new { revision = baseRevision, applied = 0, skipped = applied.Skipped.Count }));
+            return (applied.Canvas, null);
+        }, (next, bytes) => new { revision = Revision(bytes) });
+
     public IResult ReplaceCanvas(long baseRevision, byte[] canvasBytes)
     {
         if (!CanvasOpenService.TryOpenBytes(canvasBytes, path, out var opened, out var reason))
@@ -584,9 +832,10 @@ internal sealed class ProjectCanvasSceneStore
     /// </summary>
     public IResult CreateNode(long baseRevision, NodeCategory category, string? title, Guid? chapterId)
     {
-        if (category == NodeCategory.Chapter)
-            return Error(400, "CANVAS_CHAPTER_NOT_SUPPORTED",
-                "这一版还不能新建章节：章节是工作树条目（不是画布节点），得先在桌面端建好");
+        if (title is { Length: > 256 })
+            return Error(400, "INVALID_REQUEST", "标题不能超过256个字符");
+        if (category == NodeCategory.Chapter && chapterId is not null)
+            return Error(400, "INVALID_REQUEST", "章节应建在工作树根级，不能嵌入另一个章节");
 
         var created = Guid.Empty;
         return Write(baseRevision, current =>
@@ -597,6 +846,23 @@ internal sealed class ProjectCanvasSceneStore
                 // 锚点必须真的存在：写一个不存在的章节 ID，等于往画布里塞一个悬空引用。
                 if (chapterId is { } anchor && CanvasChapters.List(canvas).All(chapter => chapter.Id != anchor))
                     return (null, Error(400, "CANVAS_UNKNOWN_CHAPTER", "指定的章节不在这张画布里"));
+
+                if (category == NodeCategory.Chapter)
+                {
+                    var chapters = canvas.WorkTree.Where(item => item.Kind == WorkTreeKind.Chapter).ToList();
+                    var item = new WorkTreeItem
+                    {
+                        Kind = WorkTreeKind.Chapter,
+                        Name = string.IsNullOrWhiteSpace(title) ? $"章节{chapters.Count + 1}" : title.Trim(),
+                        Order = chapters.Count == 0 ? 0 : chapters.Max(chapter => chapter.Order) + 1
+                    };
+                    canvas.WorkTree.Add(item);
+                    var chapterNode = UnifiedWorkTree.CreateNode(canvas, item,
+                        canvas.Nodes.Count == 0 ? 0 : canvas.Nodes.Max(node => node.X) + PlaceholderSpacing, 0);
+                    chapterNode.ExecutionStatus = NodeExecutionStatus.WaitingForUser;
+                    created = chapterNode.Id;
+                    return (canvas, null);
+                }
 
                 // 落点只是「别叠在一起」，不是排版结果——同章节的兄弟姐妹决定它往哪边放。
                 var siblings = canvas.Nodes

@@ -56,6 +56,7 @@ async Task Start(string? token = "secret-value", string claims = "canvas.edit,sk
     // 在线的兜底 TTL 也可配：用例要验「断开之后不再算在线」，就得把它缩到几秒，否则要干等两分钟。
     if (presenceSeconds is null) start.Environment.Remove("YEEYEEYEE__PresenceLifetimeSeconds");
     else start.Environment["YEEYEEYEE__PresenceLifetimeSeconds"] = presenceSeconds.Value.ToString();
+    start.Environment["WebWorkflowApprovalMode"] = comfyUiBaseUrl is null ? "" : "preapproved-local-workflows";
     start.Environment["ComfyUI__BaseUrl"] = (comfyUiBaseUrl ?? new Uri("http://127.0.0.1:8188")).ToString();
     start.Environment["ComfyUI__Checkpoint"] = "offline-model.safetensors";
     start.Environment["ComfyUI__LtxCheckpoint"] = "ltx-test.safetensors";
@@ -73,11 +74,13 @@ async Task Start(string? token = "secret-value", string claims = "canvas.edit,sk
     else start.Environment["YEEYEEYEE__VideoEndpoint"] = videoEndpoint;
     start.Environment["YEEYEEYEE__AssetDirectory"] = Path.Combine(root, "assets");
     start.Environment["ASSET_DIR"] = Path.Combine(root, "assets");
+    start.Environment["YEEYEEYEE_SKILL_DIR"] = Path.Combine(root, "skills");
     server = Process.Start(start)!;
+    server.BeginOutputReadLine(); server.BeginErrorReadLine();
     using var probe = new HttpClient();
     for (var i = 0; i < 100; i++)
     {
-        if (server.HasExited) throw new Exception("Server exited: " + await server.StandardError.ReadToEndAsync());
+        if (server.HasExited) throw new Exception("Server exited with code " + server.ExitCode);
         try { if ((await probe.GetAsync($"http://127.0.0.1:{port}/health")).IsSuccessStatusCode) return; }
         catch (HttpRequestException) { }
         await Task.Delay(100);
@@ -193,6 +196,7 @@ JsonElement? PresenceOf(JsonElement snapshot, Guid userId)
 }
 try
 {
+    await ChatRegression.Run(dll, root);
     await Start();
     using var anonymous = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
     using var wrong = new HttpClient { BaseAddress = anonymous.BaseAddress };
@@ -205,6 +209,29 @@ try
     await Check(anonymous, HttpMethod.Post, "/api/web/skills/comfyui.text-to-image/invoke", 401, "{}");
     await Check(anonymous, HttpMethod.Post, $"/api/web/jobs/{Guid.NewGuid()}/cancel", 401);
     await Check(anonymous, HttpMethod.Post, $"/api/web/jobs/{Guid.NewGuid()}/retry", 401);
+    await Check(authorized, HttpMethod.Post, "/api/web/skills/comfyui.text-to-image/invoke", 403, "{\"prompt\":\"token only\",\"idempotencyKey\":\"denied\"}");
+    var skillCookies = new CookieContainer();
+    HttpClient SkillClient() => new(new HttpClientHandler { CookieContainer = skillCookies }) { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+    using var skillOwner = SkillClient();
+    await Setup(skillOwner, "{\"username\":\"skillowner\",\"password\":\"Password123!\"}");
+    var bridgeClient = authorized;
+    authorized = skillOwner;
+    Directory.CreateDirectory(Path.Combine(root, "skills"));
+    var managedSkillPath = Path.Combine(root, "skills", "http-managed.json");
+    File.WriteAllText(managedSkillPath, "{\"id\":\"http-managed\",\"name\":\"Original\",\"enabled\":true,\"custom\":\"preserved\",\"steps\":[{\"id\":\"image\",\"capability\":\"TextToImage\",\"prompt\":\"test\"}]}");
+    await Check(bridgeClient, HttpMethod.Get, "/api/web/settings/skills", 403);
+    await Check(authorized, HttpMethod.Post, "/api/web/settings/skills/http-managed", 200, "{\"operation\":\"rename\",\"name\":\"Renamed\"}");
+    var managedSkills = (await Check(authorized, HttpMethod.Get, "/api/web/settings/skills", 200)).GetProperty("skills");
+    Assert(managedSkills.EnumerateArray().Single(s => s.GetProperty("id").GetString() == "http-managed").GetProperty("name").GetString() == "Renamed", "Skill rename reload");
+    var managedSkillJson = JsonNode.Parse(File.ReadAllText(managedSkillPath))!;
+    Assert(managedSkillJson["name"] is null && managedSkillJson["custom"]!.GetValue<string>() == "preserved", "Skill rename preserves unknown fields without duplicate name");
+    await Check(authorized, HttpMethod.Post, "/api/web/settings/skills/http-managed", 200, "{\"operation\":\"enabled\",\"enabled\":false}");
+    Assert(!(await Check(authorized, HttpMethod.Get, "/api/web/settings/skills", 200)).GetProperty("skills").EnumerateArray().Single(s => s.GetProperty("id").GetString() == "http-managed").GetProperty("enabled").GetBoolean(), "Skill disable reload");
+    await Check(authorized, HttpMethod.Post, "/api/web/settings/skills/http-managed", 400, "{\"operation\":\"rename\",\"name\":\" \"}");
+    await Check(authorized, HttpMethod.Post, "/api/web/settings/skills/http-managed", 200, "{\"operation\":\"delete\"}");
+    Assert(!File.Exists(managedSkillPath), "Skill delete persisted");
+    await Check(authorized, HttpMethod.Post, "/api/web/settings/skills/http-managed", 404, "{\"operation\":\"delete\"}");
+    Console.WriteLine("Skill management HTTP regression passed: admin guard, rename and disable reload, unknown fields, validation and deletion");
     var catalog = await Check(authorized, HttpMethod.Get, "/api/web/skills", 200);
     Assert(catalog.GetProperty("skills").GetArrayLength() == 1, "Approved catalog");
     await Check(authorized, HttpMethod.Post, "/api/web/skills/unknown/invoke", 404, "{}");
@@ -239,8 +266,33 @@ try
     await mock.StartAsync();
     Stop();
     await Start(videoApproval: "preapproved-local-video", comfyUiBaseUrl: mock.BaseAddress, comfyUiVideoBackend: true, comfyUiPollingInterval: TimeSpan.FromMilliseconds(50));
-    using var videoClient = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
-    videoClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
+    using var videoClient = SkillClient();
+    await Check(videoClient, HttpMethod.Get, "/api/web/settings/workflows", 200);
+    var imported = await Check(videoClient, HttpMethod.Post, "/api/web/settings/workflows/import", 200,
+        "{\"paths\":[\"video/api.json\",\"video/ui.json\"]}");
+    Assert(imported.GetProperty("converted").GetInt32() == 1 && imported.GetProperty("failed").GetInt32() == 1, "API import and UI rejection: " + imported);
+    Assert(imported.GetProperty("workflows").EnumerateArray().Single(w => !w.GetProperty("converted").GetBoolean()).GetProperty("error").GetString()!.Length > 0, "UI rejection reason missing");
+    var installedSite = (await Check(videoClient, HttpMethod.Get, "/api/web/settings/workflows/installed", 200)).GetProperty("sites")[0];
+    var installedKey = installedSite.GetProperty("workflows").EnumerateArray().Single(w => w.GetProperty("converted").GetBoolean()).GetProperty("key").GetString();
+    var managePath = $"/api/web/settings/workflows/{installedSite.GetProperty("id").GetString()}/manage";
+    await Check(videoClient, HttpMethod.Post, managePath, 200, JsonSerializer.Serialize(new { key = installedKey, operation = "rename", name = "HTTP imported workflow" }));
+    var workflowSkill = (await Check(videoClient, HttpMethod.Get, "/api/web/skills", 200)).GetProperty("skills").EnumerateArray().Single(s => s.GetProperty("name").GetString() == "HTTP imported workflow");
+    var workflowId = workflowSkill.GetProperty("id").GetString();
+    await Check(videoClient, HttpMethod.Post, $"/api/web/skills/{workflowId}/invoke", 400, "{\"prompt\":\"x\",\"idempotencyKey\":\"workflow-invalid\",\"workflow\":{}}");
+    var workflowJob = await Check(videoClient, HttpMethod.Post, $"/api/web/skills/{workflowId}/invoke", 200, "{\"prompt\":\"imported HTTP success\",\"idempotencyKey\":\"workflow-success\"}");
+    var workflowJobId = workflowJob.GetProperty("jobId").GetGuid();
+    for (var i = 0; i < 100 && workflowJob.GetProperty("state").GetString() is "Queued" or "Running"; i++)
+    {
+        await Task.Delay(50);
+        workflowJob = await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{workflowJobId}", 200);
+    }
+    Assert(workflowJob.GetProperty("state").GetString() == "Succeeded" && mock.LastPrompt.Contains("imported HTTP success", StringComparison.Ordinal), "Imported graph execution and prompt binding: " + workflowJob);
+    using (var output = await videoClient.GetAsync($"/api/web/jobs/{workflowJobId}/outputs/0"))
+        Assert(output.IsSuccessStatusCode && output.Content.Headers.ContentType?.MediaType == "video/mp4" && (await output.Content.ReadAsByteArrayAsync()).Length > 100, "Imported workflow binary download");
+    await Check(videoClient, HttpMethod.Post, managePath, 200, JsonSerializer.Serialize(new { key = installedKey, operation = "enabled", enabled = false }));
+    await Check(videoClient, HttpMethod.Post, $"/api/web/skills/{workflowId}/invoke", 404, "{\"prompt\":\"x\",\"idempotencyKey\":\"workflow-disabled\"}");
+    await Check(videoClient, HttpMethod.Post, managePath, 200, JsonSerializer.Serialize(new { key = installedKey, operation = "delete" }));
+    Console.WriteLine("Workflow HTTP regression passed: API import/install, UI rejection, rename, declared inputs, actual prompt binding, poll/download, disable/delete");
     var videoCatalog = await Check(videoClient, HttpMethod.Get, "/api/web/skills", 200);
     Assert(videoCatalog.GetProperty("skills").EnumerateArray().Any(item => item.GetProperty("id").GetString() == "web.text-to-video" && item.GetProperty("capability").GetString() == "TextToVideo"), "Video skill catalog");
     // 自检读的是后端自己的 system_stats，不是「端口通不通」。
@@ -346,8 +398,7 @@ try
     await Check(otherVideoUser, HttpMethod.Post, $"/api/web/jobs/{videoJobId}/retry", 404);
     Stop();
     await Start(videoApproval: "preapproved-local-video", comfyUiBaseUrl: mock.BaseAddress, comfyUiVideoBackend: true, comfyUiPollingInterval: TimeSpan.FromMilliseconds(50));
-    using var authorizedAfterVideo = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
-    authorizedAfterVideo.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
+    using var authorizedAfterVideo = SkillClient();
     Assert((await Check(authorizedAfterVideo, HttpMethod.Get, $"/api/web/jobs/{videoJobId}", 200)).GetProperty("capability").GetString() == "TextToVideo", "Video owner can read video job");
     authorized = authorizedAfterVideo;
 
@@ -360,6 +411,9 @@ try
     var thirdId = third.GetProperty("jobId").GetGuid();
     for (var i = 0; i < 30 && (await Check(authorizedAfterVideo, HttpMethod.Get, $"/api/web/jobs/{thirdId}", 200)).GetProperty("state").GetString() != "Failed"; i++) await Task.Delay(100);
     await Check(authorizedAfterVideo, HttpMethod.Post, $"/api/web/jobs/{jobId}/retry", 409);
+    authorized = new HttpClient { BaseAddress = authorizedAfterVideo.BaseAddress };
+    authorized.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
+    bridgeClient.Dispose();
     using var anonymousAfterVideo = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
     using var wrongAfterVideo = new HttpClient { BaseAddress = anonymousAfterVideo.BaseAddress };
     wrongAfterVideo.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "wrong");
@@ -399,14 +453,17 @@ try
     restarted.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
     var persisted = await Check(restarted, HttpMethod.Get, "/api/web/scene", 200);
     Assert(persisted.GetProperty("revision").GetInt32() == 5 && persisted.GetProperty("records")[0].GetProperty("record").GetProperty("content").GetString() == "Edited", "Restart persistence");
-    Assert((await Check(restarted, HttpMethod.Get, $"/api/web/jobs/{jobId}", 200)).GetProperty("jobId").GetGuid() == jobId, "Job restart persistence");
+    using var restartedOwner = SkillClient();
+    Assert((await Check(restartedOwner, HttpMethod.Get, $"/api/web/jobs/{jobId}", 200)).GetProperty("jobId").GetGuid() == jobId, "Job restart persistence");
+    await Check(restarted, HttpMethod.Get, $"/api/web/jobs/{jobId}", 404);
     Stop();
     await Start(claims: "job.cancel", approval: "");
     using var restricted = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
     restricted.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-value");
     Assert((await Check(restricted, HttpMethod.Get, "/api/web/skills", 200)).GetProperty("skills").GetArrayLength() == 0, "Fail-closed catalog");
     await Check(restricted, HttpMethod.Post, "/api/web/skills/comfyui.text-to-image/invoke", 403, "{\"prompt\":\"x\",\"idempotencyKey\":\"blocked\"}");
-    await Check(restricted, HttpMethod.Post, $"/api/web/jobs/{jobId}/retry", 403);
+    using var restrictedOwner = SkillClient();
+    await Check(restrictedOwner, HttpMethod.Post, $"/api/web/jobs/{jobId}/retry", 403);
     Stop();
     await Start(null);
     using var unconfigured = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
@@ -462,8 +519,74 @@ try
         projected.GetProperty("revision").GetInt64(), "Revoked project GET");
     Assert(realBefore.SequenceEqual(File.ReadAllBytes(realCanvas)) &&
         !Directory.Exists(Path.Combine(canvasDirectory, "backups")), "Revoked project PUT changed bytes or created backup");
+    await Check(realClient, HttpMethod.Post, "/api/web/projects", 403, "{\"name\":\"Denied project\"}");
+    await Check(realClient, HttpMethod.Post, "/api/web/projects/open", 403, JsonSerializer.Serialize(new { path = projectRoot }));
+    Assert(!(await Check(realClient, HttpMethod.Get, "/api/web/projects", 200)).GetProperty("canCreate").GetBoolean(), "Revoked permission still enables project creation");
     SetClaims("canvas.edit,skill.invoke,job.cancel");
     await WaitForEditClaim(realClient, nodeId.ToString(), allowed: true);
+    // Request-scoped project selection: create/open persisted projects and isolate canvas writes.
+    var newProject = await Check(realClient, HttpMethod.Post, "/api/web/projects", 200,
+        "{\"name\":\"HTTP multi canvas\",\"type\":\"Video\"}");
+    var newProjectId = newProject.GetProperty("id").GetGuid();
+    var firstCanvasId = newProject.GetProperty("canvases")[0].GetProperty("id").GetString();
+    var secondCanvas = await Check(realClient, HttpMethod.Post, $"/api/web/projects/{newProjectId}/canvases", 200, "{\"title\":\"Second\"}");
+    var secondCanvasId = secondCanvas.GetProperty("id").GetString();
+    await Check(realClient, HttpMethod.Post, $"/api/web/projects/{newProjectId}/canvases", 400, "{\"title\":\"Second\"}");
+    await Check(realClient, HttpMethod.Post, $"/api/web/projects/{newProjectId}/canvases", 400, "{\"title\":\"hidden.edits\"}");
+    await Check(realClient, HttpMethod.Post, "/api/web/projects", 400, "{\"name\":\"..\"}");
+    await Check(realClient, HttpMethod.Post, "/api/web/projects/open", 400, JsonSerializer.Serialize(new { path = Path.Combine(root, "..") }));
+    await Check(realClient, HttpMethod.Post, "/api/web/projects/open", 400, "{\"path\":\"../outside\"}");
+    await Check(realClient, HttpMethod.Post, "/api/web/projects/open", 200, "{\"path\":\"HTTP multi canvas\"}");
+    var firstScene = await Check(realClient, HttpMethod.Get, $"/api/web/scene?canvas={firstCanvasId}", 200);
+    var secondScene = await Check(realClient, HttpMethod.Get, $"/api/web/scene?canvas={secondCanvasId}", 200);
+    Assert(firstScene.GetProperty("canvasTitle").GetString() == "画布1" && secondScene.GetProperty("canvasTitle").GetString() == "Second", "Selected canvas projection");
+    await Check(realClient, HttpMethod.Post, "/api/auth/login", 200, "{\"username\":\"skillowner\",\"password\":\"Password123!\"}");
+    var addedScoped = await Check(realClient, HttpMethod.Post, $"/api/web/records?canvas={firstCanvasId}", 200,
+        JsonSerializer.Serialize(new { baseRevision = firstScene.GetProperty("revision").GetInt64(), recordType = "storyboard", title = "Scoped node", content = "Scope body" }));
+    Assert((await Check(realClient, HttpMethod.Get, $"/api/web/scene?canvas={secondCanvasId}", 200)).GetProperty("records").GetArrayLength() == secondScene.GetProperty("records").GetArrayLength(), "Write leaked into sibling canvas");
+    Assert(realBefore.SequenceEqual(File.ReadAllBytes(realCanvas)), "Selected canvas write changed configured canvas");
+    var scopedRecordId = addedScoped.GetProperty("nodeId").GetGuid();
+    using var scopedEventsA = await realClient.GetAsync($"/api/web/events?canvas={firstCanvasId}", HttpCompletionOption.ResponseHeadersRead);
+    using var scopedEventsB = await realClient.GetAsync($"/api/web/events?canvas={secondCanvasId}", HttpCompletionOption.ResponseHeadersRead);
+    using var scopedReaderA = new StreamReader(await scopedEventsA.Content.ReadAsStreamAsync());
+    using var scopedReaderB = new StreamReader(await scopedEventsB.Content.ReadAsStreamAsync());
+    var scopedLease = await Check(realClient, HttpMethod.Post, $"/api/web/edits?canvas={firstCanvasId}", 200,
+        JsonSerializer.Serialize(new { scope = "node", targetId = scopedRecordId, client = "web" }));
+    Assert((await Check(realClient, HttpMethod.Get, $"/api/web/edits?canvas={secondCanvasId}", 200)).GetProperty("leases").GetArrayLength() == 0, "Lease leaked into sibling canvas");
+    var scopedLeaseId = scopedLease.GetProperty("lease").GetProperty("leaseId").GetGuid();
+    await Check(realClient, HttpMethod.Put, $"/api/web/edits/{scopedLeaseId}?canvas={secondCanvasId}", 404);
+    await Check(realClient, HttpMethod.Delete, $"/api/web/edits/{scopedLeaseId}?canvas={secondCanvasId}", 404);
+    await Check(realClient, HttpMethod.Delete, $"/api/web/edits/{scopedLeaseId}?canvas={secondCanvasId}&force=true", 404);
+    await Check(realClient, HttpMethod.Put, $"/api/web/edits/{scopedLeaseId}?canvas={firstCanvasId}", 200);
+    Assert((await ReadFrame(scopedReaderA).WaitAsync(TimeSpan.FromSeconds(5)))?.Type == "edits.changed", "Selected SSE missed lease event");
+    var siblingFrame = ReadFrame(scopedReaderB);
+    Assert(await Task.WhenAny(siblingFrame, Task.Delay(300)) != siblingFrame, "Lease event leaked into sibling SSE");
+    await Check(realClient, HttpMethod.Delete, $"/api/web/edits/{scopedLease.GetProperty("lease").GetProperty("leaseId").GetGuid()}?canvas={firstCanvasId}", 200);
+    Assert((await Check(realClient, HttpMethod.Get, $"/api/web/canvas/history?canvas={firstCanvasId}", 200)).GetProperty("undo").GetInt32() == 1 &&
+        (await Check(realClient, HttpMethod.Get, $"/api/web/canvas/history?canvas={secondCanvasId}", 200)).GetProperty("undo").GetInt32() == 0, "History leaked into sibling canvas");
+    var scopedChat = await Check(realClient, HttpMethod.Post, $"/api/web/chat/sessions?canvas={firstCanvasId}", 200);
+    var scopedChatId = scopedChat.GetProperty("id").GetString();
+    Assert((await Check(realClient, HttpMethod.Get, $"/api/web/chat/sessions?canvas={firstCanvasId}", 200)).GetArrayLength() == 1 &&
+        (await Check(realClient, HttpMethod.Get, $"/api/web/chat/sessions?canvas={secondCanvasId}", 200)).GetArrayLength() == 0, "Chat list leaked into sibling canvas");
+    await Check(realClient, HttpMethod.Get, $"/api/web/chat/sessions/{scopedChatId}?canvas={secondCanvasId}", 404);
+    await Check(realClient, HttpMethod.Delete, $"/api/web/chat/sessions/{scopedChatId}?canvas={secondCanvasId}", 404);
+    await Check(realClient, HttpMethod.Post, $"/api/web/chat/sessions/{scopedChatId}/cancel?canvas={secondCanvasId}", 404, "{}");
+    await Check(realClient, HttpMethod.Get, $"/api/web/chat/sessions/{scopedChatId}?canvas={firstCanvasId}", 200);
+    using (var headerRequest = new HttpRequestMessage(HttpMethod.Get, "/api/web/scene"))
+    {
+        headerRequest.Headers.Add("X-Canvas-Id", secondCanvasId);
+        using var headerResponse = await realClient.SendAsync(headerRequest);
+        var headerScene = JsonDocument.Parse(await headerResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert(headerResponse.IsSuccessStatusCode && headerScene.GetProperty("canvasTitle").GetString() == "Second", "Header selection did not select sibling canvas");
+    }
+    await Check(realClient, HttpMethod.Get, "/api/web/scene?canvas=unknown", 404);
+    await Check(realClient, HttpMethod.Post, "/api/web/projects/open", 200,
+        JsonSerializer.Serialize(new { path = Path.Combine(root, "HTTP multi canvas") }));
+    var concurrentScenes = await Task.WhenAll(
+        Check(realClient, HttpMethod.Get, $"/api/web/scene?canvas={firstCanvasId}", 200),
+        Check(realClient, HttpMethod.Get, $"/api/web/scene?canvas={secondCanvasId}", 200));
+    Assert(concurrentScenes[0].GetProperty("records").GetArrayLength() == firstScene.GetProperty("records").GetArrayLength() + 1 && concurrentScenes[1].GetProperty("records").GetArrayLength() == secondScene.GetProperty("records").GetArrayLength(), "Concurrent request scope leaked");
+    Console.WriteLine("Project selection regression passed: create/open, multiple canvases, persisted scoped write, concurrent reads, unknown ID refusal and configured canvas preservation");
     var baseRevision = projected.GetProperty("revision").GetInt64();
     await Check(realClient, HttpMethod.Put, $"/api/web/records/{nodeId}", 409,
         JsonSerializer.Serialize(new { baseRevision = baseRevision + 1, title = "Bad", content = "Bad" }));
@@ -516,6 +639,15 @@ try
     File.WriteAllText(realEntities, JsonSerializer.Serialize(new { formatVersion = 1, entities = new[] {
         new { id = managedEntity, managedByProject = true, variants = new[] { new { id = managedVariant, versions = new[] { new { id = managedVersion } } } } } } }));
     var managedRead = await Check(realClient, HttpMethod.Get, "/api/web/scene", 200);
+    var validLibrary = File.ReadAllText(realEntities);
+    var mediaId = Guid.NewGuid();
+    var mediaLibrary = JsonNode.Parse(validLibrary)!;
+    mediaLibrary["entities"]![0]!["variants"]![0]!["Attachments"] = JsonSerializer.SerializeToNode(new[] { new { Id = mediaId, Kind = 0, Reference = "data:image/png;base64,PGh0bWw+" } });
+    File.WriteAllText(realEntities, mediaLibrary.ToJsonString());
+    var safeAssets = await Check(realClient, HttpMethod.Get, "/api/web/assets", 200);
+    Assert(!safeAssets.GetRawText().Contains("data:image") && !safeAssets.GetRawText().Contains("PGh0bWw+"), "PascalCase resource Reference leaked");
+    await Check(realClient, HttpMethod.Get, $"/api/web/entities/{managedEntity}/variants/{managedVariant}/media/{mediaId}", 415);
+    File.WriteAllText(realEntities, validLibrary);
     var managedRevision = managedRead.GetProperty("revision").GetInt64();
     File.WriteAllText(realEntities, JsonSerializer.Serialize(new { formatVersion = 1, entities = new[] {
         new { id = managedEntity, managedByProject = true, variants = Array.Empty<object>() } } }));
@@ -1312,6 +1444,37 @@ try
     // ---------- 结构级写入：网页端新建 / 删除节点 ----------
     // 这两件事改的是画布结构，所以按结构级对待：要账号、要 canvas.edit、要整棵树锁。
     {
+        var emptyOriginal = File.ReadAllBytes(layoutCanvas);
+        try
+        {
+            var emptyState = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(emptyOriginal)! with
+            { Canvas = new YEEYEEYEE.Desktop.WorkflowCanvasState() };
+            File.WriteAllBytes(layoutCanvas, JsonSerializer.SerializeToUtf8Bytes(emptyState));
+            var emptyScene = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
+            var emptyRevision = emptyScene.GetProperty("revision").GetInt64();
+            Assert(emptyScene.GetProperty("records").GetArrayLength() == 0, "空画布必须真实没有记录");
+            await Check(viewerOnly, HttpMethod.Post, "/api/web/records", 403,
+                JsonSerializer.Serialize(new { baseRevision = emptyRevision, recordType = "chapter" }));
+            var firstChapter = await Check(arranger, HttpMethod.Post, "/api/web/records", 200,
+                JsonSerializer.Serialize(new { baseRevision = emptyRevision, recordType = "chapter", title = "空白起步" }));
+            var firstState = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(File.ReadAllBytes(layoutCanvas))!;
+            var firstItem = firstState.Canvas.WorkTree.Single();
+            var firstChild = await Check(arranger, HttpMethod.Post, "/api/web/records", 200,
+                JsonSerializer.Serialize(new { baseRevision = firstChapter.GetProperty("revision").GetInt64(),
+                    recordType = "storyboard", chapterId = firstItem.Id, title = "第一个分镜" }));
+            var childState = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(File.ReadAllBytes(layoutCanvas))!;
+            Assert(childState.Canvas.Nodes.Any(node => node.Title == "第一个分镜" && node.WorkTreeItemId == firstItem.Id),
+                "从空画布创建的分镜必须归属真实工作树章节");
+            var childUndo = await Check(arranger, HttpMethod.Post, "/api/web/canvas/history/undo", 200,
+                JsonSerializer.Serialize(new { baseRevision = firstChild.GetProperty("revision").GetInt64() }));
+            await Check(arranger, HttpMethod.Post, "/api/web/canvas/history/undo", 200,
+                JsonSerializer.Serialize(new { baseRevision = childUndo.GetProperty("revision").GetInt64() }));
+            var backToEmpty = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(File.ReadAllBytes(layoutCanvas))!;
+            Assert(backToEmpty.Canvas.Nodes.Count == 0 && backToEmpty.Canvas.WorkTree.Count == 0,
+                "两次撤销必须回到真实空画布");
+            Console.WriteLine("Empty canvas regression passed: chapter creation through shared worktree, child membership, viewer refusal and two-step undo");
+        }
+        finally { File.WriteAllBytes(layoutCanvas, emptyOriginal); }
         var stScene = await Check(arranger, HttpMethod.Get, "/api/web/scene", 200);
         var stBase = stScene.GetProperty("revision").GetInt64();
         var stNodes = stScene.GetProperty("records").EnumerateArray()
@@ -1353,9 +1516,24 @@ try
         Assert((await Check(arranger, HttpMethod.Post, "/api/web/records", 400,
             "{\"baseRevision\":" + stRevision + ",\"recordType\":\"spaceship\"}")).GetProperty("code").GetString() == "CANVAS_UNKNOWN_RECORD_TYPE",
             "认不出的类别要拒绝（猜一个 general 会静默地建错）");
-        Assert((await Check(arranger, HttpMethod.Post, "/api/web/records", 400,
-            "{\"baseRevision\":" + stRevision + ",\"recordType\":\"chapter\"}")).GetProperty("code").GetString() == "CANVAS_CHAPTER_NOT_SUPPORTED",
-            "章节还不能在网页端新建");
+        var chapterBefore = File.ReadAllBytes(layoutCanvas);
+        var chapterCreated = await Check(arranger, HttpMethod.Post, "/api/web/records", 200,
+            JsonSerializer.Serialize(new { baseRevision = stRevision, recordType = "chapter", title = "网页新章节" }));
+        var chapterRevision = chapterCreated.GetProperty("revision").GetInt64();
+        var chapterState = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(File.ReadAllBytes(layoutCanvas))!;
+        var stNewChapterItem = chapterState.Canvas.WorkTree.Single(item => item.Name == "网页新章节");
+        Assert(stNewChapterItem.Kind == YEEYEEYEE.Desktop.WorkTreeKind.Chapter &&
+            chapterState.Canvas.Nodes.Any(node => node.WorkTreeItemId == stNewChapterItem.Id && node.Category == YEEYEEYEE.Desktop.NodeCategory.Chapter),
+            "新章节必须同时保存共享工作树条目和投影节点");
+        await Check(arranger, HttpMethod.Post, "/api/web/records", 400,
+            JsonSerializer.Serialize(new { baseRevision = chapterRevision, recordType = "chapter", chapterId = stChapter }));
+        await Check(arranger, HttpMethod.Post, "/api/web/canvas/history/undo", 200,
+            JsonSerializer.Serialize(new { baseRevision = chapterRevision }));
+        var restoredChapterState = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(File.ReadAllBytes(layoutCanvas))!;
+        var beforeChapterState = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(chapterBefore)!;
+        Assert(JsonSerializer.Serialize(restoredChapterState.Canvas) == JsonSerializer.Serialize(beforeChapterState.Canvas),
+            "撤销新章节必须恢复原始节点、工作树、引用和连线");
+        stRevision = (await Check(arranger, HttpMethod.Get, "/api/web/scene", 200)).GetProperty("revision").GetInt64();
         Assert((await Check(arranger, HttpMethod.Post, "/api/web/records", 400,
             "{\"baseRevision\":" + stRevision + ",\"recordType\":\"prop\",\"chapterId\":\"" + Guid.NewGuid() + "\"}")).GetProperty("code").GetString() == "CANVAS_UNKNOWN_CHAPTER",
             "锚点不存在的章节要拒绝");

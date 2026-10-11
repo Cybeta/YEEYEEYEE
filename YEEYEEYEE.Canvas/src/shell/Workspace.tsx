@@ -6,7 +6,7 @@ import { CanvasView, clampZoom, type CanvasApi, type Pan } from './CanvasView'
 import { ghostMoves, type LayoutMove, type LayoutPlan, type LayoutScope } from './layoutPlan'
 import { describeLease, treeLease, type Lease } from './locks'
 import {
-  chapterGroups, isEditableRecord, PLANNING_GROUP_ID, recordContent, recordTitle, scriptEntries,
+  chapterGroups, CREATABLE_RECORD_TYPES, isEditableRecord, PLANNING_GROUP_ID, recordContent, recordTitle, scriptEntries,
   stageSummaries, UNFILED_GROUP_ID, type ShellEdge, type ViewRecord
 } from './records'
 import { ScriptView, TimelineView } from './views'
@@ -66,6 +66,11 @@ export type WorkspaceProps = {
   onConnectNodes?: (sourceId: string, targetId: string) => void
   /** 右键一张节点卡：把「哪一张 + 屏幕坐标」交出去。菜单的内容在调用方那边算（要问服务端）。 */
   onNodeContextMenu?: (recordId: string, position: { x: number; y: number }) => void
+  onCreate?: (recordType: string) => void
+  onDelete?: () => void
+  editBusy?: boolean
+  onUndo?: () => void
+  onRedo?: () => void
 }
 
 const STAGE_FILTERS: Array<{ key: string; label: string; match: (layer: number) => boolean }> = [
@@ -94,6 +99,7 @@ export function Workspace(props: WorkspaceProps) {
   const leases = props.leases ?? EMPTY_LEASES
   const edges = props.edges ?? EMPTY_EDGES
   const [stage, setStage] = useState('all')
+  const [newKind, setNewKind] = useState(CREATABLE_RECORD_TYPES[0].recordType)
   const [showReferencePreviews, setShowReferencePreviews] = useState(true)
   const [zoom, setZoom] = useState(0.86)
   const [pan, setPan] = useState<Pan>({ x: 24, y: 24 })
@@ -146,7 +152,12 @@ export function Workspace(props: WorkspaceProps) {
       <div className="df-row-between" style={{ margin: '10px 12px 0' }}>
         <div className="df-cluster df-wrap">
           <button type="button" className="df-mini-button is-active">选择</button>
-          <button type="button" className="df-mini-button" disabled title="新建节点的入口在工作树顶上（这里不再重复开一个）">＋ 节点</button>
+          <button type="button" className="df-mini-button" disabled={!props.onUndo || !!arrangeBlocked || props.editBusy} onClick={props.onUndo} title="撤销最近的普通编辑；后续协作修改会阻止撤销">撤销</button>
+          <button type="button" className="df-mini-button" disabled={!props.onRedo || !!arrangeBlocked || props.editBusy} onClick={props.onRedo}>重做</button>
+          <select aria-label="新建节点类别" className="df-input" style={{ width: 100 }} value={newKind} onChange={e => setNewKind(e.target.value)} disabled={!!arrangeBlocked || props.editBusy}>
+            {CREATABLE_RECORD_TYPES.map(item => <option key={item.recordType} value={item.recordType}>{item.label}</option>)}
+          </select>
+          <button type="button" className="df-mini-button" disabled={!props.onCreate || !!arrangeBlocked || props.editBusy} title={arrangeBlocked || '在当前章节新建节点'} onClick={() => props.onCreate?.(newKind)}>＋ 节点</button>
           <button type="button" className="df-mini-button" disabled title="新增引用尚未接入服务端">＋ 资源</button>
           <button
             type="button"
@@ -158,7 +169,7 @@ export function Workspace(props: WorkspaceProps) {
             onClick={() => (props.connectFrom ? props.onConnectCancel() : props.onConnectStart())}
           >连接</button>
           <span className="df-divider-v" style={{ height: 18, margin: '0 4px' }} />
-          <button type="button" className="df-mini-button" disabled title="删除节点的入口在检查器里（这里不再重复开一个）">删除</button>
+          <button type="button" className="df-mini-button" disabled={!props.onDelete || !!arrangeBlocked || props.editBusy} title={arrangeBlocked || '删除选中节点及其连线'} onClick={props.onDelete}>删除</button>
           <span className="df-divider-v" style={{ height: 18, margin: '0 4px' }} />
           {/* 桌面端界面里**没有**手动整理的入口——那份泳道引擎只有 Agent 与测试在用，
               所以这个按钮是新增能力，不是复刻。服务端接口已经就位，且用的是同一份引擎。 */}

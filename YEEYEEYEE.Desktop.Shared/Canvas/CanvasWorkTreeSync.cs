@@ -375,6 +375,8 @@ public static class CanvasWorkTreeSync
         // 第一遍：按稳定依据建立「节点 → 章节」上下文，并从章节节点派生要新建的章节 ID。
         var context = new Dictionary<Guid, (Guid ChapterId, bool Certain)>();
         var plannedChapters = new Dictionary<Guid, string>(); // 章节节点 ID → 计划新建的章节名
+        var danglingNodes = canvas.Nodes.Where(node => node.WorkTreeItemId is { } id
+            && !canvas.WorkTree.Any(item => item.Id == id)).Select(node => node.Id).ToHashSet();
         foreach (var node in canvas.Nodes)
         {
             if (node.WorkTreeItemId is { } anchorId && canvas.WorkTree.Any(item => item.Id == anchorId))
@@ -383,7 +385,7 @@ public static class CanvasWorkTreeSync
                 continue;
             }
 
-            if (node.Category != NodeCategory.Chapter) continue;
+            if (danglingNodes.Contains(node.Id) || node.Category != NodeCategory.Chapter) continue;
             var name = node.Title.Trim();
             if (name.Length == 0) continue;
             var existing = chapters.Where(item => string.Equals(item.Name.Trim(), name, StringComparison.Ordinal)).ToList();
@@ -415,7 +417,7 @@ public static class CanvasWorkTreeSync
             propagated = false;
             foreach (var node in canvas.Nodes)
             {
-                if (context.ContainsKey(node.Id)) continue;
+                if (context.ContainsKey(node.Id) || danglingNodes.Contains(node.Id)) continue;
                 if (node.ParentNodeId is not { } parentId) continue;
                 if (!context.TryGetValue(parentId, out var parent)) continue;
                 context[node.Id] = parent;

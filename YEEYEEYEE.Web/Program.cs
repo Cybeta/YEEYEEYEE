@@ -20,7 +20,7 @@ if (comfyUiVideoBackend && string.IsNullOrWhiteSpace(comfyUiLtxCheckpoint))
 var assetDirectory = LegacyConfig.Text(configuration, "AssetDirectory") ?? Path.Combine(AppContext.BaseDirectory, "assets");
 assetDirectory = Path.GetFullPath(assetDirectory);
 Directory.CreateDirectory(assetDirectory);
-Environment.SetEnvironmentVariable("ASSET_DIR", assetDirectory);
+Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", assetDirectory);
 // 账号库与任务库分开存：任务库会随作业增长，账号库只有几十行；混在一起会让备份账号时顺带拖走一堆作业记录。
 var userDatabasePath = LegacyConfig.Text(configuration, "UserDatabasePath") ?? Path.Combine(AppContext.BaseDirectory, "yeeeyee.users.db");
 // 前端产物默认在源码树里，容器部署时它不在那个相对位置，所以允许用配置指定。
@@ -32,6 +32,7 @@ builder.Services.AddHttpClient("comfyui", client =>
     client.BaseAddress = new Uri(comfyUiBaseUrl, UriKind.Absolute);
     client.Timeout = configuration.GetValue("ComfyUI:HttpTimeout", TimeSpan.FromSeconds(30));
 });
+builder.Services.AddHttpClient("chat", client => client.Timeout = TimeSpan.FromMinutes(5));
 builder.Services.AddHttpClient("video", client =>
 {
     client.Timeout = configuration.GetValue("VideoHttpTimeout", TimeSpan.FromMinutes(5));
@@ -56,7 +57,7 @@ builder.Services.AddSingleton<IInvocationExecutor>(services => new WebInvocation
     services.GetRequiredService<ComfyUiExecutor>(),
     services.GetRequiredService<IVideoProvider>(),
     services.GetRequiredService<ComfyUiExecutor>(),
-    comfyUiVideoBackend));
+    comfyUiVideoBackend, services.GetRequiredService<IHttpClientFactory>().CreateClient("comfyui"), configuration));
 var comfyUiWebSocketBaseUrl = configuration["ComfyUI:WebSocketBaseUrl"] ?? comfyUiBaseUrl;
 builder.Services.AddSingleton<ComfyUiProvider>(services => new ComfyUiProvider(
     services.GetRequiredService<IHttpClientFactory>().CreateClient("comfyui"), assetDirectory,
@@ -77,6 +78,8 @@ builder.Services.AddSingleton(users);
 // 在线登记处与它共用一份：SSE 订阅 / 断开是「此刻在线」的主依据（见 CanvasEventHub.Subscribe）。
 builder.Services.AddSingleton<PresenceRegistry>();
 builder.Services.AddSingleton<CanvasEventHub>();
+builder.Services.AddSingleton<WebJobAttachmentService>();
+builder.Services.AddHostedService(services => services.GetRequiredService<WebJobAttachmentService>());
 var callbackSecret = configuration["ComfyUI:CallbackSecret"];
 if (!string.IsNullOrWhiteSpace(callbackSecret))
     builder.Services.AddSingleton(_ => new HmacCallbackVerifier(new CallbackSignatureOptions { Secret = Convert.FromBase64String(callbackSecret) }));
@@ -91,7 +94,9 @@ var canvasDistPath = string.IsNullOrWhiteSpace(configuredCanvasDist)
 // 后面的写入判断靠它。
 WebAccessGuard.Map(app, users);
 AuthApi.Map(app, users, userDatabasePath);
+WebProjectApi.Map(app);
 WebSceneApi.Map(app);
+WebEntityApi.Map(app);
 // 编辑锁紧挨着场景接口注册：它按 WebCanvasMode 解出同一张画布，把锁文件放到画布旁边。
 EditLeaseApi.Map(app);
 // 整理布局用的是桌面端那份泳道引擎（Desktop.Shared），所以两端对同一张画布排出来的结果一致。
@@ -103,8 +108,9 @@ PresenceApi.Map(app, users);
 
 // 整画布写入（PUT /api/web/canvas）：桌面端把保存交给服务端，锁与修订都由服务端仲裁。
 WebCanvasApi.Map(app);
-WebSkillJobApi.Map(app);
+var invokeWebSkill = WebSkillJobApi.Map(app);
 WebSettingsApi.Map(app);
+WebChatApi.Map(app, invokeWebSkill);
 if (Directory.Exists(canvasDistPath))
     app.UseStaticFiles(new StaticFileOptions { FileProvider = new PhysicalFileProvider(canvasDistPath) });
 app.MapGet("/", () => Results.File(Path.Combine(canvasDistPath, "index.html"), "text/html"));

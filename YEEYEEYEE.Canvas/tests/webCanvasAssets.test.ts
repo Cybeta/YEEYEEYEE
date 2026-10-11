@@ -51,6 +51,19 @@ describe('WebCanvas assets from project entities.json', () => {
     expect(list[2]).toMatchObject({ kind: 'Other', name: '未命名产物' })
   })
 
+  it('retains entity editing and version metadata without exposing media references', () => {
+    const mapped = mapAssets({ entities: [{ id: 'e', name: '角色', core: '核心', aliases: '别名', variants: [{
+      id: 'v', description: '描述', currentVersion: 2, hasUncommittedChanges: true,
+      attachments: [{ id: 'a', name: '媒体', kind: 'Image', reference: 'private-path' }],
+      versions: [{ id: 'history', number: 2, description: '历史描述', note: '备注' }]
+    }] }] }).entities[0]
+    expect(mapped).toMatchObject({ core: '核心', aliases: '别名', variants: [{
+      description: '描述', currentVersion: 2, hasUncommittedChanges: true,
+      versions: [{ description: '历史描述', note: '备注' }]
+    }] })
+    expect(mapped.variants?.[0].attachments?.[0]).not.toHaveProperty('reference')
+  })
+
   it('treats a missing attachments field as none (most nodes have no products)', () => {
     expect(recordAttachments({ recordId: 'node', recordType: 'Shot', record: {} })).toEqual([])
     expect(recordAttachments({ recordId: 'node', recordType: 'Shot', record: { attachments: null } })).toEqual([])

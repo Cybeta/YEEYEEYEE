@@ -110,7 +110,7 @@ internal static class AgentOnboardingDialog
             FontSize = 12,
             Background = Brush("DfSurface2"),
             Foreground = Brush("DfInk"),
-            Watermark = "粘贴 API 密钥（留空表示不修改已保存的那把）"
+            PlaceholderText = "粘贴 API 密钥（留空表示不修改已保存的那把）"
         };
         var keyHint = Note(string.Empty);
         var test = Secondary("测试连接");

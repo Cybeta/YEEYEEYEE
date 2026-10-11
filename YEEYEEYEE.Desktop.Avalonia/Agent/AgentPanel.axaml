@@ -78,7 +78,7 @@
                   BorderThickness="1" CornerRadius="10" Padding="10,8">
             <Grid RowDefinitions="Auto,Auto">
               <TextBox x:Name="InputBox" Classes="inlineInput"
-                       Watermark="描述你要做什么，例如「按剧情自动建立第一章节点」"
+                       PlaceholderText="描述你要做什么，例如「按剧情自动建立第一章节点」"
                        AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="120" FontSize="12" />
               <Grid Grid.Row="1" ColumnDefinitions="Auto,Auto,*,Auto" Margin="0,6,0,0">
                 <Button Classes="miniButton" Content="＋ 附件" ToolTip.Tip="把图片或文本文件带进对话"

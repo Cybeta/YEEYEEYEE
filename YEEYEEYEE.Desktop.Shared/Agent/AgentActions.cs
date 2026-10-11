@@ -16,6 +16,7 @@ public sealed class AgentAction
     /// create_work_item / update_work_item / delete_work_item。
     /// </summary>
     public string Kind { get; set; } = string.Empty;
+    public IReadOnlyList<string> UnsupportedSkillFields { get; set; } = Array.Empty<string>();
 
     /// <summary>目标：节点或实体的 id 或标题；修改与删除必填。推荐用 id（完整 Guid 或 8 位短 id 前缀）——同名对象多时 id 最稳。连线的终点节点也用它。</summary>
     public string Target { get; set; } = string.Empty;
@@ -188,6 +189,7 @@ public static class AgentActionParser
             parsed.Add(new AgentAction
             {
                 Kind = kind.Trim(),
+                UnsupportedSkillFields = kind.Trim() == "invoke_skill" ? item.EnumerateObject().Where(p => p.Name is not ("kind" or "target" or "content" or "reason")).Select(p => p.Name).ToArray() : Array.Empty<string>(),
                 Target = Read(item, "target"),
                 Source = Read(item, "source"),
                 Title = Read(item, "title"),

@@ -87,7 +87,7 @@ internal sealed class SettingsApiImportDialog
         FontSize = 12,
         Background = Brush("DfSurface2"),
         Foreground = Brush("DfInk"),
-        Watermark = "https://服务商文档地址……或者 http://127.0.0.1:8188 这样的 ComfyUI 地址"
+        PlaceholderText = "https://服务商文档地址……或者 http://127.0.0.1:8188 这样的 ComfyUI 地址"
     };
     private readonly Button fetchButton = Secondary("读取网页");
     private readonly TextBox pasteBox = new()
@@ -98,7 +98,7 @@ internal sealed class SettingsApiImportDialog
         AcceptsReturn = true,
         TextWrapping = TextWrapping.Wrap,
         Height = 92,
-        Watermark = "例如：\nPOST /v1/images/generations\nmodel: flux-1-dev\n可填 1k / 2k 两种画幅\nAuthorization: Bearer sk-xxxxxxxx"
+        PlaceholderText = "例如：\nPOST /v1/images/generations\nmodel: flux-1-dev\n可填 1k / 2k 两种画幅\nAuthorization: Bearer sk-xxxxxxxx"
     };
     private readonly Button analyzeButton = Secondary("分析这段文字");
     private readonly Button repairButton = Secondary("让大模型分析");
@@ -120,7 +120,7 @@ internal sealed class SettingsApiImportDialog
         PasswordChar = '●',
         Background = Brush("DfSurface2"),
         Foreground = Brush("DfInk"),
-        Watermark = "粘贴服务商给的 API Key；留空表示沿用已保存的密钥"
+        PlaceholderText = "粘贴服务商给的 API Key；留空表示沿用已保存的密钥"
     };
     private readonly TextBlock keyHint = Note(string.Empty);
     private readonly Button saveKeyButton = Secondary("保存密钥");
@@ -592,7 +592,7 @@ internal sealed class SettingsApiImportDialog
         var draft = ProviderImporter.Inspect(lastContent);
         // 正文可能一个字都没有（地址是一台 ComfyUI 的首页，它不是「文档页」，抓不到是正常的）。
         // 那时只有地址可用——地址一样能判类型，判不出来还能去问它一句。
-        if (draft.BaseUrl.Length == 0 && urlBox.Text.Trim().Length > 0)
+        if (draft.BaseUrl.Length == 0 && !string.IsNullOrWhiteSpace(urlBox.Text))
             draft = ProviderImporter.Inspect(urlBox.Text.Trim());
         if (draft.Kind != ProviderKind.ComfyUi && draft.BaseUrl.Length > 0)
         {
@@ -608,7 +608,7 @@ internal sealed class SettingsApiImportDialog
         {
             ShowComfyUi(draft);
             // 这条分支不产出接口报告（没有要解析的接口清单）；返回一份空报告，调用方只看成功与否。
-            return ApiDocAnalyzer.Analyze(null, null);
+            return ApiDocAnalyzer.Analyze(string.Empty, string.Empty);
         }
 
         comfyDraft = null;
@@ -620,7 +620,7 @@ internal sealed class SettingsApiImportDialog
         // 会让人以为非点它不可。
         forceComfyButton.IsVisible = draft.Kind == ProviderKind.Unknown && draft.BaseUrl.Length > 0;
 
-        var report = ApiDocAnalyzer.Analyze(content, sourceUrl ?? urlBox.Text.Trim());
+        var report = ApiDocAnalyzer.Analyze(content, sourceUrl ?? urlBox.Text?.Trim() ?? string.Empty);
         Analyze(report);
         return report;
     }
@@ -1420,7 +1420,7 @@ internal sealed class SettingsApiImportDialog
         probing = true;
         rebuildButton.IsEnabled = false;
         var previous = "正在探测站点的池子清单…";
-        if (statusText.Text.Length == 0) SetStatus(previous);
+        if (string.IsNullOrEmpty(statusText.Text)) SetStatus(previous);
         else AppendStatus(previous);
 
         try
@@ -1545,7 +1545,7 @@ internal sealed class SettingsApiImportDialog
             return ApiDocRepairResult.Failed("没有接入大模型。");
         }
 
-        var source = lastReport?.SourceUrl ?? urlBox.Text.Trim();
+        var source = lastReport?.SourceUrl ?? urlBox.Text?.Trim() ?? string.Empty;
         SetStatus("正在请大模型整理这份文档（只做整理，不会替你编内容）…");
         repairButton.IsEnabled = false;
         try
@@ -1658,7 +1658,12 @@ internal sealed class SettingsApiImportDialog
 
         // 识别完**就地**要密钥。上一轮用户的反馈正是「key 放哪里，设置里没看到」——
         // 因为唯一入口藏在跟站点看不出关系的字段里。这里问一次，并明确告诉他以后去哪儿改。
-        var typed = await PromptAsync(window, "给这一家填密钥",
+        if (window is not { } owner)
+        {
+            SetStatus("导入窗口已关闭，未登记站点。");
+            return;
+        }
+        var typed = await PromptAsync(owner, "给这一家填密钥",
             $"已识别站点「{site.Label}」：生图 {site.ImagePools.Count} 个池子、视频 {site.VideoPools.Count} 个。"
             + Environment.NewLine + "粘贴这一家的 API Key（加密落盘，界面不回显）。"
             + Environment.NewLine + "留空也行 —— 之后随时可以在「设置 → 技能管理 → 站点与池子」里补。",
@@ -1699,7 +1704,7 @@ internal sealed class SettingsApiImportDialog
             return false;
         }
 
-        var applied = ApplyConfiguredProviders(keyBox.Text.Trim());
+        var applied = ApplyConfiguredProviders(keyBox.Text?.Trim() ?? string.Empty);
         if (applied.Count == 0)
         {
             // 没变化也是成功：用户可能只是点了一次确认。

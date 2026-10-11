@@ -329,6 +329,17 @@ public sealed record CanvasSaveOutcome(
 /// </summary>
 public static class CanvasSaveService
 {
+    private static FileStream AcquireLease(string path)
+    {
+        var deadline = Environment.TickCount64 + 2000;
+        while (true)
+        {
+            try { return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException ex) when ((ex.HResult & 0xffff) is 32 or 33 && Environment.TickCount64 < deadline)
+            { Thread.Sleep(10); }
+        }
+    }
+
     public static CanvasSaveOutcome Save(RecentCanvasState state, string path, byte[]? expectedBytes = null, Func<ProjectEntityFile?>? validateUnderLease = null)
     {
         ArgumentNullException.ThrowIfNull(state);
@@ -337,7 +348,12 @@ public static class CanvasSaveService
         // lease, before backup or replacement, not merely in the HTTP adapter.
         var fullPath = Path.GetFullPath(path);
         System.IO.Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        using var lease = new FileStream(fullPath + ".web.lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var parentDirectory = Path.GetDirectoryName(fullPath)!;
+        var projectRoot = File.Exists(Path.Combine(parentDirectory, "project.json"))
+            ? parentDirectory : Path.GetDirectoryName(parentDirectory);
+        using var referenceLease = projectRoot is not null && File.Exists(Path.Combine(projectRoot, "project.json"))
+            ? AcquireLease(Path.Combine(projectRoot, ".references.lock")) : null;
+        using var lease = AcquireLease(fullPath + ".web.lock");
         if (expectedBytes is not null && (!File.Exists(path) ||
             !expectedBytes.AsSpan().SequenceEqual(File.ReadAllBytes(path))))
             throw new CanvasSaveAbortedException("画布已被其他进程修改，拒绝覆盖保存。请重新加载。");

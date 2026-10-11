@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Drawing;
 using System.Net;
 using System.Net.Http;
@@ -188,6 +188,9 @@ var tests = new (string Name, Action Run)[]
     ("导入：变体 ID 被占用时不合并实体", ImportMergeRejectsVariantIdClash),
     ("真实入口冒烟：打开→保存重开→复制→重复导入", RealEntrySmokeOpenSaveCopyImport),
     ("返工 R5：空 ID 旧来源的导入身份稳定", ReworkEmptyIdSourceImportIdentityIsStable),
+    ("MP4探针：版本与未知时长边界", Mp4ProbeDurationVersions),
+    ("MP4拼接：同步首样本与跨段同步表", Mp4ConcatSyncBoundaries),
+    ("配置：显式null Profiles可加载", ProviderNullProfilesLoad),
     ("成片拼接：视频一帧不丢、音频每段丢一个预听样本，样本字节原样搬", Mp4ConcatAlignsAudioHeadAndKeepsVideoIntact),
     ("成片拼接：只差码率提示（btrt / esds）也要拼得上，别把提示值当参数不一致", Mp4ConcatIgnoresBitrateHints),
     ("成片拼接：轨道/时基/编码参数不一致就拒绝，并说清哪一段哪一项", Mp4ConcatRefusesMismatch),
@@ -563,7 +566,7 @@ static void PrecheckMissingEndpoint()
 			}
 		}
 	};
-	string text = AgentActionExecutor.Precheck(new AgentAction
+	string? text = AgentActionExecutor.Precheck(new AgentAction
 	{
 		Kind = "create_edge",
 		Source = "不存在的节点",
@@ -603,10 +606,10 @@ static void BatchPrecheckSeesEarlierNodes()
 			Target = "分镜 A"
 		}
 	};
-	string text = AgentActionExecutor.Precheck(array3[1], workflowCanvasState, null);
+	string? text = AgentActionExecutor.Precheck(array3[1], workflowCanvasState, null);
 	Expect(text?.StartsWith("找不到终点节点") ?? false, "逐条预检本来就该误报（记录旧行为），实际：" + text);
-	IReadOnlyList<string> readOnlyList = AgentActionExecutor.PrecheckBatch(array3, workflowCanvasState, null);
-	Expect(readOnlyList.Count == 2 && readOnlyList.All((string hint) => hint == null), "整批预检不应误报，实际：" + string.Join(" / ", readOnlyList.Select((string hint) => hint ?? "无")));
+	IReadOnlyList<string?> readOnlyList = AgentActionExecutor.PrecheckBatch(array3, workflowCanvasState, null);
+	Expect(readOnlyList.Count == 2 && readOnlyList.All(hint => hint == null), "整批预检不应误报，实际：" + string.Join(" / ", readOnlyList.Select(hint => hint ?? "无")));
 	Expect(workflowCanvasState.Nodes.Count == 1, $"整批预检改动了真实画布：{workflowCanvasState.Nodes.Count} 个节点");
 	WorkflowCanvasState canvas = new WorkflowCanvasState
 	{
@@ -619,7 +622,7 @@ static void BatchPrecheckSeesEarlierNodes()
 			}
 		}
 	};
-	IReadOnlyList<string> readOnlyList2 = AgentActionExecutor.PrecheckBatch(new AgentAction[1]
+	IReadOnlyList<string?> readOnlyList2 = AgentActionExecutor.PrecheckBatch(new AgentAction[1]
 	{
 		new AgentAction
 		{
@@ -773,7 +776,7 @@ static void ProductVersionLedgerListsOnlyFilmsOldestFirst()
 /// </summary>
 static void SolutionCoversEveryProject()
 {
-    var directory = new DirectoryInfo(AppContext.BaseDirectory);
+    var directory = new DirectoryInfo(Environment.GetEnvironmentVariable("DREAM_TEST_REPO_ROOT") ?? AppContext.BaseDirectory);
     while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "YEEYEEYEE.slnx")))
         directory = directory.Parent;
     Expect(directory is not null, "找不到仓库根目录（YEEYEEYEE.slnx）");
@@ -817,7 +820,7 @@ static void SolutionCoversEveryProject()
 /// </summary>
 static void ProviderAvatarPromptsMatchTheRecordedBatch()
 {
-    var directory = new DirectoryInfo(AppContext.BaseDirectory);
+    var directory = new DirectoryInfo(Environment.GetEnvironmentVariable("DREAM_TEST_REPO_ROOT") ?? AppContext.BaseDirectory);
     while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "YEEYEEYEE.slnx")))
         directory = directory.Parent;
     Expect(directory is not null, "找不到仓库根目录（YEEYEEYEE.slnx）");
@@ -1705,6 +1708,12 @@ static void ConfigFileStoresCiphertext()
     try
     {
         var config = AiProviderSettings.Load();
+        // Legacy JSON can explicitly contain a null profile collection.
+        var configJson = JsonSerializer.SerializeToNode(config)
+            ?? throw new InvalidOperationException("配置应能序列化");
+        configJson["Profiles"] = null;
+        config = configJson.Deserialize<AiProviderConfig>()
+            ?? throw new InvalidOperationException("配置应能反序列化");
         config.Endpoint = "https://api.example.com/v1";
         config.Model = "test-model";
         config.ApiKey = key;
@@ -2593,7 +2602,7 @@ static void VideoAssetPreflightVersions()
     Expect(GenerationAudit.CheckVideoAssets(canvas, shot, a => a.Reference).CanSubmit(), "明确历史保留允许有效旧版");
 }
 
-static void Expect(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
+static void Expect([System.Diagnostics.CodeAnalysis.DoesNotReturnIf(false)] bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
 
 /// <summary>这段调用该抛 ArgumentOutOfRangeException 吗。用来钉「越界必须报错，不能静默夹到边界」。</summary>
 static bool Throws(Action action)
@@ -4730,7 +4739,7 @@ static void ReworkBackupFailureAbortsSave()
 	};
 	CanvasFileWriter.Write(path, v1);
 	byte[] array3 = File.ReadAllBytes(path);
-	string text = CanvasBackup.TryBackup(path, out string _);
+	string? text = CanvasBackup.TryBackup(path, out string? _);
 	Expect(text != null, "应能创建备份");
 	string externalBackup = Path.Combine(isolatedStores.Root, "external-backup.json");
 	File.Copy(text, externalBackup);
@@ -5420,6 +5429,27 @@ static void SyncCanvasToWorkTreeCreatesAnchorsByContext()
 /// <summary>工作树 → 画布：显示文本自动同步，标题/悬空锚点需要人工确认。</summary>
 static void SyncWorkTreeToCanvasRespectsConfirmation()
 {
+    // 悬空锚点不能借父链静默重绑，也不能在同一批先重绑再清空。
+    var brokenCanvas = new WorkflowCanvasState();
+    var parent = new WorkflowNode { Title = "父章节", Category = NodeCategory.Chapter };
+    var broken = new WorkflowNode { Title = "旧镜头", ParentNodeId = parent.Id,
+        WorkTreeItemId = Guid.NewGuid(), Chapter = "旧章节" };
+    brokenCanvas.Nodes.AddRange([parent, broken]);
+    var both = CanvasWorkTreeSync.Plan(brokenCanvas);
+    Expect(!both.Changes.Any(c => c.Kind == SyncChangeKind.LinkNodeAnchor && c.ObjectId == broken.Id.ToString()),
+        "悬空锚点必须先显式解除，不能被父链覆盖");
+    var untouched = CanvasWorkTreeSync.Apply(brokenCanvas, both);
+    Expect(untouched.Canvas.Nodes.Single(n => n.Id == broken.Id).WorkTreeItemId == broken.WorkTreeItemId,
+        "未确认不得替换悬空锚点");
+    var detached = CanvasWorkTreeSync.Apply(brokenCanvas, both, true);
+    Expect(detached.Canvas.Nodes.Single(n => n.Id == broken.Id).Chapter == "旧章节",
+        "解除悬空锚点必须保留原显示文本");
+    var brokenChapter = new WorkflowNode { Title = "孤立章节", Category = NodeCategory.Chapter,
+        WorkTreeItemId = Guid.NewGuid() };
+    brokenCanvas.Nodes.Add(brokenChapter);
+    Expect(!CanvasWorkTreeSync.Plan(brokenCanvas).Changes.Any(c =>
+        c.Kind == SyncChangeKind.LinkNodeAnchor && c.ObjectId == brokenChapter.Id.ToString()),
+        "章节节点的悬空锚点也不能自动重建");
     var (canvas, chapter1, _, shot1, _) = ChapterFixture();
     var chapterNode = new WorkflowNode { Title = "旧标题", Category = NodeCategory.Chapter, WorkTreeItemId = chapter1.Id };
     var dangling = new WorkflowNode { Title = "悬空锚点", WorkTreeItemId = Guid.NewGuid(), Chapter = "第7章" };
@@ -6027,7 +6057,7 @@ static void ChapterProjectionCarriesStableIds()
 	workflowCanvasState.Nodes.AddRange(new WorkflowNode[3] { workflowNode, workflowNode2, orphan });
 	string json = JsonSerializer.Serialize(NodeProjection.ProjectRecords(workflowCanvasState.Nodes, workflowCanvasState));
 	using JsonDocument jsonDocument = JsonDocument.Parse(json);
-	Dictionary<string, string> dictionary = new Dictionary<string, string>(StringComparer.Ordinal);
+	Dictionary<string, string?> dictionary = new Dictionary<string, string?>(StringComparer.Ordinal);
 	Dictionary<string, int?> dictionary2 = new Dictionary<string, int?>(StringComparer.Ordinal);
 	int num = 0;
 	foreach (JsonElement item11 in jsonDocument.RootElement.EnumerateArray())
@@ -7537,7 +7567,7 @@ static void AgentBatchLedgerNeedsRecovery()
 static void ApiDocRepairRespectsInterfaceAssociation()
 {
 	ApiDocRepairResult apiDocRepairResult = ApiDocRepair.FromModelJson("{\"ops\":[\n  {\"capability\":\"TextToImage\",\"method\":\"POST\",\"path\":\"/v1/images/generations\",\"models\":[\"flux-1-dev\",\"flux-pro\"],\"sizes\":[\"1k\",\"4k\"]},\n  {\"capability\":\"TextToImage\",\"method\":\"POST\",\"path\":\"/v1/hd/generations\",\"models\":[\"flux-pro\"],\"sizes\":[\"4k\"]}],\n \"models\":[]}", "https://api.example.com/docs", "POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k\n\nPOST /v1/hd/generations\nmodel: flux-pro\n尺寸：4k");
-	Expect((object)apiDocRepairResult.Report != null, "应解析成功：" + apiDocRepairResult.Error);
+	Expect(apiDocRepairResult.Report != null, "应解析成功：" + apiDocRepairResult.Error);
 	ApiDocReport report = apiDocRepairResult.Report;
 	ApiOpCandidate apiOpCandidate = report.Ops.Single((ApiOpCandidate op) => op.Path == "/v1/images/generations");
 	Expect(apiOpCandidate.Models.Count == 1 && apiOpCandidate.Models[0] == "flux-1-dev", "第一接口不该拿到别的段落的模型：" + string.Join("、", apiOpCandidate.Models));
@@ -7864,16 +7894,16 @@ static void ApiSkillWriteRespectsFullOwnership()
 static void ApiDocModelTableSizesNeedAssociation()
 {
 	ApiDocRepairResult apiDocRepairResult = ApiDocRepair.FromModelJson("{\"ops\":[\n  {\"capability\":\"TextToImage\",\"method\":\"POST\",\"path\":\"/v1/images/generations\",\"models\":[\"flux-1-dev\"],\"sizes\":[\"1k\"]},\n  {\"capability\":\"TextToImage\",\"method\":\"POST\",\"path\":\"/v1/hd/generations\",\"models\":[\"flux-pro\"],\"sizes\":[\"4k\"]}],\n \"models\":[\n  {\"name\":\"flux-1-dev\",\"kind\":\"Image\",\"sizes\":[\"1k\",\"4k\"]},\n  {\"name\":\"flux-pro\",\"kind\":\"Image\",\"sizes\":[\"4k\"]}]}", "https://v6.example.com/docs", "POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k\n\nPOST /v1/hd/generations\nmodel: flux-pro\n尺寸：4k");
-	Expect(apiDocRepairResult.Ok, "应解析成功：" + apiDocRepairResult.Error);
+	Expect(apiDocRepairResult.Ok && apiDocRepairResult.Report != null, "应解析成功：" + apiDocRepairResult.Error);
 	ApiDocReport report = apiDocRepairResult.Report;
 	ApiModelEntry apiModelEntry = report.ModelTable.Single((ApiModelEntry entry) => entry.Name == "flux-1-dev");
 	Expect(apiModelEntry.Sizes.Count == 1 && apiModelEntry.Sizes[0] == "1k", "跨接口的 4K 不得挂到 flux-1-dev 上：" + string.Join("、", apiModelEntry.Sizes));
 	Expect(report.PendingItems.Any((string item) => item.Contains("4k")), "跨接口档位应列为待确认：" + string.Join("；", report.PendingItems));
 	Expect(report.ModelTable.Single((ApiModelEntry entry) => entry.Name == "flux-pro").Sizes.Contains("4k"), "flux-pro 自己的 4K 应保留");
-	PlannedApiSkill plannedApiSkill = ApiSkillFactory.Build(report).ImageSkills.FirstOrDefault((PlannedApiSkill skill) => skill.IsPool && skill.Definition.Steps[0].Model == "flux-1-dev" && skill.Definition.Steps[0].Width == 4096);
-	Expect((object)plannedApiSkill == null, "不得造出原文并不支持的 4K 池子");
+	PlannedApiSkill? plannedApiSkill = ApiSkillFactory.Build(report).ImageSkills.FirstOrDefault((PlannedApiSkill skill) => skill.IsPool && skill.Definition.Steps[0].Model == "flux-1-dev" && skill.Definition.Steps[0].Width == 4096);
+	Expect(plannedApiSkill == null, "不得造出原文并不支持的 4K 池子");
 	ApiDocRepairResult apiDocRepairResult2 = ApiDocRepair.FromModelJson("{\"ops\":[{\"capability\":\"TextToImage\",\"method\":\"POST\",\"path\":\"/v1/images/generations\",\"models\":[\"flux-1-dev\"],\"sizes\":[\"1k\"]}],\n \"models\":[{\"name\":\"flux-1-dev\",\"kind\":\"Image\",\"sizes\":[\"1k\",\"2k\"]}]}", "https://v6.example.com/docs", "POST /v1/images/generations\nmodel: flux-1-dev\n尺寸：1k 2k");
-	Expect(apiDocRepairResult2.Ok, "应解析成功：" + apiDocRepairResult2.Error);
+	Expect(apiDocRepairResult2.Ok && apiDocRepairResult2.Report != null, "应解析成功：" + apiDocRepairResult2.Error);
 	ApiModelEntry apiModelEntry2 = apiDocRepairResult2.Report.ModelTable.Single();
 	Expect(!apiModelEntry2.Sizes.Contains("2k"), "接口只声明 1K 时不得保留 2K：" + string.Join("、", apiModelEntry2.Sizes));
 	Expect(apiDocRepairResult2.Report.PendingItems.Any((string item) => item.Contains("接口")), "收敛应如实列入待确认：" + string.Join("；", apiDocRepairResult2.Report.PendingItems));
@@ -9070,8 +9100,8 @@ static void AesGcmKeyFileRoundTrip()
 {
 	string text = Path.Combine(Path.GetTempPath(), "df-secret-aesgcm-" + Guid.NewGuid().ToString("N").Substring(0, 8));
 	string text2 = Path.Combine(text, "ai-key.bin");
-	string environmentVariable = Environment.GetEnvironmentVariable("YEEYEEYEE_SECRET_SCHEME");
-	string environmentVariable2 = Environment.GetEnvironmentVariable("YEEYEEYEE_SECRET_KEYFILE");
+	string? environmentVariable = Environment.GetEnvironmentVariable("YEEYEEYEE_SECRET_SCHEME");
+	string? environmentVariable2 = Environment.GetEnvironmentVariable("YEEYEEYEE_SECRET_KEYFILE");
 	try
 	{
 		Directory.CreateDirectory(text);
@@ -9143,8 +9173,8 @@ static void AgentEdgeBatchSurvivesModelOrdering()
 	WorkflowNode first = workflowCanvasState.Nodes.First((WorkflowNode node) => node.Title == "第1章 老巷修书人");
 	WorkflowNode second = workflowCanvasState.Nodes.First((WorkflowNode node) => node.Title == "第2章 散成一摞的童话书");
 	Expect(workflowCanvasState.Edges.Any((WorkflowEdge edge) => edge.SourceNodeId == first.Id && edge.TargetNodeId == second.Id), "章节链的方向要按 source→target 连上");
-	IReadOnlyList<string> source = AgentActionExecutor.PrecheckBatch(actions, new WorkflowCanvasState(), null);
-	Expect(source.All((string hint) => string.IsNullOrWhiteSpace(hint) || !hint.Contains("找不到")), "乱序批次不该被预检报成找不到端点，实际：" + string.Join(" / ", source.Select((string hint) => hint ?? "无")));
+	IReadOnlyList<string?> source = AgentActionExecutor.PrecheckBatch(actions, new WorkflowCanvasState(), null);
+	Expect(source.All((string? hint) => string.IsNullOrWhiteSpace(hint) || !hint.Contains("找不到")), "乱序批次不该被预检报成找不到端点，实际：" + string.Join(" / ", source.Select((string? hint) => hint ?? "无")));
 	CanvasPreview canvasPreview = CanvasPreviewBuilder.Build(actions, new WorkflowCanvasState());
 	Expect(canvasPreview.AddedNodes.Count == 3 && canvasPreview.AddedEdges.Count == 2, $"虚影试算要看到 3 个新节点与 2 条新连线，实际 {canvasPreview.AddedNodes.Count} / {canvasPreview.AddedEdges.Count}");
 	WorkflowCanvasState workflowCanvasState2 = new WorkflowCanvasState
@@ -9196,7 +9226,7 @@ static void AgentEdgeBatchSurvivesModelOrdering()
 			}
 		}
 	};
-	string text = AgentActionExecutor.Precheck(new AgentAction
+	string? text = AgentActionExecutor.Precheck(new AgentAction
 	{
 		Kind = "create_edge",
 		Source = "林晚",
@@ -9241,14 +9271,14 @@ static void AgentEdgeBatchSurvivesModelOrdering()
 			}
 		}
 	};
-	string text2 = AgentActionExecutor.Precheck(new AgentAction
+	string? text2 = AgentActionExecutor.Precheck(new AgentAction
 	{
 		Kind = "create_edge",
 		Source = "第1章雨夜",
 		Target = "第1章雨夜"
 	}, canvas3, null);
 	Expect(text2?.Contains("找不到起点节点") ?? false, "两个候选相近时不许猜，实际：" + text2);
-	string text3 = AgentActionExecutor.Precheck(new AgentAction
+	string? text3 = AgentActionExecutor.Precheck(new AgentAction
 	{
 		Kind = "create_edge",
 		Source = "第1章 老巷修书人（上）",
@@ -9343,12 +9373,12 @@ static void ApiDocFamilyWordInProseIsNotAModel()
 {
 	string content = "# 接口文档\nBase URL https://video.example.com/v1\n\n### 常用端点\n- POST/v1/images/generations 文生图\n- POST/v1/videos 建视频任务\n\n## 视频参数 /v1/videos · 异步\n| 参数 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n| model | string | 必填 | 模型名(别名优先),见上表 |\n| input_reference | file | 可选 | 参考图,runway 图生视频必填 1 张 |\n\n## 确认可用模型\n| model | 类型 | 能力 |\n|---|---|---|\n| seedance-2.0(池7) | 视频 | 720p 参考图 |";
 	ApiDocReport apiDocReport = ApiDocAnalyzer.Analyze(content, "https://video.example.com/about");
-	ApiOpCandidate apiOpCandidate = apiDocReport.VideoOps.FirstOrDefault();
-	Expect((object)apiOpCandidate != null, "应解析出一条出视频接口");
+	ApiOpCandidate? apiOpCandidate = apiDocReport.VideoOps.FirstOrDefault();
+	Expect(apiOpCandidate != null, "应解析出一条出视频接口");
 	Expect(!apiOpCandidate.Models.Any((string model) => model.Contains("runway", StringComparison.OrdinalIgnoreCase)), "中文说明里的光杆词 runway 不得被当成模型名：" + string.Join("、", apiOpCandidate.Models));
 	ApiSkillPlan apiSkillPlan = ApiSkillFactory.Build(apiDocReport);
-	PlannedApiSkill plannedApiSkill = apiSkillPlan.Skills.FirstOrDefault((PlannedApiSkill skill) => skill.IsPool && skill.Name.StartsWith("生视频池", StringComparison.Ordinal));
-	Expect((object)plannedApiSkill != null, "应建出出视频池子：" + string.Join("、", apiSkillPlan.Skills.Select((PlannedApiSkill skill) => skill.Name)));
+	PlannedApiSkill? plannedApiSkill = apiSkillPlan.Skills.FirstOrDefault((PlannedApiSkill skill) => skill.IsPool && skill.Name.StartsWith("生视频池", StringComparison.Ordinal));
+	Expect(plannedApiSkill != null, "应建出出视频池子：" + string.Join("、", apiSkillPlan.Skills.Select((PlannedApiSkill skill) => skill.Name)));
 	Expect(plannedApiSkill.Definition.Steps[0].Model == "seedance-2.0(池7)", "池子要用文档模型表里的模型：" + plannedApiSkill.Definition.Steps[0].Model);
 	ApiDocReport apiDocReport2 = ApiDocAnalyzer.Analyze("Base URL https://x.test/v1\n\nPOST /v1/videos 文生视频\nmodel 可填 kling-2.5\n", "https://x.test/about");
 	Expect(apiDocReport2.VideoOps.Count == 0 || apiDocReport2.VideoOps.Any((ApiOpCandidate op) => op.Models.Any((string model) => model.Contains("kling", StringComparison.OrdinalIgnoreCase))), "带版本号的模型名仍要认出来：" + string.Join("、", apiDocReport2.VideoOps.SelectMany((ApiOpCandidate op) => op.Models)));
@@ -10368,14 +10398,15 @@ static void AttachmentPromptIsStoredAndReadable()
 	{
 		WriteIndented = true
 	});
-	WorkflowCanvasState workflowCanvasState2 = JsonSerializer.Deserialize<WorkflowCanvasState>(json);
+	WorkflowCanvasState? workflowCanvasState2 = JsonSerializer.Deserialize<WorkflowCanvasState>(json);
+	Expect(workflowCanvasState2 != null, "画布应能反序列化");
 	WorkflowAttachment workflowAttachment = workflowCanvasState2.Entities[0].Variants[0].Attachments[0];
 	Expect(workflowAttachment.Prompt.Contains("齐耳短发", StringComparison.Ordinal), "出图用的提示词要随画布存住");
 	Expect(workflowAttachment.NegativePrompt.Contains("多余手指", StringComparison.Ordinal), "负面词也要存住");
 	Expect(SettingPrompt.Prefer(workflowAttachment.Prompt, workflowEntity, workflowEntityVariant) == workflowAttachment.Prompt, "有存下来的提示词就直接用它");
 	Expect(SettingPrompt.Prefer("  ", workflowEntity, workflowEntityVariant) == SettingPrompt.Compose(workflowEntity, workflowEntityVariant), "没存提示词（手放的素材）要落回按设定现拼");
 	Expect(SettingPrompt.Prefer(null, workflowEntity, workflowEntityVariant).Contains("林晚", StringComparison.Ordinal), "空提示词不能填空字符串，要给出能用的那一份");
-	WorkflowCanvasState workflowCanvasState3 = JsonSerializer.Deserialize<WorkflowCanvasState>("{\"Nodes\":[],\"Edges\":[],\"WorkTree\":[],\"Entities\":[{\"Kind\":1,\"Name\":\"林晚\",\"Variants\":[\n{\"Name\":\"常服\",\"Attachments\":[{\"Kind\":0,\"Reference\":\"asset://a.png\",\"Name\":\"a.png\",\"Source\":\"手工放置\"}]}]}]}");
+	WorkflowCanvasState? workflowCanvasState3 = JsonSerializer.Deserialize<WorkflowCanvasState>("{\"Nodes\":[],\"Edges\":[],\"WorkTree\":[],\"Entities\":[{\"Kind\":1,\"Name\":\"林晚\",\"Variants\":[\n{\"Name\":\"常服\",\"Attachments\":[{\"Kind\":0,\"Reference\":\"asset://a.png\",\"Name\":\"a.png\",\"Source\":\"手工放置\"}]}]}]}");
 	Expect(workflowCanvasState3 != null && workflowCanvasState3.Entities[0].Variants[0].Attachments[0].Prompt.Length == 0, "老画布里没有提示词字段，读进来应当是空字符串而不是报错");
 }
 
@@ -10384,10 +10415,10 @@ static void AttachmentPromptIsStoredAndReadable()
 /// </summary>
 static void BuiltInSkillsRespectDisabledList()
 {
-	BuiltInSkill builtInSkill = BuiltInSkills.Resolve("帮我生成角色设定");
-	Expect((object)builtInSkill != null && builtInSkill.Id == "character-generation", "默认应命中角色设定，实际 " + builtInSkill?.Id);
+	BuiltInSkill? builtInSkill = BuiltInSkills.Resolve("帮我生成角色设定");
+	Expect(builtInSkill != null && builtInSkill.Id == "character-generation", "默认应命中角色设定，实际 " + builtInSkill?.Id);
 	string[] disabled = new string[1] { "character-generation" };
-	Expect((object)BuiltInSkills.Resolve("帮我生成角色设定", disabled) == null, "停用后不该再被命中");
+	Expect(BuiltInSkills.Resolve("帮我生成角色设定", disabled) == null, "停用后不该再被命中");
 	Expect(BuiltInSkills.Resolve("帮我生成场景设定", disabled)?.Id == "scene-generation", "只停用一个时其它技能照常命中");
 	string text = BuiltInSkills.DescribeForAgent(disabled);
 	Expect(!text.Contains("角色设定", StringComparison.Ordinal), "停用的技能不该出现在给 Agent 的清单里：\n" + text);
@@ -10438,19 +10469,19 @@ static void CanvasSearchFindsNodeWorkTreeAndEntity()
 		VariantId = workflowEntity.Variants[0].Id
 	});
 	IReadOnlyList<SearchHit> source = CanvasSearch.Find(workflowCanvasState, "雨夜对峙");
-	SearchHit searchHit = source.FirstOrDefault((SearchHit hit) => hit.Kind == SearchHitKind.Node);
-	Expect((object)searchHit != null && searchHit.NodeId == workflowNode.Id, "按标题能搜到节点并给出定位目标");
+	SearchHit? searchHit = source.FirstOrDefault((SearchHit hit) => hit.Kind == SearchHitKind.Node);
+	Expect(searchHit != null && searchHit.NodeId == workflowNode.Id, "按标题能搜到节点并给出定位目标");
 	Expect(searchHit.Detail.Contains("章节"), "结果要写清节点类型，实际 " + searchHit.Detail);
 	Expect(searchHit.Detail.Contains("已绑工作树"), "绑了工作树的节点要说明这一点，实际 " + searchHit.Detail);
-	SearchHit searchHit2 = CanvasSearch.Find(workflowCanvasState, "陈叔").FirstOrDefault((SearchHit hit) => hit.Kind == SearchHitKind.Node);
-	Expect((object)searchHit2 != null, "按正文也能搜到");
+	SearchHit? searchHit2 = CanvasSearch.Find(workflowCanvasState, "陈叔").FirstOrDefault((SearchHit hit) => hit.Kind == SearchHitKind.Node);
+	Expect(searchHit2 != null, "按正文也能搜到");
 	Expect(searchHit2.Snippet.Contains("陈叔"), "正文命中要给上下文片段，实际 " + searchHit2.Snippet);
-	SearchHit searchHit3 = CanvasSearch.Find(workflowCanvasState, "散页").FirstOrDefault((SearchHit hit) => hit.Kind == SearchHitKind.WorkTreeItem);
-	Expect((object)searchHit3 != null, "工作树条目也能搜到");
+	SearchHit? searchHit3 = CanvasSearch.Find(workflowCanvasState, "散页").FirstOrDefault((SearchHit hit) => hit.Kind == SearchHitKind.WorkTreeItem);
+	Expect(searchHit3 != null, "工作树条目也能搜到");
 	Expect(searchHit3.NodeId == workflowNode.Id, "条目在画布上有节点时给出定位目标");
 	Expect(searchHit3.Detail.Contains("已在画布上"), "条目状态要说清在不在画布上，实际 " + searchHit3.Detail);
-	SearchHit searchHit4 = CanvasSearch.Find(workflowCanvasState, "小晚").FirstOrDefault((SearchHit hit) => hit.Kind == SearchHitKind.Entity);
-	Expect((object)searchHit4 != null, "设定别名也能搜到");
+	SearchHit? searchHit4 = CanvasSearch.Find(workflowCanvasState, "小晚").FirstOrDefault((SearchHit hit) => hit.Kind == SearchHitKind.Entity);
+	Expect(searchHit4 != null, "设定别名也能搜到");
 	Expect(searchHit4.NodeId == workflowNode.Id, "被引用的设定要能定位到引用它的节点");
 	WorkTreeItem item = new WorkTreeItem
 	{
@@ -10458,8 +10489,8 @@ static void CanvasSearchFindsNodeWorkTreeAndEntity()
 		Name = "孤零零的道具条目"
 	};
 	workflowCanvasState.WorkTree.Add(item);
-	SearchHit searchHit5 = CanvasSearch.Find(workflowCanvasState, "孤零零").FirstOrDefault((SearchHit hit) => hit.Kind == SearchHitKind.WorkTreeItem);
-	Expect((object)searchHit5 != null && !searchHit5.NodeId.HasValue, "没放上画布的条目不给定位目标，但要说清未上画布");
+	SearchHit? searchHit5 = CanvasSearch.Find(workflowCanvasState, "孤零零").FirstOrDefault((SearchHit hit) => hit.Kind == SearchHitKind.WorkTreeItem);
+	Expect(searchHit5 != null && !searchHit5.NodeId.HasValue, "没放上画布的条目不给定位目标，但要说清未上画布");
 	Expect(!searchHit5.CanFocus, "没有节点可定位时 CanFocus 为假");
 	Expect(CanvasSearch.Find(workflowCanvasState, "   ").Count == 0, "空关键词不返回结果");
 	Expect(CanvasSearch.Find(workflowCanvasState, "的", 3).Count <= 3, "结果条数要受上限约束");
@@ -11491,7 +11522,7 @@ static void ComfyUiDeclaredFileSlotsBecomeEntries()
 
 static JsonObject ReadOfficialBinderGraph(string name)
 {
-    for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+    for (var directory = new DirectoryInfo(Environment.GetEnvironmentVariable("DREAM_TEST_REPO_ROOT") ?? AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
     {
         var path = Path.Combine(directory.FullName, name);
         if (File.Exists(path)) return JsonNode.Parse(File.ReadAllText(path))!.AsObject();
@@ -12157,7 +12188,7 @@ static void GenerationSkillsSharePromptBaseline()
 static void LegacyProgramRootConfigIsMigrated()
 {
 	string text = Path.Combine(Path.GetTempPath(), "df-confighome-" + Guid.NewGuid().ToString("N").Substring(0, 8));
-	string environmentVariable = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME");
+	string? environmentVariable = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG_HOME");
 	string path = Path.Combine(AppPaths.ProgramRoot, $"migrate-probe-{Guid.NewGuid():N}.json");
 	try
 	{
@@ -12294,8 +12325,8 @@ static void NodeAssistCollectsUpstream()
 	Expect(NodeAssistPlanner.CollectUpstream(workflowCanvasState, workflowNode5).Count == 4, "有环时仍应收 4 条，不能重复也不能卡住");
 	NodeAssistPlan nodeAssistPlan = NodeAssistPlanner.BuildPlan(workflowCanvasState, workflowNode5);
 	Expect(nodeAssistPlan.HasUpstream && nodeAssistPlan.ContextSummary.Contains("上游 4 条"), "摘要要写清上游条数（这一张图里分镜只有连线来源），实际：" + nodeAssistPlan.ContextSummary);
-	NodeAssistSuggestion nodeAssistSuggestion = nodeAssistPlan.Suggestions.FirstOrDefault((NodeAssistSuggestion item) => item.Kind == NodeAssistKind.Image);
-	Expect((object)nodeAssistSuggestion != null, "分镜应当有一条出图建议");
+	NodeAssistSuggestion? nodeAssistSuggestion = nodeAssistPlan.Suggestions.FirstOrDefault((NodeAssistSuggestion item) => item.Kind == NodeAssistKind.Image);
+	Expect(nodeAssistSuggestion != null, "分镜应当有一条出图建议");
 	Expect(nodeAssistSuggestion.CanRun, "有内容又有上游时出图建议不该被挡住：" + nodeAssistSuggestion.Blocked);
 	Expect(nodeAssistSuggestion.Prompt.Contains("角色「角色卡 · 林晚」") && nodeAssistSuggestion.Prompt.Contains("二十五岁，短发，藏青风衣"), "出图提示词要带上游角色设定，实际：" + nodeAssistSuggestion.Prompt);
 	Expect(nodeAssistSuggestion.Prompt.Contains("场景「场景卡 · 雨夜码头」"), "出图提示词要带上游场景设定");
@@ -12474,8 +12505,8 @@ static void NodeAssistMaterialsMergeFourSources()
 	NodeAssistMaterial nodeAssistMaterial = readOnlyList.First((NodeAssistMaterial material) => material.Tier == NodeAssistTier.Upstream);
 	Expect(nodeAssistMaterial.KindLabel == "分镜" && nodeAssistMaterial.Title.Contains("分镜 03"), "上游是那个源头分镜（临时画布按树的父子关系建了连线），实际 " + nodeAssistMaterial.KindLabel + " / " + nodeAssistMaterial.Title);
 	Expect(readOnlyList.Any((NodeAssistMaterial material) => material.Tier == NodeAssistTier.Sibling && material.Title == "老巷"), "同镜：同一个分镜里的场景是角色卡的情境素材");
-	NodeAssistMaterial nodeAssistMaterial2 = readOnlyList.FirstOrDefault((NodeAssistMaterial material) => material.Tier == NodeAssistTier.Chapter);
-	Expect((object)nodeAssistMaterial2 != null && nodeAssistMaterial2.Title == "第1章 老巷修书人", "往上推到本章：靠副本带着的章节锚点，不按章节名猜");
+	NodeAssistMaterial? nodeAssistMaterial2 = readOnlyList.FirstOrDefault((NodeAssistMaterial material) => material.Tier == NodeAssistTier.Chapter);
+	Expect(nodeAssistMaterial2 != null && nodeAssistMaterial2.Title == "第1章 老巷修书人", "往上推到本章：靠副本带着的章节锚点，不按章节名猜");
 	Expect(nodeAssistMaterial2.Content.Contains("雨夜里修书人接到一封信"), "本章的正文也要带出来");
 	Expect(readOnlyList.Select((NodeAssistMaterial material) => material.Tier).ToList().SequenceEqual(new NodeAssistTier[6]
 	{
@@ -12547,7 +12578,7 @@ static void NodeImageBatchKeepsOnlyPicked()
 	Expect(!readOnlyList.Contains(string.Empty), "没出好的格子不该出现在抛弃清单里");
 	IReadOnlyList<string> readOnlyList2 = nodeImageBatch.PathsExcept(2);
 	Expect(readOnlyList2.Count == 1 && readOnlyList2[0] == "C:\\a\\1.png", "换一张采用，抛弃的也要跟着换：" + string.Join("、", readOnlyList2));
-	BatchSlot batchSlot = nodeImageBatch.SlotAt(2);
+	BatchSlot? batchSlot = nodeImageBatch.SlotAt(2);
 	Expect(batchSlot != null && batchSlot.Path == "C:\\a\\3.png", "按序号要能取到那一格");
 	Expect(nodeImageBatch.AllFinishedPaths().Count == 2, "全部不要时两张都要抛弃，实际 " + nodeImageBatch.AllFinishedPaths().Count);
 	nodeImageBatch.SelectedIndices.Add(0);
@@ -12859,8 +12890,8 @@ static void ProductionStagesFilterAndCount()
 	Expect(ProductionStageRules.Matches(ProductionStage.WorkTree, workflowNode3), "绑了工作树条目的节点同时属于工作树阶段");
 	Expect(ProductionStageRules.Matches(ProductionStage.All, workflowNode), "「全部」阶段任何节点都算");
 	Expect(ProductionStageRules.FilterOf(ProductionStage.All) == null, "「全部」不设过滤（null 表示都显示）");
-	Func<WorkflowNode, bool> func = ProductionStageRules.FilterOf(ProductionStage.Storyboard);
-	Expect(func?.Invoke(workflowNode4) ?? false, "分镜过滤要放过分镜节点");
+	Func<WorkflowNode, bool>? func = ProductionStageRules.FilterOf(ProductionStage.Storyboard);
+	Expect(func != null && func(workflowNode4), "分镜过滤要放过分镜节点");
 	Expect(!func(workflowNode), "分镜过滤要挡掉别的节点");
 	IReadOnlyList<StageSummary> readOnlyList = ProductionStageRules.Summarize(workflowCanvasState, ProductionStage.Storyboard);
 	Expect(readOnlyList.Count == ProductionStageRules.Order.Count, "芯片数要与阶段数一致");
@@ -12941,8 +12972,8 @@ static void ProviderCapabilityRuleIsSharedAndHonest()
 	{
 		Expect(ProviderPresetValues.NeedsManualCapabilities(item17), item17.Id + " 没有预置型号，能力值只能由用户填");
 	}
-	ProviderModel defaultModel = ProviderPreset.Moonshot.DefaultModel;
-	Expect((object)defaultModel != null, "Kimi 应有已核实的预置型号");
+	ProviderModel? defaultModel = ProviderPreset.Moonshot.DefaultModel;
+	Expect(defaultModel != null, "Kimi 应有已核实的预置型号");
 	string text = ProviderPresetValues.Resolve(ProviderPreset.Moonshot, defaultModel).DescribeCapabilities();
 	Expect(text.Contains(defaultModel.Id), "能力说明应带上型号名");
 	Expect(text.Contains("支持图片输入"), "Kimi 的型号支持图片输入，说明里要写出来");
@@ -13379,8 +13410,7 @@ static void ReferenceCardsResolveDistinctContent()
 		EntityId = card.EntityId,
 		VariantId = card.VariantId,
 		VariantVersionId = card.VersionId
-	})).ToList();
-	Expect(source.All((ReferenceContent item) => (object)item != null), "两条引用都该解析得出来，实际有解析不出的");
+	} ) ?? throw new InvalidOperationException("两条引用都该解析得出来，实际有解析不出的")).ToList();
 	Expect(source.Select((ReferenceContent item) => item.Description).Distinct(StringComparer.Ordinal).Count() == 2, "不同引用的正文必须各不相同，否则界面上「换一个节点内容却没变」：" + string.Join(" | ", source.Select((ReferenceContent item) => item.Description)));
 	Expect(source.Any((ReferenceContent item) => item.Description.Contains("藏青外套")), "角色那条要带上外观锚点");
 	Expect(source.Any((ReferenceContent item) => item.Description.Contains("午后斜光")), "场景那条要带上光源描述");
@@ -13813,8 +13843,9 @@ static void SettingsProfilesMultiEnableAndSelection()
 		AiProviderConfig aiProviderConfig2 = AiProviderSettings.Load();
 		Expect(aiProviderConfig2.Profiles.Count == 2, "两份都要存住");
 		Expect(AiProviderSettings.EnabledProfiles(aiProviderConfig2).Count == 2, "两份都启用时都该进候选");
-		AiProviderProfile aiProviderProfile2 = AiProviderSettings.ResolveSelected(aiProviderConfig2);
-		Expect(aiProviderProfile2 != null && aiProviderProfile2.Model == "new-model", "选中的应当是第二份，实际 " + aiProviderProfile2?.Model);
+		AiProviderProfile aiProviderProfile2 = AiProviderSettings.ResolveSelected(aiProviderConfig2)
+            ?? throw new InvalidOperationException("选中的应当是第二份，实际 null");
+		Expect(aiProviderProfile2.Model == "new-model", "选中的应当是第二份，实际 " + aiProviderProfile2.Model);
 		Expect(aiProviderConfig2.Model == "new-model" && aiProviderConfig2.ApiKey == "sk-second-0123456789abcdef", "顶层（旧端读的那组字段）要跟着选中项走，密钥也要能读回明文");
 		string text = File.ReadAllText(configEnvironment.ConfigPath);
 		Expect(!text.Contains("sk-first-0123456789abcdef", StringComparison.Ordinal) && !text.Contains("sk-second-0123456789abcdef", StringComparison.Ordinal), "配置文件里不能出现任何一份的明文密钥");
@@ -13822,8 +13853,9 @@ static void SettingsProfilesMultiEnableAndSelection()
 		aiProviderProfile2.Enabled = false;
 		Expect(AiProviderSettings.Save(aiProviderConfig2), "保存应该成功");
 		AiProviderConfig aiProviderConfig3 = AiProviderSettings.Load();
-		AiProviderProfile aiProviderProfile3 = AiProviderSettings.ResolveSelected(aiProviderConfig3);
-		Expect(aiProviderProfile3 != null && aiProviderProfile3.Model == "old-model", "应当自动切到还启用着的那一份，实际 " + aiProviderProfile3?.Model);
+		AiProviderProfile aiProviderProfile3 = AiProviderSettings.ResolveSelected(aiProviderConfig3)
+            ?? throw new InvalidOperationException("应当自动切到还启用着的那一份，实际 null");
+		Expect(aiProviderProfile3.Model == "old-model", "应当自动切到还启用着的那一份，实际 " + aiProviderProfile3.Model);
 		Expect(aiProviderConfig3.SelectedProfileId == aiProviderProfile3.Id, "选中项要被修正到实际生效的那一份");
 		Expect(aiProviderConfig3.Model == "old-model", "顶层也要跟着切过去");
 		foreach (AiProviderProfile profile3 in aiProviderConfig3.Profiles)
@@ -13961,9 +13993,9 @@ static void SiteCatalogAndPoolProbe()
 			}
 		}
 	};
-	SitePoolChoice sitePoolChoice = SiteCatalog.Find(sites, "example", "gpt-image-2.5-sunburst(池6)", "4K");
+	SitePoolChoice? sitePoolChoice = SiteCatalog.Find(sites, "example", "gpt-image-2.5-sunburst(池6)", "4K");
 	int condition;
-	if ((object)sitePoolChoice != null)
+	if (sitePoolChoice != null)
 	{
 		SitePool pool = sitePoolChoice.Pool;
 		if (pool != null)
@@ -13976,12 +14008,12 @@ static void SiteCatalogAndPoolProbe()
 	goto IL_05d0;
 	IL_05d0:
 	Expect((byte)condition != 0, "同站点同模型同档位要能找回来");
-	Expect((object)SiteCatalog.Find(sites, "example", "gpt-image-2.5-sunburst(池6)", "1K") == null, "档位对不上时返回 null，不退到别的档");
-	Expect((object)SiteCatalog.Find(sites, "别家站", "gpt-image-2.5-sunburst(池6)", "2K") == null, "站点已不在时返回 null，不退到别的站");
-	Expect((object)SiteCatalog.Find(sites, "", "", "") == null, "没记过任何池子时返回 null");
-	Expect((object)SiteCatalog.Find(sites, "example", "已经下线的模型", "2K") == null, "模型被清单刷掉时返回 null，不退到同站另一个模型");
+	Expect(SiteCatalog.Find(sites, "example", "gpt-image-2.5-sunburst(池6)", "1K") == null, "档位对不上时返回 null，不退到别的档");
+	Expect(SiteCatalog.Find(sites, "别家站", "gpt-image-2.5-sunburst(池6)", "2K") == null, "站点已不在时返回 null，不退到别的站");
+	Expect(SiteCatalog.Find(sites, "", "", "") == null, "没记过任何池子时返回 null");
+	Expect(SiteCatalog.Find(sites, "example", "已经下线的模型", "2K") == null, "模型被清单刷掉时返回 null，不退到同站另一个模型");
 	string text = Path.Combine(Path.GetTempPath(), "df-sites-" + Guid.NewGuid().ToString("N").Substring(0, 8));
-	string environmentVariable = Environment.GetEnvironmentVariable("YEEYEEYEE_SKILL_DIR");
+	string? environmentVariable = Environment.GetEnvironmentVariable("YEEYEEYEE_SKILL_DIR");
 	try
 	{
 		Environment.SetEnvironmentVariable("YEEYEEYEE_SKILL_DIR", text);
@@ -14042,7 +14074,7 @@ static void SiteCatalogAndPoolProbe()
 static void SkillFileToggleAndDelete()
 {
 	string text = Path.Combine(Path.GetTempPath(), "df-skill-toggle-" + Guid.NewGuid().ToString("N").Substring(0, 8));
-	string environmentVariable = Environment.GetEnvironmentVariable("YEEYEEYEE_SKILL_DIR");
+	string? environmentVariable = Environment.GetEnvironmentVariable("YEEYEEYEE_SKILL_DIR");
 	try
 	{
 		Directory.CreateDirectory(text);
@@ -15044,7 +15076,7 @@ static byte[] TinyVisualEntry(ushort width, ushort height, string type, params b
 /// </summary>
 static byte[] TinyTrack(
 	string handler, uint timescale, uint[] deltas, int cttsOffset, bool hasCtts,
-	byte[] entry, long elstMediaTime, int sampleSize, int fillBase, long mdatStart, bool useCo64)
+	byte[] entry, long elstMediaTime, int sampleSize, int fillBase, long mdatStart, bool useCo64, int[]? syncSamples = null)
 {
 	var duration = (ulong)deltas.Sum(delta => (long)delta);
 
@@ -15074,6 +15106,8 @@ static byte[] TinyTrack(
 		TinyBox("stsd", TinyJoin(BigEndian32(0), BigEndian32(1), entry)),
 		TinyBox("stts", stts.ToArray())
 	};
+	if (syncSamples is not null)
+		children.Add(TinyBox("stss", TinyJoin(BigEndian32(0), BigEndian32(syncSamples.Length), TinyJoin(syncSamples.Select(BigEndian32).ToArray()))));
 	if (hasCtts)
 	{
 		var ctts = new List<byte> { 0, 0, 0, 0 };
@@ -15113,7 +15147,7 @@ static byte[] TinyMp4(
 	uint[] videoDeltas, int videoCtts, uint[] audioDeltas, long elstMediaTime,
 	byte[]? videoConfig = null, byte[]? videoBitrate = null, byte[]? audioBitrate = null,
 	uint videoTimescale = 12288, uint audioTimescale = 32000, uint movieTimescale = 1000,
-	string videoHandler = "vide", string audioHandler = "soun", bool useCo64 = false, bool fragmented = false)
+	string videoHandler = "vide", string audioHandler = "soun", bool useCo64 = false, bool fragmented = false, int[]? videoSyncSamples = null, int[]? audioSyncSamples = null)
 {
 	var videoSamples = TinyJoin(Enumerable.Range(0, videoDeltas.Length).Select(index => Enumerable.Repeat((byte)(0x10 + index), 10).ToArray()).ToArray());
 	var audioSamples = TinyJoin(Enumerable.Range(0, audioDeltas.Length).Select(index => Enumerable.Repeat((byte)(0x20 + index), 20).ToArray()).ToArray());
@@ -15136,8 +15170,8 @@ static byte[] TinyMp4(
 		BinaryPrimitives.WriteUInt32BigEndian(mvhd.AsSpan(96, 4), 3);
 		return TinyBox("moov", TinyJoin(
 			TinyBox("mvhd", mvhd),
-			TinyTrack(videoHandler, videoTimescale, videoDeltas, videoCtts, hasCtts: true, videoEntry, elstMediaTime, 10, 0x10, mdatStart, useCo64),
-			TinyTrack(audioHandler, audioTimescale, audioDeltas, 0, hasCtts: false, audioEntry, elstMediaTime, 20, 0x20, mdatStart + videoDeltas.Length * 10, useCo64)));
+			TinyTrack(videoHandler, videoTimescale, videoDeltas, videoCtts, hasCtts: true, videoEntry, elstMediaTime, 10, 0x10, mdatStart, useCo64, videoSyncSamples),
+			TinyTrack(audioHandler, audioTimescale, audioDeltas, 0, hasCtts: false, audioEntry, elstMediaTime, 20, 0x20, mdatStart + videoDeltas.Length * 10, useCo64, audioSyncSamples)));
 	}
 
 	var moov = Build(0);
@@ -15356,6 +15390,24 @@ static void Mp4ConcatRefusesUnsupportedShapes()
 	Expect(!empty.Ok && empty.Error.Contains("一条轨道都没有"), "没有轨道的文件要明说，实际：" + empty.Error);
 
 	Expect(!File.Exists(Path.Combine(directory, "f.mp4")), "拒绝的时候不该留下半个成品");
+    foreach (var (name, bytes, reason) in new (string, byte[], string)[]
+    {
+        ("zero-movie", TinyMp4(video, 1024, audio, 1024, movieTimescale: 0), "时间刻度"),
+        ("zero-track", TinyMp4(video, 1024, audio, 1024, audioTimescale: 0), "时间刻度"),
+        ("partial-priming", TinyMp4(video, 512, audio, 512), "样本边界"),
+        ("all-priming", TinyMp4(video, 5024, audio, 5024), "整轨"),
+        ("negative-edit", TinyMp4(video, -1, audio, -1), "编辑"),
+        ("ctts-edit-mismatch", TinyMp4(video, 1024, audio, 512), "合成偏移"),
+        ("unaligned-track-duration", TinyMp4(video, 1024, [1024, 1000, 1000], 1024), "时长不一致")
+    })
+    {
+        var badPath = Path.Combine(directory, name + ".mp4");
+        var rejectedPath = Path.Combine(directory, name + "-out.mp4");
+        File.WriteAllBytes(badPath, bytes);
+        var rejected = Mp4Concatenator.Concat([Path.Combine(directory, "ok.mp4"), badPath], rejectedPath);
+        Expect(!rejected.Ok && rejected.Error.Contains(reason), name + " 必须明确拒绝：" + rejected.Error);
+        Expect(!File.Exists(rejectedPath), "边界拒绝不得写输出：" + name);
+    }
 }
 
 // ── 出视频那两条新链：ComfyUI 工作流出视频 / 全列出来让用户选 / 自动抉择 / 记住一条 ──────────────
@@ -16941,6 +16993,96 @@ static void ComfyUiSiteIdsDoNotCollideAcrossPorts()
     Expect(SiteCatalog.Load().Sites.Count == 2, "两份站点文件并存，谁也不覆盖谁：" + SiteCatalog.Load().Sites.Count);
 }
 
+
+static void ProviderNullProfilesLoad()
+{
+    using var environment = new ConfigEnvironment();
+    try
+    {
+        File.WriteAllText(environment.ConfigPath, "{\"Profiles\":null,\"Endpoint\":\"https://example.com/v1\",\"Model\":\"legacy\"}");
+        var config = AiProviderSettings.Load();
+        Expect(config.Profiles.Count == 1 && config.Profiles[0].Model == "legacy", "null Profiles应迁移顶层配置");
+    }
+    finally { environment.Restore(); }
+}
+
+static void Mp4ProbeDurationVersions()
+{
+    static byte[] Header(byte version, uint scale, ulong duration, int? length = null)
+    {
+        var data = new byte[length ?? (version == 1 ? 32 : 20)];
+        data[0] = version;
+        var scaleAt = version == 1 ? 20 : 12;
+        if (data.Length >= scaleAt + 4) BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(scaleAt, 4), scale);
+        var at = version == 1 ? 24 : 16;
+        if (data.Length >= at + (version == 1 ? 8 : 4))
+        {
+            if (version == 1) BinaryPrimitives.WriteUInt64BigEndian(data.AsSpan(at, 8), duration);
+            else BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(at, 4), (uint)duration);
+        }
+        return data;
+    }
+    var directory = NewTempDirectory("mp4-probe-versions");
+    var hdlr = new byte[24];
+    Encoding.ASCII.GetBytes("vide", hdlr.AsSpan(8, 4));
+    var cases = new (string Name, byte[] Movie, byte[] Video, double Seconds)[]
+    {
+        ("v1-movie", Header(1, 1000, 5000000000), Header(0, 1000, 2000), 5000000),
+        ("v1-uint-max-valid", Header(1, 1, uint.MaxValue), Header(0, 1000, 2000), uint.MaxValue),
+        ("v1-fallback", Header(1, 1000, ulong.MaxValue), Header(1, 1000, 5000000000), 5000000),
+        ("v0-fallback", Header(0, 1000, uint.MaxValue), Header(0, 1000, 2000), 2),
+        ("unknown-both", Header(1, 1000, ulong.MaxValue), Header(1, 1000, ulong.MaxValue), 0),
+        ("short-v0", Header(0, 1000, 0), Header(0, 1000, 2000, 16), 0),
+        ("short-v1", Header(1, 1000, 0, 24), Header(1, 1000, 2000, 28), 0),
+        ("unsupported", Header(2, 1000, 2000), Header(2, 1000, 2000), 0),
+        ("zero-scale", Header(1, 0, 2000), Header(1, 0, 2000), 0)
+    };
+    foreach (var item in cases)
+    {
+        var path = Path.Combine(directory, item.Name + ".mp4");
+        File.WriteAllBytes(path, TinyJoin(TinyBox("ftyp", Encoding.ASCII.GetBytes("isom0000")),
+            TinyBox("moov", TinyJoin(TinyBox("mvhd", item.Movie), TinyBox("trak",
+                TinyBox("mdia", TinyJoin(TinyBox("mdhd", item.Video), TinyBox("hdlr", hdlr))))))));
+        var result = Mp4Concatenator.Probe(path);
+        Expect(result.Readable == (item.Seconds > 0), item.Name + "可读性：" + result.Problem);
+        Expect(Math.Abs(result.Seconds - item.Seconds) < 0.001, item.Name + "时长：" + result.Seconds);
+    }
+}
+
+static void Mp4ConcatSyncBoundaries()
+{
+    var directory = NewTempDirectory("mp4-sync-boundaries");
+    uint[] video = [512, 512, 512];
+    uint[] audio = [1024, 2000, 2000]; // 剪头后 4000/32000 = 视频 1536/12288，避免时长差掩盖同步边界。
+    var a = Path.Combine(directory, "a.mp4");
+    var b = Path.Combine(directory, "b.mp4");
+    var output = Path.Combine(directory, "joined.mp4");
+    File.WriteAllBytes(a, TinyMp4(video, 1024, audio, 1024));
+    foreach (var bytes in new[]
+    {
+        TinyMp4(video, 1024, audio, 1024, videoSyncSamples: [2]),
+        TinyMp4(video, 1024, audio, 1024, audioSyncSamples: [1, 3])
+    })
+    {
+        File.WriteAllBytes(b, bytes);
+        var refused = Mp4Concatenator.Concat([a, b], output);
+        Expect(!refused.Ok && refused.Error.Contains("同步样本"), "非同步边界必须拒绝：" + refused.Error);
+        Expect(!File.Exists(output), "拒绝时不得产生文件");
+    }
+    foreach (var reverse in new[] { false, true })
+    {
+        File.WriteAllBytes(b, TinyMp4(video, 1024, audio, 1024, videoSyncSamples: [1, 3]));
+        var result = Mp4Concatenator.Concat(reverse ? [b, a] : [a, b], output);
+        Expect(result.Ok, "合法同步边界应拼接：" + result.Error);
+        var data = File.ReadAllBytes(output);
+        var at = Encoding.ASCII.GetString(data).IndexOf("stss", StringComparison.Ordinal);
+        Expect(at >= 4, "后段有非同步样本时也必须写同步表");
+        var count = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(at + 8, 4));
+        var actual = Enumerable.Range(0, count).Select(i => BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(at + 12 + i * 4, 4))).ToArray();
+        Expect(actual.SequenceEqual(reverse ? new[] {1, 3, 4, 5, 6} : new[] {1, 2, 3, 4, 6}), "同步索引必须保留原始事实");
+    }
+}
+
 static class Sample
 {
     /// <summary>1x1 透明 PNG：用真实图片字节，而不是随便凑一段数据。</summary>
@@ -16953,6 +17095,7 @@ static class Sample
 /// 把配置文件路径隔离到临时目录，并清掉会覆盖它的环境变量——
 /// 否则测试会碰到用户真实的配置与密钥（环境变量优先级高于配置文件）。
 /// </summary>
+
 sealed class ConfigEnvironment : IDisposable
 {
     private readonly string? previousConfig = Environment.GetEnvironmentVariable("YEEYEEYEE_CONFIG");

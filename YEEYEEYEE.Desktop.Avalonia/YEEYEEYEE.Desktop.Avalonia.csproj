@@ -10,7 +10,7 @@
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <!-- 版本号的唯一来源：界面标题栏、左栏底部与设置页都读这里（见 AppVersion）。
          改这一行就是改版本号，不需要再去 XAML 里找写死的字符串。 -->
-    <Version>0.1.5.1</Version>
+    <Version>0.1.5.3</Version>
     <Product>YEEYEEYEE</Product>
     <AssemblyTitle>YEEYEEYEE</AssemblyTitle>
   </PropertyGroup>
@@ -59,18 +59,10 @@
           Visible="false" />
   </ItemGroup>
 
-  <!-- Ship the tested Windows decoder together with upstream GPL license/build provenance. -->
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' Or ('$(RuntimeIdentifier)' == '' And '$(OS)' == 'Windows_NT')">
-    <None Include="..\tools\ffmpeg\win-x64\ffmpeg.exe;..\tools\ffmpeg\win-x64\LICENSE;..\tools\ffmpeg\win-x64\README.txt"
-          Link="tools\ffmpeg\win-x64\%(Filename)%(Extension)"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest"
-          Visible="false" />
-  </ItemGroup>
-  <Target Name="RequireWindowsVideoDecoder" BeforeTargets="PrepareForBuild"
-          Condition="'$(RuntimeIdentifier)' == 'win-x64' Or ('$(RuntimeIdentifier)' == '' And '$(OS)' == 'Windows_NT')">
-    <Error Condition="!Exists('..\tools\ffmpeg\win-x64\ffmpeg.exe') Or !Exists('..\tools\ffmpeg\win-x64\LICENSE') Or !Exists('..\tools\ffmpeg\win-x64\README.txt')"
-           Text="Windows video decoder or license missing: restore tools/ffmpeg/win-x64 before building." />
+  <Target Name="ExcludePublishSymbols" BeforeTargets="CopyFilesToPublishDirectory" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(ResolvedFileToPublish.Extension)' == '.pdb'" />
+    </ItemGroup>
   </Target>
 
   <!-- 共享界面文案（UiText）由 Desktop.Shared 那边嵌（EmbeddedResource → 网页端项目里的

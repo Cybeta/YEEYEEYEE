@@ -25,8 +25,10 @@ internal sealed class EditLeaseStore(string canvasPath, TimeSpan lifetime)
     /// <summary>默认两分钟。太短会让长任务频繁丢锁，太长会让崩溃的人把节点占太久。</summary>
     public static readonly TimeSpan DefaultLifetime = TimeSpan.FromMinutes(2);
 
-    private readonly string path = canvasPath + ".edits.json";
-    private readonly object gate = new();
+    private string selectedPath => WebProjectApi.Current?.CanvasPath ?? canvasPath;
+    private string path => selectedPath + ".edits.json";
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> Gates = new(StringComparer.OrdinalIgnoreCase);
+    private object gate => Gates.GetOrAdd(Path.GetFullPath(selectedPath), _ => new object());
 
     /// <summary>
     /// 这份文件是**给人看的**（排查「谁锁着这张画布」时直接打开就行），所以中文不转义成 \uXXXX。
@@ -164,6 +166,21 @@ internal sealed class EditLeaseStore(string canvasPath, TimeSpan lifetime)
             return Save(leases)
                 ? EditLeaseResult.Ok(lease)
                 : EditLeaseResult.Fail(EditLeaseStatus.StorageFailed, "锁记录写不进去（磁盘或权限问题）");
+        }
+    }
+
+    // 事务期间保留调用者已有锁；同进程其他 API 共用 gate，避免检查与写盘之间插入新的租约。
+    public T WithTreeTransaction<T>(WebUser user, Func<T> apply, Func<EditLeaseResult, T> denied)
+    {
+        lock (gate)
+        {
+            var leases = Load();
+            Purge(leases, DateTimeOffset.UtcNow);
+            var conflict = leases.FirstOrDefault(item => item.UserId != user.Id);
+            if (conflict is not null)
+                return denied(EditLeaseResult.Fail(EditLeaseStatus.Conflict,
+                    $"{EditLeaseResult.Describe(conflict)}正在编辑", conflict));
+            return apply();
         }
     }
 

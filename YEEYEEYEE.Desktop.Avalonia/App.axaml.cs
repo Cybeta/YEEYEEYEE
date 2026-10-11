@@ -20,7 +20,11 @@ public partial class App : Application
         {
             ComfyUiWebViewService = ComfyUiNativeWebViewService.Start();
             desktop.ShutdownRequested += (_, _) => ComfyUiWebViewService.Dispose();
+            // ShutdownRequested can be cancelled; only terminate the thumbnail service on exit.
+            desktop.Exit += (_, _) => VideoThumbnailService.Shared.Dispose();
             desktop.MainWindow = new MainWindow(desktop.Args);
+            // The off-screen thumbnail window must not keep the desktop lifetime alive.
+            desktop.MainWindow.Closed += (_, _) => VideoThumbnailService.Shared.Dispose();
             if (desktop.Args is ["--verify-comfy", var url, var output])
                 Dispatcher.UIThread.Post(async () => await ComfyUiRuntimeVerification.RunAsync(ComfyUiWebViewService, url, output));
         }

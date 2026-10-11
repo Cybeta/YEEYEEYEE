@@ -164,7 +164,7 @@
                 </StackPanel>
 
                 <TextBox x:Name="NameBox" Grid.Column="1" Classes="inlineInput" FontSize="12"
-                         Watermark="项目名称（留空则按时间命名）" MaxWidth="320" HorizontalAlignment="Right"
+                         PlaceholderText="项目名称（留空则按时间命名）" MaxWidth="320" HorizontalAlignment="Right"
                          VerticalAlignment="Center" />
                 <Button Grid.Column="2" Classes="primary" Content="新建项目" Padding="18,8"
                         Click="Create_OnClick" VerticalAlignment="Center" />

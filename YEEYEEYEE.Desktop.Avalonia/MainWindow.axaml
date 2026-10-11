@@ -67,7 +67,7 @@
                     <Button Classes="toolButton" Content="⌕" Padding="6,4" Click="Search_OnClick"
                             VerticalAlignment="Center" />
                     <TextBox x:Name="SearchBox" Grid.Column="1" Classes="inlineInput" Margin="6,0,0,0"
-                             Watermark="搜索节点、工作树、设定库" KeyDown="SearchBox_OnKeyDown" />
+                             PlaceholderText="搜索节点、工作树、设定库" KeyDown="SearchBox_OnKeyDown" />
                   </Grid>
                 </Border>
                 <Button Classes="toolButton" Content="↶" ToolTip.Tip="撤销" Click="Undo_OnClick" />
@@ -338,7 +338,7 @@
                               BorderThickness="1" CornerRadius="8" Padding="10,8" MinHeight="76">
                         <TextBox x:Name="InspectorSummaryText" IsEnabled="False"
                                  Classes="inlineInput"
-                                 Watermark="这个节点还没有内容；在画布上选中一个节点后，可以直接在这一格里写"
+                                 PlaceholderText="这个节点还没有内容；在画布上选中一个节点后，可以直接在这一格里写"
                                  Text="在画布上点击任意节点，这里会显示它的内容，并可以直接修改。"
                                  AcceptsReturn="True" TextWrapping="Wrap" MinHeight="60" FontSize="12"
                                  GotFocus="InspectorField_OnGotFocus" LostFocus="InspectorField_OnLostFocus"

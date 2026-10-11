@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Globalization;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -30,10 +29,7 @@ internal sealed class LocalVideoPlayer : ContentControl, IDisposable
     private readonly Stretch posterStretch;
     private Bitmap? firstFrame;
     private string? idleHint;
-    private static readonly object frameCacheGate = new();
-    // Cache encoded thumbnails, not shared disposable bitmaps. Rebuilt canvas tiles own their copies.
-    private static readonly Dictionary<string, Task<byte[]?>> frameCache = new(StringComparer.Ordinal);
-    private static readonly SemaphoreSlim frameExtractionSlots = new(2);
+    private readonly CancellationTokenSource thumbnailCancellation = new();
 
     public LocalVideoPlayer(string reference, Func<bool>? canStartInline = null,
         Stretch posterStretch = Stretch.Uniform, Action? openLargePreview = null)
@@ -54,9 +50,7 @@ internal sealed class LocalVideoPlayer : ContentControl, IDisposable
             AddHandler(DoubleTappedEvent, (_, args) =>
             {
                 args.Handled = true;
-                CancelPendingPlay();
-                suppressPlayUntil = Environment.TickCount64 + 500;
-                openLargePreview();
+                RequestLargePreview();
             }, global::Avalonia.Interactivity.RoutingStrategies.Bubble, handledEventsToo: true);
         }
         ShowPlayButton();
@@ -68,27 +62,7 @@ internal sealed class LocalVideoPlayer : ContentControl, IDisposable
     {
         try
         {
-            var bytes = await Task.Run(async () =>
-            {
-                // Apply the same local-file boundary checks before invoking the decoder.
-                var path = ValidatePath(reference);
-                var info = new FileInfo(path);
-                var key = $"{path}|{info.LastWriteTimeUtc.Ticks}|{info.Length}";
-                Task<byte[]?> extraction;
-                lock (frameCacheGate)
-                {
-                    if (!frameCache.TryGetValue(key, out extraction!)
-                        || extraction.IsCompleted && (!extraction.IsCompletedSuccessfully || extraction.Result is null))
-                    {
-                        foreach (var expired in frameCache.Where(pair => pair.Value.IsCompleted
-                            && (frameCache.Count >= 160 || pair.Value.IsCompletedSuccessfully && pair.Value.Result is null))
-                            .Select(pair => pair.Key).ToList())
-                            frameCache.Remove(expired);
-                        frameCache[key] = extraction = ExtractFirstFrameAsync(path);
-                    }
-                }
-                return await extraction.ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            var bytes = await VideoThumbnailService.Shared.GetAsync(reference, thumbnailCancellation.Token).ConfigureAwait(false);
             if (bytes is null) return;
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
@@ -99,67 +73,10 @@ internal sealed class LocalVideoPlayer : ContentControl, IDisposable
             });
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException
-            or NotSupportedException or InvalidOperationException or Win32Exception)
-        {
-            // Missing decoder, invalid file or unsupported codec: keep the explicit play button.
-        }
-    }
-
-    private static async Task<byte[]?> ExtractFirstFrameAsync(string path)
-    {
-        await frameExtractionSlots.WaitAsync().ConfigureAwait(false);
-        try
-        {
-            // Revalidate after waiting; never accept a nearby role/reference image as a poster.
-            path = ValidatePath(path);
-            // Windows releases ship the tested decoder and its license together. Never
-            // silently select an unrelated/cut-down executable from the user's PATH.
-            var executable = OperatingSystem.IsWindows()
-                ? Path.Combine(AppContext.BaseDirectory, "tools", "ffmpeg", "win-x64", "ffmpeg.exe")
-                : "ffmpeg";
-            if (OperatingSystem.IsWindows() && !File.Exists(executable)) return null;
-            var start = new ProcessStartInfo(executable)
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            foreach (var argument in new[] { "-hide_banner", "-loglevel", "error", "-nostdin",
-                "-protocol_whitelist", "file,pipe", "-i", path, "-map", "0:v:0", "-frames:v", "1",
-                "-vf", "scale=640:360:force_original_aspect_ratio=decrease", "-threads", "1",
-                "-f", "image2pipe", "-vcodec", "png", "pipe:1" })
-                start.ArgumentList.Add(argument);
-            using var process = new Process { StartInfo = start };
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            process.Start();
-            try
-            {
-                var errors = process.StandardError.ReadToEndAsync(timeout.Token);
-                using var output = new MemoryStream();
-                var buffer = new byte[16 * 1024];
-                int read;
-                while ((read = await process.StandardOutput.BaseStream.ReadAsync(buffer, timeout.Token)
-                    .ConfigureAwait(false)) > 0)
-                {
-                    if (output.Length + read > 2 * 1024 * 1024) return null;
-                    output.Write(buffer, 0, read);
-                }
-                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-                await errors.ConfigureAwait(false);
-                return process.ExitCode == 0 && output.Length > 0 ? output.ToArray() : null;
-            }
-            finally
-            {
-                if (!process.HasExited) process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException
             or NotSupportedException or InvalidOperationException or Win32Exception or OperationCanceledException)
         {
-            return null;
+            // Invalid file or unsupported codec: keep the explicit play button.
         }
-        finally { frameExtractionSlots.Release(); }
     }
 
     private void ShowPlayButton(string? hint = null)
@@ -241,6 +158,14 @@ internal sealed class LocalVideoPlayer : ContentControl, IDisposable
         pendingPlay = null;
     }
 
+    private void RequestLargePreview()
+    {
+        if (disposed || openLargePreview is null || Environment.TickCount64 < suppressPlayUntil) return;
+        CancelPendingPlay();
+        suppressPlayUntil = Environment.TickCount64 + 500;
+        openLargePreview();
+    }
+
     private void SchedulePlay()
     {
         if (disposed || webView is not null || pendingPlay is not null
@@ -286,9 +211,7 @@ internal sealed class LocalVideoPlayer : ContentControl, IDisposable
             // A queued event must not act on a stopped/replaced playback instance.
             if (disposed || !ReferenceEquals(webView, source) || !ReferenceEquals(session, playback)
                 || !string.Equals(previewMessage, message, StringComparison.Ordinal)) return;
-            CancelPendingPlay();
-            suppressPlayUntil = Environment.TickCount64 + 500;
-            openLargePreview?.Invoke();
+            RequestLargePreview();
         });
     }
 
@@ -315,6 +238,7 @@ internal sealed class LocalVideoPlayer : ContentControl, IDisposable
                 <style>
                 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101010;color:#eee;font:14px sans-serif}
                 video{display:block;position:fixed;inset:0;width:100%;height:100%;object-fit:contain}
+                #previewSurface{position:fixed;inset:0 0 40px;z-index:1;background:transparent;touch-action:manipulation}
                 #error,#hint{position:fixed;left:16px;right:16px;margin:0;box-sizing:border-box;pointer-events:none;background:#101010cc;padding:8px;line-height:1.4;overflow-wrap:anywhere}
                 #error{top:16px;max-height:calc(100% - 32px);overflow:auto;pointer-events:auto}
                 #hint{bottom:56px;animation:fadeHint 3.5s forwards}
@@ -325,6 +249,9 @@ internal sealed class LocalVideoPlayer : ContentControl, IDisposable
                 <script nonce="local-video">
                 const v=document.querySelector('video'),e=document.getElementById('error'),h=document.getElementById('hint');let stopped=false;
                 v.defaultMuted=true;v.muted=true;
+                // Chromium's UA media surface can consume real mouse double clicks.
+                // Hit-test a regular DOM element over the picture, leaving the control bar native.
+                if(__PREVIEW_ENABLED__){const surface=document.createElement('div');surface.id='previewSurface';document.body.appendChild(surface);surface.addEventListener('click',event=>{if(event.detail===1&&v.paused&&!stopped){v.play().catch(()=>{})}})}
                 let lastPreview=-Infinity;
                 const preview=event=>{if(!__PREVIEW_ENABLED__||(event.type==='click'&&event.detail!==2))return;event.preventDefault();event.stopImmediatePropagation();if(stopped||event.timeStamp-lastPreview<500)return;lastPreview=event.timeStamp;__PREVIEW__};
                 document.addEventListener('click',preview,true);
@@ -607,7 +534,9 @@ internal sealed class LocalVideoPlayer : ContentControl, IDisposable
     {
         if (disposed) return;
         disposed = true;
+        thumbnailCancellation.Cancel();
         Stop();
+        thumbnailCancellation.Dispose();
         Content = null;
         firstFrame?.Dispose();
         firstFrame = null;

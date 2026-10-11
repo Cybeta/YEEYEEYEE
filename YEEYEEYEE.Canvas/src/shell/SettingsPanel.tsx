@@ -1,18 +1,74 @@
 import { useEffect, useState } from 'react'
+import { ModelSettings } from './ModelSettings'
+import { SkillSettings } from './SkillSettings'
 import { errorMessage, request } from '../api'
 import { parseSettings, settingsGroups, parseComfyUiProbe, describeComfyUiProbe, type ComfyUiProbe, type WebSettings } from './settingsView'
 
-/**
- * 设置（网页端）：**只读**。
- *
- * 为什么只有读：密钥在盘上是 DPAPI 密文，而这个服务端跑在 Linux 上（目标框架 net10.0），根本解不开；
- * 就算解得开也不该解——那属于桌面端那台机器。所以这一页回答的是「现在配了什么、密钥配没配」，
- * 要改请到桌面端。这不是「这一版没做完」，是这条链的边界。
- *
- * 它**自己取数据**（不像画布那样由 WebCanvasApp 统一持有）：一条只读接口、不参与任何写路径、
- * 也不进画布状态——挂进那边只会让那个已经很长的组件再长一截。
- */
-export function SettingsPanel() {
+type MediaDraft = {
+  revision: string; imageEndpoint: string; imageModel: string; comfyUiBaseUrl: string;
+  comfyUiCheckpoint: string; videoEndpoint: string; videoModel: string;
+  imageHasKey: boolean; videoHasKey: boolean
+}
+
+function MediaSettings({ canManage }: { canManage: boolean }) {
+  const [draft, setDraft] = useState<MediaDraft | null>(null)
+  const [keys, setKeys] = useState({ imageApiKey: '', videoApiKey: '', clearImageKey: false, clearVideoKey: false })
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState('')
+  async function reload() {
+    setBusy(true)
+    try {
+      setDraft(await request<MediaDraft>('/api/web/settings/media'))
+      setKeys({ imageApiKey: '', videoApiKey: '', clearImageKey: false, clearVideoKey: false })
+      setNotice('')
+    } catch (error) { setNotice(errorMessage(error)) }
+    finally { setBusy(false) }
+  }
+  useEffect(() => { if (canManage) void reload() }, [canManage])
+  if (!canManage) return null
+  const fields = [
+    ['imageEndpoint', '图像接口地址'], ['imageModel', '图像模型'],
+    ['comfyUiBaseUrl', 'ComfyUI 地址'], ['comfyUiCheckpoint', 'ComfyUI checkpoint'],
+    ['videoEndpoint', '视频接口地址'], ['videoModel', '视频模型']
+  ] as const
+  async function save() {
+    if (!draft || busy) return
+    setBusy(true)
+    try {
+      await request('/api/web/settings/media', { method: 'PUT', body: JSON.stringify({ ...draft, ...keys }) })
+      await reload()
+      setNotice('已保存到桌面共享配置。Web 任务服务仍使用服务启动配置中的地址。')
+    } catch (error) { setNotice(errorMessage(error)) }
+    finally { setBusy(false) }
+  }
+  return <div className="df-section">
+    <span className="df-heading">媒体设置</span>
+    <span className="df-notice">编辑桌面共享媒体配置；Web 任务服务的运行地址由服务启动配置决定。</span>
+    {draft && <>
+      {fields.map(([field, label]) => <label key={field} className="df-field">{label}
+        <input className="df-input" value={draft[field]} disabled={busy} maxLength={field.endsWith('Endpoint') || field === 'comfyUiBaseUrl' ? 2048 : 512}
+          onChange={event => setDraft({ ...draft, [field]: event.target.value })} />
+      </label>)}
+      {(['image', 'video'] as const).map(kind => {
+        const field = kind === 'image' ? 'imageApiKey' : 'videoApiKey'
+        const clear = kind === 'image' ? 'clearImageKey' : 'clearVideoKey'
+        return <div className="df-section" key={kind}>
+          <label className="df-field">{kind === 'image' ? '图像' : '视频'}密钥（{draft[kind === 'image' ? 'imageHasKey' : 'videoHasKey'] ? '已配置' : '未配置'}；留空保留）
+            <input className="df-input" type="password" autoComplete="new-password" value={keys[field]} disabled={busy || keys[clear]}
+              onChange={event => setKeys({ ...keys, [field]: event.target.value })} />
+          </label>
+          <label><input type="checkbox" checked={keys[clear]} disabled={busy}
+            onChange={event => setKeys({ ...keys, [clear]: event.target.checked, [field]: '' })} />清除此密钥</label>
+        </div>
+      })}
+      <button className="df-mini-button" disabled={busy} onClick={() => void save()}>保存媒体设置</button>
+    </>}
+    <button className="df-mini-button" disabled={busy} onClick={() => void reload()}>重新加载媒体配置</button>
+    {notice && <span className="df-notice" role="status">{notice}</span>}
+  </div>
+}
+
+export function SettingsPanel({ canManage = false }: { canManage?: boolean }) {
   const [settings, setSettings] = useState<WebSettings | null>(null)
   const [error, setError] = useState('')
   const [probe, setProbe] = useState<ComfyUiProbe | null>(null)
@@ -52,14 +108,17 @@ export function SettingsPanel() {
     }
   }
 
-  if (error) return <div className="df-notice is-error">读不到设置：{error}</div>
-  if (!settings) return <div className="df-notice">正在读取设置…</div>
+  if (error || !settings) return <div className="df-section">
+    <ModelSettings canManage={canManage} />
+    <div className={error ? 'df-notice is-error' : 'df-notice'}>{error ? `读不到设置：${error}` : '正在读取设置…'}</div>
+  </div>
 
   return (
     <div className="df-section" style={{ gap: 14 }}>
-      <div className="df-notice">
-        这一页只读：密钥在桌面端那台机器上（加密保存），这里只显示「配没配」。要改设置请到桌面端。
-      </div>
+      <ModelSettings canManage={canManage} />
+      <MediaSettings canManage={canManage} />
+      <SkillSettings canManage={canManage} />
+      <div className="df-notice">下方为本次打开面板时读取的配置摘要。</div>
       {/* 探的是**这台服务端**配置里的 ComfyUI 地址，与上面表格里那台桌面机器配的地址可以不是同一台，
           所以标题里点明主语，免得用户拿桌面端的地址去对这里的结论。 */}
       <div className="df-section" style={{ gap: 6 }}>

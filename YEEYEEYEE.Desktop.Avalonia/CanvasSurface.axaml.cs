@@ -549,7 +549,7 @@ public partial class CanvasSurface : UserControl
     }
 
     /// <summary>这个节点在当前阶段下显不显示。</summary>
-    public bool IsVisible(WorkflowNode node) => ProductionStageRules.Matches(stageFilter, node);
+    public new bool IsVisible(WorkflowNode node) => ProductionStageRules.Matches(stageFilter, node);
 
     /// <summary>当前阶段下真正会画出来的节点。</summary>
     private List<WorkflowNode> VisibleNodes(IReadOnlyList<WorkflowNode> nodes) =>

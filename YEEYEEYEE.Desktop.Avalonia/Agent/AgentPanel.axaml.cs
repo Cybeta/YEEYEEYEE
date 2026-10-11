@@ -1092,7 +1092,7 @@ public partial class AgentPanel : UserControl
 
         var free = new TextBox
         {
-            Watermark = "也可以在这里直接回答",
+            PlaceholderText = "也可以在这里直接回答",
             FontSize = 11,
             Background = Brush("DfSurface2"),
             Foreground = Brush("DfInk")

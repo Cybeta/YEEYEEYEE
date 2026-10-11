@@ -6,7 +6,7 @@
 # 为什么后端阶段能编得过：`YEEYEEYEE.Web` 的目标框架是 **net10.0**（不是 net10.0-windows），
 # 它引用的 Host、Desktop.Core 与 Desktop.Shared 也一样。见 YEEYEEYEE.Web.csproj 里的注释。
 # 其中 Desktop.Shared 是泳道布局引擎所在的库：Web 直接引用**同一份**，不在前端另写一份。
-# 注意 Shared 里带着 DPAPI 那套（SecretProtector）：Linux 上编译得过、调用会抛，所以别在这条链上碰它。
+# SecretProtector 在 Linux 使用本机 AES-GCM 密钥文件；配置目录必须随数据持久化。
 #
 # 一条命令：docker compose up -d --build
 # 数据（账号库、任务库、资产、场景）都在 /data 这个卷里，容器换了数据还在。
@@ -64,6 +64,8 @@ ENV ASPNETCORE_URLS=http://+:8080 \
     YEEYEEYEE__CanvasDistPath=/app/canvas-dist \
     YEEYEEYEE__JobDatabasePath=/data/jobs.db \
     YEEYEEYEE__UserDatabasePath=/data/users.db \
+    YEEYEEYEE__ChatDatabasePath=/data/chat.db \
+    YEEYEEYEE_CONFIG_HOME=/data/config \
     YEEYEEYEE__AssetDirectory=/data/assets
 
 # 用镜像自带的非 root 用户（.NET 8 起就有，uid 由 APP_UID 给出）。不用 root 跑服务是底线。
