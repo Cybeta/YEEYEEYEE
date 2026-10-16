@@ -26,7 +26,7 @@ const lease = (leaseId = 'lease-a') => ({ lease: {
   client: 'web', acquiredAt: '2026-10-11T00:00:00Z', expiresAt: '2026-10-11T00:02:00Z'
 } })
 const response = (body: unknown) => new Response(JSON.stringify(body), { status: 200 })
-const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve() }
+const flush = () => vi.advanceTimersByTimeAsync(0)
 const page = (type: string, persisted = false) => {
   const event = new Event(type)
   Object.defineProperty(event, 'persisted', { value: persisted })
