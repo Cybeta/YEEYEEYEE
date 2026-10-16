@@ -1,6 +1,6 @@
 # Desktop 进度与待办
 
-对应版本：`0.1.5.3`；核对日期：2026-10-11。版本唯一来源为 `YEEYEEYEE.Desktop.Avalonia.csproj` 的 `<Version>`，界面通过 `AppVersion` 读取。Web 状态见 [Web 进度与待办](Web进度与待办.md)。
+对应版本：`0.1.5.3`；核对日期：2026-10-16。本次仅同步文档，未重新构建或测试。版本唯一来源为 `YEEYEEYEE.Desktop.Avalonia.csproj` 的 `<Version>`，界面通过 `AppVersion` 读取。Web 状态见 [Web 进度与待办](Web进度与待办.md)。
 
 ## 已实现
 
@@ -17,7 +17,7 @@
 
 ## 自动测试与构建
 
-2026-10-11 当前源码：solution Release 还原构建成功，**0 警告、0 错误**；Agent **343 项**、Core **32 项**通过；Migration **8/8 场景**通过，G6V1 **40 项检查**通过；Web 控制台回归完成认证、租约、SSE、项目/多画布、资源、聊天、附件、成片、设置及工作流本地 HTTP 检查。首次 `--no-restore` 因缺少 assets 失败，随后 `--ignore-failed-sources` 还原构建解决；当前零警告是本次构建输出，不宣称完整 Rebuild 警告清零。
+2026-10-11 历史批次：solution Release 还原构建成功，**0 警告、0 错误**；Agent **343 项**、Core **32 项**通过；Migration **8/8 场景**通过，G6V1 **40 项检查**通过；Web 控制台回归完成认证、租约、SSE、项目/多画布、资源、聊天、附件、成片、设置及工作流本地 HTTP 检查。首次 `--no-restore` 因缺少 assets 失败，随后 `--ignore-failed-sources` 还原构建解决；该批次零警告是当时构建输出，不宣称完整 Rebuild 警告清零。
 
 前端 **163 项 / 19 文件通过**，类型检查、Vite 打包和设计令牌检查通过。独立目录 `artifacts/publish-0153-prepare` 的 Windows x64 framework-dependent publish 成功，主程序文件版本 `0.1.5.3`，未发现 PDB 或 FFmpeg；未覆盖旧 publish 和 ZIP，正式发行包应在发布提交后重建。构建通过不代表 Windows WebView、真实生成、更新或音频播放验收。
 
@@ -44,4 +44,4 @@ MP4 旧候选已有真实两镜 normal/reverse 独立解码及隔离 WebView 播
 
 ## 发布准备
 
-现有 `tools/publish-release.ps1` 默认读取产品版本，生成 framework-dependent Windows x64 ZIP；需 .NET 10 运行时和 WebView2 Runtime。脚本排除 PDB、项目数据和 FFmpeg；发布前仍需检查包内容、程序集版本与哈希。CI 分别执行 Windows 构建/五个控制台 runner、Node 22 前端测试/构建和 Linux Docker 构建，没有自动 Release 上传任务。父代理提交和推送后再打正式包，确保程序集提交标识对应发布提交。
+现有 `tools/publish-release.ps1` 默认读取产品版本，生成 framework-dependent Windows x64 ZIP；需 .NET 10 运行时和 WebView2 Runtime。脚本排除 PDB、项目数据和 FFmpeg；发布前仍需检查包内容、程序集版本与哈希。CI 分别执行 Windows 构建/五个控制台 runner、Node 22 前端测试/构建和 Linux Docker 构建，没有自动 Release 上传任务。源码已提交并推送；正式包仍需在确定发布提交后构建，确保程序集提交标识对应发布提交。本次未核验 GitHub tag、Release 或安装包资产。
