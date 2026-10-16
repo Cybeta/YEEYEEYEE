@@ -40,19 +40,19 @@ jobs:
 
       # 跑测试得逐个来（这些测试工程是控制台 runner，不是 dotnet test 那套）。
       - name: Agent 测试
-        run: dotnet run --project YEEYEEYEE.Agent.Tests
+        run: dotnet run --no-build --project YEEYEEYEE.Agent.Tests
 
       - name: Core 测试
-        run: dotnet run --project YEEYEEYEE.Core.Tests
+        run: dotnet run --no-build --project YEEYEEYEE.Core.Tests
 
       - name: 迁移测试
-        run: dotnet run --project YEEYEEYEE.Migration.Tests
+        run: dotnet run --no-build --project YEEYEEYEE.Migration.Tests
 
       - name: G6V1 测试
-        run: dotnet run --project YEEYEEYEE.G6V1.Tests
+        run: dotnet run --no-build --project YEEYEEYEE.G6V1.Tests
 
       - name: Web 接口与认证回归
-        run: dotnet run --project YEEYEEYEE.Web.Tests
+        run: dotnet run --no-build --project YEEYEEYEE.Web.Tests
 
   canvas:
     name: 前端构建与测试

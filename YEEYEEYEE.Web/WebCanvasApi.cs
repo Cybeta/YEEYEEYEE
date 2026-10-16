@@ -17,6 +17,7 @@ internal static class WebCanvasApi
 {
     private static ProjectCanvasSceneStore? store => WebProjectApi.Current is { } mode ? WebProjectApi.Store(mode) : null;
     private static EditLeaseStore? leases => WebProjectApi.Current is { } mode ? WebProjectApi.Leases(mode) : null;
+    public sealed record RegisterAttachmentRequest(long BaseRevision, Guid EntityId, Guid VariantId);
     public sealed record FilmRequest(long BaseRevision, Guid[] ShotIds);
     public sealed record HistoryRequest(long BaseRevision);
     public sealed record WorkTreeRequest(long BaseRevision, string Direction, string BaselineHash, bool Confirmed);
@@ -29,6 +30,26 @@ internal static class WebCanvasApi
         var mode = WebCanvasMode.Resolve(app.Configuration);
 
         var hub = app.Services.GetRequiredService<CanvasEventHub>();
+        app.MapGet("/api/web/records/{nodeId:guid}/registration-targets", (Guid nodeId) =>
+            store?.RegistrationTargets(nodeId) ?? Error(409, "CANVAS_REQUIRES_PROJECT", "登记需要项目画布"));
+        app.MapPost("/api/web/records/{nodeId:guid}/attachments/{attachmentId:guid}/register", (HttpContext context, Guid nodeId, Guid attachmentId, RegisterAttachmentRequest input) =>
+        {
+            var user = WebAccessGuard.CurrentUser(context);
+            if (user is null || !WebAccessGuard.Permissions(context).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "登记需要登录及画布编辑权限");
+            var targetStore = store;
+            if (targetStore is null) return Error(409, "CANVAS_REQUIRES_PROJECT", "登记需要项目画布");
+            if (input.EntityId == Guid.Empty || input.VariantId == Guid.Empty)
+                return Error(400, "INVALID_REQUEST", "需要明确的实体与变体 ID");
+            return leases!.WithTreeTransaction<IResult>(user, () =>
+            {
+                var before = targetStore.LastCommit;
+                var result = targetStore.RegisterAttachment(input.BaseRevision, nodeId, attachmentId, input.EntityId, input.VariantId);
+                var after = targetStore.LastCommit;
+                if (after.Serial > before.Serial) hub.CanvasChanged(after.Revision, null, WebAccessGuard.ActorName(context), "canvas");
+                return result;
+            }, EditLeaseApi.Failure);
+        });
         app.MapGet("/api/web/records/{nodeId:guid}/film", (Guid nodeId) =>
             store?.FilmPlan(nodeId) ?? Error(409, "CANVAS_REQUIRES_PROJECT", "成片需要项目画布"));
         app.MapPost("/api/web/records/{nodeId:guid}/film", (HttpContext context, Guid nodeId, FilmRequest input) =>

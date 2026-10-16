@@ -99,6 +99,11 @@ internal static class WebProjectApi
         }
         app.Use(async (context, next) =>
         {
+            if (context.Request.Path.StartsWithSegments("/api/web/models") || context.Request.Path.StartsWithSegments("/api/web/settings"))
+            {
+                await next(context);
+                return;
+            }
             var previous = CurrentMode.Value;
             var id = context.Request.Query["canvas"].ToString();
             if (id.Length == 0) id = context.Request.Headers["X-Canvas-Id"].ToString();

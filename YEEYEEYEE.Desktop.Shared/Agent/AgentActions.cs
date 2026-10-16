@@ -17,6 +17,11 @@ public sealed class AgentAction
     /// </summary>
     public string Kind { get; set; } = string.Empty;
     public IReadOnlyList<string> UnsupportedSkillFields { get; set; } = Array.Empty<string>();
+    public string AspectRatio { get; set; } = string.Empty;
+    public int? Seconds { get; set; }
+    public int? Width { get; set; }
+    public int? Height { get; set; }
+    public IReadOnlyList<string> ReferenceAttachmentIds { get; set; } = Array.Empty<string>();
 
     /// <summary>目标：节点或实体的 id 或标题；修改与删除必填。推荐用 id（完整 Guid 或 8 位短 id 前缀）——同名对象多时 id 最稳。连线的终点节点也用它。</summary>
     public string Target { get; set; } = string.Empty;
@@ -189,7 +194,7 @@ public static class AgentActionParser
             parsed.Add(new AgentAction
             {
                 Kind = kind.Trim(),
-                UnsupportedSkillFields = kind.Trim() == "invoke_skill" ? item.EnumerateObject().Where(p => p.Name is not ("kind" or "target" or "content" or "reason")).Select(p => p.Name).ToArray() : Array.Empty<string>(),
+                UnsupportedSkillFields = kind.Trim() == "invoke_skill" ? item.EnumerateObject().Where(p => p.Name is not ("kind" or "target" or "content" or "reason" or "aspectRatio" or "referenceAttachmentIds" or "entityTarget" or "variantTarget" or "seconds" or "width" or "height") || p.Name is "aspectRatio" or "entityTarget" or "variantTarget" && p.Value.ValueKind != JsonValueKind.String || p.Name is "seconds" or "width" or "height" && (p.Value.ValueKind != JsonValueKind.Number || !p.Value.TryGetInt32(out _)) || p.Name == "referenceAttachmentIds" && (p.Value.ValueKind != JsonValueKind.Array || p.Value.EnumerateArray().Any(v => v.ValueKind != JsonValueKind.String))).Select(p => p.Name).ToArray() : Array.Empty<string>(),
                 Target = Read(item, "target"),
                 Source = Read(item, "source"),
                 Title = Read(item, "title"),
@@ -197,6 +202,11 @@ public static class AgentActionParser
                 ParentTarget = Read(item, "parentTarget"),
                 WorkTreeTarget = Read(item, "workTreeTarget"),
                 Content = Read(item, "content"),
+                AspectRatio = Read(item, "aspectRatio"),
+                Seconds = item.TryGetProperty("seconds", out var seconds) && seconds.ValueKind == JsonValueKind.Number && seconds.TryGetInt32(out var secondsValue) ? secondsValue : null,
+                Width = item.TryGetProperty("width", out var width) && width.ValueKind == JsonValueKind.Number && width.TryGetInt32(out var widthValue) ? widthValue : null,
+                Height = item.TryGetProperty("height", out var height) && height.ValueKind == JsonValueKind.Number && height.TryGetInt32(out var heightValue) ? heightValue : null,
+                ReferenceAttachmentIds = ReadStringArray(item, "referenceAttachmentIds"),
                 EntityKind = Read(item, "entityKind"),
                 Path = Read(item, "path"),
                 WorkTreeKind = Read(item, "workTreeKind"),

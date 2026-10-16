@@ -25,7 +25,16 @@ public sealed record AgentContext(
     string LibrarySummary,
     string WorkspaceSummary,
     string PendingSummary,
-    string WorkTreeSummary = "")
+    string WorkTreeSummary = "",
+    /// <summary>
+    /// 本次请求**针对哪个节点**的稳定身份（id · 类别 · 章节 · 标题）。
+    ///
+    /// 为什么单列一段：`NodeTitle` 只是标签，标题可以重名；而画布节点清单在宿主侧还可能被
+    /// 章节筛选或条数上限截断——目标节点一旦落在清单之外，模型手里就只剩一个标题，
+    /// 同名时它会挑错人。清单里那一行仍在（宿主保证目标在清单里），这一段是给模型**指路**用的：
+    /// 动作的 target 直接用这里的 id。空串表示这次不是针对某个节点的请求（两者都不占位）。
+    /// </summary>
+    string TargetIdentity = "")
 {
     public bool IsEmpty =>
         string.IsNullOrWhiteSpace(NodeTitle) && string.IsNullOrWhiteSpace(NodeContent)
@@ -46,6 +55,9 @@ public sealed record AgentContext(
         };
         if (!string.IsNullOrWhiteSpace(NodeTitle)) lines.Add($"- 选中节点：{NodeTitle}");
         if (!string.IsNullOrWhiteSpace(NodeContent)) lines.Add($"- 选中节点内容：\n{NodeContent}");
+        // 目标身份紧跟内容：动作的 target 必须用这个 id，不能只靠标题（标题可能重名）。
+        if (!string.IsNullOrWhiteSpace(TargetIdentity))
+            lines.Add($"- **本次请求的目标节点**（动作里的 target 一律用这里的 id，不要只写标题——标题可能同名）：{TargetIdentity}");
         if (!string.IsNullOrWhiteSpace(CanvasSummary)) lines.Add($"- 画布节点（target 推荐用 id：完整 Guid 或 8 位短 id；也可用标题。同一个名字可能对应多个对象，用 id 最稳）：\n{CanvasSummary}");
         if (!string.IsNullOrWhiteSpace(LibrarySummary)) lines.Add($"- 资源视觉内容：{LibrarySummary}");
         if (!string.IsNullOrWhiteSpace(WorkTreeSummary)) lines.Add($"- 工作树（**叙事轴**：人物/能力/道具及剧情版本与来源章节）：\n{WorkTreeSummary}");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { followAction, hasUnsavedDraft } from '../src/shell/serverEvents'
+import { canApplyScene, followAction, hasUnsavedDraft } from '../src/shell/serverEvents'
 
 /**
  * 收到「画布有变动」之后该做什么。
@@ -41,5 +41,26 @@ describe('「手上有草稿」的判据', () => {
 
   it('聚焦中但没改：仍然算有草稿（他正要改）', () => {
     expect(hasUnsavedDraft(true, { title: '分镜一', content: '内容' }, record)).toBe(true)
+  })
+})
+
+/**
+ * 产物回挂之后的那次后台刷新（followScene）取回来的场景还能不能落到界面上。
+ *
+ * 这条路是**自动**的：用户没按任何按钮，界面就换了一份数据。所以两道闸门都得钉住——
+ * 落错了不报错，只是悄悄把他正看着的东西换掉、或者把他刚敲的几行顶没。
+ */
+describe('后台刷新回来的场景能不能落到界面上', () => {
+  it('还是最新那次、手上也没在编辑：可以落', () => {
+    expect(canApplyScene({ stale: false, editing: false })).toBe(true)
+  })
+
+  it('期间整份重载过 / 又跟了别的版本（这次已经过期）：不落——落上去就是回退', () => {
+    expect(canApplyScene({ stale: true, editing: false })).toBe(false)
+    expect(canApplyScene({ stale: true, editing: true })).toBe(false)
+  })
+
+  it('请求往返期间用户已经打开编辑框：不落——那会把他刚敲的东西顶掉', () => {
+    expect(canApplyScene({ stale: false, editing: true })).toBe(false)
   })
 })

@@ -1,11 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { recordReferences, resolveReference, type Asset } from '../assets'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { recordAttachments, recordReferences, resolveReference, type Asset, type Reference } from '../assets'
 import { ALL_CHAPTERS_ID } from '../ChapterView'
-import { entityThumbUrl } from './assetImages'
+import { agentPreviewLayer, describeNodeAssetDelta, type AgentCanvasPreview } from './agentPreview'
+import './agentPreview.css'
+import { attachmentFileUrl, entityThumbUrl } from './assetImages'
 import type { LayoutMove } from './layoutPlan'
 import { describeLease, isMine, nodeLease, treeLease, type Lease } from './locks'
+import { nodeJobState, nodeMedia, type NodeJob, type NodeJobState } from './nodeMedia'
 import {
-  canvasBounds, chapterGroups, isEditableRecord, kindOf, NODE_KINDS, nodeX, nodeY,
+  CANDIDATE_CARD,
+  candidateCardRects,
+  type CandidateBatchView,
+  type CandidateSlotView
+} from './candidateBatch'
+import {
+  canvasBounds, chapterGroups, isEditableRecord, kindOf, NODE_KINDS, nodeStatusOf, nodeX, nodeY,
   recordContent, recordStatus, recordTitle, visibleEdges, type ShellEdge, type ViewRecord
 } from './records'
 import { gestureHint } from './uiText'
@@ -86,6 +95,25 @@ export type CanvasViewProps = {
   myUserId?: string
   /** 整理布局的虚影。只画不动——桌面端的预览层同样不参与命中测试。 */
   ghosts?: LayoutMove[]
+  /**
+   * 当前的生成任务（`GET /api/web/jobs`）。卡片据此显示「生成中 / 失败」。
+   * **按任务的 targetNodeId 归到节点上**，不看当前选中项：选中项换了，任务仍属于它的原目标节点。
+   */
+  jobs?: NodeJob[]
+  /**
+   * 节点出图的候选批次（临时卡片，见 candidateBatch.ts）。它们**不是**画布节点：
+   * 不进正式画布数据、不参与连线、不参与命中测试的节点层。
+   */
+  candidates?: CandidateBatchView[]
+  /** 采用某一件候选产物：由服务端校验归属、目标、权限、租约与锁定之后追加到原节点。 */
+  onAdoptCandidate?: (nodeId: string, jobId: string, outputIndex: number) => void
+  /** 丢弃某一批候选（只撤掉卡片；不会取消后台任务，也不会删产物文件）。 */
+  onDiscardCandidates?: (batchId: string) => void
+  /** 看候选产物的大图（浮层摆在画布之外，见 WebCanvasApp）。 */
+  onOpenCandidate?: (jobId: string, outputIndex: number, name: string) => void
+  agentPreview?: AgentCanvasPreview | null
+  previewRecords?: ViewRecord[]
+  previewMatches?: (record: ViewRecord) => boolean
   /** 画布上的连线（服务端只投影两端都还在的那些）。 */
   edges?: ShellEdge[]
   /**
@@ -112,6 +140,18 @@ export type CanvasViewProps = {
    * 画布不认识菜单的内容——*有哪些选项*是从服务端那份协助计划来的，画布只管把事件递出去。
    */
   onNodeContextMenu?: (recordId: string, position: { x: number; y: number }) => void
+  /**
+   * 点了一张卡上的**引用徽标**：交给调用方去打开这条引用的详情。
+   * 它只影响检查器的展开状态，不改引用配置、不改画布；也不等于「进引用画布」——
+   * 网页端没有那套临时画布，普通实体引用不该被当成画布跳转。
+   */
+  onOpenReference?: (recordId: string, reference: Reference) => void
+  /**
+   * 点了一张卡上**这个节点自己出的图**：交给调用方去开大图（先选中这个节点）。
+   * 卡片上的那一格是「产物缩略图」，看大图要铺满视口的浮层——画布世界整层带 transform，
+   * 浮层挂在这里会变成相对世界定位，所以由调用方在画布之外摆。
+   */
+  onOpenMedia?: (recordId: string, attachmentId: string) => void
 }
 
 const MIN_ZOOM = 0.25
@@ -227,10 +267,45 @@ export function CanvasView(props: CanvasViewProps) {
   }, [records, drag])
 
   // 以下都从 `shown` 算，不是从 `records`：拖动中的那一份预览要同时管到卡片与连线。
-  const bounds = useMemo(() => canvasBounds(shown), [shown])
+  const preview = useMemo(() => agentPreviewLayer(props.agentPreview, props.previewRecords ?? records,
+    activeChapter, props.previewMatches), [props.agentPreview, props.previewRecords, records, activeChapter, props.previewMatches])
+  const fitNodes = useMemo(() => [...shown.filter(isEditableRecord), ...preview.nodes.map(item => item.node)], [shown, preview])
+  const bounds = useMemo(() => canvasBounds(fitNodes), [fitNodes])
   const nodes = useMemo(() => shown.filter(isEditableRecord), [shown])
   const movingIds = useMemo(() => new Set(ghosts.map((ghost) => ghost.recordId)), [ghosts])
   const others = useMemo(() => leases.filter((lease) => !isMine(lease, props.myUserId)), [leases, props.myUserId])
+
+  /**
+   * 每个节点身上的任务汇总，按任务的 targetNodeId 归组。
+   *
+   * 这一步就是「任务不串节点」的落点：任务归谁由它自己带着的目标节点说了算，
+   * 与「现在选中了哪一张」完全无关——所以切换节点时这个映射一个字都不会变。
+   */
+  const jobStates = useMemo(() => {
+    const grouped = new Map<string, NodeJob[]>()
+    for (const job of props.jobs ?? []) {
+      if (!job.targetNodeId) continue
+      grouped.set(job.targetNodeId, [...(grouped.get(job.targetNodeId) ?? []), job])
+    }
+    const states = new Map<string, NodeJobState>()
+    for (const [nodeId, list] of grouped) states.set(nodeId, nodeJobState(list, nodeId))
+    return states
+  }, [props.jobs])
+
+  /**
+   * 每个节点上有几件候选图「等着采用」。
+   *
+   * 用它把卡片状态写成「待确认」——**不能**提前写成「已完成」：产物还没进节点，
+   * 采用之前节点上没有这件东西（Desktop 也是先 NeedsReview、采用时才 Completed）。
+   */
+  const adoptableCandidates = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const batch of props.candidates ?? []) {
+      const pending = batch.slots.filter((slot) => slot.adoptable).length
+      if (pending > 0) counts.set(batch.nodeId, (counts.get(batch.nodeId) ?? 0) + pending)
+    }
+    return counts
+  }, [props.candidates])
 
   /**
    * 这个节点现在能不能拖。三道闸门，与「能不能改它的文字」是同一套：
@@ -434,7 +509,7 @@ export function CanvasView(props: CanvasViewProps) {
     const element = viewportRef.current
     if (!element) return
     const rect = element.getBoundingClientRect()
-    if (!nodes.length) {
+    if (!fitNodes.length) {
       // 桌面端 ApplyFit 在空画布上的取值。
       onZoom(1)
       onPan({ x: 40, y: 40 })
@@ -444,7 +519,7 @@ export function CanvasView(props: CanvasViewProps) {
     let minY = Number.POSITIVE_INFINITY
     let maxX = Number.NEGATIVE_INFINITY
     let maxY = Number.NEGATIVE_INFINITY
-    for (const node of nodes) {
+    for (const node of fitNodes) {
       minX = Math.min(minX, nodeX(node))
       minY = Math.min(minY, nodeY(node))
       maxX = Math.max(maxX, nodeX(node) + 232)
@@ -457,7 +532,7 @@ export function CanvasView(props: CanvasViewProps) {
     const next = Math.max(MIN_ZOOM, Math.min(1, Math.min(rect.width / width, rect.height / height)))
     onZoom(next)
     onPan({ x: (rect.width - width * next) / 2 - (minX - pad) * next, y: (rect.height - height * next) / 2 - (minY - pad) * next })
-  }, [nodes, onZoom, onPan])
+  }, [fitNodes, onZoom, onPan])
 
   /**
    * 首次拿到节点后自动适应一次；之后只有用户点「适应」才动视角。
@@ -473,6 +548,14 @@ export function CanvasView(props: CanvasViewProps) {
     fitted.current = true
     fit()
   }, [nodes, fit])
+
+  const previewFitKey = props.agentPreview
+    ? JSON.stringify([props.agentPreview.sessionId, props.agentPreview.messageId, props.agentPreview.revision]) : null
+  const fittedPreview = useRef<string | null>(null)
+  useEffect(() => {
+    if (previewFitKey !== null && fittedPreview.current !== previewFitKey) fit()
+    fittedPreview.current = previewFitKey
+  }, [previewFitKey, fit])
 
   useEffect(() => {
     const element = viewportRef.current
@@ -579,6 +662,7 @@ export function CanvasView(props: CanvasViewProps) {
               assets={assets}
               assetsReady={assetsReady}
               showReferences={showReferencePreviews}
+              jobState={jobStates.get(node.recordId) ?? null}
               onSelect={onSelect}
               connectFrom={props.connectFrom ?? null}
               onConnectTarget={props.onConnectTarget}
@@ -593,14 +677,87 @@ export function CanvasView(props: CanvasViewProps) {
               onPortMove={movePortDrag}
               onPortEnd={endPortDrag}
               onNodeContextMenu={props.onNodeContextMenu}
+              onOpenReference={props.onOpenReference}
+              onOpenMedia={props.onOpenMedia}
+              adoptableCandidates={adoptableCandidates.get(node.recordId) ?? 0}
             />
           ))}
+
+          {/* 节点出图的候选卡：临时的、挂在原节点旁边（节点一动它们跟着动，见 candidateCardRects）。
+              它不是画布节点——不进正式数据、不参与连线；点它上面的按钮也不会被当成拖节点或连线。 */}
+          {(props.candidates ?? []).map((batch) => {
+            const owner = nodes.find((node) => node.recordId === batch.nodeId)
+            if (!owner) return null
+            const rects = candidateCardRects(batch.slots.length, { x: nodeX(owner), y: nodeY(owner) }, NODE_CARD_WIDTH, NODE_CARD_HEIGHT)
+            return (
+              <div key={batch.batchId} className="df-candidate-layer">
+                {batch.slots.map((slot, index) => (
+                  <CandidateCard
+                    key={slot.key}
+                    slot={slot}
+                    position={rects[index]}
+                    index={index}
+                    startedAt={batch.startedAt}
+                    nodeId={batch.nodeId}
+                    onAdopt={props.onAdoptCandidate}
+                    onOpen={props.onOpenCandidate}
+                  />
+                ))}
+                <div className="df-candidate-caption" style={{ left: rects[0].left, top: rects[0].top + CANDIDATE_CARD.height + 4 }}>
+                  <span>{batch.headline}</span>
+                  <button type="button" className="df-candidate-action" onPointerDown={stopCanvasGesture}
+                    onClick={() => props.onDiscardCandidates?.(batch.batchId)}>丢弃这一批</button>
+                </div>
+              </div>
+            )
+          })}
 
           {/* 拖线时的虚影：画在卡片**上面**——线尖跟着指针走，压在卡片下面时线尖会被卡片吃掉。整层不可点。 */}
           {connectDrag && (
             <svg className="df-connect-layer" width={bounds.width} height={bounds.height} aria-hidden="true">
               <line x1={connectDrag.fromX} y1={connectDrag.fromY} x2={connectDrag.toX} y2={connectDrag.toY} />
             </svg>
+          )}
+
+          {props.agentPreview && (
+            <div className="df-agent-preview-layer" aria-label="Agent 待审批改动">
+              <svg width={bounds.width} height={bounds.height}>
+                <defs>
+                  {(['added', 'removed'] as const).map(change => (
+                    <marker key={change} id={`${arrowId}-preview-${change}`} className={`is-${change}`}
+                      viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                      <path d="M0,0 L8,4 L0,8 Z" />
+                    </marker>
+                  ))}
+                </defs>
+                {preview.edges.map(({ change, edge, from, to }) => {
+                  const x1 = nodeX(from) + NODE_CARD_WIDTH
+                  const y1 = nodeY(from) + NODE_CARD_HEIGHT / 2
+                  const x2 = nodeX(to)
+                  const y2 = nodeY(to) + NODE_CARD_HEIGHT / 2
+                  return (
+                    <g key={`${change}-${edge.edgeId}`} className={`is-${change}`}>
+                      <line x1={x1} y1={y1} x2={x2} y2={y2} markerEnd={`url(#${arrowId}-preview-${change})`} />
+                      <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 8}>{change === 'added' ? '＋ 新增连线' : '− 删除连线'}</text>
+                    </g>
+                  )
+                })}
+              </svg>
+              {preview.nodes.map(({ change, node, assets }) => {
+                // 这个节点上待生效的附件 / 引用变化：虚影里只给一行摘要，
+                // 具体增删改在右侧 Agent 审批区展开（虚影层整层不可点，本来就放不下交互）。
+                const assetLine = describeNodeAssetDelta(assets)
+                return (
+                  <div key={`${change}-${node.recordId}`} className={`df-agent-preview-card is-${change}`}
+                    style={{ left: nodeX(node), top: nodeY(node), width: NODE_CARD_WIDTH, minHeight: NODE_CARD_HEIGHT }}>
+                    <span className="df-agent-preview-label">{change === 'added' ? '＋ 将新增' : change === 'updated' ? '△ 将修改' : '− 将删除'} · 审批后生效</span>
+                    <span className="df-node-title">{recordTitle(node)}</span>
+                    <span className="df-node-body">{recordContent(node) || '暂无内容'}</span>
+                    {assetLine && <span className="df-agent-preview-asset-summary">{assetLine}</span>}
+                  </div>
+                )
+              })}
+            </div>
           )}
 
           {/* 整理布局的虚影：目标位置的虚线卡 + 从原位置过去的虚线。整层不可点。 */}
@@ -631,6 +788,14 @@ export function CanvasView(props: CanvasViewProps) {
           )}
         </div>
         <div className="df-scanband" aria-hidden="true" />
+        {props.agentPreview && (
+          <div className="df-agent-preview-legend" role="status">
+            <span>Agent 待审批预览</span>
+            <span className="is-added">＋ 绿色：新增节点 / 连线</span>
+            <span className="is-updated">△ 黄色：修改节点</span>
+            <span className="is-removed">− 红色：删除节点 / 连线</span>
+          </div>
+        )}
         {(whoLines.length > 0 || props.channelNotice) && (
           <div className="df-who">
             {whoLines.map((line) => <span key={line}>◉ {line}</span>)}
@@ -652,7 +817,7 @@ export function CanvasView(props: CanvasViewProps) {
   )
 }
 
-function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, onSelect, connectFrom, onConnectTarget, draggable, dragging, onDragStart, onDragMove, onDragEnd, consumeClick, showPort, onPortStart, onPortMove, onPortEnd, onNodeContextMenu }: {
+function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, assetsReady, showReferences, jobState, adoptableCandidates, onSelect, connectFrom, onConnectTarget, draggable, dragging, onDragStart, onDragMove, onDragEnd, consumeClick, showPort, onPortStart, onPortMove, onPortEnd, onNodeContextMenu, onOpenReference, onOpenMedia }: {
   node: ViewRecord
   selected: boolean
   dimmed: boolean
@@ -662,6 +827,10 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
   assets: Asset[]
   assetsReady: boolean
   showReferences: boolean
+  /** 这个节点身上的生成任务（按 targetNodeId 归好的）。null = 没有任务。 */
+  jobState: NodeJobState | null
+  /** 这个节点上还有几件出好的候选图在等采用（0 = 没有）。 */
+  adoptableCandidates: number
   onSelect: (recordId: string) => void
   connectFrom: string | null
   onConnectTarget?: (recordId: string) => void
@@ -681,19 +850,66 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
   onPortEnd: (event: PortPointerEvent, cancelled: boolean) => void
   /** 右键这张卡：把「哪一张 + 屏幕坐标」交出去，菜单由调用方摆。 */
   onNodeContextMenu?: (recordId: string, position: { x: number; y: number }) => void
+  /** 点这张卡上的引用徽标：打开那条引用的详情（不改任何数据）。 */
+  onOpenReference?: (recordId: string, reference: Reference) => void
+  /** 点这张卡上自己出的一张图：打开它的大图（不改任何数据）。没给就只是选中这张卡。 */
+  onOpenMedia?: (recordId: string, attachmentId: string) => void
 }) {
   const kind = kindOf(node.recordType)
   const meta = NODE_KINDS[kind]
   const references = recordReferences(node)
+  // 这个节点**自己**的产物（不是它引用了谁）：图片与视频在上面那排引用徽标之外单独列，
+  // 两者说的是两件事，混在一起就会把「引用的设定图」看成「这个节点出的图」。
+  const media = nodeMedia(recordAttachments(node))
+  const ownMedia = [...media.images, ...media.videos]
+  const [brokenImages, setBrokenImages] = useState<string[]>([])
+  /**
+   * 点卡片上的一张产物图：先选中这个节点（右侧检查器跟着切过去），再打开它的大图。
+   * 两件事在这里是同一个动作的两半；指针事件在这一格上先被吃掉（见下面 onPointerDown），
+   * 所以拖动、连线、以及卡片自己那一下「点空白选中」都不会从这里起手。
+   */
+  function openOwnImage(event: ReactMouseEvent, attachmentId: string) {
+    if (!onOpenMedia) return
+    event.stopPropagation()
+    onSelect(node.recordId)
+    onOpenMedia(node.recordId, attachmentId)
+  }
   const mine = isMine(lock, myUserId)
   const connecting = connectFrom === node.recordId
   /** 连接模式下，除了起点自己，每张卡都是可选的终点——点它就是画线。 */
   const armed = connectFrom !== null && !connecting && !!onConnectTarget
+  // 节点自身的执行状态（服务端投影）。到了生成这一步，它还只反映「产物已经回挂」这种落定的事，
+  // 所以下面再用**任务**把它顶掉：跑到哪一步、失败了没有，只有任务知道。
+  const status = nodeStatusOf(recordStatus(node))
+  const activeJobs = jobState?.active ?? []
+  const failures = jobState?.failures ?? []
+  // 三种覆盖，优先级就是这里的顺序：**正在跑的任务**最先（它是「现在」，别的都只是结果）；
+  // 其次是「有候选图等着采用」——这时不能显示成已完成（产物还没进节点，参见 candidateBatch）；
+  // 最后才是失败。同节点上有别的任务在跑时，本批候选不覆盖它。
+  const live = activeJobs.length > 0
+    ? {
+        label: activeJobs.length > 1 ? `生成中 ${activeJobs.length} 项` : '生成中',
+        hex: nodeStatusOf('Generating').hex,
+        title: `这个节点上有 ${activeJobs.length} 个生成任务正在进行：${activeJobs.map((job) => job.jobId.slice(0, 8)).join('、')}`
+      }
+    : adoptableCandidates > 0
+      ? {
+          label: '待确认',
+          hex: nodeStatusOf('NeedsReview').hex,
+          title: `有 ${adoptableCandidates} 张候选图等着采用（采用之前不会写进这个节点）`
+        }
+      : failures.length > 0
+        ? {
+            label: '失败',
+            hex: nodeStatusOf('Failed').hex,
+            title: failures.map((failure) => `${failure.jobId.slice(0, 8)}：${failure.reason}`).join('\n')
+          }
+        : null
   return (
     <button
       type="button"
       data-record-id={node.recordId}
-      className={`df-node${selected ? ' is-selected' : ''}${moving ? ' is-moving' : ''}${connecting ? ' is-connecting' : ''}${armed ? ' is-connectable' : ''}${draggable && !armed && !connecting ? ' is-draggable' : ''}${dragging ? ' is-dragging' : ''}`}
+      className={`df-node${selected ? ' is-selected' : ''}${moving ? ' is-moving' : ''}${connecting ? ' is-connecting' : ''}${armed ? ' is-connectable' : ''}${draggable && !armed && !connecting ? ' is-draggable' : ''}${dragging ? ' is-dragging' : ''}${activeJobs.length > 0 ? ' is-generating' : ''}`}
       style={{ left: nodeX(node), top: nodeY(node), width: NODE_CARD_WIDTH, minHeight: NODE_CARD_HEIGHT, opacity: dimmed ? 0.35 : moving ? 0.4 : 1 }}
       onPointerDown={(event) => {
         event.stopPropagation()
@@ -718,7 +934,7 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
         onSelect(node.recordId)
         onNodeContextMenu?.(node.recordId, { x: event.clientX, y: event.clientY })
       }}
-      title={`${meta.label} · ${recordStatus(node)}${lock ? ` · ${describeLease(lock)} 正在编辑` : ''}${armed ? ' · 点它连到这里' : draggable ? ' · 按住可拖动' : ''}`}
+      title={`${meta.label} · ${status.label}${live ? ` · ${live.label}` : ''}${lock ? ` · ${describeLease(lock)} 正在编辑` : ''}${armed ? ' · 点它连到这里' : draggable ? ' · 按住可拖动' : ''}`}
     >
       <span className="df-node-kind">
         <span className="df-node-dot" style={{ background: meta.hex }} aria-hidden="true" />
@@ -737,9 +953,25 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
       {showReferences && references.length > 0 && (
         <span className="df-node-refs">
           {references.map((reference, index) => {
-            const resolved = resolveReference(reference, assets, assetsReady)
+            // 第 4 个参数与检查器的详情一致（referenceDetail 也传 true）：资产库没这一条时，
+            // 用场景投影里那份 name / variantLabel / versions 兜底。两边各用一套的话，
+            // 同一条引用会在检查器里解析得好好的、在卡片上却显示「实体缺失」。
+            const resolved = resolveReference(reference, assets, assetsReady, true)
             return (
-              <span key={`${reference.entityId}-${index}`} className={`df-ref-pill${resolved.error ? ' is-missing' : ''}`} title={resolved.error ?? resolved.mode}>
+              <span
+                key={`${reference.entityId}-${index}`}
+                className={`df-ref-pill${resolved.error ? ' is-missing' : ''}${onOpenReference ? ' is-openable' : ''}`}
+                title={`${resolved.error ?? resolved.mode}${onOpenReference ? ' · 点开这条引用的详情' : ''}`}
+                // 引用徽标可点开详情：先拦住指针事件，免得这一下被卡片当成「拖节点」或「连线」起手；
+                // 点它**不改**任何引用配置，也不进什么引用画布（只把检查器的那条详情展开）。
+                role={onOpenReference ? 'button' : undefined}
+                onPointerDown={(event) => { if (onOpenReference) event.stopPropagation() }}
+                onClick={(event) => {
+                  if (!onOpenReference) return
+                  event.stopPropagation()
+                  onOpenReference(node.recordId, reference)
+                }}
+              >
                 {/* 引用的那一版设定长什么样，卡片上直接看得见。取不到图就把 img 收起来——
                     缩略图是**加成**，缺了它这条引用仍然是可读的一枚徽标，不该变成一个破图图标。 */}
                 {reference.entityId && (
@@ -757,8 +989,46 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
           })}
         </span>
       )}
+      {/* 这个节点**自己**出的图 / 视频。与上面那排引用徽标分开摆、中间加一条分隔线：
+          上面那排说的是「这个节点引用了谁」，这里说的是「这个节点自己出了什么」——
+          混成一块就会把引用的设定图看成这个节点出的图（桌面端同样是分两块画的）。 */}
+      {ownMedia.length > 0 && (
+        <>
+          <span className="df-node-divider" aria-hidden="true" />
+          <span className="df-node-media">
+            {media.images.map((image) => brokenImages.includes(image.id)
+              // 图取不到时**留一个同样大小的空位**，不是把 img 收起来：收起来卡片会矮一截，
+              // 一圈卡片跟着跳（桌面端这里写的是「无图」两个字）。占位仍然可点：大图那边可能读得出来。
+              ? <span
+                key={image.id}
+                className="df-node-media-tile is-empty"
+                title={`${image.name} · 图片无法读取（点它到检查器里重试）`}
+                onPointerDown={(event) => { if (onOpenMedia) event.stopPropagation() }}
+                onClick={(event) => openOwnImage(event, image.id)}
+              >无图</span>
+              : <img
+                key={image.id}
+                className="df-node-media-tile"
+                src={attachmentFileUrl(node.recordId, image.id)}
+                alt={image.name}
+                loading="lazy"
+                title={`${image.name}${image.source ? ` · ${image.source}` : ''} · 点它看大图（检查器里可下载）`}
+                onPointerDown={(event) => { if (onOpenMedia) event.stopPropagation() }}
+                onClick={(event) => openOwnImage(event, image.id)}
+                onError={() => setBrokenImages((current) => current.includes(image.id) ? current : [...current, image.id])}
+              />)}
+            {/* 视频在卡片上只放一枚明确的标识：既不抓首帧（要在每张卡上跑一次解码），也不塞播放器
+                （桌面端这里画的也是「▶」）。真正播放去检查器的产物附件，那里用的是同一份字节。 */}
+            {media.videos.map((video) => (
+              <span key={video.id} className="df-node-media-tile is-video" title={`${video.name} · 在检查器的产物附件里播放`}>▶</span>
+            ))}
+          </span>
+        </>
+      )}
       <span className="df-node-foot">
-        <span className="df-mono">{recordStatus(node)}</span>
+        <span className="df-node-status" style={{ color: live?.hex ?? status.hex }} title={live?.title ?? `节点状态：${status.label}`}>
+          {live?.label ?? status.label}
+        </span>
         <span className="df-mono" title={node.recordId}>{node.recordId.slice(0, 8)}</span>
       </span>
       {/* 右缘的连线圆点。按住它拖到另一张卡上就是连线——与工具栏「连接」同一个动作，只是手势不同。
@@ -775,5 +1045,77 @@ function NodeCard({ node, selected, dimmed, moving, lock, myUserId, assets, asse
         />
       )}
     </button>
+  )
+}
+
+/** 候选卡上的按下不能落到画布手势上（拖节点 / 从圆点连线 / 空白处平移）。 */
+function stopCanvasGesture(event: React.PointerEvent) {
+  event.stopPropagation()
+}
+
+/**
+ * 一张节点出图的候选卡。
+ *
+ * 临时的：它不是画布节点，不参与连线，也不在正式数据里（见 candidateBatch.ts）。
+ * 状态与结果都来自任务（复用现有轮询与 SSE，不另开一套）；耗时由卡片自己按秒走——
+ * 谁显示谁计时，整张画布不跟着每秒重画。
+ */
+function CandidateCard({ slot, position, index, startedAt, nodeId, onAdopt, onOpen }: {
+  slot: CandidateSlotView
+  position: { left: number; top: number }
+  index: number
+  startedAt: number
+  nodeId: string
+  onAdopt?: (nodeId: string, jobId: string, outputIndex: number) => void
+  onOpen?: (jobId: string, outputIndex: number, name: string) => void
+}) {
+  const [, tick] = useState(0)
+  const busy = slot.status === 'waiting' || slot.status === 'running'
+  useEffect(() => {
+    if (!busy) return
+    const timer = window.setInterval(() => tick((value) => value + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [busy])
+  const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000))
+  const name = `第 ${index + 1} 张 · ${slot.label}`
+  return (
+    <div
+      className={`df-candidate-card is-${slot.status}`}
+      style={{ left: position.left, top: position.top, width: CANDIDATE_CARD.width, height: CANDIDATE_CARD.height }}
+      onPointerDown={stopCanvasGesture}
+    >
+      <span className="df-candidate-index" aria-hidden="true">{index + 1}</span>
+      {slot.status === 'succeeded' && slot.imageUrl
+        ? (
+          <img
+            className="df-candidate-thumb"
+            src={slot.imageUrl}
+            alt={name}
+            loading="lazy"
+            title="点它看大图"
+            onPointerDown={stopCanvasGesture}
+            onClick={(event) => { event.stopPropagation(); onOpen?.(slot.jobId, slot.outputIndex, name) }}
+          />
+        )
+        : (
+          <span className="df-candidate-state">
+            {slot.label}
+            {/* 有可靠百分比就显示；没有就只说「生成中」+ 耗时，不编一个数字出来。 */}
+            {slot.progress !== null && <span className="df-candidate-percent df-mono">{Math.round(slot.progress)}%</span>}
+            {busy && <span className="df-dim df-mono">{seconds}s</span>}
+          </span>
+        )}
+      {slot.failure.length > 0 && <span className="df-candidate-fail" title={slot.failure}>{slot.failure}</span>}
+      {slot.adopted && <span className="df-candidate-note">已采用</span>}
+      {slot.adoptable && (
+        <button
+          type="button"
+          className="df-candidate-action"
+          title="采用这一张：追加到原节点"
+          onPointerDown={stopCanvasGesture}
+          onClick={(event) => { event.stopPropagation(); onAdopt?.(nodeId, slot.jobId, slot.outputIndex) }}
+        >用这一张</button>
+      )}
+    </div>
   )
 }

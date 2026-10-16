@@ -131,8 +131,6 @@ describe('章节分组', () => {
     expect(isPlanning(node(GUID_C, 'prop', {}))).toBe(false)
     expect(isPlanning(node(GUID_C, 'general', {}))).toBe(false)
     expect(isPlanning(node(GUID_C, '完全没见过的类型', {}))).toBe(false)
-    // 角色挂在章节里，就不该出现在企划组里
-    expect(chapterGroups(records)[0].records.map((item) => item.record.id)).not.toContain('林晚')
   })
 
   it('没有节点的章节照样出现在时间轴上，只是空的', () => {

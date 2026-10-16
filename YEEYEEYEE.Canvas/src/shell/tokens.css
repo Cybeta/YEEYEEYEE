@@ -132,6 +132,14 @@ select {
 
 /* ==================== 工作台骨架（MainWindow.axaml: WorkbenchRoot） ==================== */
 
+.df-project-workbench {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .df-workbench {
   position: relative;
   height: 100%;
@@ -718,6 +726,68 @@ textarea.df-input {
   color: var(--df-ink-3);
 }
 
+/* 节点自身的执行状态（草稿 / 待补充 / 生成中 / 已完成 / 失败 / 待确认），颜色由组件按状态给。
+   与桌面端同一套色，见 records.nodeStatusOf。 */
+.df-node-status {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* 这个节点**自己**出的图 / 视频：与上面那排引用徽标分开摆，中间一条分隔线。
+   上面那排说的是「它引用了谁」，这一块说的是「它自己出了什么」——混成一块就会读错。 */
+.df-node-divider {
+  height: 1px;
+  background: var(--df-line);
+  margin: 3px 0 5px;
+}
+
+.df-node-media {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+/* 缩略图与视频标识**同尺寸、同占位**（尺寸与桌面端的产物小格一致）：
+   图还没解码出来、或取不到图时，也占着这一块，卡片高度不会先塌后弹。 */
+.df-node-media-tile {
+  width: 66px;
+  height: 48px;
+  border-radius: var(--df-radius-small);
+  flex: none;
+  background: var(--df-surface-1);
+  border: 1px solid var(--df-line);
+}
+
+img.df-node-media-tile {
+  object-fit: cover;
+}
+
+/* 「▶」与「无图」共用一个居中的小标识位。 */
+.df-node-media-tile.is-video,
+.df-node-media-tile.is-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--df-ink-3);
+}
+
+.df-node-media-tile.is-video {
+  font-size: 15px;
+  color: var(--df-ink-2);
+  border-color: var(--df-line-strong);
+}
+
+/* 正在生成：卡片外面套一圈主色描边。
+   用 outline 而不是 box-shadow，是因为「选中」与「拖动」各自已经占着 box-shadow——
+   两者叠在一张卡上时不该互相顶掉。静态、不做呼吸动画：画布上可能同时有好几张在跑，
+   动画会把 CPU 咬住，而这里要的只是「一眼看得出来它在跑」。 */
+.df-node.is-generating {
+  border-color: var(--df-primary);
+  outline: 1px solid rgba(77, 155, 255, 0.45);
+  outline-offset: 2px;
+}
+
 .df-node-refs {
   display: flex;
   flex-wrap: wrap;
@@ -747,6 +817,63 @@ textarea.df-input {
   background: var(--df-surface-1);
 }
 
+/* 可点开详情的引用徽标：只是把「能点」说出来，不改变它作为徽标的样子。 */
+.df-ref-pill.is-openable {
+  cursor: pointer;
+}
+
+.df-ref-pill.is-openable:hover {
+  border-color: var(--df-line-strong);
+  color: var(--df-ink);
+}
+
+/* ==================== 引用详情（检查器里展开的那一段） ==================== */
+.df-ref-detail {
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--df-line);
+}
+
+/* 详情里的图片预览：限制高度、保持比例；大图另开浮层看，不在这里撑开面板。 */
+.df-ref-media-image {
+  display: block;
+  max-width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  border-radius: var(--df-radius-small);
+  background: var(--df-surface-1);
+}
+
+/* 大图浮层：铺满视口、压住画布（点它不会落到画布手势上）；固定定位所以不受面板滚动影响。 */
+.df-ref-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  background: rgba(6, 12, 22, 0.88);
+}
+
+.df-ref-viewer img {
+  max-width: 92vw;
+  max-height: 82vh;
+  object-fit: contain;
+  border-radius: var(--df-radius-small);
+}
+
+.df-ref-viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--df-ink-2);
+}
+
 /* ==================== 节点产物附件（检查器里那一格） ==================== */
 /* 缩略图与引用徽标那张同一条路：取不到图由组件把 img 收起来，所以这里不为「加载失败」留位置。 */
 .df-attachments {
@@ -774,6 +901,11 @@ textarea.df-input {
   background: var(--df-surface-1);
 }
 
+/* 视频 / 音频产物：用同一个附件占位宽度里的原生播放器（Range 请求由服务端支持）。 */
+.df-attachment-media {
+  width: 100%;
+}
+
 /* 非图片的产物（视频 / 音频 / 其他）：给一个同样大小的标记位，
    免得那一列在「有图 / 没图」之间跳来跳去。 */
 .df-attachment-kind {
@@ -787,6 +919,133 @@ textarea.df-input {
   align-items: center;
   justify-content: center;
   flex: none;
+}
+
+/* ==================== 节点产物：主预览、选择入口与大图 ==================== */
+/* 44×44 的选择入口：点它换主预览。它就是那一格缩略图，所以按钮本身不带内边距与背景。 */
+.df-attachment-tile {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--df-radius-small);
+  background: none;
+  cursor: pointer;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 当前主预览那一行：描边 + 底色，多附件时「现在看的是哪一件」在列表里也一眼看得出来。 */
+.df-attachment.is-active {
+  border-color: var(--df-primary);
+  background: var(--df-surface-1);
+}
+
+/* 主预览：图片按比例收在框里（点它看大图），视频用原生播放器，读不到时换成说明 + 重试。 */
+.df-media-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.df-media-stage.is-openable {
+  padding: 0;
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-small);
+  background: var(--df-surface-1);
+  cursor: zoom-in;
+}
+
+.df-media-stage.is-failed {
+  align-items: flex-start;
+  padding: 10px;
+  border: 1px dashed var(--df-line-strong);
+  border-radius: var(--df-radius-small);
+  color: var(--df-ink-3);
+  font-size: 11px;
+}
+
+.df-media-stage-image {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  border-radius: var(--df-radius-small);
+  background: var(--df-surface-1);
+}
+
+.df-media-stage-video {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  border-radius: var(--df-radius-small);
+  background: #0e141c;
+}
+
+/* 音频读不到时占住播放器那一块：说明 + 重试，行里的名称与下载入口照旧。 */
+.df-attachment-failed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+  min-width: 0;
+  flex: 1;
+}
+
+/* 大图浮层里的多条切换：底部一条缩略带，当前那一张描边标出来。
+   **必须 flex: none**：浮层是纵向 flex、整屏高度已被大图与说明占掉大半，
+   默认的 flex-shrink 会把这条带子压扁（52px 的缩略图只分到 28px），底边还会被裁掉。 */
+.df-media-viewer-strip {
+  display: flex;
+  flex: none;
+  flex-wrap: nowrap;
+  gap: 8px;
+  justify-content: center;
+  align-items: center;
+  /* 上下各留 2px：实测缩略图内容比容器高 1px（52 的内容盒 vs 52 的格），
+     不留这点余量时 overflow-y:hidden 会把当前那格的下沿描边削掉一线。 */
+  padding: 2px 0;
+  max-width: 92vw;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* 多图时给缩略带让出高度：一张图 + 一行说明 + 一条缩略带都要装进视口。 */
+.df-ref-viewer.is-multi img {
+  max-height: 70vh;
+}
+
+.df-media-viewer-thumb {
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--df-radius-small);
+  background: none;
+  cursor: pointer;
+}
+
+.df-media-viewer-thumb.is-active {
+  border-color: var(--df-primary);
+}
+
+.df-media-viewer-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--df-radius-small);
+}
+
+.df-media-viewer-failure {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  color: var(--df-ink-2);
+  font-size: 12px;
 }
 
 .df-attachment-meta {
@@ -1045,6 +1304,107 @@ textarea.df-input {
   color: var(--df-primary);
 }
 
+/* ==================== 节点出图的候选卡 ==================== */
+/* 临时的：挂在原节点旁边（位置由节点坐标现算，节点一动跟着动），不进正式画布数据。
+   整层不接事件，只有卡片自己接——卡片上的按下已经 stopPropagation，不会被当成拖节点或连线。 */
+.df-candidate-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.df-candidate-card {
+  position: absolute;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--df-line-strong);
+  border-radius: var(--df-radius-small);
+  background: var(--df-surface-2);
+  box-shadow: 6px 8px 18px rgba(4, 9, 16, 0.45);
+  overflow: hidden;
+  cursor: default;
+}
+
+.df-candidate-card.is-succeeded {
+  border-color: var(--df-primary);
+}
+
+.df-candidate-card.is-failed {
+  border-color: #e0707e;
+}
+
+.df-candidate-index {
+  position: absolute;
+  top: 2px;
+  left: 5px;
+  font-size: 9px;
+  color: var(--df-ink-2);
+}
+
+.df-candidate-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  font-size: 10px;
+  color: var(--df-ink);
+}
+
+.df-candidate-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--df-radius-small);
+  cursor: pointer;
+}
+
+.df-candidate-fail {
+  max-height: 22px;
+  overflow: hidden;
+  font-size: 9px;
+  color: #e0707e;
+  text-align: center;
+}
+
+.df-candidate-note {
+  font-size: 9px;
+  color: var(--df-ink-2);
+}
+
+.df-candidate-action {
+  margin-top: 2px;
+  padding: 1px 6px;
+  border: 1px solid var(--df-line-strong);
+  border-radius: var(--df-radius-small);
+  background: var(--df-surface-3);
+  color: var(--df-ink);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.df-candidate-action:hover {
+  border-color: var(--df-primary);
+}
+
+/* 批次那一行说明 + 丢弃：与卡片同一排的下方 */
+.df-candidate-caption {
+  position: absolute;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--df-ink-2);
+}
+
 /* 会被移动的节点：换成虚线边（压暗在 JS 里算——inline opacity 会压过这里，
    而「只看这一章」也在用 opacity，两个状态谁生效必须写在一处） */
 .df-node.is-moving {
@@ -1106,6 +1466,20 @@ textarea.df-input {
   height: 1px;
   margin: 4px 6px;
   background: var(--df-line);
+}
+
+/* 菜单里的「出图选项」（张数 / 比例）：与菜单项同一片区域，只是横着排 */
+.df-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+}
+
+.df-menu-row-label {
+  margin-right: 2px;
+  font-size: 11px;
+  color: var(--df-ink-2);
 }
 
 /* ==================== 编辑锁 ==================== */
@@ -1462,9 +1836,9 @@ textarea.df-input {
   border: 1px solid var(--df-line);
   border-radius: var(--df-radius-control);
   background: var(--df-surface-2);
-  padding: 8px 10px;
-  cursor: pointer;
-  text-align: left;
+  /* 内边距让给里面那几个按钮：任务行与产物各要能单独点，整张卡不再是**一个**按钮。 */
+  padding: 0;
+  overflow: hidden;
 }
 
 .df-lane-chip:hover {
@@ -1475,6 +1849,108 @@ textarea.df-input {
 .df-lane-chip.is-selected {
   border-color: var(--df-primary);
   box-shadow: 0 0 0 1px rgba(77, 155, 255, 0.35);
+}
+
+/* 时间轴卡里的节点那一块（点它选中节点） */
+.df-lane-node {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* 这张节点上的任务：一行一个，谁也不覆盖谁 */
+.df-lane-tasks {
+  display: grid;
+  gap: 6px;
+  padding: 6px 8px 8px;
+  border-top: 1px solid var(--df-line);
+}
+
+.df-lane-task {
+  display: grid;
+  gap: 3px;
+}
+
+.df-lane-task-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--df-ink);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.df-lane-task-bar {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--df-surface-3);
+  overflow: hidden;
+}
+
+.df-lane-task-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--df-primary);
+}
+
+/* 失败原因：服务端原话，不在界面上改写成别的说法 */
+.df-lane-task-fail {
+  font-size: 10px;
+  line-height: 1.5;
+  color: #e0707e;
+  word-break: break-word;
+}
+
+/* 一件已回挂的产物：缩略图或「种类 · 名称」 */
+.df-lane-media {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--df-ink-2);
+  font: inherit;
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.df-lane-media-thumb {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-small);
+  object-fit: cover;
+}
+
+.df-lane-media-thumb.is-empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--df-ink-2);
+}
+
+/* 「目标节点已删除/不可用」那条泳道里的卡：不是可点的节点，画成虚线 */
+.df-lane-chip.is-unavailable {
+  padding: 8px 10px;
+  border-style: dashed;
+  cursor: default;
 }
 
 /* 剧本视图 */
@@ -1498,4 +1974,322 @@ textarea.df-input {
   line-height: 1.75;
   color: var(--df-ink-2);
   margin: 6px 0 14px;
+}
+
+.df-agent-dock-tools {
+  position: absolute;
+  top: 9px;
+  right: 10px;
+  display: flex;
+  gap: 2px;
+  z-index: 1;
+}
+
+.df-panel-body.df-agent-body {
+  padding: 0;
+  overflow: hidden;
+}
+
+.df-agent-panel,
+.df-agent-chat-view,
+.df-agent-chat {
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.df-agent-chat-view {
+  flex: 1;
+}
+
+.df-agent-chat-view[hidden] {
+  display: none;
+}
+
+.df-agent-panel > .df-panel-head {
+  padding-right: 172px;
+  font-size: 13px;
+}
+
+.df-agent-view-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 8px;
+  border-bottom: 1px solid var(--df-line);
+  flex: none;
+}
+
+.df-agent-panel > .df-section {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--df-surface-4) transparent;
+}
+
+.df-agent-panel .df-card {
+  overflow-wrap: anywhere;
+}
+
+.df-agent-chat {
+  font-size: 12px;
+  line-height: 19px;
+}
+
+.df-agent-chat-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--df-line);
+  flex: none;
+}
+
+.df-agent-chat-toolbar .df-row {
+  gap: 4px;
+}
+
+.df-agent-chat-toolbar .df-select {
+  min-width: 0;
+  flex: 1;
+}
+
+.df-agent-chat-toolbar .df-mini-button {
+  flex: none;
+  padding: 5px 6px;
+}
+
+.df-agent-context {
+  font-size: 10px;
+  color: var(--df-ink-2);
+  overflow-wrap: anywhere;
+}
+
+.df-agent-authorization {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--df-ink-2);
+  font-size: 11px;
+}
+
+.df-agent-authorization .df-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.df-agent-history {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px;
+}
+
+.df-agent-message {
+  gap: 6px;
+  align-self: flex-start;
+  max-width: 100%;
+  min-width: 0;
+  padding: 10px;
+  margin-bottom: 5px;
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-box);
+  background: var(--df-surface-2);
+  overflow-wrap: anywhere;
+}
+
+.df-agent-message.is-user {
+  align-self: flex-end;
+  max-width: 90%;
+  background: var(--df-primary-soft);
+  border-color: var(--df-line-glow);
+}
+
+.df-agent-message-role {
+  font-size: 10px;
+  color: var(--df-ink-2);
+}
+
+.df-agent-thinking {
+  color: var(--df-ink-2);
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: var(--df-radius-small);
+  background: var(--df-surface-1);
+}
+
+.df-agent-thinking-preview {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  height: 2.8em;
+  line-height: 1.4;
+  overflow: hidden;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.df-agent-thinking-preview > span {
+  flex-shrink: 0;
+}
+
+.df-agent-thinking[open] .df-agent-thinking-preview {
+  display: none;
+}
+
+.df-agent-chat summary {
+  cursor: pointer;
+  color: var(--df-ink-2);
+  font-size: 11px;
+}
+
+.df-agent-chat details > .df-section,
+.df-agent-thinking[open] > div {
+  margin-top: 8px;
+}
+
+.df-agent-usage,
+.df-agent-attachment,
+.df-agent-message > a {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-pill);
+  background: var(--df-surface-3);
+  color: var(--df-ink-2);
+  font-size: 10px;
+  text-decoration: none;
+}
+
+.df-agent-usage-details {
+  min-width: 0;
+  font-size: 10px;
+  color: var(--df-ink-2);
+}
+
+.df-agent-usage-details > summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  list-style: none;
+}
+
+.df-agent-usage-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.df-agent-usage-details .df-agent-usage {
+  padding: 1px 6px;
+  overflow-wrap: anywhere;
+}
+
+.df-agent-usage-details > .df-section {
+  max-height: 180px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.df-agent-chat a {
+  color: var(--df-primary);
+  overflow-wrap: anywhere;
+}
+
+.df-agent-attachment a {
+  min-width: 0;
+}
+
+.df-agent-attachment .df-mini-button {
+  flex: none;
+  padding: 2px 4px;
+}
+
+.df-agent-approval {
+  padding: 8px;
+  background: var(--df-surface-1);
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-box);
+}
+
+.df-agent-message .df-row {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.df-agent-message pre {
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+
+.df-agent-session-jobs {
+  border-top: 1px solid var(--df-line);
+  margin-top: 10px;
+  padding-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.df-agent-composer-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: none;
+  max-height: 45%;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-top: 1px solid var(--df-line);
+}
+
+.df-agent-composer {
+  background: var(--df-surface-2);
+  border: 1px solid var(--df-line);
+  border-radius: var(--df-radius-box);
+  padding: 8px;
+}
+
+.df-agent-composer:focus-within {
+  border-color: var(--df-primary);
+}
+
+.df-agent-composer textarea.df-input {
+  display: block;
+  padding: 4px 2px 8px;
+  resize: none;
+  line-height: 19px;
+}
+
+.df-agent-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.df-agent-submit {
+  margin-left: auto;
+  flex: none;
+}
+
+.df-agent-submit .df-primary-button {
+  min-width: 76px;
+}
+
+.df-agent-input-hint {
+  font-size: 10px;
+  color: var(--df-ink-3);
+}
+
+.df-agent-panel button:focus-visible,
+.df-agent-chat summary:focus-visible,
+.df-agent-chat a:focus-visible {
+  outline: 2px solid var(--df-primary);
+  outline-offset: 2px;
 }

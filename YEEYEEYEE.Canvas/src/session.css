@@ -146,3 +146,41 @@
 .session-users code {
   color: #7fd1c0;
 }
+
+.df-account-dialog {
+  width: min(720px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--df-line-strong);
+  border-radius: var(--df-radius-glass);
+  background: var(--df-surface-1);
+  color: var(--df-ink);
+}
+
+.df-account-dialog::backdrop {
+  background: rgba(0, 0, 0, .5);
+}
+
+.df-account-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.df-account-dialog .session-inline {
+  flex-wrap: wrap;
+}
+
+.df-account-dialog .session-users {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.df-account-dialog input {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}

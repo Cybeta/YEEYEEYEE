@@ -42,6 +42,7 @@ public sealed class AiProviderConfig
 
     public string ImageEndpoint { get; set; } = string.Empty;
     public string ImageModel { get; set; } = string.Empty;
+    public string ImageProxyUrl { get; set; } = string.Empty;
 
     /// <summary>
     /// 图像接口自己的密钥。**留空时沿用当前选中模型的密钥**。
@@ -61,6 +62,7 @@ public sealed class AiProviderConfig
     /// 视频接口通常是异步任务：提交后轮询取结果，因此未配置时只生成任务规格，不伪造视频结果。
     /// </summary>
     public string VideoEndpoint { get; set; } = string.Empty;
+    public string VideoProxyUrl { get; set; } = string.Empty;
 
     /// <summary>视频模型名称；留空表示未启用视频链路。</summary>
     public string VideoModel { get; set; } = string.Empty;
@@ -225,7 +227,7 @@ public sealed class AiProviderConfig
 
     /// <summary>
     /// 被停用的**内置**技能 Id（见 <see cref="BuiltInSkills"/>）。
-    /// 内置技能是代码里的静态表，只能在配置里记一份"停用名单"，而不是去改代码。
+    /// 只在配置里记一份"停用名单"，而不是去改代码。
     /// </summary>
     public List<string> DisabledBuiltInSkills { get; set; } = new();
 
@@ -373,15 +375,16 @@ public static class AiProviderSettings
         Encoder = JavaScriptEncoder.Create(UnicodeRanges.All)
     };
 
-    public static AiProviderConfig Load(bool migrateSecrets = true)
+    public static AiProviderConfig Load(bool migrateSecrets = true, string? filePath = null, bool applyEnvironmentOverrides = true)
     {
+        var path = filePath ?? ConfigPath;
         var config = new AiProviderConfig();
         var onDiskKey = string.Empty;
         try
         {
-            if (File.Exists(ConfigPath))
+            if (File.Exists(path))
             {
-                config = JsonSerializer.Deserialize<AiProviderConfig>(File.ReadAllText(ConfigPath)) ?? config;
+                config = JsonSerializer.Deserialize<AiProviderConfig>(File.ReadAllText(path)) ?? config;
                 onDiskKey = config.ApiKey;
             }
         }
@@ -409,9 +412,9 @@ public static class AiProviderSettings
         EnsureProfiles(config);
         var selected = ResolveSelected(config);
         if (selected is not null) ApplyProfile(config, selected);
-        ApplyEnvironmentOverrides(config, selected);
+        if (applyEnvironmentOverrides) ApplyEnvironmentOverrides(config, selected);
 
-        if (migrateSecrets) MigratePlaintextSecret(config);
+        if (migrateSecrets && filePath is null) MigratePlaintextSecret(config);
         return config;
     }
 
@@ -504,7 +507,7 @@ public static class AiProviderSettings
         return fallback;
     }
 
-    /// <summary>Agent 面板的候选：所有**已启用**的配置（停用的不进候选，但配置与密钥都留着）。</summary>
+    /// <summary>Agent 面板的候选：所有**已启用**的配置（停用的不进候选）。</summary>
     public static IReadOnlyList<AiProviderProfile> EnabledProfiles(AiProviderConfig config) =>
         config.Profiles is null ? Array.Empty<AiProviderProfile>() : config.Profiles.Where(item => item.Enabled).ToList();
 

@@ -90,6 +90,12 @@ public static class CanvasPreviewBuilder
         // 预览阶段跳过文件写入：预览不能有副作用。
         AgentActionExecutor.Apply(actions, working, null, FileWriteMode.Skip);
 
+        return Compare(current, working);
+    }
+
+    public static CanvasPreview Compare(WorkflowCanvasState current, WorkflowCanvasState working)
+    {
+        var preview = new CanvasPreview();
         var currentNodes = current.Nodes.ToDictionary(node => node.Id);
         var previewNodes = working.Nodes.ToDictionary(node => node.Id);
         foreach (var node in working.Nodes)
@@ -115,18 +121,8 @@ public static class CanvasPreviewBuilder
         JsonSerializer.Deserialize<WorkflowCanvasState>(JsonSerializer.Serialize(source)) ?? new WorkflowCanvasState();
 
     private static bool NodeChanged(WorkflowNode before, WorkflowNode after) =>
-        !string.Equals(before.Title, after.Title, StringComparison.Ordinal)
-        || !string.Equals(before.Content, after.Content, StringComparison.Ordinal)
-        || before.IsLocked != after.IsLocked
-        || before.VersionDecision != after.VersionDecision
-        || before.WorkTreeItemId != after.WorkTreeItemId
-        || !before.Attachments.Select(item => item.Reference)
-            .SequenceEqual(after.Attachments.Select(item => item.Reference))
-        || !before.References.Select(DescribeReference)
-            .SequenceEqual(after.References.Select(DescribeReference));
-
-    private static string DescribeReference(NodeReference reference) =>
-        $"{reference.EntityId}|{reference.VariantId}|{reference.VariantVersionId}";
+        !System.Text.Json.Nodes.JsonNode.DeepEquals(
+            JsonSerializer.SerializeToNode(before), JsonSerializer.SerializeToNode(after));
 }
 
 /// <summary>被 Agent 覆盖或新建的文件快照，撤销时用于恢复原内容或删除新文件。</summary>

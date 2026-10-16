@@ -340,7 +340,7 @@ internal static class WebSceneApi
         // 不该因为别人正占着编辑锁而问不出来。
         app.MapGet("/api/web/records/{recordId}/assist", (string recordId) =>
             projectStore is not null
-                ? projectStore.Assist(recordId)
+                ? projectStore.Assist(recordId, videoAvailable: WebInvocationExecutor.VideoLinkReady(app.Configuration))
                 : Error(409, "CANVAS_REQUIRES_PROJECT", "节点协助计划要的是项目画布；当前配置的是独立 Web 场景"));
 
         // 只读：一条设定的预览图**字节**。网页端画布上那些引用徽标显示的就是它。

@@ -87,7 +87,7 @@ export function parseNodeAssist(raw: unknown): NodeAssistPlan {
 }
 
 /** 点下去做什么。`none` = 摆出来但没接执行方（灰着，原因写在 reason 上）。 */
-export type NodeMenuAction = 'copyPrompt' | 'runImage' | 'editNode' | 'deleteNode' | 'none'
+export type NodeMenuAction = 'copyPrompt' | 'runAgent' | 'runImage' | 'runVideo' | 'editNode' | 'deleteNode' | 'none'
 
 /** 菜单分组：只影响渲染时在哪切一条分隔线。 */
 export type NodeMenuGroup = 'summary' | 'assist' | 'node'
@@ -109,16 +109,29 @@ export type NodeMenuItem = {
 export type NodeMenuCapabilities = {
   /** 出图那条技能的 ID（来自 `/api/web/skills`）；没有 = 服务端没预授权或没配模型。 */
   imageSkillId: string | null
+  /** 出视频那条技能的 ID（来自 `/api/web/skills`，capability = TextToVideo）；没有 = 这边跑不了。 */
+  videoSkillId: string | null
+  canRunAgent: boolean
 }
+
+/**
+ * 「出这一版的成片视频」那条建议的服务端 id（见 NodeAssist.cs 的 Product 分支）。
+ *
+ * 它**不是**文生视频：不生成画面，只是把每一镜已经出好的视频按分镜顺序接起来。桌面端点开是个
+ * 对话框，网页端这个入口在成品卡的成片面板里（FilmPanel）。所以菜单上这一项保持灰着并说清去处——
+ * 拿文生视频去冒充它，等于凭空造出一段不属于任何镜头的画面。
+ */
+export const PRODUCT_VIDEO_SUGGESTION_ID = 'product-video'
 
 /**
  * 网页端只摆出来、但还跑不了的那几条（原因写清楚，不要让人以为菜单坏了）。
  * 这几句是**网页端专有**的：桌面端有 Agent 与站点池子，所以它们不进两端共读的 uiText.json。
  */
 export const WEB_ONLY_REASONS = {
-  agent: '网页端还没有 Agent 执行方：这一步请在桌面端做',
-  video: '出视频执行方尚未接入',
-  noImageSkill: '服务端没有可用的本机图像技能（未预授权或没配模型）'
+  agent: '当前账号或画布没有 Agent 执行权限',
+  noImageSkill: '服务端没有可用的本机图像技能（未预授权或没配模型）',
+  noVideoSkill: '当前账号或服务端没有可用的视频技能（未预授权或没配视频接口）',
+  filmInstead: '成片不在这里出：它把每一镜已经出好的视频接起来，请用成品卡里的「成片」面板'
 }
 
 /**
@@ -132,22 +145,27 @@ export function buildNodeMenu(plan: NodeAssistPlan, capabilities: NodeMenuCapabi
 
   for (const suggestion of plan.suggestions) {
     // 先看服务端怎么说（节点没内容又没素材这类），再看网页端自己有没有执行方。
-    const reason = !suggestion.canRun
-      ? suggestion.blocked
-      : suggestion.kind === 'Agent'
-        ? WEB_ONLY_REASONS.agent
-        : suggestion.kind === 'Video'
-          ? WEB_ONLY_REASONS.video
-          : suggestion.kind === 'Image' && capabilities.imageSkillId === null
-            ? WEB_ONLY_REASONS.noImageSkill
-            : undefined
+    // 「成片」那条是例外，它要**排在 canRun 之前**：计划故意把它标成可跑（桌面端点开是个对话框），
+    // 而网页端这一项不在菜单里跑，得先说清它去哪儿（见 PRODUCT_VIDEO_SUGGESTION_ID）。
+    const reason = suggestion.kind === 'Video' && suggestion.id === PRODUCT_VIDEO_SUGGESTION_ID
+      ? WEB_ONLY_REASONS.filmInstead
+      : !suggestion.canRun
+        ? suggestion.blocked
+        : suggestion.kind === 'Agent' && !capabilities.canRunAgent
+          ? WEB_ONLY_REASONS.agent
+          : suggestion.kind === 'Video' && capabilities.videoSkillId === null
+            ? WEB_ONLY_REASONS.noVideoSkill
+            : suggestion.kind === 'Image' && capabilities.imageSkillId === null
+              ? WEB_ONLY_REASONS.noImageSkill
+              : undefined
 
     // 灰着的项一律 `none`：它现在**没有**动作。留一个「点了会跑」的 action 在那儿，
     // 等于给以后留了一条「把不可点的项接上执行方」的错线。
     const action: NodeMenuAction = reason !== undefined
       ? 'none'
       : suggestion.kind === 'Prompt' ? 'copyPrompt'
-        : suggestion.kind === 'Image' ? 'runImage' : 'none'
+        : suggestion.kind === 'Image' ? 'runImage'
+          : suggestion.kind === 'Video' ? 'runVideo' : suggestion.kind === 'Agent' ? 'runAgent' : 'none'
 
     items.push({
       id: suggestion.id,

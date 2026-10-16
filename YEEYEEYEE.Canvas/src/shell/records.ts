@@ -97,6 +97,25 @@ export function recordStatus(item: OperationRecord): string {
   return text(item.record.status, '—')
 }
 
+/**
+ * 节点自身执行状态（服务端投影的 `NodeExecutionStatus` 名字）的**显示口径**。
+ *
+ * 文案与颜色逐个对齐桌面端 `CanvasSurface.StatusText` / `StatusBrush`：两端对同一个状态
+ * 给出同一个词、同一个色（生成中是主色蓝、已完成是绿、失败是红、待补充与待确认是黄）。
+ * 认不出的按「草稿」显示——状态名是服务端的枚举，将来多一个取值时，界面该退回中性色，
+ * 而不是把一个认不出的英文单词直接摆在卡片上。
+ */
+export function nodeStatusOf(status: string): { label: string; hex: string } {
+  switch (status) {
+    case 'WaitingForUser': return { label: '待补充', hex: '#DFB45A' }
+    case 'Generating': return { label: '生成中', hex: '#4D9BFF' }
+    case 'Completed': return { label: '已完成', hex: '#5CC99A' }
+    case 'Failed': return { label: '失败', hex: '#E0707E' }
+    case 'NeedsReview': return { label: '待确认', hex: '#DFB45A' }
+    default: return { label: '草稿', hex: '#93A1B3' }
+  }
+}
+
 export function nodeX(item: OperationRecord): number {
   return numberOf(item.record.x) ?? 0
 }

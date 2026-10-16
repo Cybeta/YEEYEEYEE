@@ -340,7 +340,7 @@ public static class CanvasSaveService
         }
     }
 
-    public static CanvasSaveOutcome Save(RecentCanvasState state, string path, byte[]? expectedBytes = null, Func<ProjectEntityFile?>? validateUnderLease = null)
+    public static CanvasSaveOutcome Save(RecentCanvasState state, string path, byte[]? expectedBytes = null, Func<ProjectEntityFile?>? validateUnderLease = null, Action? rollbackUnderLease = null)
     {
         ArgumentNullException.ThrowIfNull(state);
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -358,28 +358,36 @@ public static class CanvasSaveService
             !expectedBytes.AsSpan().SequenceEqual(File.ReadAllBytes(path))))
             throw new CanvasSaveAbortedException("画布已被其他进程修改，拒绝覆盖保存。请重新加载。");
 
-        var authority = validateUnderLease?.Invoke();
-        // R8：隔离副本，任何后续失败都不会改动调用方的对象。
-        var isolated = CanvasCloner.Clone(state);
-        EnsureWritable(isolated);
-
-        // 目标 6 / G6-1：项目级资源在画布文件里只是快照，写盘前从项目库刷新，
-        // 保证「改一次库 → 所有画布看到同一份内容」，同时旧版程序仍能读到完整快照。
-        if (isolated.Canvas is not null)
+        try
         {
-            if (validateUnderLease is not null)
-                ProjectEntityScope.RefreshSnapshots(isolated.Canvas, authority ?? new ProjectEntityFile());
-            else
-                ProjectEntityScope.RefreshSnapshots(isolated.Canvas);
-        }
+            var authority = validateUnderLease?.Invoke();
+            // R8：隔离副本，任何后续失败都不会改动调用方的对象。
+            var isolated = CanvasCloner.Clone(state);
+            EnsureWritable(isolated);
 
-        var migrated = CanvasMigration.Migrate(isolated);
-        var validation = CanvasIdentityValidator.Validate(migrated.State.Canvas ?? new WorkflowCanvasState(),
-            validateUnderLease is null ? AssetStore.Exists : null);
-        if (validateUnderLease is not null && validation.HasErrors)
-            throw new CanvasSaveAbortedException("项目库快照刷新后画布引用校验失败，已中止保存。");
-        var (backup, writtenBytes) = WriteWithBackupBytes(path, migrated.State);
-        return new CanvasSaveOutcome(path, backup, migrated.Report, validation) { WrittenBytes = writtenBytes };
+            // 目标 6 / G6-1：项目级资源在画布文件里只是快照，写盘前从项目库刷新，
+            // 保证「改一次库 → 所有画布看到同一份内容」，同时旧版程序仍能读到完整快照。
+            if (isolated.Canvas is not null)
+            {
+                if (validateUnderLease is not null)
+                    ProjectEntityScope.RefreshSnapshots(isolated.Canvas, authority ?? new ProjectEntityFile());
+                else
+                    ProjectEntityScope.RefreshSnapshots(isolated.Canvas);
+            }
+
+            var migrated = CanvasMigration.Migrate(isolated);
+            var validation = CanvasIdentityValidator.Validate(migrated.State.Canvas ?? new WorkflowCanvasState(),
+                validateUnderLease is null ? AssetStore.Exists : null);
+            if (validateUnderLease is not null && validation.HasErrors)
+                throw new CanvasSaveAbortedException("项目库快照刷新后画布引用校验失败，已中止保存。");
+            var (backup, writtenBytes) = WriteWithBackupBytes(path, migrated.State);
+            return new CanvasSaveOutcome(path, backup, migrated.Report, validation) { WrittenBytes = writtenBytes };
+        }
+        catch
+        {
+            rollbackUnderLease?.Invoke();
+            throw;
+        }
     }
 
     /// <summary>更高的格式版本不允许被当前版本覆盖保存（返工 R11）。</summary>

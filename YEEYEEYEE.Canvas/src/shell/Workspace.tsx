@@ -1,10 +1,13 @@
 import { useMemo, useRef, useState } from 'react'
-import type { Asset } from '../assets'
+import type { Asset, Reference } from '../assets'
 import { ALL_CHAPTERS_ID } from '../ChapterView'
 import { layerOf } from '../Protocol/VersionedMessages'
 import { CanvasView, clampZoom, type CanvasApi, type Pan } from './CanvasView'
+import type { AgentCanvasPreview } from './agentPreview'
+import type { CandidateBatchView } from './candidateBatch'
 import { ghostMoves, type LayoutMove, type LayoutPlan, type LayoutScope } from './layoutPlan'
 import { describeLease, treeLease, type Lease } from './locks'
+import type { NodeJob } from './nodeMedia'
 import {
   chapterGroups, CREATABLE_RECORD_TYPES, isEditableRecord, PLANNING_GROUP_ID, recordContent, recordTitle, scriptEntries,
   stageSummaries, UNFILED_GROUP_ID, type ShellEdge, type ViewRecord
@@ -44,6 +47,14 @@ export type WorkspaceProps = {
   channelNotice?: string
   layoutBusy: boolean
   layoutPlan: LayoutPlan | null
+  /** 当前的生成任务：卡片上的「生成中 / 失败」由它来（按任务的 targetNodeId 归节点）。 */
+  jobs?: NodeJob[]
+  /** 节点出图的候选批次（临时卡片，见 candidateBatch.ts）。 */
+  candidates?: CandidateBatchView[]
+  onAdoptCandidate?: (nodeId: string, jobId: string, outputIndex: number) => void
+  onDiscardCandidates?: (batchId: string) => void
+  onOpenCandidate?: (jobId: string, outputIndex: number, name: string) => void
+  agentPreview?: AgentCanvasPreview | null
   layoutScope: LayoutScope
   onLayoutPlan: (scope: LayoutScope) => void
   onLayoutApply: (overrideManual: boolean) => void
@@ -66,6 +77,10 @@ export type WorkspaceProps = {
   onConnectNodes?: (sourceId: string, targetId: string) => void
   /** 右键一张节点卡：把「哪一张 + 屏幕坐标」交出去。菜单的内容在调用方那边算（要问服务端）。 */
   onNodeContextMenu?: (recordId: string, position: { x: number; y: number }) => void
+  /** 点画布上一张卡的引用徽标：打开那条引用的详情（放哪、展开成什么由调用方决定）。 */
+  onOpenReference?: (recordId: string, reference: Reference) => void
+  /** 点画布上一张卡里**这个节点自己出的图**：打开它的大图（浮层摆在画布之外，见 CanvasView）。 */
+  onOpenMedia?: (recordId: string, attachmentId: string) => void
   onCreate?: (recordType: string) => void
   onDelete?: () => void
   editBusy?: boolean
@@ -119,6 +134,12 @@ export function Workspace(props: WorkspaceProps) {
 
   const groups = useMemo(() => chapterGroups(visible), [visible])
   const entries = useMemo(() => scriptEntries(visible), [visible])
+  // 时间轴判断「任务的目标节点还在不在」要用**全部**节点，不是筛出来的那些：
+  // 被阶段芯片或搜索藏起来的节点不是被删了，报成「目标不可用」等于凭空造一条错误。
+  const nodeIds = useMemo(
+    () => records.filter(isEditableRecord).map((record) => record.recordId),
+    [records]
+  )
   const ghosts = useMemo(() => (props.layoutPlan ? ghostMoves(props.layoutPlan) : EMPTY_GHOSTS), [props.layoutPlan])
 
   // 章节范围只在真的选中了某一章时才有意义：企划与未归档不是章节，不能拿去做范围。
@@ -239,6 +260,17 @@ export function Workspace(props: WorkspaceProps) {
             myUserId={props.myUserId}
             channelNotice={props.channelNotice}
             ghosts={ghosts}
+            jobs={props.jobs}
+            candidates={props.candidates}
+            onAdoptCandidate={props.onAdoptCandidate}
+            onDiscardCandidates={props.onDiscardCandidates}
+            onOpenCandidate={props.onOpenCandidate}
+            agentPreview={props.agentPreview}
+            previewRecords={records}
+            previewMatches={(record) => {
+              const stageMatcher = STAGE_FILTERS.find((item) => item.key === stage)?.match
+              return (!stageMatcher || stageMatcher(layerOf(record.recordType))) && matchesSearch(record, search)
+            }}
             edges={edges}
             connectFrom={props.connectFrom ?? null}
             onConnectTarget={props.onConnectTarget}
@@ -246,6 +278,8 @@ export function Workspace(props: WorkspaceProps) {
             onMove={props.onMove}
             onConnectNodes={props.onConnectNodes}
             onNodeContextMenu={props.onNodeContextMenu}
+            onOpenReference={props.onOpenReference}
+            onOpenMedia={props.onOpenMedia}
           />
         )}
         {view === 'timeline' && (
@@ -254,6 +288,8 @@ export function Workspace(props: WorkspaceProps) {
               groups={groups}
               activeChapter={activeChapter || ALL_CHAPTERS_ID}
               selectedId={selectedId}
+              jobs={props.jobs}
+              nodeIds={nodeIds}
               onChapter={onChapter}
               onSelect={onSelect}
             />

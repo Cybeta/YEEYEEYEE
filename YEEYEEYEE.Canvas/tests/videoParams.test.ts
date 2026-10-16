@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_VIDEO_PARAMS,
   VIDEO_FRAMES_PER_SECOND,
+  VIDEO_SIZE_OPTIONS,
   buildInvocationBody,
+  videoBackendOf,
   videoEffectiveSeconds,
   videoFramesForSeconds,
   videoSeconds,
-  videoSize
+  videoSize,
+  videoSizeOptions
 } from '../src/shell/videoParams'
 
 describe('文生视频请求体', () => {
@@ -60,5 +63,34 @@ describe('文生视频请求体', () => {
   it('别的技能不带视频参数——文生图收到这些字段会整次调用被拒', () => {
     const body = buildInvocationBody('comfyui.text-to-image', '一张图', { seconds: '9', size: '512', seed: '7' }, 'key-5')
     expect(body).toEqual({ prompt: '一张图', idempotencyKey: 'key-5' })
+  })
+
+  it('接口站那条视频路只发秒：帧数与种子会被自己的服务端拒收', () => {
+    // 没有 ComfyUI 后端时，WebSkillJobApi 对 body 里的 videoFrames / seed / negativePrompt 一律 400
+    // SKILL_INPUT_UNSUPPORTED（它不肯静默忽略），所以这里连字段都不能出现。
+    const body = buildInvocationBody('web.text-to-video', '灯笼在木桌上', { seconds: '3', size: '384', seed: '7' }, 'key-6', 'http')
+    expect(body).toEqual({ prompt: '灯笼在木桌上', idempotencyKey: 'key-6', seconds: 3 })
+    expect('videoFrames' in body).toBe(false)
+    expect('seed' in body).toBe(false)
+    expect('width' in body).toBe(false)
+    expect('height' in body).toBe(false)
+  })
+
+  it('接口站那条路的秒数同样有上下界，乱填退回 1 秒', () => {
+    const low = buildInvocationBody('web.text-to-video', 'x', { ...DEFAULT_VIDEO_PARAMS, seconds: 'abc' }, 'key-7', 'http')
+    expect(low.seconds).toBe(1)
+    const high = buildInvocationBody('web.text-to-video', 'x', { ...DEFAULT_VIDEO_PARAMS, seconds: '999' }, 'key-8', 'http')
+    expect(high.seconds).toBe(videoSeconds('999'))
+  })
+
+  it('边长档位只在 LTX 后端摆——接口站那条路不接受画幅，摆出来就是发不出去的档位', () => {
+    expect(videoSizeOptions('comfyui')).toEqual(VIDEO_SIZE_OPTIONS)
+    expect(videoSizeOptions('http')).toEqual([])
+  })
+
+  it('后端声明缺失时按 comfyui 走，不把既有形态改坏', () => {
+    expect(videoBackendOf({})).toBe('comfyui')
+    expect(videoBackendOf({ videoBackend: 'comfyui' })).toBe('comfyui')
+    expect(videoBackendOf({ videoBackend: 'http' })).toBe('http')
   })
 })

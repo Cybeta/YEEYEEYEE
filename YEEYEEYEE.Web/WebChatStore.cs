@@ -11,15 +11,34 @@ public sealed class WebChatMessage
     public string Content { get; set; } = "";
     public List<string> AttachmentIds { get; set; } = new();
     public string? TargetNodeId { get; set; }
+    public string? TargetChapterId { get; set; }
+    public string? Source { get; set; }
+    public string? TargetNodeTitle { get; set; }
     public string Thinking { get; set; } = "";
     public string State { get; set; } = "completed";
     public string? Error { get; set; }
     public AiUsage? Usage { get; set; }
+    public int ContextWindow { get; set; }
+    public double? FirstTokenSeconds { get; set; }
+    public double? DecodeSeconds { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public AiUsageReport? UsageReport => Role == "assistant"
+        ? AiUsageReport.From(Usage ?? AiUsage.Empty, ContextWindow, DecodeSeconds, FirstTokenSeconds)
+        : null;
+
+    public void ObserveOutput(double elapsedSeconds, bool thinking)
+    {
+        FirstTokenSeconds ??= elapsedSeconds;
+        if (!thinking && elapsedSeconds > FirstTokenSeconds.Value)
+            DecodeSeconds = elapsedSeconds - FirstTokenSeconds.Value;
+    }
+
     public string Model { get; set; } = "";
     public List<AgentAction> Actions { get; set; } = new();
     public List<AgentAction> SkillActions { get; set; } = new();
     public string SkillState { get; set; } = "none";
     public string? SkillError { get; set; }
+    public string? SkillIdempotencyKey { get; set; }
     public List<Guid> SkillJobIds { get; set; } = new();
     public AgentAsk? Ask { get; set; }
     public string Mode { get; set; } = "approval";
@@ -28,7 +47,19 @@ public sealed class WebChatMessage
     public string[] Hints { get; set; } = Array.Empty<string>();
     public string[] ActionErrors { get; set; } = Array.Empty<string>();
     public long? CommittedRevision { get; set; }
+    public int CommittedActionCount { get; set; }
+    /// <summary>
+    /// 最后一次**成功预检**时那一批动作的指纹（见 WebChatApi.ActionFingerprint）。
+    ///
+    /// 为什么要有它：同一条消息的动作会在生成任务完成之后被追加（attach_asset），
+    /// 而消息 ID 与画布修订都不变；只按那两个判据，「用户批准的那一版动作」与
+    /// 「此刻真正要执行的动作」可以是两批不同的东西。提交时拿它与当前待执行动作比一次，
+    /// 对不上就拒绝并提示重新预检——不靠前端把按钮灰掉。
+    /// **动作一有变化就必须清空它**（追加、丢弃、撤销、重新预检失败），这样旧批准立刻失效。
+    /// </summary>
+    public string? PreviewFingerprint { get; set; }
     public byte[]? UndoCanvas { get; set; }
+    public byte[]? CommittedEntityLibrary { get; set; }
 }
 
 public sealed class WebChatSession

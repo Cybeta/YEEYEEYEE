@@ -88,6 +88,10 @@ export function isOtherRevision(mine: number | undefined, event: CanvasChangedEv
 /** 把事件说成一句人话。节点标题由调用方给（它手上有整份记录）。 */
 export function canvasChangeText(event: CanvasChangedEvent, recordTitle?: string): string {
   if (event.scope === 'layout') return `${event.actor} 重新整理了画布布局`
+  // 生成产物回挂：服务端写的是发起那个任务的账号。它可能正是「你」，所以不写成「有人改动了」——
+  // 那句话会让人以为画布被谁动过，而实际是自己的任务把产物挂上了节点。
+  if (event.scope === 'job-output')
+    return recordTitle ? `${event.actor} 的生成产物已回挂到「${recordTitle}」` : `${event.actor} 的生成产物已回挂到画布`
   if (event.recordId === null) return `${event.actor} 改动了画布`
   return recordTitle
     ? `${event.actor} 改动了「${recordTitle}」`
@@ -107,6 +111,19 @@ export type FollowAction = 'ignore' | 'notify' | 'reload'
 export function followAction(isStale: boolean, hasDraft: boolean): FollowAction {
   if (!isStale) return 'ignore'
   return hasDraft ? 'notify' : 'reload'
+}
+
+/**
+ * 一次「后台刷新」取回来的场景还能不能落到界面上（生成产物回挂走的就是这条路）。
+ *
+ * 两道否决，各自对应一种会把用户手上的东西搞丢的情况：
+ * · `stale`：这次请求已经不是最新那次了——期间画布整份重载过、或者又跟了一版，落上去就是回退；
+ * · `editing`：**请求往返期间**用户已经打开了编辑框（草稿在手上），
+ *   把他正看着的这份换掉就是把他刚敲的东西顶掉。只看发出那一刻是不够的：
+ *   那一眼干净，不代表回来的那一刻也干净。
+ */
+export function canApplyScene(state: { stale: boolean; editing: boolean }): boolean {
+  return !state.stale && !state.editing
 }
 
 /**

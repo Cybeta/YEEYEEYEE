@@ -1,8 +1,7 @@
 /**
  * 网页端「设置」那一页读的是什么。
  *
- * 这一页**只有读**，而且读了也没有密钥：密钥在盘上是 DPAPI 密文，服务端跑在 Linux 上根本解不开，
- * 就算解得开也不该解（那属于桌面端那台机器）。所以接口只回答「端点是什么、模型是什么、密钥配没配」。
+ * 摘要读取服务端独立配置，不返回密钥，只回答「端点是什么、模型是什么、密钥配没配」。
  *
  * 与其它解析器同一个态度：形状不对就抛——这是我们自己服务端的响应，字段对不上是开发期错误；
  * 而「页面上一格空白」不会报错，只会让人以为没配。
@@ -151,7 +150,16 @@ const orUnset = (value: string): { value: string; warn?: boolean } =>
 const keyRow = (hasKey: boolean): SettingsRow =>
   hasKey ? { label: '密钥', value: '已配置' } : { label: '密钥', value: '未配置', warn: true }
 
-/** 把设置摊成「三组、每组几行」——面板只负责画，判定与兜底都在这里（可测）。 */
+export const settingsPages = [
+  { id: 'models', title: '模型接入' },
+  { id: 'media', title: '生图与生视频' },
+  { id: 'skills', title: '技能管理' },
+  { id: 'collaboration', title: '协作' }
+] as const
+
+export type SettingsPage = typeof settingsPages[number]['id']
+
+/** 按 Desktop 的四个分页归类配置摘要。 */
 export function settingsGroups(settings: WebSettings): Array<{ title: string; rows: SettingsRow[] }> {
   if (!settings.configured)
     return [{ title: '模型接入', rows: [{ label: '配置文件', value: settings.note, warn: true }] }]
@@ -180,12 +188,17 @@ export function settingsGroups(settings: WebSettings): Array<{ title: string; ro
       ]
     },
     {
-      title: '协作与技能',
+      title: '技能管理',
+      rows: [
+        { label: '停用的内置技能', value: disabledSkills.length === 0 ? '没有停用' : disabledSkills.join('、') }
+      ]
+    },
+    {
+      title: '协作',
       rows: [
         { label: '协作服务器', ...orUnset(collaboration.serverUrl) },
         { label: '协作账号', ...orUnset(collaboration.account) },
-        { label: '改完自动同步', value: collaboration.autoSync ? '开' : '关' },
-        { label: '停用的内置技能', value: disabledSkills.length === 0 ? '没有停用' : disabledSkills.join('、') }
+        { label: '改完自动同步', value: collaboration.autoSync ? '开' : '关' }
       ]
     }
   ]

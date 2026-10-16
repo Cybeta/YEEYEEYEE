@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 using YEEYEEYEE.Core;
 using YEEYEEYEE.Desktop;
@@ -31,6 +32,7 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
 
     public async Task<ExecutionOutput> ExecuteAsync(SessionContext session, Invocation invocation, Job job, CancellationToken cancellationToken)
     {
+        WebGenerationReferences.ValidateEvidence(invocation.Inputs);
         if (WebWorkflowCatalog.IsWorkflow(invocation.Tool))
         {
             if (!session.ServerClaims.Contains("skill.invoke") || configuration["WebWorkflowApprovalMode"] != "preapproved-local-workflows")
@@ -43,24 +45,85 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
             return await new ComfyUiExecutor(workflowHttp, call => WebWorkflowCatalog.Bind(entry, call))
                 .ExecuteAsync(session, invocation, job, cancellationToken).ConfigureAwait(false);
         }
+        if (invocation.Tool == WebImageGeneration.SkillId)
+        {
+            if (!session.ServerClaims.Contains("skill.invoke")) throw new InvalidOperationException("缺少 skill.invoke 权限");
+            var config = WebSettingsApi.LoadModels();
+            if (!WebImageGeneration.IsConfigured(config)) throw new InvalidOperationException("Web 图片 API 未配置");
+            var storedImageKey = config.ImageApiKey;
+            config.ImageApiKey = SecretProtector.Unprotect(storedImageKey)
+                ?? throw new InvalidOperationException("Web 图片 API 密钥无法解密，请在原账户和设备上检查配置；未提交生成请求");
+            var size = WebImageGeneration.Size(ReadString(invocation.Inputs, "aspectRatio"))
+                ?? throw new InvalidOperationException("请先选择图片比例");
+            var references = invocation.Inputs.TryGetValue("referenceImages", out var images)
+                ? images.Deserialize<string[]>() ?? [] : Array.Empty<string>();
+            config.ImageMaxReferenceImages = WebImageGeneration.ReferenceCapacity(config);
+            if (references.Length > config.ImageMaxReferenceImages)
+                throw new InvalidOperationException("当前图片模型不支持所需参考图，请选择支持参考图的模型");
+            using var imageHttp = CreateMediaHttp(config.ImageProxyUrl, TimeSpan.FromMinutes(5));
+            var image = await new OpenAiCompatibleImageProvider(config, imageHttp).GenerateAsync(new ImageGenerationRequest
+            {
+                Prompt = ReadString(invocation.Inputs, "prompt"), Width = size.Width, Height = size.Height,
+                ReferenceImages = references
+            }, cancellationToken).ConfigureAwait(false);
+            if (image.Status != ImageGenerationStatus.Succeeded)
+            {
+                var error = string.IsNullOrWhiteSpace(image.Error) ? "图片 API 未返回可用产物" : image.Error;
+                foreach (var secret in new[] { storedImageKey, config.ImageApiKey, config.ApiKey })
+                    if (!string.IsNullOrEmpty(secret)) error = error.Replace(secret, "[已隐藏密钥]", StringComparison.Ordinal);
+                throw new InvalidOperationException(error + $" Web显式代理={DiagnosticProxy(config.ImageProxyUrl)}");
+            }
+            if (!File.Exists(image.FilePath))
+                throw new InvalidOperationException("图片 API 声称成功，但输出文件不存在");
+            return new ExecutionOutput { Outputs = [new AssetRef { Role = "image", Ref = AssetStore.ToReference(image.FilePath) }] };
+        }
         if (!string.Equals(invocation.Tool, VideoTool, StringComparison.Ordinal))
             return await imageExecutor.ExecuteAsync(session, invocation, job, cancellationToken).ConfigureAwait(false);
 
         if (comfyUiVideoBackend)
-            return await comfyUiExecutor.ExecuteAsync(session, invocation, job, cancellationToken).ConfigureAwait(false);
-
-        var prompt = ReadString(invocation.Inputs, "prompt");
-        var model = ReadString(invocation.Inputs, "model");
-        var seconds = ReadInt(invocation.Inputs, "seconds");
-        var result = await videoProvider.GenerateAsync(new VideoGenerationRequest
         {
-            Prompt = prompt,
-            Model = model,
-            Seconds = seconds
+            if (invocation.Inputs.TryGetValue("referenceImages", out var comfyReferences) && comfyReferences.GetArrayLength() > 0)
+                throw new InvalidDataException("当前 ComfyUI 视频模板不支持首帧参考，禁止忽略参考生成");
+            return await comfyUiExecutor.ExecuteAsync(session, invocation, job, cancellationToken).ConfigureAwait(false);
+        }
+
+        var videoConfig = WebSettingsApi.LoadModels();
+        var storedVideoKey = videoConfig.VideoApiKey;
+        var useWebVideo = HasWebVideoSettings(videoConfig);
+        if (useWebVideo)
+        {
+            if (!IsWebVideoConfigured(videoConfig)) throw new InvalidOperationException("Web 视频 API 未配置完整");
+            videoConfig.VideoApiKey = SecretProtector.Unprotect(storedVideoKey)
+                ?? throw new InvalidOperationException("Web 视频 API 密钥无法解密，请在原账户和设备上检查配置；未提交生成请求");
+        }
+        else
+        {
+            videoConfig.VideoEndpoint = LegacyConfig.Text(configuration, "VideoEndpoint") ?? string.Empty;
+            videoConfig.VideoModel = LegacyConfig.Text(configuration, "VideoModel") ?? string.Empty;
+            videoConfig.VideoApiKey = LegacyConfig.Text(configuration, "VideoApiKey") ?? string.Empty;
+        }
+        using var videoHttp = CreateMediaHttp(videoConfig.VideoProxyUrl,
+            configuration.GetValue("VideoHttpTimeout", TimeSpan.FromMinutes(5)));
+        var provider = useWebVideo || !string.IsNullOrWhiteSpace(videoConfig.VideoProxyUrl)
+            ? new HttpVideoProvider(videoConfig, videoHttp) : videoProvider;
+        var result = await provider.GenerateAsync(new VideoGenerationRequest
+        {
+            Prompt = ReadString(invocation.Inputs, "prompt"),
+            Model = ReadString(invocation.Inputs, "model"),
+            Seconds = ReadInt(invocation.Inputs, "seconds"),
+            Width = ReadInt(invocation.Inputs, "width"),
+            Height = ReadInt(invocation.Inputs, "height"),
+            ReferenceImages = invocation.Inputs.TryGetValue("referenceImages", out var videoImages)
+                ? videoImages.Deserialize<string[]>() ?? [] : Array.Empty<string>()
         }, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != VideoGenerationStatus.Succeeded || string.IsNullOrWhiteSpace(result.FilePath))
-            throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error) ? "视频 provider 未返回成功结果" : result.Error);
+        {
+            var error = string.IsNullOrWhiteSpace(result.Error) ? "视频 provider 未返回成功结果" : result.Error;
+            foreach (var secret in new[] { storedVideoKey, videoConfig.VideoApiKey, videoConfig.ApiKey })
+                if (!string.IsNullOrEmpty(secret)) error = error.Replace(secret, "[已隐藏密钥]", StringComparison.Ordinal);
+            throw new InvalidOperationException(error);
+        }
         if (!File.Exists(result.FilePath))
             throw new InvalidOperationException("视频 provider 声称成功，但输出文件不存在");
         if (!IsVideoFile(result.FilePath))
@@ -68,8 +131,53 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
 
         return new ExecutionOutput
         {
+            // 接口站那条任务号一并带回任务记录：视频这条路超时是常态，落下来才能续查/取回。
+            ExternalTaskId = result.ExternalTaskId,
             Outputs = [new AssetRef { Role = "video", Ref = AssetStore.ToReference(result.FilePath) }]
         };
+    }
+
+    internal static bool HasWebVideoSettings(AiProviderConfig config) =>
+        !string.IsNullOrWhiteSpace(config.VideoEndpoint) || !string.IsNullOrWhiteSpace(config.VideoModel) || !string.IsNullOrWhiteSpace(config.VideoApiKey);
+
+    internal static bool IsWebVideoConfigured(AiProviderConfig config) =>
+        !string.IsNullOrWhiteSpace(config.VideoEndpoint) && !string.IsNullOrWhiteSpace(config.VideoModel);
+
+    /// <summary>
+    /// 出视频这条**链路配好了吗**。与「这个账号准不准跑」无关——那是审批模式（见技能授权那边）。
+    ///
+    /// 为什么要单独有它：节点右键菜单里的「出视频」能不能点，是共享的协助计划按这个答案算出来的
+    /// （桌面端传的就是 VideoProviderFactory 的 IsConfigured）。网页端不回答的话，那份计划永远
+    /// 认为「还没有可用的出视频链路」，菜单上就会挂着一句与事实相反的说明。
+    /// </summary>
+    internal static bool VideoLinkReady(IConfiguration configuration)
+    {
+        if (string.Equals(configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase))
+            return !string.IsNullOrWhiteSpace(configuration["ComfyUI:BaseUrl"]);
+        var config = WebSettingsApi.LoadModels();
+        if (HasWebVideoSettings(config)) return IsWebVideoConfigured(config);
+        return !string.IsNullOrWhiteSpace(LegacyConfig.Text(configuration, "VideoModel"))
+            && !string.IsNullOrWhiteSpace(LegacyConfig.Text(configuration, "VideoEndpoint"));
+    }
+
+    internal static string DiagnosticProxy(string proxyUrl)
+    {
+        if (string.IsNullOrWhiteSpace(proxyUrl)) return "未配置（使用系统默认）";
+        var uri = new Uri(proxyUrl.Trim());
+        return new UriBuilder(uri.Scheme, uri.Host, uri.Port).Uri.GetLeftPart(UriPartial.Authority);
+    }
+
+    internal static HttpClient CreateMediaHttp(string proxyUrl, TimeSpan timeout)
+    {
+        var handler = new HttpClientHandler();
+        if (!WebSettingsApi.ValidProxyUrl(proxyUrl))
+            throw new InvalidOperationException("媒体 API 代理地址无效，请检查网络代理设置");
+        if (!string.IsNullOrWhiteSpace(proxyUrl))
+        {
+            handler.Proxy = new WebProxy(proxyUrl.Trim());
+            handler.UseProxy = true;
+        }
+        return new HttpClient(handler) { Timeout = timeout };
     }
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> inputs, string name) =>

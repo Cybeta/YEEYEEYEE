@@ -29,10 +29,34 @@ export const DEFAULT_VIDEO_PARAMS: VideoParams = { seconds: '1', size: '256', se
 export type InvocationBody = {
   prompt: string
   idempotencyKey: string
+  seconds?: number
   videoFrames?: number
   width?: number
   height?: number
   seed?: number
+}
+
+/**
+ * 文生视频这条技能背后的执行器。它决定**这次请求体能带什么**，两者不通用：
+ *
+ * · `comfyui`：LTX 那条流水线，认 `videoFrames`（由秒折帧）与边长档位。
+ * · `http`：接口站那条路（见 WebInvocationExecutor 的 HTTP 分支），只认 `seconds` / `width` / `height`，
+ *   而且服务端**明确拒收** `videoFrames` 与 `seed`（没有 ComfyUI 后端时发这些字段一律 400
+ *   SKILL_INPUT_UNSUPPORTED——它不肯静默忽略）。画幅也一样：没给宽高时由服务端按模型默认档位决定，
+ *   所以这里**不替它猜**，只把秒数发出去。
+ *
+ * 后端由服务端在 `/api/web/skills` 里如实声明（客户端看不见 `WebVideoBackend` 配置）。
+ * 声明缺失时按 `comfyui` 走：那是这条路最早、也是既有测试覆盖的形态，不会把老行为改坏。
+ */
+export type VideoBackend = 'comfyui' | 'http'
+
+export function videoBackendOf(skill: { videoBackend?: string }): VideoBackend {
+  return skill.videoBackend === 'http' ? 'http' : 'comfyui'
+}
+
+/** 这个后端下要摆哪些「边长」档位。接口站那条路不发画幅，所以那一档不摆。 */
+export function videoSizeOptions(backend: VideoBackend): string[] {
+  return backend === 'http' ? [] : VIDEO_SIZE_OPTIONS
 }
 
 function toInt(value: string, fallback: number): number {
@@ -72,14 +96,21 @@ export function videoSize(value: string): number {
  *
  * 只有文生视频那条路会带上画面参数：文生图走的是它自己那套（模型、步数），
  * 把它不认识的分辨率参数塞过去，后端只会当成未知字段拒绝整次调用。
+ *
+ * 视频这两条路的字段**不通用**，所以后端必须由调用方按服务端声明的能力传进来（见 VideoBackend）：
+ * 接口站那条路只发秒数；发 `videoFrames`/`seed` 会被自己的服务端以 SKILL_INPUT_UNSUPPORTED 拒收。
  */
 export function buildInvocationBody(
   skillId: string,
   prompt: string,
   params: VideoParams,
-  idempotencyKey: string
+  idempotencyKey: string,
+  backend: VideoBackend = 'comfyui'
 ): InvocationBody {
   if (skillId !== 'web.text-to-video') return { prompt, idempotencyKey }
+
+  // 接口站那条路：只发秒。帧折算是 LTX 节点的规矩，画幅由服务端按模型默认档位决定。
+  if (backend === 'http') return { prompt, idempotencyKey, seconds: videoSeconds(params.seconds) }
 
   const size = videoSize(params.size)
   const body: InvocationBody = {

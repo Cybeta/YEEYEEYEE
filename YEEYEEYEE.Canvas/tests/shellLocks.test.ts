@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseLayoutPlan, ghostMoves, movingIds, scopeLabel } from '../src/shell/layoutPlan'
-import { clientLabel, describeLease, holderOf, isMine, leaseCovering, nodeLease, parseLease, parseLeases, shouldHoldNodeLease, treeLease } from '../src/shell/locks'
+import { describeLease, holderOf, isMine, leaseCovering, nodeLease, parseLease, parseLeases, shouldHoldNodeLease, treeLease } from '../src/shell/locks'
 
 /**
  * 编辑锁与整理计划的读取口径。
@@ -36,12 +36,6 @@ describe('编辑锁的解析与归属', () => {
     expect(parsed.leases[1].targetId).toBeNull()
     expect(describeLease(parsed.leases[0])).toBe('陈默（桌面端）')
     expect(describeLease(parsed.leases[1])).toBe('陈默（网页端）')
-  })
-
-  it('认不出的来源端说「网页端」，与服务端 EditClient.Label 一致', () => {
-    expect(clientLabel('desktop')).toBe('桌面端')
-    expect(clientLabel('web')).toBe('网页端')
-    expect(clientLabel('unknown')).toBe('网页端')
   })
 
   it('单条坏数据只跳过并计数，不把整份锁列表清空', () => {

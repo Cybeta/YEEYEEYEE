@@ -19,29 +19,37 @@ export function RightDock({ mode, onMode, onClose, children }: {
   children: ReactNode
 }) {
   const title = mode === 'inspector' ? uiText('dock.inspector') : mode === 'agent' ? uiText('dock.agent') : '设置'
+  const isAgent = mode === 'agent'
   return (
     <div className="df-glass" style={{ height: '100%' }}>
       <div className="df-edge-top" />
       <div className="df-panel">
-        <div className="df-panel-head">
-          <span className="df-heading" style={{ fontSize: 13 }}>{title}</span>
-          <span className="df-row" style={{ gap: 2 }}>
-            <button type="button" className="df-tool-button" onClick={onClose} title="收起右侧栏">×</button>
-            <button type="button" className="df-tool-button" disabled title="面板菜单在网页端尚未接入">•••</button>
-          </span>
-        </div>
-        <div className="df-panel-tabs">
-          <button type="button" className={`df-tab${mode === 'inspector' ? ' is-active' : ''}`} onClick={() => onMode('inspector')}>
-            {uiText('dock.inspector')}
-          </button>
-          <button type="button" className={`df-tab${mode === 'agent' ? ' is-active' : ''}`} onClick={() => onMode('agent')}>
-            {uiText('dock.agent')} ›
-          </button>
-          <button type="button" className={`df-tab${mode === 'settings' ? ' is-active' : ''}`} onClick={() => onMode('settings')}>
-            设置
-          </button>
-        </div>
-        <div className="df-panel-body df-scroll">{children}</div>
+        {!isAgent && <>
+          <div className="df-panel-head">
+            <span className="df-heading" style={{ fontSize: 13 }}>{title}</span>
+            <span className="df-row" style={{ gap: 2 }}>
+              <button type="button" className="df-tool-button" onClick={onClose} title="收起右侧栏">×</button>
+              <button type="button" className="df-tool-button" disabled title="面板菜单在网页端尚未接入">•••</button>
+            </span>
+          </div>
+          <div className="df-panel-tabs">
+            <button type="button" className={`df-tab${mode === 'inspector' ? ' is-active' : ''}`} onClick={() => onMode('inspector')}>
+              {uiText('dock.inspector')}
+            </button>
+            <button type="button" className="df-tab" onClick={() => onMode('agent')}>
+              {uiText('dock.agent')} ›
+            </button>
+            <button type="button" className={`df-tab${mode === 'settings' ? ' is-active' : ''}`} onClick={() => onMode('settings')}>
+              设置
+            </button>
+          </div>
+        </>}
+        {isAgent && <div className="df-agent-dock-tools">
+          <button type="button" className="df-tool-button" onClick={() => onMode('settings')} title="打开设置">设置</button>
+          <button type="button" className="df-tool-button" onClick={() => onMode('inspector')} title="打开检查器">检查器</button>
+          <button type="button" className="df-tool-button" onClick={onClose} aria-label="关闭 Agent 协作" title="关闭 Agent 协作，切回检查器">×</button>
+        </div>}
+        <div className={isAgent ? 'df-panel-body df-agent-body' : 'df-panel-body df-scroll'}>{children}</div>
       </div>
     </div>
   )

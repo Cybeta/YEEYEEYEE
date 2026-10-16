@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { applyModelPreset } from '../src/shell/ModelSettings'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { SettingsPanel } from '../src/shell/SettingsPanel'
 import { parseSettings, settingsGroups, parseComfyUiProbe, describeComfyUiProbe } from '../src/shell/settingsView'
 
 /**
@@ -20,6 +24,35 @@ const configured = {
   collaboration: { serverUrl: 'http://localhost:5000', account: 'cybeta', autoSync: false },
   disabledSkills: ['a', 'b']
 }
+
+it('设置初始分页显示大模型，媒体页面保持挂载但隐藏', () => {
+  const html = renderToStaticMarkup(createElement(SettingsPanel))
+  expect(html).toContain('role="tablist" aria-label="设置分页"')
+  expect(html).toContain('aria-selected="true" aria-controls="settings-models"')
+  expect(html).toContain('id="settings-media" role="tabpanel" aria-labelledby="settings-media-tab" hidden=""')
+  expect(html).toContain('生图与生视频')
+  expect(html).toContain('id="settings-skills" role="tabpanel" aria-labelledby="settings-skills-tab" hidden=""')
+  expect(html).toContain('id="settings-collaboration" role="tabpanel" aria-labelledby="settings-collaboration-tab" hidden=""')
+  expect(html.indexOf('>模型接入</button>')).toBeLessThan(html.indexOf('>生图与生视频</button>'))
+  expect(html.indexOf('>生图与生视频</button>')).toBeLessThan(html.indexOf('>技能管理</button>'))
+  expect(html.indexOf('>技能管理</button>')).toBeLessThan(html.indexOf('>协作</button>'))
+})
+
+describe('模型预设', () => {
+  const draft = { id: 'saved', displayName: '我的配置', endpoint: 'https://custom.example/v1', model: 'manual', apiFormat: 1, useFullUrl: true, enabled: false, hasKey: true, presetId: 'custom', contextWindow: 10, maxOutputTokens: 20, sendSamplingParameters: true, supportsImageInput: false }
+  const values = { endpoint: 'https://preset.example/v1', format: 0, useFullUrl: false, modelId: 'recommended', contextWindow: 1000, maxOutputTokens: 200, sendsSamplingParameters: false, supportsVision: true }
+  const preset = { id: 'provider', name: '厂家', hint: '', manualCapabilities: false, defaults: values, models: [] }
+  it('应用服务端能力默认值，同时保留配置身份与密钥状态', () => {
+    expect(applyModelPreset(draft, preset)).toEqual({ ...draft, presetId: 'provider', endpoint: values.endpoint, apiFormat: 0, useFullUrl: false, model: 'recommended', contextWindow: 1000, maxOutputTokens: 200, sendSamplingParameters: false, supportsImageInput: true })
+  })
+  it('新增配置选择服务商时填入默认显示名称', () => {
+    expect(applyModelPreset({ ...draft, displayName: '' }, preset).displayName).toBe('厂家')
+  })
+  it('切回自定义保留已填字段；无预置型号时保留手填能力', () => {
+    expect(applyModelPreset(draft, { ...preset, id: 'custom' })).toEqual(draft)
+    expect(applyModelPreset(draft, { ...preset, manualCapabilities: true, defaults: { ...values, modelId: '' } })).toMatchObject({ model: '', contextWindow: 10, maxOutputTokens: 20, supportsImageInput: false, hasKey: true })
+  })
+})
 
 describe('设置响应', () => {
   it('形状不对就抛——页面上一格空白不会报错，只会让人以为没配', () => {
@@ -51,7 +84,7 @@ describe('设置响应', () => {
 
   it('分组与兜底：没配的写「未配置」并标出来，密钥只说配没配', () => {
     const groups = settingsGroups(parseSettings(configured))
-    expect(groups.map((group) => group.title)).toEqual(['模型接入', '生图与生视频', '协作与技能'])
+    expect(groups.map((group) => group.title)).toEqual(['模型接入', '生图与生视频', '技能管理', '协作'])
 
     const model = groups[0].rows
     expect(model.find((row) => row.label === '当前端点')).toMatchObject({ value: 'https://api.example.com/v1' })
@@ -64,9 +97,10 @@ describe('设置响应', () => {
     expect(media.find((row) => row.label === '密钥')).toMatchObject({ value: '未配置', warn: true })
     expect(media.find((row) => row.label === 'ComfyUI 模型')).toMatchObject({ value: 'sd_xl' })
 
-    const collaboration = groups[2].rows
+    expect(groups[2].rows.find((row) => row.label === '停用的内置技能')).toMatchObject({ value: 'a、b' })
+    const collaboration = groups[3].rows
     expect(collaboration.find((row) => row.label === '改完自动同步')).toMatchObject({ value: '关' })
-    expect(collaboration.find((row) => row.label === '停用的内置技能')).toMatchObject({ value: 'a、b' })
+    expect(collaboration.find((row) => row.label === '停用的内置技能')).toBeUndefined()
   })
 })
 

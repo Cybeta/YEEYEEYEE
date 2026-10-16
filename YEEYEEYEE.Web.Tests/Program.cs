@@ -8,6 +8,115 @@ using System.Text.Json.Nodes;
 using YEEYEEYEE.Core;
 using YEEYEEYEE.Host;
 
+if (args.Contains("--canvas-preview-only"))
+{
+    var current = new YEEYEEYEE.Desktop.WorkflowCanvasState();
+    var node = new YEEYEEYEE.Desktop.WorkflowNode();
+    current.Nodes.Add(node);
+    foreach (var property in typeof(YEEYEEYEE.Desktop.WorkflowNode).GetProperties())
+    {
+        var working = YEEYEEYEE.Desktop.CanvasPreviewBuilder.Clone(current);
+        var target = working.Nodes[0];
+        var value = property.GetValue(target);
+        object? changed = property.PropertyType == typeof(string) ? "changed" :
+            property.PropertyType == typeof(bool) ? !(bool)value! :
+            property.PropertyType == typeof(float) ? 123f :
+            property.PropertyType == typeof(int) ? 123 :
+            property.PropertyType == typeof(Guid) || property.PropertyType == typeof(Guid?) ? Guid.NewGuid() :
+            property.PropertyType.IsEnum ? Enum.GetValues(property.PropertyType).Cast<object>().First(item => !item.Equals(value)) : null;
+        if (changed is not null) property.SetValue(target, changed);
+        else if (value is System.Collections.IDictionary dictionary) dictionary.Add("changed", "value");
+        else if (value is System.Collections.IList list)
+        {
+            var itemType = property.PropertyType.GetGenericArguments()[0];
+            list.Add(itemType == typeof(string) ? "changed" : Activator.CreateInstance(itemType));
+        }
+        else if (property.Name == "AssetRequirements") target.AssetRequirements = new() { Character = YEEYEEYEE.Desktop.AssetNeed.Required };
+        else throw new Exception("Uncovered node field: " + property.Name);
+        var diff = YEEYEEYEE.Desktop.CanvasPreviewBuilder.Compare(current, working);
+        if (property.Name == "Id" ? diff.AddedNodes.Count != 1 || diff.RemovedNodeIds.Count != 1 : !diff.UpdatedNodeIds.Contains(node.Id))
+            throw new Exception("Node field omitted from preview: " + property.Name);
+    }
+    node.Attachments.Add(new YEEYEEYEE.Desktop.WorkflowAttachment { Reference = "unchanged" });
+    var metadata = YEEYEEYEE.Desktop.CanvasPreviewBuilder.Clone(current);
+    metadata.Nodes[0].Attachments[0].Name = "Changed metadata";
+    if (!YEEYEEYEE.Desktop.CanvasPreviewBuilder.Compare(current, metadata).UpdatedNodeIds.Contains(node.Id))
+        throw new Exception("Attachment metadata omitted from preview");
+    if (!YEEYEEYEE.Desktop.CanvasPreviewBuilder.Compare(current, YEEYEEYEE.Desktop.CanvasPreviewBuilder.Clone(current)).IsEmpty)
+        throw new Exception("Unchanged clone produces a diff");
+    Console.WriteLine("Canvas preview full node field regression passed (offline)");
+    return;
+}
+
+if (args.Contains("--video-reference-only"))
+{
+    await VideoReferenceRegression.Run();
+    return;
+}
+
+if (args.Contains("--attachment-registration-only"))
+{
+    AttachmentRegistrationRegression.Run();
+    return;
+}
+
+if (args.Contains("--job-attach-only"))
+{
+    JobAttachRegression.Run();
+    return;
+}
+
+if (args.Contains("--candidate-batch-only"))
+{
+    CandidateBatchRegression.Run();
+    return;
+}
+
+if (args.Contains("--node-target-only"))
+{
+    NodeAgentTargetRegression.Run();
+    return;
+}
+
+if (args.Contains("--usage-only"))
+{
+    UsageRegression.Run();
+    return;
+}
+
+if (args.Contains("--chat-protocol-only"))
+{
+    await ChatRegression.Run(
+        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "YEEYEEYEE.Web.dll")),
+        Path.Combine(Path.GetTempPath(), "yeeeyee-web-chat-protocol-tests-" + Guid.NewGuid().ToString("N")),
+        protocolOnly: true);
+    return;
+}
+
+if (args.Contains("--chat-only"))
+{
+    var diagnosticProxy = typeof(YEEYEEYEE.Web.WebChatMessage).Assembly.GetType("YEEYEEYEE.Web.WebInvocationExecutor")!
+        .GetMethod("DiagnosticProxy", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+    var sanitizedProxy = (string)diagnosticProxy.Invoke(null,
+        new object[] { "http://proxy-user:proxy-password@proxy.example.invalid:8123/private-path?token=proxy-token#fragment" })!;
+    if (sanitizedProxy != "http://proxy.example.invalid:8123") throw new Exception("Explicit proxy diagnostic leaked private URI components");
+    Console.WriteLine("Explicit proxy diagnostic regression passed (offline)");
+    await ChatRegression.Run(
+        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "YEEYEEYEE.Web.dll")),
+        Path.Combine(Path.GetTempPath(), "yeeeyee-web-chat-tests-" + Guid.NewGuid().ToString("N")),
+        protocolOnly: args.Contains("--protocol-only"));
+    return;
+}
+
+if (args.Contains("--settings-only"))
+{
+    await ChatRegression.Run(
+        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "YEEYEEYEE.Web.dll")),
+        Path.Combine(Path.GetTempPath(), "yeeeyee-web-settings-tests-" + Guid.NewGuid().ToString("N")),
+        settingsOnly: true);
+    return;
+}
+
 var root = Path.Combine(Path.GetTempPath(), "yeeeyee-web-tests-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
 var scenePath = Path.Combine(root, "scene.json");
@@ -197,6 +306,8 @@ JsonElement? PresenceOf(JsonElement snapshot, Guid userId)
 try
 {
     await ChatRegression.Run(dll, root);
+    JobAttachRegression.Run();
+    NodeAgentTargetRegression.Run();
     await Start();
     using var anonymous = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
     using var wrong = new HttpClient { BaseAddress = anonymous.BaseAddress };
@@ -295,6 +406,11 @@ try
     Console.WriteLine("Workflow HTTP regression passed: API import/install, UI rejection, rename, declared inputs, actual prompt binding, poll/download, disable/delete");
     var videoCatalog = await Check(videoClient, HttpMethod.Get, "/api/web/skills", 200);
     Assert(videoCatalog.GetProperty("skills").EnumerateArray().Any(item => item.GetProperty("id").GetString() == "web.text-to-video" && item.GetProperty("capability").GetString() == "TextToVideo"), "Video skill catalog");
+    // 客户端看不见 WebVideoBackend 配置，只能由这里如实告诉它：两种后端认的请求体不一样，
+    // 说错了前端就会按 ComfyUI 的体去发，接口站那条路必然被自己的服务端以 SKILL_INPUT_UNSUPPORTED 挡回来。
+    Assert(videoCatalog.GetProperty("skills").EnumerateArray()
+        .Single(item => item.GetProperty("id").GetString() == "web.text-to-video").GetProperty("videoBackend").GetString() == "comfyui",
+        "Video skill declares the ComfyUI backend");
     // 自检读的是后端自己的 system_stats，不是「端口通不通」。
     var mockProbe = await Check(videoClient, HttpMethod.Get, "/api/web/settings/comfyui", 200);
     Assert(mockProbe.GetProperty("reachable").GetBoolean() && mockProbe.GetProperty("version").GetString() == "0.0.0-mock", "Self-check reads the backend's system_stats: " + mockProbe);
@@ -923,6 +1039,19 @@ try
     Assert((await Check(reader, HttpMethod.Get, "/api/web/edits", 200)).GetProperty("leases").GetArrayLength() == 0, "一开始不该有锁");
     Assert((await Check(reader, HttpMethod.Post, "/api/web/edits", 403, Lease("node", nodeA)))
         .GetProperty("code").GetString() == "CANVAS_EDIT_FORBIDDEN", "只读账号不该能占锁");
+
+    var ownerA = Guid.NewGuid();
+    var ownerB = Guid.NewGuid();
+    string PageLease(Guid ownerId) => JsonSerializer.Serialize(new { scope = "node", targetId = nodeA, client = "web", ownerId });
+    var pageA = (await Check(mate, HttpMethod.Post, "/api/web/edits", 200, PageLease(ownerA))).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    var pageB = (await Check(mate, HttpMethod.Post, "/api/web/edits", 200, PageLease(ownerB))).GetProperty("lease").GetProperty("leaseId").GetGuid();
+    Assert(pageA != pageB, "同账号不同页面必须持有独立租约，关闭一个不能释放另一个");
+    Assert((await Check(mate, HttpMethod.Post, "/api/web/edits", 200, PageLease(ownerB))).GetProperty("lease").GetProperty("leaseId").GetGuid() == pageB, "同页面重复申请应当幂等");
+    await Check(mate, HttpMethod.Delete, $"/api/web/edits/{pageA}", 200);
+    await Check(mate, HttpMethod.Put, $"/api/web/edits/{pageB}", 200);
+    await Check(boss, HttpMethod.Post, "/api/web/edits", 409, Lease("node", nodeA));
+    await Check(mate, HttpMethod.Delete, $"/api/web/edits/{pageB}", 200);
+    Console.WriteLine("同账号多页面租约隔离 HTTP 回归通过");
 
     // 申请节点锁：来源端由调用方声明，只影响「某某（桌面端）」这种文案。
     var held = await Check(mate, HttpMethod.Post, "/api/web/edits", 200, Lease("node", nodeA, "desktop"));

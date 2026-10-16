@@ -2,12 +2,13 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using YEEYEEYEE.Core;
+using YEEYEEYEE.Desktop;
 using YEEYEEYEE.Host;
 
 namespace YEEYEEYEE.Web;
 
-// Only server-approved skills and installed local workflows are exposed;
-// never accept a workflow graph or tool definition from the client.
+// 仅暴露服务端批准的技能和已安装的本地工作流；
+// 不接受客户端传入的工作流图或工具定义。
 internal static class WebSkillJobApi
 {
     private const string SkillId = "comfyui.text-to-image";
@@ -18,6 +19,7 @@ internal static class WebSkillJobApi
     {
         var execution = app.Services.GetRequiredService<SingleMachineExecutionService>();
         var attachments = app.Services.GetRequiredService<WebJobAttachmentService>();
+        var hub = app.Services.GetRequiredService<CanvasEventHub>();
         var assetDirectory = Path.GetFullPath(
             LegacyConfig.Text(app.Configuration, "AssetDirectory")
             ?? Path.Combine(AppContext.BaseDirectory, "assets"));
@@ -43,20 +45,13 @@ internal static class WebSkillJobApi
         }
         bool ImageApproved() => string.Equals(LegacyConfig.Text(app.Configuration, "WebSkillApprovalMode"), "preapproved-local-image", StringComparison.Ordinal)
             && !string.IsNullOrWhiteSpace(app.Configuration["ComfyUI:Checkpoint"]);
-        bool VideoApproved()
-        {
-            if (!string.Equals(LegacyConfig.Text(app.Configuration, "WebVideoApprovalMode"), "preapproved-local-video", StringComparison.Ordinal))
-                return false;
-            if (string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase))
-                return !string.IsNullOrWhiteSpace(app.Configuration["ComfyUI:BaseUrl"]);
-            return !string.IsNullOrWhiteSpace(LegacyConfig.Text(app.Configuration, "VideoModel"))
-                && !string.IsNullOrWhiteSpace(LegacyConfig.Text(app.Configuration, "VideoEndpoint"));
-        }
+        bool VideoApproved() => string.Equals(LegacyConfig.Text(app.Configuration, "WebVideoApprovalMode"), "preapproved-local-video", StringComparison.Ordinal)
+            && WebInvocationExecutor.VideoLinkReady(app.Configuration);
         WebWorkflowCatalog.Entry? Workflow(string id) => WebWorkflowCatalog.Load(app.Configuration["ComfyUI:BaseUrl"]!).FirstOrDefault(e => e.Id == id);
-        bool Known(string id) => id is SkillId or VideoSkillId || WebWorkflowCatalog.IsWorkflow(id);
+        bool Known(string id) => id is SkillId or VideoSkillId or WebImageGeneration.SkillId || WebWorkflowCatalog.IsWorkflow(id);
         bool InvokeAllowed(SessionContext session) => session.ServerClaims.Contains("skill.invoke");
         bool SkillAllowed(SessionContext session, string skillId) => InvokeAllowed(session)
-            && (skillId == SkillId ? ImageApproved() : skillId == VideoSkillId ? VideoApproved()
+            && (skillId == WebImageGeneration.SkillId ? WebImageGeneration.IsConfigured(WebSettingsApi.LoadModels()) : skillId == SkillId ? ImageApproved() : skillId == VideoSkillId ? VideoApproved()
                 : app.Configuration["WebWorkflowApprovalMode"] == "preapproved-local-workflows" && Workflow(skillId) is not null);
         IResult Denied() => Error(403, "SKILL_NOT_APPROVED", "技能未获服务端预授权或缺少 skill.invoke 权限");
         object View(Job job, SessionContext session)
@@ -81,8 +76,14 @@ internal static class WebSkillJobApi
         {
             var session = Session(context);
             var skills = new List<object>();
+            if (SkillAllowed(session, WebImageGeneration.SkillId)) skills.Add(new { id = WebImageGeneration.SkillId, name = "Web 图片 API", capability = "TextToImage", approval = "configured-web-image", referenceCapacity = WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels()), aspectRatios = new[] { "1:1", "16:9", "9:16", "4:3", "3:4" } });
             if (SkillAllowed(session, SkillId)) skills.Add(new { id = SkillId, name = "本机 ComfyUI 文生图", capability = "TextToImage", approval = "preapproved-local-image" });
-            if (SkillAllowed(session, VideoSkillId)) skills.Add(new { id = VideoSkillId, name = "Web 文生视频", capability = "TextToVideo", approval = "preapproved-local-video" });
+            // 视频这条技能由**两种执行器**之一承担，它们认的请求体不一样：ComfyUI 那条认 videoFrames（秒折帧）
+            // 与边长档位；接口站那条只认 seconds / width / height，并且**明确拒收** videoFrames 与 seed
+            // （见下面 Invoke 里的 SKILL_INPUT_UNSUPPORTED）。客户端看不见配置，所以这里如实把后端告诉它——
+            // 不说的话，前端只能按 ComfyUI 的体去发，接口站那条路必然被自己的服务端挡回来。
+            if (SkillAllowed(session, VideoSkillId)) skills.Add(new { id = VideoSkillId, name = "Web 文生视频", capability = "TextToVideo", approval = "preapproved-local-video",
+                videoBackend = string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase) ? "comfyui" : "http" });
             if (InvokeAllowed(session) && app.Configuration["WebWorkflowApprovalMode"] == "preapproved-local-workflows")
                 skills.AddRange(WebWorkflowCatalog.Load(app.Configuration["ComfyUI:BaseUrl"]!).Select(e => (object)new {
                     id = e.Id, name = e.Workflow.Title, capability = e.Capability.ToString(), approval = "preapproved-local-workflows",
@@ -94,13 +95,13 @@ internal static class WebSkillJobApi
             var session = Session(context);
             if (session.UserId == Guid.Empty) return Error(403, "LOGIN_REQUIRED", "技能任务需要账号登录");
             var workflow = WebWorkflowCatalog.IsWorkflow(skillId) ? Workflow(skillId) : null;
-            if (skillId != SkillId && skillId != VideoSkillId && workflow is null) return Error(404, "SKILL_NOT_FOUND", "技能不存在");
+            if (skillId != SkillId && skillId != WebImageGeneration.SkillId && skillId != VideoSkillId && workflow is null) return Error(404, "SKILL_NOT_FOUND", "技能不存在");
             if (!SkillAllowed(session, skillId)) return Denied();
             if (body.ValueKind != JsonValueKind.Object) return Error(400, "INVALID_REQUEST", "请求必须是 JSON 对象");
             var isVideo = skillId == VideoSkillId;
             var allowedFields = workflow is not null ? new[] { "prompt", "idempotencyKey", "targetNodeId" } : isVideo
                 ? new[] { "prompt", "negativePrompt", "model", "seconds", "width", "height", "videoFrames", "seed", "idempotencyKey", "targetNodeId", "chatSessionId", "referenceAttachmentIds" }
-                : new[] { "prompt", "idempotencyKey", "targetNodeId", "chatSessionId", "referenceAttachmentIds" };
+                : new[] { "prompt", "aspectRatio", "idempotencyKey", "targetNodeId", "chatSessionId", "referenceAttachmentIds", "candidateBatch" };
             var invalidVideoFields = isVideo && (
                 (body.TryGetProperty("negativePrompt", out var negative) && (negative.ValueKind != JsonValueKind.String || negative.GetString()!.Length > 4000)) ||
                 (body.TryGetProperty("width", out var width) && (width.ValueKind != JsonValueKind.Number || !width.TryGetInt32(out var widthValue) || widthValue is < 64 or > 2048)) ||
@@ -118,16 +119,31 @@ internal static class WebSkillJobApi
                     ? "仅接受 prompt、negativePrompt、model、seconds（1-600）、width、height、videoFrames、seed 与 idempotencyKey"
                     : "图片技能仅接受 prompt 与 idempotencyKey");
             if (isVideo && !string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase) &&
-                new[] { "negativePrompt", "width", "height", "videoFrames", "seed" }.Any(field => body.TryGetProperty(field, out _)))
-                return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前视频执行器仅支持 prompt、model、seconds，拒绝忽略额外参数");
+                new[] { "negativePrompt", "videoFrames", "seed" }.Any(field => body.TryGetProperty(field, out _)))
+                return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前视频执行器仅支持 prompt、model、seconds、width、height 与参考图，拒绝忽略额外参数");
             var inputs = new Dictionary<string, JsonElement> { ["prompt"] = prompt.Clone(), ["webCanvasPath"] = JsonSerializer.SerializeToElement(WebProjectApi.Scope) };
+            if (!isVideo && workflow is null)
+            {
+                var ratio = body.TryGetProperty("aspectRatio", out var aspect) && aspect.ValueKind == JsonValueKind.String ? aspect.GetString() : null;
+                var size = WebImageGeneration.Size(ratio);
+                if (size is null && (skillId == WebImageGeneration.SkillId || body.TryGetProperty("aspectRatio", out _)))
+                    return Error(400, "IMAGE_RATIO_REQUIRED", "请选择图片比例：1:1、16:9、9:16、4:3 或 3:4");
+                if (size is { } dimensions)
+                {
+                    inputs["aspectRatio"] = JsonSerializer.SerializeToElement(ratio);
+                    inputs["width"] = JsonSerializer.SerializeToElement(dimensions.Width);
+                    inputs["height"] = JsonSerializer.SerializeToElement(dimensions.Height);
+                }
+            }
             if (body.TryGetProperty("referenceAttachmentIds", out var references))
             {
                 if (references.ValueKind != JsonValueKind.Array || references.GetArrayLength() is < 1 or > 8 || !body.TryGetProperty("chatSessionId", out var chatSession) || chatSession.ValueKind != JsonValueKind.String)
                     return Error(400, "REFERENCE_INVALID", "参考图须来自当前会话，最多8张");
-                if (isVideo && !string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase))
-                    return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前视频执行器不支持参考图");
-                if (!isVideo && references.GetArrayLength() > 1) return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前图片工作流仅支持一张底图，不能静默忽略多图");
+                if (isVideo && !string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase) && references.GetArrayLength() > 1)
+                    return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前视频接口仅支持一张首帧参考图，不能静默忽略多图");
+                if (skillId == WebImageGeneration.SkillId && references.GetArrayLength() > WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels()))
+                    return Error(400, "IMAGE_REFERENCE_UNSUPPORTED", "当前图片模型不支持所需参考图，请在 Web 设置中选择支持参考图的模型");
+                if (skillId == SkillId && references.GetArrayLength() > 1) return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前图片工作流仅支持一张底图，不能静默忽略多图");
                 var files = new List<WebChatStore.Attachment>();
                 foreach (var reference in references.EnumerateArray())
                 {
@@ -152,12 +168,47 @@ internal static class WebSkillJobApi
                 if (!session.ServerClaims.Contains("canvas.edit")) return Error(403, "TARGET_FORBIDDEN", "回挂产物需要 canvas.edit 权限");
                 try
                 {
-                    var snapshot = WebProjectApi.Store(mode)!.AgentContextSnapshot(null, targetNode.GetString());
+                    var store = WebProjectApi.Store(mode)!;
+                    var snapshot = store.GenerationTarget(targetNode.GetGuid());
                     inputs["targetBaseRevision"] = JsonSerializer.SerializeToElement(snapshot.Revision);
+                    if (!isVideo && (workflow is null || workflow.Capability == Capability.TextToImage))
+                    {
+                        var capacity = skillId == WebImageGeneration.SkillId ? WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels()) : skillId == SkillId ? 1 : 0;
+                        var extra = inputs.TryGetValue("referenceImages", out var supplied) ? supplied.Deserialize<string[]>()! : Array.Empty<string>();
+                        var paths = WebGenerationReferences.Resolve(snapshot, capacity, extra);
+                        WebGenerationReferences.RecordEvidence(inputs, paths, snapshot);
+                    }
+                    if (isVideo)
+                    {
+                        var extra = inputs.TryGetValue("referenceImages", out var supplied) ? supplied.Deserialize<string[]>()! : Array.Empty<string>();
+                        var paths = WebGenerationReferences.ResolveVideoTarget(snapshot, extra);
+                        WebGenerationReferences.RecordEvidence(inputs, paths, snapshot);
+                    }
+                    if (!inputs.ContainsKey("sourceFingerprints"))
+                    {
+                        var paths = WebGenerationReferences.ResolveVideoTarget(snapshot, []);
+                        if (paths.Length > 0)
+                            throw new InvalidDataException("当前本地视频工作流不支持首帧参考，禁止忽略参考生成");
+                        WebGenerationReferences.RecordEvidence(inputs, [], snapshot);
+                    }
+                    if (context.Items.TryGetValue("webChatGeneration", out var chat) && chat is true)
+                        inputs["webChatGeneration"] = JsonSerializer.SerializeToElement(true);
                 }
-                catch (Exception ex) when (ex is IOException or InvalidDataException or JsonException) { return Error(409, "TARGET_INVALID", "目标节点不可用"); }
+                catch (InvalidDataException ex) { return Error(409, "GENERATION_ASSETS_INVALID", ex.Message); }
+                catch (Exception ex) when (ex is IOException or JsonException) { return Error(409, "TARGET_INVALID", "目标节点不可用"); }
                 inputs["targetNodeId"] = targetNode.Clone();
             }
+            // 候选批次（节点出图）：产物留在任务里等用户采用，后台不替它自动回挂。
+            // 这是**显式**开关，不是「只要有 targetNodeId 就当候选」：回挂方式按入口分，
+            // 不改变其它调用方（视频、工作流、重试）现在拿到的行为。
+            if (body.TryGetProperty("candidateBatch", out var candidate))
+            {
+                if (candidate.ValueKind != JsonValueKind.True) return Error(400, "INVALID_REQUEST", "candidateBatch 只能是 true");
+                if (!inputs.ContainsKey("targetNodeId")) return Error(400, "TARGET_INVALID", "候选批次必须指定目标节点");
+                inputs[WebJobAttachmentService.CandidateInput] = JsonSerializer.SerializeToElement(true);
+            }
+            if (!inputs.ContainsKey("referenceImageHashes"))
+                WebGenerationReferences.RecordEvidence(inputs, inputs.TryGetValue("referenceImages", out var finalImages) ? finalImages.Deserialize<string[]>()! : []);
             if (isVideo && body.TryGetProperty("model", out var selectedModel)) inputs["model"] = selectedModel.Clone();
             if (isVideo && body.TryGetProperty("seconds", out var selectedSeconds)) inputs["seconds"] = selectedSeconds.Clone();
             if (isVideo && body.TryGetProperty("negativePrompt", out var negativePrompt)) inputs["negativePrompt"] = negativePrompt.Clone();
@@ -180,8 +231,8 @@ internal static class WebSkillJobApi
                     return Error(409, "IDEMPOTENCY_CONFLICT", "幂等键已用于其他调用");
                 return Results.Json(View(existing, session));
             }
-            var invocation = new Invocation { Tool = skillId, Capability = workflow?.Capability ?? (isVideo ? Capability.TextToVideo : Capability.TextToImage), Channel = isVideo ? "video" : "comfyui", Inputs = inputs };
-            // StartAsync returns after submission; failed jobs remain visible rather than becoming false positives.
+            var invocation = new Invocation { Tool = skillId, Capability = workflow?.Capability ?? (isVideo ? Capability.TextToVideo : Capability.TextToImage), Channel = isVideo ? "video" : skillId == WebImageGeneration.SkillId ? "image-api" : "comfyui", Inputs = inputs };
+            // StartAsync 在提交后返回；失败任务仍保留，避免被误报为成功。
             var result = await execution.StartAsync(session, invocation, key.GetString()!);
             execution.TryGet(result.JobId, out var job);
             return Results.Json(View(job!, session));
@@ -219,8 +270,8 @@ internal static class WebSkillJobApi
             var path = ResolveAsset(job.Outputs[outputIndex].Ref, assetDirectory);
             if (path is null) return Error(404, "OUTPUT_NOT_FOUND", "任务产物文件不存在");
 
-            // Open the resolved asset explicitly. This keeps the response tied to the
-            // ownership-checked path and avoids relying on late physical-file resolution.
+            // 显式打开已解析的资产，使响应绑定到已完成所属校验的路径，
+            // 避免依赖延后的物理文件解析。
             try
             {
                 var stream = new FileStream(
@@ -254,6 +305,41 @@ internal static class WebSkillJobApi
                 return Error(403, "OUTPUT_FORBIDDEN", "任务产物不可读取");
             }
         });
+        // 采用一件候选产物：把它安全追加到**原任务的目标节点**。
+        //
+        // 信任边界都在这边：目标节点取自任务自己的 inputs（不是客户端传的），产物取自任务自己的
+        // outputs[index]（客户端传不了路径与附件 ID），权限、租约、锁定、目录与图片类型逐层校验，
+        // 落盘走 AppendToCurrent（当前快照 + 字节级 CAS），幂等由确定性附件 ID 保证。
+        app.MapPost("/api/web/jobs/{jobId:guid}/outputs/{outputIndex:int}/adopt", (HttpContext context, Guid jobId, int outputIndex) =>
+        {
+            var session = Session(context);
+            var found = Find(jobId, session, out var job);
+            if (job is null) return found;
+            if (!Known(job.Tool)) return Error(404, "JOB_NOT_FOUND", "任务不存在");
+            // 只有候选批次能从画布直接采用：普通后台回挂与聊天生成的审批各有各的路，不能从这儿绕。
+            if (!WebJobAttachmentService.IsCandidate(job)) return Error(409, "NOT_CANDIDATE_JOB", "这条任务不是候选批次");
+            if (job.State != JobState.Succeeded) return Error(409, "JOB_NOT_READY", "任务还没有成功结果");
+            if (outputIndex < 0 || outputIndex >= job.Outputs.Count) return Error(404, "OUTPUT_NOT_FOUND", "任务产物不存在");
+            var user = WebAccessGuard.CurrentUser(context);
+            if (user is null || user.Disabled || !session.ServerClaims.Contains("canvas.edit"))
+                return Error(403, "TARGET_FORBIDDEN", "采用产物需要登录及画布编辑权限");
+            if (!job.Inputs.TryGetValue("targetNodeId", out var targetNode) || !targetNode.TryGetGuid(out var nodeId))
+                return Error(409, "TARGET_INVALID", "这条任务没有目标节点");
+            if (WebProjectApi.Current is not { IsProject: true } mode) return Error(409, "CANVAS_REQUIRES_PROJECT", "采用产物需要项目画布");
+            var store = WebProjectApi.Store(mode);
+            var leases = WebProjectApi.Leases(mode);
+            if (store is null || leases is null) return Error(409, "CANVAS_REQUIRES_PROJECT", "采用产物需要项目画布");
+            return leases.WithTreeTransaction<IResult>(user, () =>
+            {
+                var before = store.LastCommit;
+                var result = store.AdoptJobOutput(job.ToResult(), nodeId, outputIndex);
+                var after = store.LastCommit;
+                // 采用成功就是一次真实的画布写入：推一条（与产物回挂同一个 scope），别的端跟着刷新。
+                if (after.Serial > before.Serial)
+                    hub.CanvasChanged(after.Revision, nodeId.ToString(), WebAccessGuard.ActorName(context), "job-output");
+                return result;
+            }, EditLeaseApi.Failure);
+        });
         app.MapPost("/api/web/jobs/{jobId:guid}/cancel", (HttpContext context, Guid jobId) =>
         {
             var session = Session(context);
@@ -276,11 +362,24 @@ internal static class WebSkillJobApi
                 return Error(409, "JOB_NOT_RETRYABLE", reason);
             try
             {
+                if (source.Capability == Capability.TextToImage && source.Inputs.TryGetValue("targetNodeId", out var retryTarget))
+                {
+                    if (!session.ServerClaims.Contains("canvas.edit")) return Error(403, "TARGET_FORBIDDEN", "重试目标生成需要 canvas.edit 权限");
+                    var store = WebProjectApi.Current is { IsProject: true } retryMode ? WebProjectApi.Store(retryMode) : null;
+                    if (store is null) return Error(409, "TARGET_INVALID", "目标画布不可用");
+                    var capacity = source.Tool == WebImageGeneration.SkillId ? WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels()) : source.Tool == SkillId ? 1 : 0;
+                    var target = store.GenerationTarget(retryTarget.GetGuid());
+                    var paths = source.Inputs.TryGetValue("referenceImages", out var retryImages) ? retryImages.Deserialize<string[]>()! : Array.Empty<string>();
+                    var errors = GenerationAudit.CheckImageSubmission(target.Canvas, target.Node, WebGenerationReferences.Locate, paths, capacity);
+                    if (errors.Count > 0) return Error(409, "GENERATION_ASSETS_INVALID", string.Join("；", errors));
+                }
                 var result = await execution.RetryAsync(session, jobId, Guid.NewGuid().ToString("N"));
                 execution.TryGet(result.JobId, out var job);
                 return Results.Json(View(job!, session));
             }
             catch (ProtocolViolationException ex) { return Error(409, ex.Code, ex.Message); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or JsonException or InvalidOperationException or UnauthorizedAccessException)
+            { return Error(409, "GENERATION_ASSETS_INVALID", ex.Message); }
         });
         return Invoke;
     }

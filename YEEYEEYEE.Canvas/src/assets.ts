@@ -1,12 +1,41 @@
 import type { OperationRecord } from './Protocol/VersionedMessages'
 
-export type Version = { id: string; number?: number; label?: string; note?: string; description?: string }
+export type Version = { id: string; number?: number; label?: string; note?: string; description?: string; attachments?: AttachmentSummary[] }
 export type Variant = { id: string; name?: string; description?: string; currentVersion?: number; hasUncommittedChanges?: boolean; attachments?: AttachmentSummary[]; versions?: Version[] }
 export type Asset = { id: string; name: string; core?: string; aliases?: string; kind?: string; variants?: Variant[] }
-export type Reference = { entityId: string; name?: string; kind?: string; variantId?: string; variantVersionId?: string | null }
+export type Reference = { entityId: string; name?: string; kind?: string; variantId?: string; variantVersionId?: string | null; variantLabel?: string; unresolved?: boolean; versions?: Version[] }
 
 function hasId(value: unknown): value is { id: string; [key: string]: unknown } {
   return !!value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { id?: unknown }).id === 'string' && !!(value as { id: string }).id.trim()
+}
+
+/**
+ * 媒体种类归一化。
+ *
+ * 两边的写法不同：节点的产物走 NodeProjection（`kind` 是 `Image` / `Video` 这种名字），
+ * 而实体库 `/api/web/assets` 直接下发 entities.json 的那一份，`kind` 是**数字**
+ * （AttachmentKind：Image=0、Video=1、Audio=2、Other=3）。
+ * 不归一化的话，实体媒体一律认成「认不出的种类」，界面上就会写着「网页端不能预览」——
+ * 而这恰恰是「图片 / 视频」两条最常见的媒体。认同不出的**不猜**：回 Other，由界面如实说。
+ */
+function normalizeKind(value: unknown): string {
+  if (typeof value === 'string' && value.trim()) return value
+  switch (value) {
+    case 0: return 'Image'
+    case 1: return 'Video'
+    case 2: return 'Audio'
+    default: return 'Other'
+  }
+}
+
+/** 服务端投影的附件元数据（`id` 是身份，路径不在里面：取字节按 ID 走接口）。 */
+function mapAttachments(value: unknown): AttachmentSummary[] {
+  return Array.isArray(value)
+    ? value.filter(hasId).map((entry) => ({
+      id: entry.id, name: typeof entry.name === 'string' ? entry.name : '',
+      kind: normalizeKind(entry.kind), source: typeof entry.source === 'string' ? entry.source : ''
+    }))
+    : []
 }
 
 /** entities.json uses id at every level; names are labels, never identity keys. */
@@ -21,14 +50,14 @@ export function mapAssets(value: unknown): { entities: Asset[]; invalidCount: nu
       description: typeof variant.description === 'string' ? variant.description : '',
       currentVersion: typeof variant.currentVersion === 'number' ? variant.currentVersion : undefined,
       hasUncommittedChanges: variant.hasUncommittedChanges === true,
-      attachments: Array.isArray(variant.attachments) ? variant.attachments.filter(hasId).map(a => ({
-        id: a.id, name: typeof a.name === 'string' ? a.name : '', kind: typeof a.kind === 'string' ? a.kind : String(a.kind), source: typeof a.source === 'string' ? a.source : ''
-      })) : [],
+      attachments: mapAttachments(variant.attachments),
       versions: Array.isArray(variant.versions) ? variant.versions.filter(hasId).map((version) => ({
         id: version.id, number: typeof version.number === 'number' ? version.number : undefined,
         label: typeof version.label === 'string' ? version.label : undefined,
         note: typeof version.note === 'string' ? version.note : undefined,
-        description: typeof version.description === 'string' ? version.description : undefined
+        description: typeof version.description === 'string' ? version.description : undefined,
+        // 每个历史版本自己的媒体：锁定版本时要读的就是这一份，**不能**退回当前变体的最新附件。
+        attachments: mapAttachments(version.attachments)
       })) : undefined
     })) : undefined
   }))
@@ -69,10 +98,17 @@ export function recordAttachments(item: OperationRecord): AttachmentSummary[] {
   })
 }
 
-export function resolveReference(ref: Reference, assets: Asset[], available = true): { asset?: Asset; variant?: Variant; version?: Version; error?: string; mode: string } {
+export function resolveReference(ref: Reference, assets: Asset[], available = true, useSceneProjection = false): { asset?: Asset; variant?: Variant; version?: Version; error?: string; mode: string } {
   const mode = ref.variantVersionId ? '锁定版本' : '跟随最新'
-  if (!available) return { mode, error: '资产库不可用，无法核对引用' }
-  const asset = assets.find((item) => item.id === ref.entityId)
+  let asset = available ? assets.find((item) => item.id === ref.entityId) : undefined
+  if (!asset && useSceneProjection && ref.unresolved !== true && typeof ref.name === 'string'
+    && typeof ref.variantLabel === 'string' && Array.isArray(ref.versions)) {
+    asset = mapAssets({ entities: [{
+      id: ref.entityId, name: ref.name, kind: ref.kind,
+      variants: ref.variantId ? [{ id: ref.variantId, name: ref.variantLabel, versions: ref.versions }] : []
+    }] }).entities[0]
+  }
+  if (!asset && !available) return { mode, error: '资产库不可用，无法核对引用' }
   if (!asset) return { mode, error: `实体缺失：${ref.entityId}` }
   if (!ref.variantId) return { asset, mode, error: '引用未指定变体 ID' }
   const variant = asset.variants?.find((item) => item.id === ref.variantId)

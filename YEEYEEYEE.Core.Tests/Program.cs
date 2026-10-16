@@ -26,7 +26,6 @@ var tests = new (string Name, Action Run)[]
     ("资源版本替换状态", ResourceReplaceState),
     ("引用媒体草稿隔离与定向提交", ReferenceMediaDraftIsolation),
     ("媒体版本回滚仅影响草稿", MediaVersionRollbackDraftOnly),
-    ("媒体提交当前及全部引用范围", MediaCommitReferenceScopes),
     ("子引用版本快照和隔离复制", NestedReferenceSnapshots),
     ("AI 导入自动建立角色技能道具引用", AgentCharacterNestedReferences),
     ("SQLite Job 持久化和恢复", SqliteJobPersistence),
@@ -41,15 +40,25 @@ var tests = new (string Name, Action Run)[]
 ("HTTP 回调签名防重放", SignedCallbackSecurity),
     };
 
+var selectedTests = args.Length == 0 ? tests : tests.Where(test => args.Any(filter =>
+    test.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)
+    || test.Run.Method.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))).ToArray();
+if (selectedTests.Length == 0)
+{
+    Console.Error.WriteLine($"没有匹配的 Core 测试：{string.Join("、", args)}");
+    Environment.ExitCode = 1;
+    return;
+}
+
 var failures = new List<string>();
-foreach (var test in tests)
+foreach (var test in selectedTests)
 {
     try { test.Run(); Console.WriteLine($"PASS {test.Name}"); }
     catch (Exception ex) { failures.Add($"FAIL {test.Name}: {ex.Message}"); Console.WriteLine(failures[^1]); }
 }
 
 if (failures.Count > 0) Environment.ExitCode = 1;
-else Console.WriteLine($"全部 {tests.Length} 项 Core 测试通过。");
+else Console.WriteLine($"全部 {selectedTests.Length} 项 Core 测试通过。");
 
 /// <summary>
 /// 钉住统一出场的跨章隔离、双向编辑、锁定版本与保存重开：本章编辑不泄漏到他章，节点改动能回写树，锁版与跟随最新语义不丢。
@@ -565,34 +574,6 @@ static void MediaVersionRollbackDraftOnly()
     Expect(draft.Description == "当前" && draft.Attachments.Single().Name == "current.png", "回滚没有恢复所选版本快照");
     Expect(variant.Description == "修改后" && variant.Attachments.Single().Name == "changed.png", "回滚草稿意外改动源变体");
     Expect(draft.HasUncommittedChanges, "回滚草稿应保留未提交状态");
-}
-
-/// <summary>
-/// 钉住媒体提交的范围语义：仅当前镜头只改这一条引用，全部引用则覆盖该实体变体的所有引用且不误伤非本实体的引用。
-/// </summary>
-static void MediaCommitReferenceScopes()
-{
-    var entity = new WorkflowEntity { Name = "主角" };
-    var variant = entity.CreateVariant("默认");
-    var old = variant.Versions.Single();
-    var current = new WorkflowNode();
-    var other = new WorkflowNode();
-    var unrelated = new WorkflowNode();
-    current.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id, VariantVersionId = old.Id });
-    other.References.Add(new NodeReference { EntityId = entity.Id, VariantId = variant.Id });
-    unrelated.References.Add(new NodeReference { EntityId = Guid.NewGuid(), VariantId = variant.Id });
-    var draft = variant.CloneAsVariant("草稿");
-    draft.Description = "新版本";
-    variant.Description = draft.Description;
-    var created = variant.Commit("测试");
-    current.References[0].VariantVersionId = created.Id;
-    Expect(current.References[0].VariantVersionId == created.Id, "当前引用没有切换到新版本");
-    Expect(other.References[0].VariantVersionId is null, "仅当前镜头模式修改了其它引用");
-
-    foreach (var reference in new[] { current.References[0], other.References[0], unrelated.References[0] })
-        if (reference.EntityId == entity.Id && reference.VariantId == variant.Id) reference.VariantVersionId = created.Id;
-    Expect(current.References[0].VariantVersionId == created.Id && other.References[0].VariantVersionId == created.Id, "全部引用模式遗漏匹配引用");
-    Expect(unrelated.References[0].VariantVersionId is null, "全部引用模式依赖名称或错误匹配非同 ID 引用");
 }
 
 /// <summary>

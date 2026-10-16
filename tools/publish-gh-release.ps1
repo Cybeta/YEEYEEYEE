@@ -26,7 +26,7 @@ if ($head -notmatch '^[0-9a-f]{40,64}$') { throw 'invalid current HEAD commit id
 # Send the exact request through Process stdin; never invoke cmd or print credentials.
 $startInfo = New-Object System.Diagnostics.ProcessStartInfo
 $startInfo.FileName = (Get-Command git -CommandType Application -ErrorAction Stop).Source
-$startInfo.Arguments = 'credential fill'
+$startInfo.Arguments = '-c http.proxy= -c https.proxy= credential fill'
 $startInfo.UseShellExecute = $false
 $startInfo.CreateNoWindow = $true
 $startInfo.RedirectStandardInput = $true
@@ -37,12 +37,16 @@ $startInfo.EnvironmentVariables['GCM_INTERACTIVE'] = 'Never'
 $process = New-Object System.Diagnostics.Process
 $process.StartInfo = $startInfo
 $credentialOutput = $null
+$inputEncoding = [Console]::InputEncoding
 try {
+    [Console]::InputEncoding = [System.Text.Encoding]::ASCII
     if (-not $process.Start()) { throw 'could not start git credential fill' }
     $outputTask = $process.StandardOutput.ReadToEndAsync()
     $errorTask = $process.StandardError.ReadToEndAsync()
-    $process.StandardInput.Write("protocol=https`nhost=github.com`n`n")
-    $process.StandardInput.Close()
+    $credentialRequest = [System.Text.Encoding]::ASCII.GetBytes("protocol=https`nhost=github.com`n`n")
+    $process.StandardInput.BaseStream.Write($credentialRequest, 0, $credentialRequest.Length)
+    $process.StandardInput.BaseStream.Flush()
+    $process.StandardInput.BaseStream.Close()
     if (-not $process.WaitForExit(30000)) {
         $process.Kill()
         $process.WaitForExit()
@@ -58,6 +62,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($token)) { throw 'stored credential has an empty token' }
 }
 finally {
+    [Console]::InputEncoding = $inputEncoding
     $credentialOutput = $null
     $line = $null
     $outputTask = $null

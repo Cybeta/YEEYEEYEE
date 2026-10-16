@@ -56,6 +56,7 @@ export type WorkbenchChrome = {
   onToggleDock: () => void
   agentActive: boolean
   onOpenAgent: () => void
+  onOpenSettings: () => void
   onSave: () => void
   saveLabel: string
   saveDisabled: boolean
@@ -212,7 +213,7 @@ export function WorkbenchShell({ chrome, status, presence, session, tree, worksp
             {tree}
           </div>
 
-          <button type="button" className="df-nav-button" style={{ marginTop: 10 }} disabled title="设置页（模型接入 / 生图生视频 / 技能管理）在网页端尚未接入">
+          <button type="button" className="df-nav-button" style={{ marginTop: 10 }} onClick={chrome.onOpenSettings} title="打开设置">
             <span className="df-row"><span style={{ color: 'var(--df-primary)' }}>⚙</span><span style={{ color: 'var(--df-ink)' }}>设置</span></span>
           </button>
           <div className="df-dim" style={{ margin: '12px 0 0 4px', fontSize: 11 }}>{chrome.version} · 服务端项目</div>
@@ -252,7 +253,7 @@ export function WorkbenchShell({ chrome, status, presence, session, tree, worksp
       </footer>
 
       {badge.visible && (
-        <button type="button" className="df-agent-badge" onClick={badge.onClick} title="打开 Agent 协作面板">
+        <button type="button" className="df-agent-badge" style={{ bottom: 'calc(var(--df-gap) + var(--df-statusbar-height) + 2px)', zIndex: 6 }} onClick={badge.onClick} aria-label="打开 Agent 协作面板" title="打开 Agent 协作面板">
           <span className="df-agent-badge-ring">{badge.text}</span>
         </button>
       )}

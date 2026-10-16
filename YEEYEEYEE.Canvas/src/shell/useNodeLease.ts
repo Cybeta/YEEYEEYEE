@@ -32,25 +32,31 @@ export function useNodeLease(options: { recordId: string; wanted: boolean; onCha
   const [blockedBy, setBlockedBy] = useState<Lease | null>(null)
   const [error, setError] = useState('')
   const leaseId = useRef('')
-  // 回调放 ref：它每次渲染都是新函数，进依赖数组会让「申请锁」变成每次渲染都跑一遍。
+  // 同持有周期的申请幂等：恢复必须等旧请求及释放完成，不能让旧响应删掉恢复后的同一把锁。
+  const pending = useRef<Promise<void>>(Promise.resolve())
   const onChanged = useRef(options.onChanged)
   onChanged.current = options.onChanged
 
   useEffect(() => {
     if (!wanted || recordId.length === 0) return
 
-    let cancelled = false
+    const ownerId = crypto.randomUUID()
+    let active = false
+    let generation = 0
     let timer: number | undefined
+    let busy = false
+    const release = (id: string) => request(`/api/web/edits/${id}`, { method: 'DELETE', keepalive: true }).then(() => {}, () => {})
+    const current = (run: number) => active && run === generation
 
-    const acquire = async () => {
+    const acquire = async (run: number) => {
       try {
         const body = await request<{ lease?: unknown }>('/api/web/edits', {
           method: 'POST',
-          body: JSON.stringify({ scope: 'node', targetId: recordId, client: 'web' })
+          body: JSON.stringify({ scope: 'node', targetId: recordId, client: 'web', ownerId })
         })
         const lease = parseLease(body?.lease)
-        if (cancelled) {
-          if (lease) void request(`/api/web/edits/${lease.leaseId}`, { method: 'DELETE', keepalive: true }).catch(() => {})
+        if (!current(run)) {
+          if (lease) await release(lease.leaseId)
           return
         }
         if (!lease) {
@@ -63,61 +69,81 @@ export function useNodeLease(options: { recordId: string; wanted: boolean; onCha
         setHeld(true)
         setBlockedBy(null)
         setError('')
-        // 让画布上的锁列表尽快跟上：否则自己那张卡的徽标要等下一次轮询才出现。
         onChanged.current?.()
       } catch (failure) {
-        if (cancelled) return
+        if (!current(run)) return
         leaseId.current = ''
         setHeld(false)
-        // 409 是「别人在编辑」，不是错误：把持有者显示出来就够，不打错误提示。
         const holder = apiCode(failure) === 'EDIT_CONFLICT' ? holderOf(apiBody(failure)) : null
         setBlockedBy(holder)
         setError(holder ? '' : errorMessage(failure))
       }
     }
 
-    const renew = async () => {
+    const renew = async (run: number) => {
       const id = leaseId.current
       if (id.length === 0) {
-        await acquire()
+        await acquire(run)
         return
       }
       try {
         const body = await request<{ lease?: unknown }>(`/api/web/edits/${id}`, { method: 'PUT' })
         const lease = parseLease(body?.lease)
-        if (cancelled) return
+        if (!current(run)) return
         if (lease) {
           leaseId.current = lease.leaseId
           setHeld(true)
         }
       } catch {
-        // 续期失败可能是锁已经被回收：清掉手里这个 id，下一次按新申请走。
-        if (cancelled) return
+        if (!current(run)) return
         leaseId.current = ''
         setHeld(false)
-        await acquire()
+        await acquire(run)
       }
     }
 
-    // 每次进入都先申请一次：申请是幂等的（同一个人同一个目标回同一把锁），
-    // 所以焦点来回切换不会造出一堆锁。
-    void acquire()
-    timer = window.setInterval(() => void renew(), HEARTBEAT_MS)
-
-    return () => {
-      cancelled = true
+    const tick = () => {
+      if (!active || busy) return
+      busy = true
+      const run = generation
+      pending.current = pending.current.then(async () => {
+        if (current(run)) await renew(run)
+      }).finally(() => { if (current(run)) busy = false })
+    }
+    const start = () => {
+      if (active) return
+      active = true
+      generation++
+      busy = false
+      tick()
+      timer = window.setInterval(tick, HEARTBEAT_MS)
+    }
+    const stop = () => {
+      active = false
+      generation++
       if (timer !== undefined) window.clearInterval(timer)
+      timer = undefined
       const stale = leaseId.current
       leaseId.current = ''
       setHeld(false)
       setBlockedBy(null)
       setError('')
       if (stale.length > 0) {
-        // 还锁是「说一声就好」的事：失败了也不该在界面上留个错误——
-        // 真没还成，服务端两分钟后会自己回收。
-        void request(`/api/web/edits/${stale}`, { method: 'DELETE', keepalive: true }).catch(() => {})
+        // pagehide 必须立即发送；后续申请仍等待这次释放和未完成的旧请求。
+        const released = release(stale)
+        pending.current = Promise.all([pending.current, released]).then(() => {})
         onChanged.current?.()
       }
+    }
+    const onPageShow = (event: PageTransitionEvent) => { if (event.persisted) start() }
+
+    start()
+    window.addEventListener('pagehide', stop)
+    window.addEventListener('pageshow', onPageShow)
+    return () => {
+      window.removeEventListener('pagehide', stop)
+      window.removeEventListener('pageshow', onPageShow)
+      stop()
     }
   }, [wanted, recordId])
 

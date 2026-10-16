@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { attachmentFileUrl, entityThumbUrl } from '../src/shell/assetImages'
+import { attachmentFileUrl, entityMediaUrl, entityThumbUrl, withRetry } from '../src/shell/assetImages'
 
 /**
  * 引用徽标上那张缩略图的 URL。
@@ -31,5 +31,36 @@ describe('节点产物图的 URL', () => {
   it('两条 ID 都进路径，各转义各的', () => {
     expect(attachmentFileUrl('n1', 'a1')).toBe('/api/web/records/n1/attachments/a1/file')
     expect(attachmentFileUrl('n/1', 'a 1')).toBe('/api/web/records/n%2F1/attachments/a%201/file')
+  })
+})
+
+/**
+ * 设定媒体的 URL：`versionId` 决定读的是**哪个版本**的字节。
+ * 漏掉它不会报错——只会静默换成当前变体的最新附件，而锁定版本的引用要的恰恰不是那一份。
+ */
+describe('设定媒体的 URL', () => {
+  it('跟随最新不带 versionId，锁定版本必须带上', () => {
+    expect(entityMediaUrl('e1', 'v1', 'a1')).toBe('/api/web/entities/e1/variants/v1/media/a1')
+    expect(entityMediaUrl('e1', 'v1', 'a1', null)).toBe('/api/web/entities/e1/variants/v1/media/a1')
+    expect(entityMediaUrl('e1', 'v1', 'a1', 'v3')).toBe('/api/web/entities/e1/variants/v1/media/a1?versionId=v3')
+  })
+
+  it('三段 ID 与版本号各转义各的', () => {
+    expect(entityMediaUrl('e/1', 'v 1', 'a/1', 'v 3')).toBe('/api/web/entities/e%2F1/variants/v%201/media/a%2F1?versionId=v%203')
+  })
+})
+
+/**
+ * 失败重试时的地址：**重试必须换 URL**，否则浏览器会把上一次的结果（含失败）直接拿出来，
+ * 按下去等于没按。序号只是浏览器这一侧的缓存键，服务端不看它。
+ */
+describe('重试地址', () => {
+  it('没重试过就原样返回，不在正常地址上多挂一截参数', () => {
+    expect(withRetry('/api/web/records/n1/attachments/a1/file', 0)).toBe('/api/web/records/n1/attachments/a1/file')
+  })
+
+  it('重试过就换一个地址；原本带查询串时接在它后面', () => {
+    expect(withRetry('/api/web/records/n1/attachments/a1/file', 1)).toBe('/api/web/records/n1/attachments/a1/file?retry=1')
+    expect(withRetry('/api/web/records/n1/attachments/a1/file?canvas=c1', 2)).toBe('/api/web/records/n1/attachments/a1/file?canvas=c1&retry=2')
   })
 })

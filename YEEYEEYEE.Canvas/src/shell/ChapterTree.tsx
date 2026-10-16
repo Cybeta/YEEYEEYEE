@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ALL_CHAPTERS_ID } from '../ChapterView'
-import { CREATABLE_RECORD_TYPES, NODE_KINDS, kindOf, recordStatus, recordTitle, type ChapterGroup } from './records'
+import { CREATABLE_RECORD_TYPES, NODE_KINDS, kindOf, nodeStatusOf, recordStatus, recordTitle, type ChapterGroup } from './records'
 
 /**
  * 左栏「工作树资源」里的那棵树。
@@ -118,7 +118,7 @@ export function ChapterTree({ groups, activeChapter, selectedId, onChapter, onSe
                   className={`df-nav-button${selectedId === record.recordId ? ' is-active' : ''}`}
                   style={{ padding: '4px 6px 4px 24px', fontSize: 11 }}
                   onClick={() => onSelect(record.recordId)}
-                  title={`${recordStatus(record)} · ${record.recordId}`}
+                  title={`${nodeStatusOf(recordStatus(record)).label} · ${record.recordId}`}
                 >
                   <span className="df-row" style={{ gap: 6 }}>
                     <span className="df-node-dot" style={{ background: NODE_KINDS[kind].hex }} aria-hidden="true" />

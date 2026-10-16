@@ -108,11 +108,11 @@ internal sealed class EditLeaseStore(string canvasPath, TimeSpan lifetime)
     }
 
     /// <summary>
-    /// 申请。同一目标重复申请是**幂等**的（刷新过期时间即可）——连点两下、网络重试都不该把自己挡住。
+    /// 申请。同一持有周期对同一目标重复申请是**幂等**的；不同页面的 ownerId 各有租约，独立释放。
     /// <paramref name="client"/> 为 null 表示调用方没声明来源端：新建时按网页端算，刷新时**保留原值**
     /// （否则一次没带 client 的心跳就会把「某某（桌面端）」悄悄改成网页端）。
     /// </summary>
-    public EditLeaseResult Acquire(string scope, Guid? targetId, WebUser user, string? client, bool force)
+    public EditLeaseResult Acquire(string scope, Guid? targetId, WebUser user, string? client, bool force, Guid? ownerId = null)
     {
         lock (gate)
         {
@@ -121,7 +121,7 @@ internal sealed class EditLeaseStore(string canvasPath, TimeSpan lifetime)
             Purge(leases, now);
 
             var existing = leases.FindIndex(lease => lease.LeaseId != Guid.Empty &&
-                lease.UserId == user.Id && lease.Scope == scope && lease.TargetId == targetId);
+                lease.UserId == user.Id && lease.Scope == scope && lease.TargetId == targetId && lease.OwnerId == ownerId);
             if (existing >= 0)
             {
                 var refreshed = leases[existing] with
@@ -153,7 +153,7 @@ internal sealed class EditLeaseStore(string canvasPath, TimeSpan lifetime)
                 leases.RemoveAll(lease => victims.Contains(lease));
                 // 申请整棵树时，自己原有的节点锁是它的子集，一并收掉，免得留下永远没人续期的僵尸锁。
                 if (scope == EditScope.Tree) leases.RemoveAll(lease => lease.UserId == user.Id);
-                var taken = new EditLease(Guid.NewGuid(), scope, targetId, user.Id, NameOf(user), resolvedClient, now, now + lifetime);
+                var taken = new EditLease(Guid.NewGuid(), scope, targetId, user.Id, NameOf(user), resolvedClient, now, now + lifetime, ownerId);
                 leases.Add(taken);
                 return Save(leases)
                     ? EditLeaseResult.Ok(taken, victims)
@@ -161,7 +161,7 @@ internal sealed class EditLeaseStore(string canvasPath, TimeSpan lifetime)
             }
 
             if (scope == EditScope.Tree) leases.RemoveAll(lease => lease.UserId == user.Id);
-            var lease = new EditLease(Guid.NewGuid(), scope, targetId, user.Id, NameOf(user), resolvedClient, now, now + lifetime);
+            var lease = new EditLease(Guid.NewGuid(), scope, targetId, user.Id, NameOf(user), resolvedClient, now, now + lifetime, ownerId);
             leases.Add(lease);
             return Save(leases)
                 ? EditLeaseResult.Ok(lease)

@@ -4,7 +4,7 @@ using YEEYEEYEE.Desktop;
 
 namespace YEEYEEYEE.Web;
 
-/// <summary>Web adapter for the desktop canvas file; never persists a projected scene.</summary>
+/// <summary>桌面画布文件的 Web 适配器；不会将投影视图持久化。</summary>
 internal sealed class ProjectCanvasSceneStore
 {
     private readonly string defaultPath;
@@ -70,7 +70,7 @@ internal sealed class ProjectCanvasSceneStore
 
     private (RecentCanvasState State, byte[] Bytes, long Revision, CanvasOpenOutcome Open) Load()
     {
-        // A single byte snapshot supplies both the response revision and the projected state.
+        // 同一份字节快照同时提供响应修订号和投影状态。
         var bytes = File.ReadAllBytes(path);
         if (!CanvasOpenService.TryOpenBytes(bytes, path, out var opened, out var reason))
             throw new InvalidDataException(reason);
@@ -108,7 +108,7 @@ internal sealed class ProjectCanvasSceneStore
         void CheckReference(Guid? entityId, Guid? variantId, Guid? versionId)
         {
             if (entityId is not { } id) return;
-            // A local entity keeps its own authority; all others require a library entry.
+            // 本地实体以自身为准；其它实体必须存在于项目库。
             if (state.Canvas.Entities.Any(local => local.Id == id && !local.ManagedByProject)) return;
             if (!byId.TryGetValue(id, out var entity))
                 throw new InvalidDataException("项目库中缺少画布引用的实体");
@@ -167,39 +167,154 @@ internal sealed class ProjectCanvasSceneStore
             .ToList();
     }
 
-    public (long Revision, string Context) AgentContextSnapshot(string? chapterId, string? nodeId)
+    internal (WorkflowCanvasState Canvas, WorkflowNode Node, long Revision) GenerationTarget(Guid nodeId)
     {
-        var current = Load(); CheckProjectAuthority(current.State);
+        var current = Load();
+        var authority = CheckProjectAuthority(current.State);
+        ProjectEntityScope.RefreshSnapshots(current.State.Canvas, authority ?? new ProjectEntityFile());
+        var node = current.State.Canvas.Nodes.SingleOrDefault(n => n.Id == nodeId)
+            ?? throw new InvalidDataException("目标节点不存在");
+        return (current.State.Canvas, node, current.Revision);
+    }
+
+    internal static (Guid Entity, Guid Variant)? OutputTarget(WorkflowCanvasState canvas, WorkflowNode node, string entityTarget, string variantTarget)
+    {
+        var explicitTarget = !string.IsNullOrEmpty(entityTarget) || !string.IsNullOrEmpty(variantTarget);
+        var kind = node.Category switch { NodeCategory.Character => EntityKind.Character, NodeCategory.Prop => EntityKind.Prop, NodeCategory.Scene => EntityKind.Scene, _ => (EntityKind?)null };
+        if (!explicitTarget && kind is null) return null;
+        if (explicitTarget && (!Guid.TryParse(entityTarget, out _) || !Guid.TryParse(variantTarget, out _)))
+            throw new InvalidDataException("设定图输出目标须提供完整 entityTarget 和 variantTarget ID");
+        var candidates = node.References.Select(r => (Reference: r, Entity: canvas.FindEntity(r.EntityId)))
+            .Where(x => x.Entity is not null && (explicitTarget || x.Entity.Kind == kind))
+            .Select(x => (Entity: x.Entity!, Variant: x.Entity!.Variants.FirstOrDefault(v => v.Id == x.Reference.VariantId), Reference: x.Reference))
+            .Where(x => x.Variant is not null && (!explicitTarget || x.Entity.Id == Guid.Parse(entityTarget) && x.Variant.Id == Guid.Parse(variantTarget)))
+            .ToArray();
+        if (candidates.Length != 1) throw new InvalidDataException("设定图输出目标未绑定当前节点或存在歧义，请明确绑定实体与变体");
+        if (candidates[0].Reference.VariantVersionId is not null) throw new InvalidDataException("历史版本引用不能作为设定图输出目标，请绑定当前变体");
+        return (candidates[0].Entity.Id, candidates[0].Variant!.Id);
+    }
+
+    public (long Revision, string Context) AgentContextSnapshot(string? chapterId, string? nodeId, bool requireWritable = false)
+    {
+        var current = Load();
+        if (requireWritable && (current.Open.UnsupportedFormat || current.Open.Validation.HasErrors || current.Open.Migration.Ambiguities.Count > 0))
+            throw new InvalidDataException("画布只读或有未解决校验问题");
+        ProjectEntityScope.RefreshSnapshots(current.State.Canvas, CheckProjectAuthority(current.State) ?? new ProjectEntityFile());
         var canvas = current.State.Canvas;
         var selected = canvas.Nodes.FirstOrDefault(n => n.Id.ToString() == nodeId);
         if (!string.IsNullOrEmpty(chapterId) && !Guid.TryParse(chapterId, out _)) throw new InvalidDataException("章节ID无效");
         Guid? chapter = Guid.TryParse(chapterId, out var id) ? id : null;
         if (chapter is not null && CanvasChapters.List(canvas).All(c => c.Id != chapter)) throw new InvalidDataException("当前章节不存在");
         if (!string.IsNullOrEmpty(nodeId) && selected is null) throw new InvalidDataException("选中节点不存在");
-        var nodes = canvas.Nodes.Where(n => chapter is null || CanvasChapters.ResolveChapterId(canvas, n) == chapter).Take(100);
+        var nodes = canvas.Nodes.Where(n => chapter is null || CanvasChapters.ResolveChapterId(canvas, n) == chapter).Take(100).ToList();
+        // 目标节点可能被章节筛选排除、或落在 100 条的截断之外——它是这次请求的操作对象，
+        // 必须始终出现在清单里：清单之外只留一个标题时，同名节点会让模型挑错人。
+        if (selected is not null && nodes.All(n => n.Id != selected.Id)) nodes.Insert(0, selected);
         var context = new AgentContext(selected?.Title ?? "", selected?.Content ?? "",
-            string.Join("\n", nodes.Select(n => $"{n.Id} | {n.Category} | {n.Title} | {n.Content}")),
-            string.Join("\n", canvas.Entities.Select(e => $"{e.Id} | {e.Name}")), "", "",
-            JsonSerializer.Serialize(canvas.WorkTree));
+            string.Join("\n", nodes.Select(n => $"{n.Id} | {n.Category} | {n.Title} | {n.Content} | assetRequirements={JsonSerializer.Serialize(n.AssetRequirements)} | references={JsonSerializer.Serialize(n.References)}")),
+            string.Join("\n", canvas.Entities.Select(e => $"{e.Id} | {e.Kind} | {e.Name} | variants=" + string.Join(",", e.Variants.Select(v => $"{v.Id}:v{v.CurrentVersion}:imageAvailable={v.Attachments.Any(a => a.Kind == AttachmentKind.Image && WebGenerationReferences.Locate(a) is not null)}")))),
+            "", "", JsonSerializer.Serialize(canvas.WorkTree), TargetIdentity(canvas, selected));
         return (current.Revision, $"当前章节ID：{chapterId ?? "全部"}；基准修订：{current.Revision}\n" + context.Describe(24000, includeDesktopSkills: false) + "\nWeb能力边界：生成技能使用Web聊天提供的invoke_skill协议与服务端预授权；模型不能声称调用了桌面技能或任务已完成。write_file不支持。审批模式只预览，用户提交后才写盘。实体修改受项目资源权威校验约束。");
     }
 
-    public (long Revision, byte[] Before, byte[] After, string?[] Hints, string[] Errors) PreviewActions(IReadOnlyList<AgentAction> actions)
+    /// <summary>
+    /// 目标节点的稳定身份：**id 在前**，跟着类别、章节与标题。
+    ///
+    /// 为什么 id 要写全：模型靠这一段认人，而标题可能重名、还可能被清单截断；
+    /// 用完整 Guid（外加 8 位短 id 便于和清单里的短写法对上）才不会挑错节点。
+    /// 类别与章节用共享层的同一套读法（NodeAssistPlanner / CanvasChapters），不另立一份。
+    /// 没有目标节点（普通聊天）时返回空串，`Describe` 就不会摆出这一段。
+    /// </summary>
+    private static string TargetIdentity(WorkflowCanvasState canvas, WorkflowNode? node)
     {
-        var current = Load(); CheckProjectAuthority(current.State);
+        if (node is null) return string.Empty;
+        var id = node.Id.ToString("N");
+        var chapter = "未归档";
+        if (CanvasChapters.ResolveChapterId(canvas, node) is { } chapterId)
+            chapter = $"{chapterId:N}（{CanvasChapters.List(canvas).FirstOrDefault(c => c.Id == chapterId)?.Name ?? "未命名"}）";
+        return $"{id}（短 {id[..8]}）· {NodeAssistPlanner.KindLabelOf(node.Category)} · 章节 {chapter} · 标题「{node.Title}」";
+    }
+
+    public (long Revision, byte[] Before, byte[] After, string?[] Hints, string[] Errors, object Diff) PreviewActions(IReadOnlyList<AgentAction> actions, Func<AgentAction, YEEYEEYEE.Core.ExecutionResult>? attachmentJob = null)
+    {
+        var current = Load();
+        ProjectEntityScope.RefreshSnapshots(current.State.Canvas, CheckProjectAuthority(current.State) ?? new ProjectEntityFile());
         if (current.Open.UnsupportedFormat || current.Open.Validation.HasErrors || current.Open.Migration.Ambiguities.Count > 0)
             throw new InvalidDataException("画布只读或有未解决校验问题");
         if (actions.Count is < 1 or > 100) throw new InvalidDataException("动作数量必须为1至100");
         if (actions.Any(a => a.Kind == "write_file")) throw new InvalidDataException("Web事务不支持write_file，请改为画布动作");
         var canvas = CanvasPreviewBuilder.Clone(current.State.Canvas);
-        var hints = AgentActionExecutor.PrecheckBatch(actions, canvas, null, path).ToArray();
-        var result = AgentActionExecutor.Apply(actions, canvas, null, FileWriteMode.Skip, canvasPath: path);
-        var next = current.State with { Canvas = canvas };
+        var ordinary = actions.Where(a => a.Kind != "attach_asset").ToArray();
+        var hints = AgentActionExecutor.PrecheckBatch(ordinary, canvas, null, path).ToList();
+        var result = AgentActionExecutor.Apply(ordinary, canvas, null, FileWriteMode.Skip, canvasPath: path);
         var errors = result.Errors.ToList();
+        foreach (var action in actions.Where(a => a.Kind == "attach_asset"))
+        {
+            try
+            {
+                if (!Guid.TryParse(action.Target, out var target) || canvas.Nodes.SingleOrDefault(n => n.Id == target) is not { } node)
+                    throw new InvalidDataException("附件目标节点不存在");
+                if (node.IsLocked) throw new InvalidDataException("附件目标节点已锁定");
+                var job = attachmentJob?.Invoke(action) ?? throw new InvalidDataException("附件缺少可信任务来源");
+                if (!job.Inputs.TryGetValue("targetNodeId", out var originalTarget) || originalTarget.GetGuid() != target)
+                    throw new InvalidDataException("附件目标与原任务不一致");
+                var fingerprints = WebGenerationReferences.Fingerprints(job.Inputs);
+                if (!action.Content.StartsWith("asset://", StringComparison.Ordinal) || action.Content != "asset://" + Path.GetFileName(action.Content[8..]))
+                    throw new InvalidDataException("附件必须是规范的项目生成资产引用");
+                var file = AssetStore.Resolve(action.Content);
+                if (file is null || !File.Exists(file) || !InsideAllowedRoots(file)) throw new InvalidDataException("附件资产不可安全读取");
+                for (var part = Path.GetFullPath(file); part is not null; part = Path.GetDirectoryName(part))
+                    if ((File.GetAttributes(part) & FileAttributes.ReparsePoint) != 0) throw new InvalidDataException("附件路径不能经过符号链接");
+                var kind = WorkflowAttachment.KindOf(file);
+                if (kind is not (AttachmentKind.Image or AttachmentKind.Video)) throw new InvalidDataException("附件仅支持图片或视频");
+                var id = new Guid(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"web-chat:{action.Source}:{action.Content}"))[..16]);
+                if (!node.Attachments.Any(a => a.Id == id))
+                    node.Attachments.Add(new WorkflowAttachment { Id = id, Kind = kind, Reference = action.Content, Name = action.Title, Source = "web-chat", SourceFingerprints = new(fingerprints, StringComparer.Ordinal) });
+                if (!string.IsNullOrEmpty(action.EntityTarget) || !string.IsNullOrEmpty(action.VariantTarget))
+                {
+                    if (kind != AttachmentKind.Image) throw new InvalidDataException("实体图槽仅接受图片");
+                    var output = OutputTarget(canvas, node, action.EntityTarget, action.VariantTarget)!.Value;
+                    var variant = canvas.FindEntity(output.Entity)!.Variants.Single(v => v.Id == output.Variant);
+                    variant.EnsureInitialVersion();
+                    if (!variant.Attachments.Any(a => a.Id == id))
+                    {
+                        variant.Attachments.Insert(0, new WorkflowAttachment { Id = id, Kind = kind, Reference = action.Content, Name = action.Title, Source = "web-chat", SourceFingerprints = new(fingerprints, StringComparer.Ordinal) });
+                        variant.Commit("Web Agent 生成设定图");
+                    }
+                    hints.Add("将图片写入实体变体并提交新版本");
+                }
+                node.ExecutionStatus = NodeExecutionStatus.Completed;
+                hints.Add("将生成媒体回挂到节点：" + node.Title);
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException or UnauthorizedAccessException)
+            { errors.Add(ex.Message); hints.Add(ex.Message); }
+        }
+        var next = current.State with { Canvas = canvas };
         if (CanvasIdentityValidator.Validate(canvas).HasErrors) errors.Add("预览画布引用或身份校验失败");
         try { CheckProjectAuthority(next); }
         catch (InvalidDataException) { errors.Add("动作违反项目资源库权威约束"); }
-        return (current.Revision, current.Bytes, JsonSerializer.SerializeToUtf8Bytes(next), hints, errors.ToArray());
+        var comparison = CanvasPreviewBuilder.Compare(current.State.Canvas, canvas);
+        static List<object> Nodes(WorkflowCanvasState state, IEnumerable<Guid> ids)
+        {
+            var selected = ids.Select(id => id.ToString()).ToHashSet();
+            return NodeProjection.ProjectRecords(state.Nodes, state)
+                .Where(record => selected.Contains(JsonSerializer.SerializeToElement(record).GetProperty("recordId").GetString()!)).ToList();
+        }
+        static List<object> Edges(WorkflowCanvasState state, IEnumerable<Guid> ids)
+        {
+            var selected = ids.Select(id => id.ToString()).ToHashSet();
+            return ProjectEdges(state)
+                .Where(edge => selected.Contains(JsonSerializer.SerializeToElement(edge).GetProperty("edgeId").GetString()!)).ToList();
+        }
+        var diff = new
+        {
+            addedNodes = Nodes(canvas, comparison.AddedNodes.Select(node => node.Id)),
+            updatedNodes = Nodes(canvas, comparison.UpdatedNodeIds),
+            removedNodes = Nodes(current.State.Canvas, comparison.RemovedNodeIds),
+            addedEdges = Edges(canvas, comparison.AddedEdges.Select(edge => edge.Id)),
+            removedEdges = Edges(current.State.Canvas, comparison.RemovedEdgeIds)
+        };
+        return (current.Revision, JsonSerializer.SerializeToUtf8Bytes(current.State), JsonSerializer.SerializeToUtf8Bytes(next), hints.ToArray(), errors.ToArray(), diff);
     }
 
     public IResult Read()
@@ -214,6 +329,65 @@ internal sealed class ProjectCanvasSceneStore
         {
             return Error(503, "PROJECT_CANVAS_READ_FAILED", "项目画布或项目资源无法安全读取：" + ex.Message);
         }
+    }
+
+    public IResult RegisterAttachment(long baseRevision, Guid nodeId, Guid attachmentId, Guid entityId, Guid variantId) =>
+        Write(baseRevision, current =>
+        {
+            var canvas = current.Canvas;
+            var node = canvas.Nodes.SingleOrDefault(n => n.Id == nodeId);
+            if (node is null) return (null, Error(404, "RECORD_NOT_FOUND", "节点不存在"));
+            if (node.IsLocked) return (null, Error(409, "NODE_LOCKED", "节点已锁定"));
+            var entity = canvas.FindEntity(entityId);
+            if (entity is null || entity.ManagedByProject)
+                return (null, Error(409, "CANVAS_LOCAL_ENTITY_REQUIRED", "请选择当前画布的内嵌实体"));
+            var variant = entity.Variants.SingleOrDefault(v => v.Id == variantId);
+            if (variant is null) return (null, Error(404, "CANVAS_VARIANT_NOT_FOUND", "变体不存在"));
+            if (!node.References.Any(r => r.EntityId == entityId && r.VariantId == variantId && r.VariantVersionId is null))
+                return (null, Error(409, "OUTPUT_TARGET_UNBOUND", "请先把实体的当前变体明确绑定到节点"));
+            var attachment = node.Attachments.SingleOrDefault(a => a.Id == attachmentId);
+            if (attachment is null || attachment.Kind != AttachmentKind.Image)
+                return (null, Error(404, "ASSET_ATTACHMENT_NOT_FOUND", "节点图片附件不存在"));
+            var file = WebGenerationReferences.Locate(attachment);
+            if (file is null) return (null, Error(409, "ASSET_UNAVAILABLE", "图片资产不可安全读取"));
+            using (var stream = File.OpenRead(file))
+            {
+                var signature = new byte[Math.Min(32L, stream.Length)];
+                stream.ReadExactly(signature);
+                var type = AgentAttachmentLoader.ImageMediaType(file);
+                if (type == "image/jpeg" && signature.Length >= 4)
+                {
+                    stream.Seek(-2, SeekOrigin.End);
+                    stream.ReadExactly(signature.AsSpan(signature.Length - 2));
+                }
+                if (type is null || !WebEntityApi.ValidMedia(signature, type))
+                    return (null, Error(415, "ASSET_SIGNATURE_INVALID", "图片内容与声明格式不符"));
+            }
+            if (variant.Attachments.Any(a => a.Id == attachmentId || a.Reference == attachment.Reference))
+                return (null, Results.Json(new { revision = baseRevision, registered = false, version = variant.CurrentVersion }));
+            variant.EnsureInitialVersion();
+            variant.Attachments.Insert(0, JsonSerializer.Deserialize<WorkflowAttachment>(JsonSerializer.Serialize(attachment))!);
+            variant.Commit("Web 登记节点图片附件");
+            return (canvas, null);
+        }, (next, bytes) => new { revision = Revision(bytes), registered = true,
+            version = next.Canvas.FindEntity(entityId)!.Variants.Single(v => v.Id == variantId).CurrentVersion });
+
+    public IResult RegistrationTargets(Guid nodeId)
+    {
+        try
+        {
+            var current = Load();
+            CheckProjectAuthority(current.State);
+            var node = current.State.Canvas.Nodes.SingleOrDefault(n => n.Id == nodeId);
+            if (node is null) return Error(404, "RECORD_NOT_FOUND", "节点不存在");
+            var targets = current.State.Canvas.Entities.Where(e => !e.ManagedByProject)
+                .SelectMany(e => e.Variants.Select(v => new { entityId = e.Id, variantId = v.Id,
+                    name = e.Name, variantName = v.Name, version = v.CurrentVersion,
+                    bound = node.References.Any(r => r.EntityId == e.Id && r.VariantId == v.Id && r.VariantVersionId is null) }));
+            return Results.Json(new { revision = current.Revision, targets });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or InvalidDataException)
+        { return Error(503, "PROJECT_CANVAS_READ_FAILED", "画布无法安全读取"); }
     }
 
     /// <summary>
@@ -239,7 +413,26 @@ internal sealed class ProjectCanvasSceneStore
                 if (node is null) return (null, Error(404, "RECORD_NOT_FOUND", "该记录不是可编辑节点"));
                 if (node.IsLocked) return (null, Error(409, "NODE_LOCKED", "节点已锁定"));
 
+                // 库里有、这张画布还没有的设定，**按引用把它补进画布**——与桌面端
+                // ProjectEntityScope.MergeInto 的注入规则是同一条（那边注入的是「被节点引用到的」库实体）。
+                //
+                // 为什么这里必须认库：网页端「项目资源库」面板列的就是项目库（/api/web/assets 直接读
+                // entities.json），选中即写。若只认画布里的快照，就会出现「列表里能选到、一选必然
+                // 404 CANVAS_ENTITY_NOT_FOUND」——资源新建完就再也挂不上去，用户以为功能坏了。
                 var entity = canvas.FindEntity(entityId);
+                if (entity is null)
+                {
+                    var library = CheckProjectAuthority(current) ?? throw new InvalidDataException("资源库缺失");
+                    if (library.Entities.FirstOrDefault(candidate => candidate.Id == entityId) is { } authoritative)
+                    {
+                        var snapshot = ProjectEntityScope.CloneEntity(authoritative);
+                        // 画布里只放**托管快照**：权威内容始终在项目库，画布这份供渲染与解析用。
+                        snapshot.ManagedByProject = true;
+                        snapshot.ProjectMissingReason = null;
+                        canvas.Entities.Add(snapshot);
+                        entity = snapshot;
+                    }
+                }
                 if (entity is null) return (null, Error(404, "CANVAS_ENTITY_NOT_FOUND", "这条设定不在这张画布里"));
                 var variant = variantId is { } wanted
                     ? entity.Variants.FirstOrDefault(item => item.Id == wanted)
@@ -272,7 +465,7 @@ internal sealed class ProjectCanvasSceneStore
     /// 算出来。这里只做投影，所以不要锁、不写盘、任何人（含只读账号）都能取——「这个节点能做什么」
     /// 是看一眼就知道的事，不该因为别人正占着编辑锁就问不出来。
     /// </summary>
-    public IResult Assist(string recordId)
+    public IResult Assist(string recordId, bool videoAvailable = false)
     {
         if (!Guid.TryParse(recordId, out var nodeId))
             return Error(400, "CANVAS_RECORD_INVALID", "记录 ID 不是合法的 GUID");
@@ -283,7 +476,10 @@ internal sealed class ProjectCanvasSceneStore
             var node = current.State.Canvas.Nodes.FirstOrDefault(item => item.Id == nodeId);
             if (node is null) return Error(404, "CANVAS_RECORD_NOT_FOUND", "这条记录不在这张画布里");
 
-            var plan = NodeAssistPlanner.BuildPlan(current.State.Canvas, node);
+            // 「有没有素材」由共享的计划算；「这一端有没有出视频的链路」必须由这一端告诉它——
+            // 桌面端传的是它自己的视频 provider 是否配好，网页端传的是网页视频接口/ComfyUI 是否配好。
+            // 不传（一直是 false）的话，分镜那条「出视频」永远会带着「还没有可用的出视频链路」被挡掉。
+            var plan = NodeAssistPlanner.BuildPlan(current.State.Canvas, node, videoAvailable: videoAvailable);
             return Results.Json(new
             {
                 recordId = nodeId.ToString(),
@@ -401,6 +597,38 @@ internal sealed class ProjectCanvasSceneStore
         { return Error(503, "LIBRARY_UNAVAILABLE", "资源库无法安全读取"); }
     }
 
+    /// <summary>
+    /// 只读：**待审批预览**里某个产物的字节。
+    ///
+    /// 待提交的产物还没写进正式节点，<see cref="AttachmentFile"/> 那条按正式画布找的接口自然读不到它。
+    /// 这里不另建一套试算：调用方给的这批动作走的就是 <see cref="PreviewActions"/>（同一条预检、
+    /// 同一个附件任务校验、同一次 FileWriteMode.Skip 的试算），再从**试算结果**里取那一件产物——
+    /// 于是「这个 ID 属不属于这批预览」由服务端自己说了算，调用方猜不出来。
+    /// 出字节仍然只有 <see cref="AttachmentBytes"/> 一条路（内嵌 data URL 与允许目录两道闸都在那里），
+    /// 没有为预览放宽任何校验。
+    /// </summary>
+    public IResult PreviewAttachmentFile(IReadOnlyList<AgentAction> actions, Func<AgentAction, YEEYEEYEE.Core.ExecutionResult>? attachmentJob, Guid recordId, Guid attachmentId)
+    {
+        try
+        {
+            if (actions.Count == 0) return Error(409, "ACTION_PREVIEW_REQUIRED", "这批动作已经不在预览状态");
+            var preview = PreviewActions(actions, attachmentJob);
+            if (preview.Errors.Length > 0) return Error(409, "ACTION_PRECHECK_FAILED", string.Join("；", preview.Errors));
+            if (!CanvasOpenService.TryOpenBytes(preview.After, path, out var opened, out var reason) || opened.State.Canvas is null)
+                return Error(503, "PREVIEW_CANVAS_INVALID", "预览画布无法读取：" + reason);
+            var node = opened.State.Canvas.Nodes.FirstOrDefault(item => item.Id == recordId);
+            var attachment = node?.Attachments.FirstOrDefault(item => item.Id == attachmentId);
+            if (attachment is null) return Error(404, "ASSET_ATTACHMENT_NOT_FOUND", "这个产物不属于本次待审批的改动");
+            if (attachment.Kind is not (AttachmentKind.Image or AttachmentKind.Video or AttachmentKind.Audio))
+                return Error(409, "ASSET_NOT_MEDIA", "这个产物不是可预览的图片、视频或音频");
+            return AttachmentBytes(attachment);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
+        {
+            return Error(503, "PROJECT_CANVAS_READ_FAILED", "项目画布或项目资源无法安全读取：" + ex.Message);
+        }
+    }
+
     private IResult AttachmentBytes(WorkflowAttachment attachment)
     {
         if (AgentAttachmentLoader.SplitDataUrl(attachment.Reference) is { } inline)
@@ -481,13 +709,14 @@ internal sealed class ProjectCanvasSceneStore
         long baseRevision,
         Func<RecentCanvasState, (WorkflowCanvasState? Canvas, IResult? Result)> mutate,
         Func<RecentCanvasState, byte[], object> respond,
-        Action? onCommitted = null)
+        Action? onCommitted = null,
+        bool requireBaseRevision = true)
     {
         var committed = false;
         try
         {
             var current = Load();
-            if (current.Revision != baseRevision) return Error(409, "SCENE_REVISION_CONFLICT", "项目画布已被修改，请重新加载");
+            if (requireBaseRevision && current.Revision != baseRevision) return Error(409, "SCENE_REVISION_CONFLICT", "项目画布已被修改，请重新加载");
             if (current.Open.UnsupportedFormat) return Error(409, "CANVAS_READ_ONLY", "高版本画布只读，拒绝覆盖");
             if (current.Open.Validation.HasErrors || current.Open.Migration.Ambiguities.Count > 0)
                 return Error(409, "CANVAS_VALIDATION_FAILED", "画布引用或迁移存在未解决问题，拒绝保存");
@@ -504,8 +733,8 @@ internal sealed class ProjectCanvasSceneStore
             CanvasSaveOutcome saved;
             try
             {
-                // The save service checks expected bytes and revalidates the project library
-                // under the cross-process canvas lease before backup and atomic replacement.
+                // 保存服务会在跨进程画布租约下校验期望字节并重新验证项目资源库，
+                // 然后执行备份和原子替换。
                 saved = CanvasSaveService.Save(next, path, current.Bytes, () => CheckProjectAuthority(next));
             }
             catch (CanvasSaveAbortedException ex) when (ex.Message.Contains("其他进程", StringComparison.Ordinal))
@@ -516,8 +745,8 @@ internal sealed class ProjectCanvasSceneStore
             // 修订号取的是刚落盘那份字节的哈希，与 respond 回给客户端的 `revision` 是同一个数——
             // 客户端就是拿它和自己手上的比「谁更新」的，两边必须是同一把尺子。
             LastCommit = (LastCommit.Serial + 1, Revision(saved.WrittenBytes));
-            // Do not re-open the file after commit: another writer may already have replaced it.
-            // Returning a failure after successful replacement would invite an unsafe retry.
+            // 提交后不再重新打开文件：其它写入者可能已替换它。
+            // 成功替换后返回失败会诱发不安全的重复提交。
             return Results.Json(respond(next, saved.WrittenBytes));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
@@ -532,6 +761,20 @@ internal sealed class ProjectCanvasSceneStore
         var file = AssetStore.Resolve(reference);
         return file is not null && InsideAllowedRoots(file) ? file : null;
     }
+
+    /// <summary>
+    /// 与 <see cref="Write"/> 同一套闸门、同一次原子落盘，只去掉「修订必须等于 baseRevision」这一条。
+    ///
+    /// 用在哪：**生成产物回挂**。任务提交时记下的 revision 与回挂时的当前版本几乎必然不同——
+    /// 同一批里第一个任务回挂成功就改了它，于是第二个任务按旧修订写必然冲突。
+    /// 安全由两层兜住：一是这里读的是**刚读到的当前快照**（不是提交时那份），
+    /// 二是落盘时 <c>CanvasSaveService.Save</c> 会校验期望字节——读与写之间有人动过这整笔就作废
+    /// （调用方拿到 409，下一轮重新读、重新追加）。所以这不是「不校验」，
+    /// 而是把判据从「修订相等」换成「我改的正是我刚读的那一份」——后者才真正回答并发问题。
+    /// </summary>
+    private IResult AppendToCurrent(
+        Func<RecentCanvasState, (WorkflowCanvasState? Canvas, IResult? Result)> mutate,
+        Func<RecentCanvasState, byte[], object> respond) => Write(0, mutate, respond, null, requireBaseRevision: false);
 
     public IResult FilmPlan(Guid nodeId)
     {
@@ -592,7 +835,13 @@ internal sealed class ProjectCanvasSceneStore
 
     public IResult AttachJobOutputs(YEEYEEYEE.Core.ExecutionResult job, Guid nodeId)
     {
-        if (!job.Inputs.TryGetValue("targetBaseRevision", out var baseline) || !baseline.TryGetInt64(out var revision))
+        if (!job.Inputs.TryGetValue("targetNodeId", out var originalTarget) || originalTarget.GetGuid() != nodeId)
+            return Error(409, "TARGET_MISMATCH", "回挂目标与原任务不一致");
+        var fingerprints = WebGenerationReferences.Fingerprints(job.Inputs);
+        // 提交时那一版修订仍要记着（它是任务依据的一部分，也用来判断任务是不是同一批），
+        // 但**不再要求它与回挂时的当前版本相等**：多个任务从同一版提交时，
+        // 前一个的回挂必然把修订改掉（见 AppendToCurrent）。并发安全改由字节级 CAS 兜住。
+        if (!job.Inputs.TryGetValue("targetBaseRevision", out var baseline) || !baseline.TryGetInt64(out _))
             return Error(409, "TARGET_REVISION_REQUIRED", "任务缺少提交时修订，产物保留在任务中");
         var snapshot = Load();
         var existingNode = snapshot.State.Canvas.Nodes.FirstOrDefault(n => n.Id == nodeId);
@@ -600,7 +849,7 @@ internal sealed class ProjectCanvasSceneStore
                 new Guid(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"web-job:{job.JobId}:{index}"))[..16]))
             .All(id => existingNode.Attachments.Any(a => a.Id == id)))
             return Results.Json(new { attached = true });
-        return Write(revision, current =>
+        return AppendToCurrent(current =>
         {
             var node = current.Canvas.Nodes.FirstOrDefault(n => n.Id == nodeId);
             if (node is null) return (null, Error(404, "TARGET_NOT_FOUND", "任务目标节点已删除"));
@@ -615,11 +864,12 @@ internal sealed class ProjectCanvasSceneStore
                 if (file is null || !InsideAllowedRoots(file)) return (null, Error(409, "OUTPUT_UNAVAILABLE", "成功产物文件不可安全读取"));
                 var kind = WorkflowAttachment.KindOf(file);
                 if (kind is not (AttachmentKind.Image or AttachmentKind.Video)) return (null, Error(409, "OUTPUT_UNSUPPORTED", "产物不是支持的图片或视频"));
-                node.Attachments.Insert(0, new WorkflowAttachment
+                node.Attachments.Add(new WorkflowAttachment
                 {
                     Id = attachmentId, Kind = kind, Reference = output.Ref,
                     Name = $"{WorkflowAttachment.DisplayName(kind)} · {job.JobId.ToString()[..8]} · {index + 1}",
-                    Source = job.Tool, Prompt = job.Inputs.TryGetValue("prompt", out var prompt) ? prompt.GetString() ?? "" : ""
+                    Source = job.Tool, Prompt = job.Inputs.TryGetValue("prompt", out var prompt) ? prompt.GetString() ?? "" : "",
+                    SourceFingerprints = new(fingerprints, StringComparer.Ordinal)
                 });
                 added = true;
             }
@@ -627,6 +877,56 @@ internal sealed class ProjectCanvasSceneStore
             node.ExecutionStatus = NodeExecutionStatus.Completed;
             return (current.Canvas, null);
         }, (_, bytes) => new { attached = true, revision = Revision(bytes) });
+    }
+
+    /// <summary>
+    /// 采用一件候选产物：把**这一件**（按任务产物自己的下标）安全追加到原目标节点。
+    ///
+    /// 为什么按「原始下标」而不是整批一起挂：用户采用的是画布上那**一张**（Desktop 的 SavePickedSlot
+    /// 同样只收一张）。而附件 ID 是服务端按 `web-job:{jobId}:{index}` 算出来的——下标必须还是任务里
+    /// 那个原始下标，换个下标就等于换了一件产物，幂等与「重复采用不重复添加」都会失效。
+    ///
+    /// 与回挂同一条写入通道（<see cref="AppendToCurrent"/>）：读的是当前快照、落盘仍是字节级 CAS，
+    /// 所以别的画布改动不会让它必然失败，也不会覆盖别人刚写进去的附件；目标不存在/锁定、产物读不到
+    /// 或不是图片时整笔拒绝，画布一个字节不动。
+    /// </summary>
+    public IResult AdoptJobOutput(YEEYEEYEE.Core.ExecutionResult job, Guid nodeId, int outputIndex)
+    {
+        if (!job.Inputs.TryGetValue("targetNodeId", out var originalTarget) || originalTarget.GetGuid() != nodeId)
+            return Error(409, "TARGET_MISMATCH", "采用目标与原任务不一致");
+        if (outputIndex < 0 || outputIndex >= job.Outputs.Count)
+            return Error(404, "OUTPUT_NOT_FOUND", "任务产物不存在");
+        var fingerprints = WebGenerationReferences.Fingerprints(job.Inputs);
+        var attachmentId = new Guid(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"web-job:{job.JobId}:{outputIndex}"))[..16]);
+        var snapshot = Load();
+        var existing = snapshot.State.Canvas.Nodes.FirstOrDefault(n => n.Id == nodeId);
+        if (existing is not null && existing.Attachments.Any(a => a.Id == attachmentId))
+            return Results.Json(new { attached = true, alreadyAttached = true, attachmentId });
+        return AppendToCurrent(current =>
+        {
+            var node = current.Canvas.Nodes.FirstOrDefault(n => n.Id == nodeId);
+            if (node is null) return (null, Error(404, "TARGET_NOT_FOUND", "任务目标节点已删除"));
+            if (node.IsLocked) return (null, Error(409, "TARGET_LOCKED", "任务目标节点已锁定"));
+            // 采用是幂等的：这一件已经在节点上就什么都不做，也不重复写盘。
+            if (node.Attachments.Any(a => a.Id == attachmentId))
+                return (null, Results.Json(new { attached = true, alreadyAttached = true, attachmentId }));
+            var output = job.Outputs[outputIndex];
+            var file = AssetStore.Resolve(output.Ref);
+            if (file is null || !InsideAllowedRoots(file))
+                return (null, Error(409, "OUTPUT_UNAVAILABLE", "产物文件不可安全读取"));
+            var kind = WorkflowAttachment.KindOf(file);
+            if (kind is not AttachmentKind.Image)
+                return (null, Error(409, "OUTPUT_UNSUPPORTED", "候选产物不是图片"));
+            node.Attachments.Add(new WorkflowAttachment
+            {
+                Id = attachmentId, Kind = kind, Reference = output.Ref,
+                Name = $"{WorkflowAttachment.DisplayName(kind)} · {job.JobId.ToString()[..8]} · {outputIndex + 1}",
+                Source = job.Tool, Prompt = job.Inputs.TryGetValue("prompt", out var prompt) ? prompt.GetString() ?? "" : "",
+                SourceFingerprints = new(fingerprints, StringComparer.Ordinal)
+            });
+            node.ExecutionStatus = NodeExecutionStatus.Completed;
+            return (current.Canvas, null);
+        }, (_, bytes) => new { attached = true, alreadyAttached = false, attachmentId, revision = Revision(bytes) });
     }
 
     public async Task<IResult> Update(string recordId, HttpRequest request)
@@ -807,6 +1107,78 @@ internal sealed class ProjectCanvasSceneStore
                 return (null, Results.Json(new { revision = baseRevision, applied = 0, skipped = applied.Skipped.Count }));
             return (applied.Canvas, null);
         }, (next, bytes) => new { revision = Revision(bytes) });
+
+    internal byte[] EntityLibraryBytes() => File.ReadAllBytes(entitiesPath);
+
+    internal IResult ReplaceChatCanvas(long baseRevision, byte[] canvasBytes, IReadOnlyCollection<Guid> entityIds, byte[] expectedLibrary, out byte[]? committedLibrary)
+    {
+        committedLibrary = null;
+        if (entityIds.Count == 0) return ReplaceCanvas(baseRevision, canvasBytes);
+        byte[]? writtenLibrary = null;
+        try
+        {
+            var current = Load();
+            if (current.Revision != baseRevision) return Error(409, "SCENE_REVISION_CONFLICT", "画布已变化");
+            if (current.Open.UnsupportedFormat || current.Open.Validation.HasErrors || current.Open.Migration.Ambiguities.Count > 0)
+                return Error(409, "CANVAS_READ_ONLY", "画布不可安全写入");
+            var next = JsonSerializer.Deserialize<RecentCanvasState>(canvasBytes) ?? throw new InvalidDataException("画布为空");
+            next = next with { Revision = checked(current.State.Revision + 1) };
+            if (CanvasIdentityValidator.Validate(next.Canvas).HasErrors) throw new InvalidDataException("画布校验失败");
+            var saved = CanvasSaveService.Save(next, path, current.Bytes, () =>
+            {
+                if (!expectedLibrary.AsSpan().SequenceEqual(File.ReadAllBytes(entitiesPath)))
+                    throw new InvalidDataException("项目实体已变化，请重新生成提议；撤销不能覆盖后续实体编辑");
+                var library = CheckProjectAuthority(current.State) ?? throw new InvalidDataException("资源库缺失");
+                foreach (var id in entityIds)
+                {
+                    var incoming = next.Canvas.FindEntity(id) ?? throw new InvalidDataException("实体不存在");
+                    if (!incoming.ManagedByProject) continue;
+                    var index = library.Entities.FindIndex(e => e.Id == id);
+                    if (index < 0) throw new InvalidDataException("权威实体不存在");
+                    var retainedVersions = incoming.Variants.SelectMany(v => v.Versions).Select(v => v.Id).ToHashSet();
+                    var removedVersions = library.Entities[index].Variants.SelectMany(v => v.Versions).Select(v => v.Id).Where(id => !retainedVersions.Contains(id)).ToHashSet();
+                    if (removedVersions.Count > 0)
+                    {
+                        bool Matches(NodeReference reference) => reference.EntityId == id && reference.VariantVersionId is { } version && removedVersions.Contains(version);
+                        var directory = Path.GetDirectoryName(path)!;
+                        var sources = Directory.EnumerateFiles(directory, "*.json").Where(p => !p.EndsWith(".edits.json", StringComparison.OrdinalIgnoreCase)).ToList();
+                        var draft = Path.Combine(Path.GetDirectoryName(directory)!, "last-canvas.json");
+                        if (File.Exists(draft)) sources.Add(draft);
+                        foreach (var source in sources)
+                        {
+                            WorkflowCanvasState canvas;
+                            if (string.Equals(Path.GetFullPath(source), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase)) canvas = next.Canvas;
+                            else
+                            {
+                                if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0 || !CanvasOpenService.TryRead(source, out var state, out _) || state.Canvas is null)
+                                    throw new InvalidDataException("有画布无法安全扫描，已阻止撤销实体版本");
+                                canvas = state.Canvas;
+                            }
+                            if (CanvasReferenceScanner.Scan(canvas, source, false, false).Hits.Any(h => h.EntityId == id && h.VariantVersionId is { } version && removedVersions.Contains(version)) ||
+                                canvas.Entities.Where(e => !e.ManagedByProject).SelectMany(e => e.Variants).Any(v => v.References.Concat(v.Versions.SelectMany(ver => ver.References)).Any(Matches)))
+                                throw new InvalidDataException("其它画布仍引用生成版本，不能撤销");
+                        }
+                        if (library.Entities.Where(e => e.Id != id).Append(incoming).SelectMany(e => e.Variants).Any(v => v.References.Concat(v.Versions.SelectMany(ver => ver.References)).Any(Matches)))
+                            throw new InvalidDataException("实体历史仍引用生成版本，不能撤销");
+                    }
+                    library.Entities[index] = incoming;
+                }
+                if (!ProjectLibrary.TrySave(library, entitiesPath, expectedLibrary, out var error)) throw new IOException(error);
+                writtenLibrary = File.ReadAllBytes(entitiesPath);
+                return CheckProjectAuthority(next);
+            }, () =>
+            {
+                if (writtenLibrary is null) return;
+                var original = JsonSerializer.Deserialize<ProjectEntityFile>(expectedLibrary, JsonOptions)!;
+                if (!ProjectLibrary.TrySave(original, entitiesPath, writtenLibrary, out var error)) throw new IOException("资源库回滚失败：" + error);
+            });
+            committedLibrary = writtenLibrary;
+            LastCommit = (LastCommit.Serial + 1, Revision(saved.WrittenBytes));
+            return Results.Json(new { revision = LastCommit.Revision, nodes = next.Canvas.Nodes.Count });
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or JsonException or InvalidOperationException or UnauthorizedAccessException)
+        { return Error(409, "ACTION_FAILED", ex.Message); }
+    }
 
     public IResult ReplaceCanvas(long baseRevision, byte[] canvasBytes)
     {

@@ -7,13 +7,15 @@ using YEEYEEYEE.Web;
 
 internal static class ChatRegression
 {
-    public static async Task Run(string dll, string root)
+    public static async Task Run(string dll, string root, bool settingsOnly = false, bool protocolOnly = false)
     {
         static int Port() { using var l = new TcpListener(IPAddress.Loopback, 0); l.Start(); return ((IPEndPoint)l.LocalEndpoint).Port; }
         static void Assert(bool value, string label) { if (!value) throw new Exception("Chat regression: " + label); }
         var directory = Path.Combine(root, "chat"); Directory.CreateDirectory(directory);
         var modelPort = Port(); var webPort = Port(); var mode = "success";
         var modelText = "回答";
+        var imageFailureStatus = 0;
+        TaskCompletionSource? imageGate = null;
         var project = Path.Combine(directory, "project");
         Directory.CreateDirectory(Path.Combine(project, "canvases"));
         Directory.CreateDirectory(Path.Combine(project, "project"));
@@ -26,6 +28,7 @@ internal static class ChatRegression
             Canvas = new { Nodes = new[] { new { Id = nodeId, Title = "Context node", Content = "Selected context body", Category = 0 } },
                 Edges = Array.Empty<object>(), Entities = Array.Empty<object>(), WorkTree = Array.Empty<object>() } }));
         var captured = new List<JsonElement>();
+        var referenceCounts = new List<int>();
         using var model = new HttpListener(); model.Prefixes.Add($"http://127.0.0.1:{modelPort}/"); model.Start();
         var modelLoop = Task.Run(async () =>
         {
@@ -37,10 +40,50 @@ internal static class ChatRegression
                 {
                     try
                     {
+                        if (context.Request.HttpMethod == "GET" && context.Request.Url!.AbsolutePath == "/about")
+                        {
+                            context.Response.ContentType = "application/json";
+                            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"openapi\":\"3.0.0\",\"paths\":{\"/v1/videos\":{\"post\":{\"summary\":\"Generate video\"}}}}"));
+                            context.Response.Close(); return;
+                        }
+                        if (context.Request.HttpMethod == "GET" && context.Request.Url!.AbsolutePath == "/admin/api/managed-models")
+                        {
+                            context.Response.ContentType = "application/json";
+                            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"data\":[{\"type\":\"video\",\"enabled\":true,\"alias\":\"catalog(alias)\",\"resolutions\":[\"720p\"],\"durations\":[\"4s\"],\"prices\":{\"720p\":30},\"duration_prices\":{\"per_second\":24}}]}"));
+                            context.Response.Close(); return;
+                        }
                         using var reader = new StreamReader(context.Request.InputStream);
-                        var payload = JsonDocument.Parse(await reader.ReadToEndAsync()).RootElement.Clone();
+                        var bodyText = await reader.ReadToEndAsync();
+                        if (context.Request.Url!.AbsolutePath.EndsWith("/images/edits"))
+                        {
+                            lock (referenceCounts) referenceCounts.Add(bodyText.Split("name=\"image[]\"", StringSplitOptions.None).Length - 1);
+                            context.Response.ContentType = "application/json";
+                            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"data\":[{\"b64_json\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=\"}]}"));
+                            context.Response.Close(); return;
+                        }
+                        var payload = JsonDocument.Parse(bodyText).RootElement.Clone();
                         lock (captured) captured.Add(payload);
+                        if (context.Request.Url!.AbsolutePath.EndsWith("/images/generations"))
+                        {
+                            if (imageGate is { } pendingImage) await pendingImage.Task;
+                            if (imageFailureStatus != 0) { context.Response.StatusCode = imageFailureStatus; context.Response.Close(); return; }
+                            context.Response.ContentType = "application/json";
+                            // 产物给一张**真能过格式校验**的 1×1 PNG（与 /images/edits 那张同一份）：
+                            // 8 字节签名 + IHDR + 数据。假 PNG（只有签名）取字节时会被 ValidMedia 拒掉，
+                            // 那样测不到「待审批产物能不能安全读出来」这条链路。
+                            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("{\"data\":[{\"b64_json\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=\"}]}"));
+                            context.Response.Close(); return;
+                        }
                         var requestMode = mode;
+                        var responseText = modelText;
+                        if (requestMode == "protocol-example")
+                        {
+                            var protocol = payload.GetProperty("messages").EnumerateArray().Select(m => m.GetProperty("content"))
+                                .Where(v => v.ValueKind == JsonValueKind.String).Select(v => v.GetString()!)
+                                .Single(v => v.Contains("Web技能协议："));
+                            var start = protocol.IndexOf("完整示例：", StringComparison.Ordinal) + "完整示例：".Length;
+                            responseText = "```json\n" + protocol[start..protocol.IndexOf('。', start)] + "\n```";
+                        }
                         if (requestMode == "fail") { context.Response.StatusCode = 500; context.Response.Close(); return; }
                         if (!payload.TryGetProperty("stream", out var stream) || !stream.GetBoolean())
                         {
@@ -62,7 +105,7 @@ internal static class ChatRegression
                         }
                         else
                         {
-                            await Frame(new { choices = new[] { new { delta = new { reasoning_content = "思考", content = modelText } } } });
+                            await Frame(new { choices = new[] { new { delta = new { reasoning_content = "思考", content = responseText } } } });
                             if (requestMode == "slow") await Task.Delay(2500);
                             await Frame(new { choices = Array.Empty<object>(), usage = new { prompt_tokens = 7, completion_tokens = 3, prompt_cache_hit_tokens = 2 } });
                         }
@@ -72,7 +115,10 @@ internal static class ChatRegression
                 });
             }
         });
-        var configPath = Path.Combine(directory, "ai.json");
+        var configPath = Path.Combine(directory, "web-ai-config.json");
+        var desktopConfigPath = Path.Combine(directory, "desktop-ai.json");
+        const string desktopConfig = "{\"Endpoint\":\"http://127.0.0.1:1\",\"Model\":\"desktop-only\",\"ApiKey\":\"desktop-test-key\"}";
+        File.WriteAllText(desktopConfigPath, desktopConfig);
         void Config(bool anthropic = false, bool local = false) => File.WriteAllText(configPath, JsonSerializer.Serialize(new {
             UseLocalProvider = local, SelectedProfileId = "selected", Profiles = new[] {
                 new { Id = "disabled", Enabled = false, Endpoint = "http://127.0.0.1:1", Model = "wrong", ApiKey = "plain:test" , ApiFormat = 0, SupportsImageInput = false },
@@ -84,7 +130,8 @@ internal static class ChatRegression
         async Task Start()
         {
             var start = new ProcessStartInfo("dotnet", $"\"{dll}\" --urls http://127.0.0.1:{webPort}") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = directory };
-            start.Environment["YEEYEEYEE_CONFIG"] = configPath;
+            start.Environment["YEEYEEYEE_CONFIG"] = desktopConfigPath;
+            start.Environment["YEEYEEYEE__WebAiConfigPath"] = configPath;
             start.Environment["YEEYEEYEE__AssetDirectory"] = Path.Combine(project, "assets");
             start.Environment["YEEYEEYEE__ProjectCanvasPath"] = canvasPath;
             start.Environment["YEEYEEYEE__ProjectEntitiesPath"] = entitiesPath;
@@ -137,7 +184,300 @@ internal static class ChatRegression
             await Json(admin, "/api/auth/setup", "{\"username\":\"chatadmin\",\"password\":\"Password123!\"}");
             await Json(admin, "/api/auth/users", "{\"username\":\"chatother\",\"password\":\"Password123!\",\"role\":\"Viewer\"}");
             await Json(other, "/api/auth/login", "{\"username\":\"chatother\",\"password\":\"Password123!\"}");
-            var s = await Json(admin, "/api/web/chat/sessions", "{}"); var id = s.GetProperty("id").GetString()!;
+            using var anonymous = new HttpClient { BaseAddress = admin.BaseAddress };
+            await Json(anonymous, "/api/web/models/presets?canvas=missing-canvas", status: 401);
+            var presets = await Json(other, "/api/web/models/presets?canvas=missing-canvas");
+            Assert(presets.GetProperty("presets").GetArrayLength() > 0, "preset catalog available to authenticated viewer without canvas");
+            await Json(admin, "/api/web/models?canvas=missing-canvas");
+            await Json(other, "/api/web/settings?canvas=missing-canvas");
+            await Json(other, "/api/web/settings/media?canvas=missing-canvas", status: 403);
+            await Json(other, "/api/web/models/selected?canvas=missing-canvas", "{}", 403, "PUT");
+            await Json(admin, "/api/web/scene?canvas=missing-canvas", status: 404);
+            async Task ProtocolRegression()
+            {
+                int RequestCount() { lock (captured) return captured.Count; }
+                foreach (var output in new[] {
+                    "正在调用web.text-to-image。\n```json\n```",
+                    "正在调用web.text-to-image。\r\n```JSON\r\n \t\r\n``` \r\n",
+                    "```json\n{ \r\n }\n```",
+                    "正在调用web.text-to-image。\n```json\n   ",
+                    "```json\n{\"actions\":[]}\n```",
+                    "```json\n{\"ask\":{} }\n```",
+                    "```json\n{\"actions\":[" })
+                {
+                    modelText = output;
+                    var sid = (await Json(admin, "/api/web/chat/sessions", "{}")).GetProperty("id").GetString()!;
+                    var count = RequestCount();
+                    var failed = await Send(sid, "{\"text\":\"生成图片\",\"mode\":\"readonly\"}");
+                    var reply = failed.GetProperty("messages")[1];
+                    Assert(reply.GetProperty("state").GetString() == "failed" &&
+                        reply.GetProperty("error").GetString()!.Contains("动作协议为空或无效，未发起任务，请重试"), "empty/broken protocol explicitly failed");
+                    Assert(reply.GetProperty("actions").GetArrayLength() == 0 && reply.GetProperty("skillActions").GetArrayLength() == 0 &&
+                        reply.GetProperty("skillJobIds").GetArrayLength() == 0 && failed.GetProperty("jobIds").GetArrayLength() == 0,
+                        "failed protocol must not invent actions or create jobs");
+                    Assert(RequestCount() == count + 1, "failed protocol does not automatically retry provider");
+                }
+                foreach (var output in new[] { "你好", "正在调用web.text-to-image。", "示例：\n```json\n{\"prompt\":\"example\"}\n```",
+                    "示例：\n```json\n[]\n```", "```json\n```\n以上仅作示例。" })
+                {
+                    modelText = output;
+                    var sid = (await Json(admin, "/api/web/chat/sessions", "{}")).GetProperty("id").GetString()!;
+                    var done = await Send(sid, "{\"text\":\"聊天\",\"mode\":\"readonly\"}");
+                    Assert(done.GetProperty("messages")[1].GetProperty("state").GetString() == "completed" &&
+                        done.GetProperty("messages")[1].GetProperty("content").GetString() == output &&
+                        done.GetProperty("jobIds").GetArrayLength() == 0, "ordinary chat/nonempty JSON remains unchanged without invented actions");
+                }
+                modelText = "```json\n{\"ask\":{\"question\":\"需要什么风格？\"}}\n```";
+                var askSession = (await Json(admin, "/api/web/chat/sessions", "{}")).GetProperty("id").GetString()!;
+                var asked = await Send(askSession, "{\"text\":\"生成图片\",\"mode\":\"readonly\"}");
+                Assert(asked.GetProperty("messages")[1].GetProperty("state").GetString() == "completed" &&
+                    asked.GetProperty("messages")[1].GetProperty("ask").GetProperty("question").GetString() == "需要什么风格？", "valid ask remains available");
+                var imageSettings = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(configPath))!;
+                imageSettings["ImageEndpoint"] = $"http://127.0.0.1:{modelPort}/v1";
+                imageSettings["ImageModel"] = "offline-image";
+                File.WriteAllText(configPath, imageSettings.ToJsonString());
+                modelText = "正在调用web.text-to-image。\n```json\n```";
+                var retrySession = (await Json(admin, "/api/web/chat/sessions", "{}")).GetProperty("id").GetString()!;
+                await Send(retrySession, "{\"text\":\"生成图片\",\"mode\":\"readonly\"}");
+                mode = "protocol-example";
+                var retried = await Send(retrySession, "{\"retry\":true,\"mode\":\"readonly\"}");
+                mode = "success";
+                var retriedReply = retried.GetProperty("messages")[1];
+                Assert(retried.GetProperty("messages").GetArrayLength() == 2 && retriedReply.GetProperty("state").GetString() == "completed" &&
+                    retriedReply.GetProperty("skillActions").GetArrayLength() == 1 &&
+                    retriedReply.GetProperty("skillActions")[0].GetProperty("target").GetString() == "web.text-to-image" &&
+                    retriedReply.GetProperty("skillState").GetString() == "preview" && retried.GetProperty("jobIds").GetArrayLength() == 0,
+                    "retry preserves valid skill protocol without duplicating user or creating job before ratio");
+                lock (captured) Assert(captured.Last().GetProperty("messages").EnumerateArray().Any(m =>
+                    m.GetProperty("content").ValueKind == JsonValueKind.String && m.GetProperty("content").GetString()!.Contains("不得仅声明正在调用技能")),
+                    "request contains stronger skill protocol guidance");
+                var path = $"/api/web/chat/sessions/{retrySession}/skills/{retriedReply.GetProperty("id").GetString()}/invoke";
+                var countBeforeImage = RequestCount();
+                await Json(admin, path, "{\"aspectRatio\":\"1:1\"}");
+                await Json(admin, path, "{\"aspectRatio\":\"1:1\"}", 409);
+                await Json(admin, $"/api/web/chat/sessions/{retrySession}/messages", "{\"retry\":true,\"mode\":\"readonly\"}", 409);
+                var submitted = await Json(admin, "/api/web/chat/sessions/" + retrySession);
+                Assert(submitted.GetProperty("jobIds").GetArrayLength() == 1 &&
+                    submitted.GetProperty("messages")[1].GetProperty("skillJobIds").GetArrayLength() == 1, "successful retry submits exactly one job");
+                for (var i = 0; i < 100; i++)
+                {
+                    var job = await Json(admin, "/api/web/jobs/" + submitted.GetProperty("jobIds")[0].GetString());
+                    if (job.GetProperty("state").GetString() == "Succeeded") break;
+                    Assert(job.GetProperty("state").GetString() != "Failed", "offline image job succeeds");
+                    await Task.Delay(50);
+                }
+                var completed = await Json(admin, "/api/web/jobs/" + submitted.GetProperty("jobIds")[0].GetString());
+                Assert(completed.GetProperty("state").GetString() == "Succeeded" && RequestCount() == countBeforeImage + 1,
+                    "retry and duplicate invoke produce exactly one image provider request");
+                async Task<JsonElement> WaitSkill(string sid, string state)
+                {
+                    for (var i = 0; i < 100; i++)
+                    {
+                        var current = await Json(admin, "/api/web/chat/sessions/" + sid);
+                        if (current.GetProperty("messages")[1].GetProperty("skillState").GetString() == state) return current;
+                        await Task.Delay(50);
+                    }
+                    throw new Exception("Skill state timeout: " + state);
+                }
+                foreach (var failureStatus in new[] { 500, 502 })
+                {
+                    modelText = "```json\n{\"actions\":[{\"kind\":\"invoke_skill\",\"target\":\"web.text-to-image\",\"content\":\"explicit retry fixture\"}]}\n```";
+                    var sid = (await Json(admin, "/api/web/chat/sessions", "{}")).GetProperty("id").GetString()!;
+                    var proposed = await Send(sid, "{\"text\":\"生成图片\",\"mode\":\"readonly\"}");
+                    var invokePath = $"/api/web/chat/sessions/{sid}/skills/{proposed.GetProperty("messages")[1].GetProperty("id").GetString()}/invoke";
+                    imageFailureStatus = failureStatus;
+                    var beforeFailure = RequestCount();
+                    var firstJob = await Json(admin, invokePath, "{\"aspectRatio\":\"1:1\"}");
+                    var failedCard = await WaitSkill(sid, "failed");
+                    var diagnostic = failedCard.GetProperty("messages")[1].GetProperty("skillError").GetString()!;
+                    Assert(diagnostic.Contains($"初始URI=http://127.0.0.1:{modelPort}/v1/images/generations")
+                        && diagnostic.Contains("请求HTTP=1.1") && diagnostic.Contains("响应HTTP=1.1")
+                        && diagnostic.Contains("耗时ms=") && diagnostic.Contains("Web显式代理=未配置（使用系统默认）")
+                        && !diagnostic.Contains("explicit retry fixture"), "failed card persists sanitized connection diagnostics");
+                    var firstKey = failedCard.GetProperty("messages")[1].GetProperty("skillIdempotencyKey").GetString();
+                    await Task.Delay(150);
+                    Assert(RequestCount() == beforeFailure + 1, "500/502 image failure must not automatically retry");
+                    await Json(other, invokePath, "{\"aspectRatio\":\"1:1\"}", 404);
+                    var replayedFailure = await Json(admin, "/api/web/skills/web.text-to-image/invoke",
+                        JsonSerializer.Serialize(new { prompt = "explicit retry fixture", aspectRatio = "1:1", idempotencyKey = firstKey }));
+                    Assert(replayedFailure.GetProperty("jobId").GetGuid() == firstJob.GetProperty("jobId").GetGuid() &&
+                        RequestCount() == beforeFailure + 1, "public failed-job idempotency remains unchanged");
+                    imageFailureStatus = 0;
+                    imageGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var restart = Json(admin, invokePath, "{\"aspectRatio\":\"9:16\"}");
+                    try
+                    {
+                        for (var i = 0; i < 100 && RequestCount() == beforeFailure + 1; i++) await Task.Delay(20);
+                        Assert(RequestCount() == beforeFailure + 2, "explicit failed-card click reaches provider exactly once");
+                        await Json(admin, invokePath, "{\"aspectRatio\":\"9:16\"}", 409);
+                        await Task.Delay(1200);
+                        var pending = await Json(admin, "/api/web/chat/sessions/" + sid);
+                        Assert(pending.GetProperty("messages")[1].GetProperty("skillState").GetString() == "preview", "old failed job cannot overwrite pending new attempt");
+                    }
+                    finally { imageGate.SetResult(); imageGate = null; }
+                    var secondJob = await restart;
+                    var succeededCard = await WaitSkill(sid, "completed");
+                    Assert(firstJob.GetProperty("jobId").GetGuid() != secondJob.GetProperty("jobId").GetGuid() &&
+                        succeededCard.GetProperty("jobIds").GetArrayLength() == 2 &&
+                        succeededCard.GetProperty("messages")[1].GetProperty("skillJobIds").GetArrayLength() == 2 &&
+                        succeededCard.GetProperty("messages")[1].GetProperty("skillIdempotencyKey").GetString() != firstKey,
+                        "new attempt has a persisted new key and preserves both job records");
+                    await Json(admin, invokePath, "{\"aspectRatio\":\"9:16\"}", 409);
+                    Assert(RequestCount() == beforeFailure + 2, "pending/successful duplicate clicks create no extra request");
+                    Assert((await Json(admin, "/api/web/jobs/" + firstJob.GetProperty("jobId").GetString())).GetProperty("state").GetString() == "Failed", "old failure remains available");
+                }
+                modelText = "```json\n{\"actions\":[{\"kind\":\"invoke_skill\",\"target\":\"web.text-to-image\",\"content\":\"restore original image fixture\"}]}\n```";
+                var restoreSession = (await Json(admin, "/api/web/chat/sessions", "{}")).GetProperty("id").GetString()!;
+                var restoreProposal = await Send(restoreSession, JsonSerializer.Serialize(new { text = "生成图片", mode = "approval", nodeId }));
+                var restoreMessageId = restoreProposal.GetProperty("messages")[1].GetProperty("id").GetString();
+                var restoreActionPath = $"/api/web/chat/sessions/{restoreSession}/actions/{restoreMessageId}/";
+                var originalJob = await Json(admin, $"/api/web/chat/sessions/{restoreSession}/skills/{restoreMessageId}/invoke", "{\"aspectRatio\":\"1:1\"}");
+                var originalCard = (await WaitSkill(restoreSession, "completed")).GetProperty("messages")[1];
+                var originalActions = originalCard.GetProperty("actions").GetRawText();
+                var originalJobIds = originalCard.GetProperty("skillJobIds").GetRawText();
+                using var fixtureJobs = new YEEYEEYEE.Host.SqliteJobStore(Path.Combine(directory, "jobs.db"));
+                string OriginalInputs() => JsonSerializer.Serialize(fixtureJobs.LoadAll().Single(j => j.JobId == originalJob.GetProperty("jobId").GetGuid()).Inputs);
+                var originalInputs = OriginalInputs();
+                // 生成任务完成时，服务端往**同一条回复**追加了 attach_asset：消息 ID 与画布修订都没变，
+                // 但动作集合变了——没重新预检就不许提交，旧的批准资格随动作变化失效。
+                var staleApproval = await Json(admin, restoreActionPath + "commit", "{}", 409);
+                Assert(staleApproval.GetProperty("code").GetString() == "ACTION_PREVIEW_REQUIRED", "appended action invalidates the previous approval");
+                var rearmed = await Json(admin, restoreActionPath + "preview", "{}");
+                Assert(rearmed.GetProperty("errors").GetArrayLength() == 0
+                    && rearmed.GetProperty("revision").GetInt64() == originalCard.GetProperty("baseRevision").GetInt64(), "re-preview after append is clean at the same revision");
+                await Json(admin, restoreActionPath + "commit", "{}");
+                await Json(admin, restoreActionPath + "undo", "{}");
+                var undoneCard = (await Json(admin, "/api/web/chat/sessions/" + restoreSession)).GetProperty("messages")[1];
+                Assert(undoneCard.GetProperty("actionState").GetString() == "undone" && undoneCard.GetProperty("committedActionCount").GetInt32() == 0, "attachment undo leaves original proposal available");
+                var beforeRestore = File.ReadAllBytes(canvasPath);
+                var countBeforeRestore = RequestCount();
+                await Json(other, restoreActionPath + "preview", "{}", 404);
+                var restoredPreview = await Json(admin, restoreActionPath + "preview", "{}");
+                var restoredCard = (await Json(admin, "/api/web/chat/sessions/" + restoreSession)).GetProperty("messages")[1];
+                Assert(restoredCard.GetProperty("actionState").GetString() == "preview" && restoredCard.GetProperty("baseRevision").GetInt64() == restoredPreview.GetProperty("revision").GetInt64(), "undone attachment explicitly restores approval at current revision");
+                Assert(restoredCard.GetProperty("actions").GetRawText() == originalActions && restoredCard.GetProperty("skillJobIds").GetRawText() == originalJobIds && restoredCard.GetProperty("mode").GetString() == "approval", "restore preserves original actions, jobs and mode");
+                Assert(beforeRestore.SequenceEqual(File.ReadAllBytes(canvasPath)) && RequestCount() == countBeforeRestore, "restore previews without canvas writes or provider calls");
+                // 待提交的产物还没进正式节点，正式那条按节点取产物的接口读不到它；预览媒体接口按这批动作
+                // 重新试算后再取，并且只服务「属于本会话、且还停在待审批预览」的那条消息。
+                var previewProjection = restoredPreview.GetProperty("diff").GetProperty("updatedNodes")[0];
+                var previewRecordId = previewProjection.GetProperty("recordId").GetString();
+                var previewAttachment = previewProjection.GetProperty("record").GetProperty("attachments")[0];
+                var previewAttachmentId = previewAttachment.GetProperty("id").GetString();
+                var previewMediaPath = $"/api/web/chat/sessions/{restoreSession}/messages/{restoreMessageId}"
+                    + $"/preview/records/{previewRecordId}/attachments/{previewAttachmentId}/file";
+                Assert(previewAttachment.GetProperty("kind").GetString() == "Image", "pending product is projected with its media kind");
+                string Describe(HttpResponseMessage response, byte[] bytes) =>
+                    $" [{(int)response.StatusCode} {response.Content.Headers.ContentType?.MediaType} {Encoding.UTF8.GetString(bytes, 0, Math.Min(120, bytes.Length))}]";
+                using (var pendingMedia = await admin.GetAsync(previewMediaPath))
+                {
+                    var pendingBytes = await pendingMedia.Content.ReadAsByteArrayAsync();
+                    Assert(pendingMedia.IsSuccessStatusCode && pendingBytes.Length > 0,
+                        "pending product bytes come from the preview trial" + Describe(pendingMedia, pendingBytes));
+                }
+                using (var foreignMedia = await other.GetAsync(previewMediaPath))
+                    Assert(foreignMedia.StatusCode == HttpStatusCode.NotFound, "another account cannot read pending preview media");
+                using (var unrelated = await admin.GetAsync(previewMediaPath.Replace(previewAttachmentId!, Guid.NewGuid().ToString())))
+                    Assert(unrelated.StatusCode == HttpStatusCode.NotFound, "products outside this batch are not served by the preview media endpoint");
+                Assert(beforeRestore.SequenceEqual(File.ReadAllBytes(canvasPath)) && RequestCount() == countBeforeRestore, "reading preview media writes nothing and calls no provider");
+                await Json(admin, restoreActionPath + "commit", "{}");
+                using (var staleMedia = await admin.GetAsync(previewMediaPath))
+                    Assert(staleMedia.StatusCode == HttpStatusCode.Conflict, "committed proposals are no longer served as pending preview media");
+                using (var committedMedia = await admin.GetAsync($"/api/web/records/{previewRecordId}/attachments/{previewAttachmentId}/file"))
+                    Assert(committedMedia.IsSuccessStatusCode, "the committed product is readable through the formal record media endpoint");
+                var committedCanvas = JsonDocument.Parse(File.ReadAllBytes(canvasPath)).RootElement;
+                Assert(committedCanvas.GetProperty("Canvas").GetProperty("Nodes")[0].GetProperty("Attachments").GetArrayLength() == 1, "restored original attachment commits once through approval");
+                Assert(OriginalInputs() == originalInputs && RequestCount() == countBeforeRestore, "reapproval preserves Job inputs without rerunning skill");
+                await Json(admin, restoreActionPath + "undo", "{}");
+
+                var fixtureStore = new WebChatStore(Path.Combine(directory, "chat.db"));
+                string fixtureOwner;
+                using (var fixtureDb = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + Path.Combine(directory, "chat.db")))
+                {
+                    fixtureDb.Open();
+                    using var query = fixtureDb.CreateCommand();
+                    query.CommandText = "SELECT owner FROM chat_sessions WHERE id=$id";
+                    query.Parameters.AddWithValue("$id", restoreSession);
+                    fixtureOwner = (string)query.ExecuteScalar()!;
+                }
+                var originalUndone = JsonSerializer.Serialize(fixtureStore.Get(fixtureOwner, restoreSession)!);
+                foreach (var rejection in new[] { "readonly", "non-attachment", "missing-job" })
+                {
+                    var fixtureSession = JsonSerializer.Deserialize<WebChatSession>(originalUndone)!;
+                    var fixtureMessage = fixtureSession.Messages[1];
+                    if (rejection == "readonly") fixtureMessage.Mode = "readonly";
+                    else if (rejection == "non-attachment") fixtureMessage.Actions[0].Kind = "update_node";
+                    else fixtureMessage.SkillJobIds.Clear();
+                    fixtureStore.Save(fixtureOwner, fixtureSession);
+                    var unchangedCanvas = File.ReadAllBytes(canvasPath);
+                    var rejected = await Json(admin, restoreActionPath + "preview", "{}", rejection == "readonly" ? 403 : 409);
+                    Assert(rejected.GetProperty("code").GetString() == (rejection == "readonly" ? "ACTION_READ_ONLY" : rejection == "non-attachment" ? "ACTION_STATE_INVALID" : "ACTION_PRECHECK_FAILED"), "restore rejects " + rejection);
+                    var rejectedMessage = fixtureStore.Get(fixtureOwner, restoreSession)!.Messages[1];
+                    Assert(rejectedMessage.ActionState == "undone" && rejectedMessage.BaseRevision == fixtureMessage.BaseRevision && unchangedCanvas.SequenceEqual(File.ReadAllBytes(canvasPath)), "rejected restore preserves state and canvas: " + rejection);
+                }
+                fixtureStore.Save(fixtureOwner, JsonSerializer.Deserialize<WebChatSession>(originalUndone)!);
+                Assert(RequestCount() == countBeforeRestore, "rejected restoration never invokes provider");
+
+                // 临时性失败（产物暂时回挂不上）消失之后重新预检：预检的结论必须**覆盖**旧的
+                // Hints / ActionErrors，否则界面会拿着上一次的错误一直挡着批准。
+                var transient = JsonSerializer.Deserialize<WebChatSession>(originalUndone)!;
+                transient.Messages[1].SkillJobIds.Clear();
+                fixtureStore.Save(fixtureOwner, transient);
+                var blocked = await Json(admin, restoreActionPath + "preview", "{}", 409);
+                Assert(blocked.GetProperty("code").GetString() == "ACTION_PRECHECK_FAILED", "transient attachment failure blocks the preview");
+                var blockedCard = fixtureStore.Get(fixtureOwner, restoreSession)!.Messages[1];
+                Assert(blockedCard.ActionErrors.Length > 0 && blockedCard.PreviewFingerprint is null, "failed preview records the reason and arms nothing");
+                fixtureStore.Save(fixtureOwner, JsonSerializer.Deserialize<WebChatSession>(originalUndone)!);
+                var recoveredPreview = await Json(admin, restoreActionPath + "preview", "{}");
+                Assert(recoveredPreview.GetProperty("errors").GetArrayLength() == 0, "recovered preview reports no errors");
+                var recoveredCard = fixtureStore.Get(fixtureOwner, restoreSession)!.Messages[1];
+                Assert(recoveredCard.ActionErrors.Length == 0 && recoveredCard.PreviewFingerprint is not null, "recovered preview clears stale errors and arms approval");
+
+                // 预检**没能跑完**（画布文件读不出来）与「动作校验没过」是两件事：
+                // 前者不往 ActionErrors 里塞东西（那是动作校验的字段），但上一次预检留下的批准资格必须收掉——
+                // 这批动作这次没有被重新核对过。修好之后重新预检应当照常通过。
+                var goodCanvas = File.ReadAllBytes(canvasPath);
+                File.WriteAllText(canvasPath, "{ 这不是一份合法画布 ");
+                var unfinished = await Json(admin, restoreActionPath + "preview", "{}", 409);
+                Assert(unfinished.GetProperty("code").GetString() == "ACTION_PREVIEW_FAILED",
+                    "unfinished preview is reported as an execution failure, not a validation failure");
+                var unfinishedCard = fixtureStore.Get(fixtureOwner, restoreSession)!.Messages[1];
+                Assert(unfinishedCard.ActionErrors.Length == 0 && unfinishedCard.PreviewFingerprint is null,
+                    "unfinished preview does not fake a validation error and drops the stale approval");
+                File.WriteAllBytes(canvasPath, goodCanvas);
+                var recoveredAfterFailure = await Json(admin, restoreActionPath + "preview", "{}");
+                Assert(recoveredAfterFailure.GetProperty("errors").GetArrayLength() == 0, "preview recovers once the canvas is readable again");
+                Assert(fixtureStore.Get(fixtureOwner, restoreSession)!.Messages[1].PreviewFingerprint is not null,
+                    "recovered preview arms approval again");
+
+                // 预检之后动作又变了：服务端按指纹拒绝旧批准——不能只靠前端把按钮灰掉。
+                var tampered = JsonSerializer.Deserialize<WebChatSession>(originalUndone)!;
+                tampered.Messages[1].ActionState = "preview";
+                tampered.Messages[1].BaseRevision = recoveredCard.BaseRevision;
+                tampered.Messages[1].PreviewFingerprint = recoveredCard.PreviewFingerprint;
+                tampered.Messages[1].Actions[0].Title = "预检之后被改过的标题";
+                fixtureStore.Save(fixtureOwner, tampered);
+                var unchangedBytes = File.ReadAllBytes(canvasPath);
+                var staleCommit = await Json(admin, restoreActionPath + "commit", "{}", 409);
+                Assert(staleCommit.GetProperty("code").GetString() == "ACTION_PREVIEW_REQUIRED"
+                    && unchangedBytes.SequenceEqual(File.ReadAllBytes(canvasPath)), "changed actions after preview are rejected server-side without writing");
+
+                // 按最新动作重新预检之后才放行。
+                fixtureStore.Save(fixtureOwner, JsonSerializer.Deserialize<WebChatSession>(originalUndone)!);
+                await Json(admin, restoreActionPath + "preview", "{}");
+                await Json(admin, restoreActionPath + "commit", "{}");
+                Assert(JsonDocument.Parse(File.ReadAllBytes(canvasPath)).RootElement.GetProperty("Canvas").GetProperty("Nodes")[0]
+                    .GetProperty("Attachments").GetArrayLength() == 1, "re-preview after an action change restores approval and commits once");
+                await Json(admin, restoreActionPath + "undo", "{}");
+                Config(); modelText = "回答";
+                Console.WriteLine("Chat protocol regression passed: empty/broken protocol failure, ordinary chat/JSON, valid ask/skill, explicit retry, single Job and undone attachment reapproval (local fixture)");
+            }
+            if (!settingsOnly) await ProtocolRegression();
+            if (protocolOnly) return;
+            lock (captured) captured.Clear();
+            var id = "";
+            if (!settingsOnly)
+            {
+            var s = await Json(admin, "/api/web/chat/sessions", "{}"); id = s.GetProperty("id").GetString()!;
             Assert((await Json(other, "/api/web/chat/sessions")).GetArrayLength() == 0, "owner list isolation");
             await Json(other, "/api/web/chat/sessions/" + id, status: 404);
             await Json(other, "/api/web/chat/sessions/" + id, "{}", 404, "DELETE");
@@ -153,9 +493,13 @@ internal static class ChatRegression
             Assert(captured[0].GetProperty("model").GetString() == "openai-test" && captured[0].GetProperty("stream").GetBoolean(), "selected desktop profile");
             await Send(id, "{\"text\":\"继续\"}");
             Assert(!captured[1].ToString().Contains("思考"), "thinking excluded from history");
-            mode = "fail"; var failed = await Send(id, "{\"text\":\"失败测试\"}");
+            mode = "fail"; var failed = await Send(id, JsonSerializer.Serialize(new { text = "失败测试", nodeId, mode = "readonly", source = "node-menu", targetNodeTitle = "Original target" }));
             Assert(failed.GetProperty("messages")[5].GetProperty("state").GetString() == "failed", "failure persisted");
-            mode = "success"; var retried = await Send(id, "{\"retry\":true}");
+            mode = "success"; var retried = await Send(id, JsonSerializer.Serialize(new { retry = true, mode = "auto", nodeId = Guid.NewGuid(), chapterId = Guid.NewGuid(), source = "changed", targetNodeTitle = "Changed target" }));
+            foreach (var field in new[] { "id", "targetNodeId", "targetChapterId", "baseRevision", "mode", "source", "targetNodeTitle" })
+                Assert(retried.GetProperty("messages")[5].GetProperty(field).ToString() == failed.GetProperty("messages")[5].GetProperty(field).ToString(), "retry preserves " + field);
+            foreach (var field in new[] { "targetNodeId", "targetChapterId", "baseRevision", "mode", "source", "targetNodeTitle" })
+                Assert(failed.GetProperty("messages")[4].GetProperty(field).ToString() == failed.GetProperty("messages")[5].GetProperty(field).ToString(), "user and assistant bind " + field);
             Assert(retried.GetProperty("messages").GetArrayLength() == 6 && retried.GetProperty("messages")[5].GetProperty("state").GetString() == "completed", "retry does not duplicate user");
             Config(anthropic: true); var anth = await Send(id, "{\"text\":\"另一协议\"}");
             Assert(anth.GetProperty("messages")[7].GetProperty("content").GetString() == "回答", "Anthropic provider"); Config();
@@ -170,10 +514,14 @@ internal static class ChatRegression
             mode = "success";
             var resumed = await Send(id, "{\"retry\":true}");
             Assert(resumed.GetProperty("messages").GetArrayLength() == 10 && resumed.GetProperty("messages")[9].GetProperty("state").GetString() == "completed", "cancelled reply retry after restart");
-            // Model CRUD must never echo credentials, and switching only needs a revision.
+            }
+            // 模型增删改查不能回显凭证，切换模型只需修订号。
             var models = await Json(admin, "/api/web/models");
             var revision = models.GetProperty("revision").GetString();
-            string ModelBody(string? rev, string? secret = null) => JsonSerializer.Serialize(new { revision = rev, displayName = "Web model", endpoint = $"http://127.0.0.1:{modelPort}/v1", model = "openai-test", apiKey = secret });
+            Assert(!models.ToString().Contains("desktop-only"), "desktop profiles must not be imported");
+            var summary = await Json(admin, "/api/web/settings");
+            Assert(!summary.ToString().Contains("desktop-only"), "summary uses independent server configuration");
+            string ModelBody(string? rev, string? secret = null) => JsonSerializer.Serialize(new { revision = rev, displayName = "", endpoint = $"http://127.0.0.1:{modelPort}/v1", model = "openai-test", apiKey = secret });
             await Json(other, "/api/web/models/web-test", ModelBody(revision), 403, "PUT");
             await Json(admin, "/api/web/models/web-test", ModelBody(revision, "new-private-key"), 200, "PUT");
             Assert(!File.ReadAllText(configPath).Contains("new-private-key"), "key encrypted at rest");
@@ -205,29 +553,83 @@ internal static class ChatRegression
             Assert(models.GetProperty("selectedProfileId").GetString() != "web-test", "delete resets active selection");
             await Json(admin, "/api/web/models/web-test?revision=" + models.GetProperty("revision").GetString(), status: 404, method: "DELETE");
             var media = await Json(admin, "/api/web/settings/media");
-            string MediaBody(string? rev, string? imageKey = null, string? videoKey = null, bool clear = false, string endpoint = "http://127.0.0.1:8188") =>
+            string MediaBody(string? rev, string? imageKey = null, string? videoKey = null, bool clear = false, string endpoint = "http://127.0.0.1:8188",
+                string? imageProxy = null, string? videoProxy = null) =>
                 JsonSerializer.Serialize(new { revision = rev, imageEndpoint = endpoint, imageModel = "image-test", comfyUiBaseUrl = "http://127.0.0.1:8188",
                     comfyUiCheckpoint = "test.safetensors", videoEndpoint = endpoint, videoModel = "video-test", imageApiKey = imageKey,
-                    videoApiKey = videoKey, clearImageKey = clear, clearVideoKey = clear });
+                    videoApiKey = videoKey, clearImageKey = clear, clearVideoKey = clear, imageProxyUrl = imageProxy, videoProxyUrl = videoProxy });
             await Json(other, "/api/web/settings/media", status: 403);
             revision = media.GetProperty("revision").GetString();
             await Json(other, "/api/web/settings/media", MediaBody(revision), 403, "PUT");
             await Json(admin, "/api/web/settings/media", MediaBody(revision, endpoint: "file:///tmp/media"), 400, "PUT");
             await Json(admin, "/api/web/settings/media", MediaBody("stale"), 409, "PUT");
-            await Json(admin, "/api/web/settings/media", MediaBody(revision, "image-private-secret", "video-private-secret"), method: "PUT");
+            foreach (var proxy in new[] { "127.0.0.1:10809", "file:///tmp/proxy", "http://user:password@localhost:10809", "http://localhost:10809/path", "http://localhost:10809?token=secret", "http://localhost:10809#fragment" })
+            {
+                await Json(admin, "/api/web/settings/media", MediaBody(revision, imageProxy: proxy), 400, "PUT");
+                await Json(admin, "/api/web/settings/media", MediaBody(revision, videoProxy: proxy), 400, "PUT");
+            }
+            await Json(admin, "/api/web/settings/media", MediaBody(revision, "image-private-secret", "video-private-secret",
+                imageProxy: " http://127.0.0.1:10809 ", videoProxy: "socks5://127.0.0.1:10808"), method: "PUT");
             media = await Json(admin, "/api/web/settings/media");
             var mediaDisk = File.ReadAllText(configPath);
             Assert(!mediaDisk.Contains("image-private-secret") && !mediaDisk.Contains("video-private-secret"), "media keys encrypted at rest");
             Assert(!media.ToString().Contains("private-secret") && media.GetProperty("imageHasKey").GetBoolean() && media.GetProperty("videoHasKey").GetBoolean(), "media projection exposes presence only");
-            Assert(JsonDocument.Parse(mediaDisk).RootElement.GetProperty("ImageModel").GetString() == "image-test", "media writes shared desktop configuration");
+            Assert(JsonDocument.Parse(mediaDisk).RootElement.GetProperty("ImageModel").GetString() == "image-test", "media writes independent server configuration");
+            Assert(media.GetProperty("imageProxyUrl").GetString() == "http://127.0.0.1:10809" &&
+                media.GetProperty("videoProxyUrl").GetString() == "socks5://127.0.0.1:10808", "independent media proxy projection and trimming");
+            var savedMedia = JsonDocument.Parse(mediaDisk).RootElement;
+            Assert(savedMedia.GetProperty("ImageProxyUrl").GetString() == "http://127.0.0.1:10809" &&
+                savedMedia.GetProperty("VideoProxyUrl").GetString() == "socks5://127.0.0.1:10808", "independent media proxy persistence");
             await Json(admin, "/api/web/settings/media", MediaBody(media.GetProperty("revision").GetString()), method: "PUT");
             media = await Json(admin, "/api/web/settings/media");
             Assert(media.GetProperty("imageHasKey").GetBoolean() && media.GetProperty("videoHasKey").GetBoolean(), "blank media keys preserve credentials");
+            Assert(media.GetProperty("imageProxyUrl").GetString() == "http://127.0.0.1:10809" &&
+                media.GetProperty("videoProxyUrl").GetString() == "socks5://127.0.0.1:10808", "omitted proxy settings preserve existing values");
+            await Json(admin, "/api/web/settings/media", MediaBody(media.GetProperty("revision").GetString(), imageProxy: "", videoProxy: ""), method: "PUT");
+            media = await Json(admin, "/api/web/settings/media");
+            Assert(media.GetProperty("imageProxyUrl").GetString() == "" && media.GetProperty("videoProxyUrl").GetString() == "", "empty proxy settings restore default transport");
+            var readVideoModels = System.Reflection.Assembly.Load("YEEYEEYEE.Web").GetType("YEEYEEYEE.Web.WebSettingsApi")!
+                .GetMethod("ReadVideoModels", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+            var videoModels = JsonSerializer.SerializeToElement(readVideoModels.Invoke(null, new object[] { """
+                {"data":[
+                  {"type":"video","enabled":true,"alias":"full(alias)","resolutions":["720p","1080p"],"durations":["4s","8s"],"prices":{"720p":30,"1080p":90},"duration_prices":{"per_second":24},"prices_agent":{"720p":1}},
+                  {"type":"video","enabled":true,"alias":"fixed","resolutions":["720p"],"durations":["15s"],"prices":{"720p":100},"duration_prices":{"15s":20}},
+                  {"type":"video","enabled":false,"alias":"disabled"}]}
+                """ }));
+            Assert(videoModels.GetArrayLength() == 2 && videoModels[0].GetProperty("Alias").GetString() == "full(alias)" && videoModels[0].GetProperty("Price").GetDecimal() == 126 &&
+                videoModels[0].GetProperty("Seconds").GetInt32() == 4 && videoModels[0].GetProperty("Width").GetInt32() == 1280 && videoModels[0].GetProperty("Height").GetInt32() == 720 && videoModels[1].GetProperty("Price").GetDecimal() == 120,
+                "video catalog uses full alias, enabled models, minimum resolution plus duration price and per-second price without agent price");
+            await Json(other, "/api/web/settings/media/video/inspect", "{\"url\":\"https://example.com/about\"}", 403, "POST");
+            await Json(admin, "/api/web/settings/media/video/inspect", "{\"url\":\"file:///tmp/doc\"}", 400, "POST");
+            var beforeInspect = media.GetProperty("revision").GetString();
+            var inspectedVideo = await Json(admin, "/api/web/settings/media/video/inspect", JsonSerializer.Serialize(new { url = $"http://127.0.0.1:{modelPort}/about" }), method: "POST");
+            Assert(inspectedVideo.GetProperty("endpoint").GetString() == $"http://127.0.0.1:{modelPort}/v1" &&
+                inspectedVideo.GetProperty("models")[0].GetProperty("alias").GetString() == "catalog(alias)" &&
+                inspectedVideo.GetProperty("models")[0].GetProperty("price").GetDecimal() == 126,
+                "read-only video inspect resolves document endpoint and catalog parameters");
+            Assert((await Json(admin, "/api/web/settings/media")).GetProperty("revision").GetString() == beforeInspect, "inspect never saves configuration");
+            string ReuseBody(string videoEndpoint, string? rev = null) => JsonSerializer.Serialize(new {
+                revision = rev ?? media.GetProperty("revision").GetString(), imageEndpoint = "http://127.0.0.1:8188", imageModel = "image-test",
+                comfyUiBaseUrl = "", comfyUiCheckpoint = "", videoEndpoint, videoModel = "full(alias)", videoDefaultSeconds = 4, reuseImageKeyForVideo = true });
+            await Json(admin, "/api/web/settings/media", ReuseBody("http://127.0.0.1:8189/v1"), 400, "PUT");
+            await Json(admin, "/api/web/settings/media", ReuseBody("http://127.0.0.1:8188/v1", "stale"), 409, "PUT");
+            await Json(admin, "/api/web/settings/media", ReuseBody("http://127.0.0.1:8188/v1"), method: "PUT");
+            media = await Json(admin, "/api/web/settings/media");
+            Assert(media.GetProperty("videoDefaultSeconds").GetInt32() == 4 && !media.ToString().Contains("private-secret"),
+                "video default seconds persist and reused key never appears in projection");
+            var reusedConfig = JsonDocument.Parse(File.ReadAllText(configPath)).RootElement;
+            Assert(reusedConfig.GetProperty("ImageApiKey").GetString() == reusedConfig.GetProperty("VideoApiKey").GetString(), "reuse copies saved encrypted image key");
             await Json(admin, "/api/web/settings/media", MediaBody(media.GetProperty("revision").GetString(), clear: true), method: "PUT");
             media = await Json(admin, "/api/web/settings/media");
             Assert(!media.GetProperty("imageHasKey").GetBoolean() && !media.GetProperty("videoHasKey").GetBoolean(), "explicit media key clearing");
-            Console.WriteLine("Media settings regression passed: admin permission, URL validation, revision conflict, shared configuration persistence, encrypted keys, presence-only projection, key preservation and clearing");
-            Config(); // Restore the fixture model before the remaining agent regressions.
+            Assert(File.ReadAllText(desktopConfigPath) == desktopConfig, "model and media settings must not modify desktop configuration");
+            Console.WriteLine("Media settings regression passed: admin permission, URL validation, revision conflict, independent server persistence, encrypted keys, presence-only projection, key preservation and clearing");
+            if (settingsOnly)
+            {
+                Console.WriteLine("Settings regression passed: preset catalog authentication, viewer access, canvas independence and preserved canvas validation");
+                return;
+            }
+            Config(); // 后续 Agent 回归前恢复测试模型。
             Console.WriteLine("Model removal regression passed: admin permission, stale revision, profile and active key clearing, deletion, selection reset and missing profile");
 
             async Task<(string Session, string Message)> Proposal(string executionMode = "approval", string? output = null)
@@ -237,7 +639,22 @@ internal static class ChatRegression
                 var sid = created.GetProperty("id").GetString()!;
                 var scene = await Json(admin, "/api/web/scene");
                 var done = await Send(sid, JsonSerializer.Serialize(new { text = "修改选中节点", mode = executionMode, nodeId, baseRevision = scene.GetProperty("revision").GetInt64() }));
-                return (sid, done.GetProperty("messages")[1].GetProperty("id").GetString()!);
+                var messageId = done.GetProperty("messages")[1].GetProperty("id").GetString()!;
+                var reply = done.GetProperty("messages")[1];
+                if (reply.TryGetProperty("skillActions", out var actions) && actions.GetArrayLength() == 1 &&
+                    actions[0].GetProperty("target").GetString() is "comfyui.text-to-image" or "web.text-to-image" &&
+                    (!reply.TryGetProperty("ask", out var askValue) || askValue.ValueKind == JsonValueKind.Null))
+                {
+                    Assert(done.GetProperty("jobIds").GetArrayLength() == 0, "image proposal waits for user ratio in every mode");
+                    await Json(admin, $"/api/web/chat/sessions/{sid}/skills/{messageId}/invoke", "{}", 400);
+                    var action = actions[0];
+                    var unsupportedInput = action.TryGetProperty("unsupportedSkillFields", out var unsupported) && unsupported.GetArrayLength() > 0 ||
+                        new[] { "seconds", "width", "height" }.Any(field => action.TryGetProperty(field, out var value) && value.ValueKind != JsonValueKind.Null) ||
+                        new[] { "source", "path" }.Any(field => action.TryGetProperty(field, out var value) && !string.IsNullOrEmpty(value.GetString())) ||
+                        action.TryGetProperty("entityTargets", out var entityTargets) && entityTargets.GetArrayLength() > 0;
+                    await Json(admin, $"/api/web/chat/sessions/{sid}/skills/{messageId}/invoke", "{\"aspectRatio\":\"16:9\"}", unsupportedInput ? 400 : 200);
+                }
+                return (sid, messageId);
             }
             string ActionPath((string Session, string Message) p, string op) => $"/api/web/chat/sessions/{p.Session}/actions/{p.Message}/{op}";
             var ordinaryScene = await Json(admin, "/api/web/scene");
@@ -284,13 +701,51 @@ internal static class ChatRegression
             var proposal = await Proposal();
             Assert(captured.Last().ToString().Contains("Selected context body"), "selected node context sent to model");
             Assert(beforeActions.SequenceEqual(File.ReadAllBytes(canvasPath)), "approval generation does not write");
-            await Json(admin, ActionPath(proposal, "preview"), "{}");
+            var actionPreview = await Json(admin, ActionPath(proposal, "preview"), "{}");
+            Assert(actionPreview.GetProperty("sessionId").GetString() == proposal.Session && actionPreview.GetProperty("messageId").GetString() == proposal.Message, "preview ownership identity");
+            var diff = actionPreview.GetProperty("diff");
+            foreach (var field in new[] { "addedNodes", "updatedNodes", "removedNodes", "addedEdges", "removedEdges" })
+                Assert(diff.GetProperty(field).ValueKind == JsonValueKind.Array, "preview diff array " + field);
+            var trialCanvas = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(actionPreview.GetProperty("after").GetRawText())!.Canvas;
+            var expectedNode = YEEYEEYEE.Desktop.NodeProjection.ProjectRecords(trialCanvas.Nodes, trialCanvas)
+                .Select(record => JsonSerializer.SerializeToElement(record)).Single(record => record.GetProperty("recordId").GetString() == nodeId.ToString());
+            Assert(diff.GetProperty("updatedNodes").GetArrayLength() == 1 && System.Text.Json.Nodes.JsonNode.DeepEquals(
+                System.Text.Json.Nodes.JsonNode.Parse(diff.GetProperty("updatedNodes")[0].GetRawText()), System.Text.Json.Nodes.JsonNode.Parse(expectedNode.GetRawText())), "diff matches existing trial Web projection");
+            Assert(new[] { "addedNodes", "removedNodes", "addedEdges", "removedEdges" }.All(field => diff.GetProperty(field).GetArrayLength() == 0), "unchanged arrays empty");
+            foreach (var operation in new[] { "preview", "commit", "undo" })
+            {
+                await Json(other, ActionPath(proposal, operation), "{}", 404);
+                await Json(admin, $"/api/web/chat/sessions/{id}/actions/{proposal.Message}/{operation}", "{}", 404);
+            }
             Assert(beforeActions.SequenceEqual(File.ReadAllBytes(canvasPath)), "preview does not write");
             await Json(admin, ActionPath(proposal, "commit"), "{}");
             Assert(File.ReadAllText(canvasPath).Contains("Agent changed"), "commit writes actual desktop canvas");
             await Json(admin, ActionPath(proposal, "commit"), "{}", 409);
             await Json(admin, ActionPath(proposal, "undo"), "{}");
             Assert(File.ReadAllText(canvasPath).Contains("Selected context body"), "undo restores original content");
+            var addedProposal = await Proposal(output: "```json\n" + JsonSerializer.Serialize(new { actions = new object[] {
+                new { kind = "create_node", title = "Trial added node", content = "Trial content" },
+                new { kind = "create_edge", source = nodeId.ToString(), target = "Trial added node" } } }) + "\n```");
+            var addedBytes = File.ReadAllBytes(canvasPath);
+            var addedPreview = await Json(admin, ActionPath(addedProposal, "preview"), "{}");
+            var addedDiff = addedPreview.GetProperty("diff");
+            var addedCanvas = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(addedPreview.GetProperty("after").GetRawText())!.Canvas;
+            Assert(addedDiff.GetProperty("addedNodes").GetArrayLength() == 1 && addedDiff.GetProperty("addedEdges").GetArrayLength() == 1, "trial adds node and edge");
+            var addedId = addedDiff.GetProperty("addedNodes")[0].GetProperty("recordId").GetString();
+            Assert(addedCanvas.Nodes.Any(node => node.Id.ToString() == addedId) && addedCanvas.Edges.Any(edge =>
+                edge.Id.ToString() == addedDiff.GetProperty("addedEdges")[0].GetProperty("edgeId").GetString() && edge.TargetNodeId.ToString() == addedId), "diff IDs equal single trial IDs");
+            Assert(addedBytes.SequenceEqual(File.ReadAllBytes(canvasPath)), "adding preview never writes");
+            await Json(admin, ActionPath(addedProposal, "commit"), "{}");
+            var removalProposal = await Proposal(output: "```json\n" + JsonSerializer.Serialize(new { actions = new[] { new { kind = "delete_node", target = "Trial added node" } } }) + "\n```");
+            var removalBytes = File.ReadAllBytes(canvasPath);
+            var removalPreview = await Json(admin, ActionPath(removalProposal, "preview"), "{}");
+            var removalDiff = removalPreview.GetProperty("diff");
+            var removalBefore = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(removalPreview.GetProperty("before").GetRawText())!.Canvas;
+            Assert(removalDiff.GetProperty("removedNodes").GetArrayLength() == 1 && removalDiff.GetProperty("removedEdges").GetArrayLength() == 1, "delete preview includes removed node and incident edge");
+            Assert(removalBefore.Nodes.Any(node => node.Id.ToString() == removalDiff.GetProperty("removedNodes")[0].GetProperty("recordId").GetString()) &&
+                removalBefore.Edges.Any(edge => edge.Id.ToString() == removalDiff.GetProperty("removedEdges")[0].GetProperty("edgeId").GetString()), "removed records use original trial IDs");
+            Assert(removalBytes.SequenceEqual(File.ReadAllBytes(canvasPath)), "removal preview never writes");
+            await Json(admin, ActionPath(addedProposal, "undo"), "{}");
             var readOnly = await Proposal("readonly");
             var unchanged = File.ReadAllBytes(canvasPath);
             await Json(admin, ActionPath(readOnly, "commit"), "{}", 403);
@@ -344,15 +799,24 @@ internal static class ChatRegression
             string SkillPath((string Session, string Message) p) => $"/api/web/chat/sessions/{p.Session}/skills/{p.Message}/invoke";
             var skillProposal = await Proposal(output: SkillOutput());
             var skillSession = await Json(admin, "/api/web/chat/sessions/" + skillProposal.Session);
-            Assert(skillSession.GetProperty("jobIds").GetArrayLength() == 0 && skillSession.GetProperty("messages")[1].GetProperty("skillState").GetString() == "preview", "model approval does not submit before approval");
+            Assert(skillSession.GetProperty("jobIds").GetArrayLength() == 1 && skillSession.GetProperty("messages")[1].GetProperty("skillState").GetString() is "submitted" or "completed" or "failed", "approval executes non-canvas skill without separate approval");
             await Json(other, SkillPath(skillProposal), "{}", 404);
-            var approvedJob = await Json(admin, SkillPath(skillProposal), "{}");
-            skillSession = await Json(admin, "/api/web/chat/sessions/" + skillProposal.Session);
-            Assert(skillSession.GetProperty("jobIds")[0].GetString() == approvedJob.GetProperty("jobId").GetString() && skillSession.GetProperty("messages")[1].GetProperty("skillState").GetString() == "submitted", "approved model job linked server-side");
-            await Json(admin, SkillPath(skillProposal), "{}", 409);
+            var approvedJob = await Json(admin, "/api/web/jobs/" + skillSession.GetProperty("jobIds")[0].GetString());
+            Assert(approvedJob.GetProperty("targetNodeId").GetGuid() == nodeId && approvedJob.GetProperty("attachmentState").GetString() == "none", "conversation skill never passes selected target to background attachment");
+            for (var i = 0; i < 100; i++)
+            {
+                skillSession = await Json(admin, "/api/web/chat/sessions/" + skillProposal.Session);
+                if (skillSession.GetProperty("messages")[1].GetProperty("skillState").GetString() == "failed") break;
+                await Task.Delay(50);
+            }
+            await Json(admin, SkillPath(skillProposal), "{\"aspectRatio\":\"16:9\"}");
+            var resubmittedSession = await Json(admin, "/api/web/chat/sessions/" + skillProposal.Session);
+            Assert(resubmittedSession.GetProperty("jobIds").GetArrayLength() == 2 &&
+                resubmittedSession.GetProperty("jobIds")[0].GetGuid() != resubmittedSession.GetProperty("jobIds")[1].GetGuid(),
+                "explicit failed skill resubmission creates a new job and retains the old job");
             var autoSkill = await Proposal("auto", SkillOutput());
             skillSession = await Json(admin, "/api/web/chat/sessions/" + autoSkill.Session);
-            Assert(skillSession.GetProperty("jobIds").GetArrayLength() == 1 && skillSession.GetProperty("messages")[1].GetProperty("skillState").GetString() == "submitted", "model auto submits and links");
+            Assert(skillSession.GetProperty("jobIds").GetArrayLength() == 1 && skillSession.GetProperty("messages")[1].GetProperty("skillState").GetString() is "submitted" or "completed" or "failed", "model auto submits and links");
             var autoJobId = skillSession.GetProperty("jobIds")[0].GetString();
             for (var i = 0; i < 100; i++)
             {
@@ -361,8 +825,12 @@ internal static class ChatRegression
                 if (i == 99) throw new Exception("offline model skill did not fail");
                 await Task.Delay(50);
             }
+            var readonlyBytes = File.ReadAllBytes(canvasPath);
             var readonlySkill = await Proposal("readonly", SkillOutput());
-            await Json(admin, SkillPath(readonlySkill), "{}", 403);
+            skillSession = await Json(admin, "/api/web/chat/sessions/" + readonlySkill.Session);
+            Assert(skillSession.GetProperty("jobIds").GetArrayLength() == 1 && skillSession.GetProperty("messages")[1].GetProperty("skillState").GetString() is "submitted" or "completed" or "failed", "readonly executes non-canvas skill");
+            Assert(readonlyBytes.SequenceEqual(File.ReadAllBytes(canvasPath)), "readonly skill preserves canvas bytes");
+            // 后台可能已把失败状态写回；重复发起的幂等性由前面的关联与任务测试覆盖。
             var askSkill = await Proposal("auto", SkillOutput(askFirst: true));
             Assert((await Json(admin, "/api/web/chat/sessions/" + askSkill.Session)).GetProperty("jobIds").GetArrayLength() == 0, "ask prevents skill auto submit");
             var unknownSkill = await Proposal("auto", SkillOutput("desktop.unsupported"));
@@ -375,6 +843,36 @@ internal static class ChatRegression
             Assert((await Json(admin, "/api/web/chat/sessions/" + extraSkill.Session)).GetProperty("messages")[1].GetProperty("skillError").GetString()!.Contains("SKILL_INPUT_UNSUPPORTED"), "unsupported parameters never silently ignored");
             var multiSkill = await Proposal("auto", "```json\n{\"actions\":[{\"kind\":\"invoke_skill\",\"target\":\"comfyui.text-to-image\",\"content\":\"one\"},{\"kind\":\"invoke_skill\",\"target\":\"comfyui.text-to-image\",\"content\":\"two\"}]}\n```");
             Assert((await Json(admin, "/api/web/chat/sessions/" + multiSkill.Session)).GetProperty("messages")[1].GetProperty("skillState").GetString() == "blocked", "multiple skills explicitly blocked");
+            foreach (var canvasMode in new[] { "readonly", "approval", "auto" })
+            {
+                var mixedBefore = File.ReadAllBytes(canvasPath);
+                var mixed = await Proposal(canvasMode, "```json\n" + JsonSerializer.Serialize(new { actions = new object[] {
+                    new { kind = "invoke_skill", target = "comfyui.text-to-image", content = "mixed generation" },
+                    new { kind = "update_node", target = nodeId.ToString(), content = "mixed " + canvasMode }
+                } }) + "\n```");
+                var mixedReply = (await Json(admin, "/api/web/chat/sessions/" + mixed.Session)).GetProperty("messages")[1];
+                Assert(mixedReply.GetProperty("skillState").GetString() is "submitted" or "completed" or "failed", canvasMode + " mixed reply executes skill");
+                Assert(mixedReply.GetProperty("actionState").GetString() == (canvasMode == "auto" ? "committed" : "preview"), canvasMode + " mixed reply respects canvas approval");
+                if (canvasMode == "auto")
+                    Assert(File.ReadAllText(canvasPath).Contains("mixed auto"), "mixed auto writes canvas");
+                else
+                    Assert(mixedBefore.SequenceEqual(File.ReadAllBytes(canvasPath)), canvasMode + " mixed reply preserves canvas before approval");
+                if (canvasMode == "approval")
+                {
+                    // 生成产物回挂会在服务端往同一条回复追加 attach_asset：等技能落定，再按**最新动作**
+                    // 预检一次并提交（与前端同一条路——旧批准不会把没看见的动作一起执行掉）。
+                    for (var i = 0; i < 100; i++)
+                    {
+                        var current = (await Json(admin, "/api/web/chat/sessions/" + mixed.Session)).GetProperty("messages")[1];
+                        if (current.GetProperty("skillState").GetString() is "completed" or "failed") break;
+                        await Task.Delay(50);
+                    }
+                    await Json(admin, ActionPath(mixed, "preview"), "{}");
+                    await Json(admin, ActionPath(mixed, "commit"), "{}");
+                    Assert(File.ReadAllText(canvasPath).Contains("mixed approval"), "mixed approval uses existing commit");
+                }
+                if (canvasMode == "readonly") await Json(admin, ActionPath(mixed, "commit"), "{}", 403);
+            }
             modelText = "回答"; await Send(autoSkill.Session, "{\"text\":\"任务结果是什么\"}");
             Assert(captured.Last().ToString().Contains("Failed") && captured.Last().ToString().Contains(autoJobId!), "actual job failure enters model context");
             Console.WriteLine("Model skill regression passed: approval, auto submission, server-side link, readonly, ask gating, unknown/unapproved errors, duplicate approval, offline backend failure, idempotent link recovery and owner isolation");
@@ -387,8 +885,41 @@ internal static class ChatRegression
             scopedCanvas["Canvas"]!["Nodes"]!.AsArray().Add(System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(new { Id = Guid.NewGuid(), Category = 0, Title = "Outside chapter", Content = "Outside chapter secret", WorkTreeItemId = chapterTwo })));
             File.WriteAllText(canvasPath, scopedCanvas.ToJsonString());
             var scopedSession = (await Json(admin, "/api/web/chat/sessions", "{}")).GetProperty("id").GetString()!;
-            await Send(scopedSession, JsonSerializer.Serialize(new { text = "阅读本章", chapterId = chapterOne, nodeId }));
+            var scopedDone = await Send(scopedSession, JsonSerializer.Serialize(new { text = "阅读本章", chapterId = chapterOne, nodeId, source = "node-menu", targetNodeTitle = "Bound title", mode = "approval" }));
+            Assert(scopedDone.GetProperty("messages").EnumerateArray().All(message => message.GetProperty("targetChapterId").GetString() == chapterOne.ToString() && message.GetProperty("source").GetString() == "node-menu"), "both roles persist chapter and source");
+            // 模型上下文必须带着目标节点的稳定 id（标题可能重名）：身份段与清单行都要有。
+            // 请求体里的非 ASCII 是 \uXXXX 转义过的（JsonElement.ToString 也是），所以先解回可读文本再找。
+            static string Readable(JsonElement payload) => System.Text.RegularExpressions.Regex.Unescape(payload.ToString());
+            Assert(captured.Any(payload => Readable(payload).Contains("本次请求的目标节点") && Readable(payload).Contains(nodeId.ToString("N"))),
+                "node-menu model context states the request target explicitly with the node id");
+            mode = "fail";
+            var scopedFailed = await Send(scopedSession, JsonSerializer.Serialize(new { text = "重试本章", chapterId = chapterOne, nodeId, source = "node-menu", targetNodeTitle = "Bound title", mode = "readonly" }));
+            mode = "success";
+            var scopedRetried = await Send(scopedSession, JsonSerializer.Serialize(new { retry = true, chapterId = chapterTwo, nodeId = Guid.NewGuid(), mode = "auto", source = "changed" }));
+            foreach (var field in new[] { "id", "targetNodeId", "targetChapterId", "baseRevision", "mode", "source", "targetNodeTitle" })
+                Assert(scopedRetried.GetProperty("messages")[3].GetProperty(field).ToString() == scopedFailed.GetProperty("messages")[3].GetProperty(field).ToString(), "scoped retry preserves " + field);
+            // 重试时前端带上的是**当时选中的另一个节点**：原请求的目标不能因此被改写，
+            // 模型上下文同样要按原目标重建。
+            Assert(Readable(captured.Where(payload => Readable(payload).Contains("重试本章")).Last()).Contains(nodeId.ToString("N")),
+                "retry keeps the original request target in the model context");
             Assert(captured.Last().ToString().Contains(chapterOne.ToString()) && !captured.Last().ToString().Contains("Outside chapter secret"), "chapter filters node context by stable identity");
+            mode = "fail";
+            var staleRetry = await Send(scopedSession, JsonSerializer.Serialize(new { text = "过期重试", chapterId = chapterOne, nodeId, source = "node-menu" }));
+            mode = "success";
+            var boundHistory = staleRetry.ToString();
+            var savedCanvasBytes = File.ReadAllBytes(canvasPath);
+            scopedCanvas["Canvas"]!["Nodes"]![0]!["Title"] = "Changed after failure";
+            File.WriteAllText(canvasPath, scopedCanvas.ToJsonString());
+            await Json(admin, $"/api/web/chat/sessions/{scopedSession}/messages", "{\"retry\":true}", 409);
+            Assert(boundHistory == (await Json(admin, "/api/web/chat/sessions/" + scopedSession)).ToString(), "stale retry preserves original failed message");
+            File.WriteAllBytes(canvasPath, savedCanvasBytes);
+            scopedCanvas = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(canvasPath))!;
+            scopedCanvas["FormatVersion"] = 999;
+            File.WriteAllText(canvasPath, scopedCanvas.ToJsonString());
+            await Json(admin, $"/api/web/chat/sessions/{scopedSession}/messages", JsonSerializer.Serialize(new { text = "只读画布", nodeId, source = "node-menu" }), 409);
+            Assert(boundHistory == (await Json(admin, "/api/web/chat/sessions/" + scopedSession)).ToString(), "node menu rejects nonwritable canvas without saving history");
+            File.WriteAllBytes(canvasPath, savedCanvasBytes);
+            scopedCanvas = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(canvasPath))!;
             var scopedHistory = (await Json(admin, "/api/web/chat/sessions/" + scopedSession)).ToString();
             await Json(admin, $"/api/web/chat/sessions/{scopedSession}/messages", "{\"text\":\"invalid\",\"chapterId\":\"bad-id\"}", 409);
             Assert(scopedHistory == (await Json(admin, "/api/web/chat/sessions/" + scopedSession)).ToString(), "rejected context does not change persisted history");
@@ -495,6 +1026,24 @@ internal static class ChatRegression
             var primaryVariantKey = variantKey; variantKey = disposableVariant;
             await EditEntity("deleteVariant"); variantKey = primaryVariantKey;
             Assert((await Json(admin, "/api/web/assets")).GetProperty("entities").EnumerateArray().Single(e => e.GetProperty("id").GetGuid() == entityKey).GetProperty("variants").GetArrayLength() == 1, "unreferenced variant deletion persists");
+            // 网页端「项目资源库」面板列的就是**项目库**（/api/web/assets 直接读 entities.json），
+            // 所以在库上新建的设定必须能直接挂到节点上。从前这里是「列表里选得到、一选必然
+            // 404 CANVAS_ENTITY_NOT_FOUND」——挂载只认画布里的快照，而新建的库实体还不在画布里。
+            // 现在按引用把库实体补成画布快照（与桌面端 ProjectEntityScope.MergeInto 的注入规则同一条），
+            // 这条就是那件事的回归。
+            var bindingScene = await Json(admin, "/api/web/scene");
+            var bindingNode = await Json(admin, "/api/web/records", JsonSerializer.Serialize(new { baseRevision = bindingScene.GetProperty("revision").GetInt64(), recordType = "general", title = "引用挂载" }));
+            var bindingNodeId = bindingNode.GetProperty("nodeId").GetGuid();
+            var bindingBefore = await Json(admin, "/api/web/scene");
+            await Json(admin, $"/api/web/records/{bindingNodeId}/references",
+                JsonSerializer.Serialize(new { baseRevision = bindingBefore.GetProperty("revision").GetInt64(), entityId = entityKey, variantId = variantKey }));
+            var bindingAfter = await Json(admin, "/api/web/scene");
+            var bindingRecord = bindingAfter.GetProperty("records").EnumerateArray().Single(r => r.GetProperty("recordId").GetString() == bindingNodeId.ToString());
+            Assert(bindingRecord.GetProperty("record").GetProperty("references").EnumerateArray()
+                    .Any(r => r.GetProperty("entityId").GetString() == entityKey.ToString()),
+                "library-only entity binds through the API: " + bindingRecord);
+            Assert(File.ReadAllText(canvasPath).Contains(entityKey.ToString(), StringComparison.Ordinal),
+                "the bind writes a managed snapshot of that entity into the canvas");
             Console.WriteLine("Entity HTTP regression passed: permissions, CAS, descriptions, shared commit/rollback, protected versions, media bytes/rename/detach and historical media retention");
             await using var attachmentMock = new MockComfyUiServer();
             await attachmentMock.StartAsync(); attachmentBackend = attachmentMock.BaseAddress;
@@ -510,9 +1059,207 @@ internal static class ChatRegression
                 }
                 throw new Exception("Attachment timeout: " + job);
             }
+            var imageConfig = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(configPath))!;
+            imageConfig["ImageEndpoint"] = $"http://127.0.0.1:{modelPort}/v1";
+            imageConfig["ImageModel"] = "grok-image-2.0(池4)";
+            imageConfig["ImageMaxReferenceImages"] = 0;
+            File.WriteAllText(configPath, imageConfig.ToJsonString());
+            var published = await Json(admin, "/api/web/skills");
+            Assert(published.GetProperty("skills").EnumerateArray().Any(s => s.GetProperty("id").GetString() == "web.text-to-image"), "independent image API publishes skill");
+            mode = "protocol-example";
+            var protocolSession = (await Json(admin, "/api/web/chat/sessions", "{}")).GetProperty("id").GetString()!;
+            var protocolDone = await Send(protocolSession, "{\"text\":\"生成蓝天白云插画，无参考，1:1\",\"mode\":\"readonly\"}");
+            mode = "success";
+            var protocolReply = protocolDone.GetProperty("messages")[1];
+            Assert(protocolReply.GetProperty("state").GetString() == "completed" &&
+                protocolReply.GetProperty("skillActions")[0].GetProperty("target").GetString() == "web.text-to-image" &&
+                protocolReply.GetProperty("skillActions")[0].GetProperty("aspectRatio").GetString() == "1:1" &&
+                protocolReply.GetProperty("skillActions")[0].GetProperty("unsupportedSkillFields").GetArrayLength() == 0 &&
+                protocolReply.GetProperty("skillState").GetString() == "preview" &&
+                protocolDone.GetProperty("jobIds").GetArrayLength() == 0,
+                "actual request protocol example parses and waits for ratio without submitting image task");
+            await Json(admin, "/api/web/skills/web.text-to-image/invoke", "{\"prompt\":\"offline image\",\"idempotencyKey\":\"no-ratio\"}", 400);
+            int requestsBeforeReference; lock (captured) requestsBeforeReference = captured.Count;
+            await Json(admin, "/api/web/skills/web.text-to-image/invoke", JsonSerializer.Serialize(new { prompt = "reference", aspectRatio = "1:1", idempotencyKey = "unsupported-image-ref", chatSessionId = attachmentSession, referenceAttachmentIds = new[] { imageAttachment } }), 400);
+            lock (captured) Assert(captured.Count == requestsBeforeReference, "unsupported reference blocked before provider request");
+            var imageJob = await Json(admin, "/api/web/skills/web.text-to-image/invoke", "{\"prompt\":\"offline image\",\"aspectRatio\":\"9:16\",\"idempotencyKey\":\"api-image\"}");
+            for (var i = 0; i < 100 && imageJob.GetProperty("state").GetString() is "Queued" or "Running"; i++)
+            { await Task.Delay(50); imageJob = await Json(admin, "/api/web/jobs/" + imageJob.GetProperty("jobId").GetString()); }
+            Assert(imageJob.GetProperty("state").GetString() == "Succeeded" && imageJob.GetProperty("outputs")[0].GetProperty("role").GetString() == "image", "API image uses existing job assets");
+            lock (captured) Assert(captured.Any(p => p.TryGetProperty("size", out var size) && size.GetString() == "864x1536"), "chosen portrait ratio reaches shared image provider");
+            using (var imageOutput = await admin.GetAsync("/api/web/jobs/" + imageJob.GetProperty("jobId").GetString() + "/outputs/0"))
+                Assert(imageOutput.IsSuccessStatusCode, "API image output available through owned job route");
+            var unlockedCanvas = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(canvasPath))!;
+            unlockedCanvas["Canvas"]!["Nodes"]!.AsArray().Single(n => n!["Id"]!.GetValue<Guid>() == nodeId)!["IsLocked"] = false;
+            File.WriteAllText(canvasPath, unlockedCanvas.ToJsonString());
+            foreach (var generationSkill in new[] { "web.text-to-video", "web.text-to-image" })
+            foreach (var canvasMode in new[] { "readonly", "approval", "auto" })
+            {
+                var generatedBefore = File.ReadAllBytes(canvasPath);
+                var generated = await Proposal(canvasMode, SkillOutput(generationSkill));
+                var generatedSession = await Json(admin, "/api/web/chat/sessions/" + generated.Session);
+                Assert(generatedSession.GetProperty("jobIds").GetArrayLength() == 1, canvasMode + " conversation submits generation");
+                var generatedId = generatedSession.GetProperty("jobIds")[0].GetGuid();
+                Task<JsonElement>? concurrentReply = null;
+                if (canvasMode == "readonly")
+                {
+                    mode = "slow"; modelText = "继续沟通";
+                    concurrentReply = Send(generated.Session, "{\"text\":\"生成期间继续聊\",\"mode\":\"readonly\"}");
+                }
+                JsonElement generatedJob = default;
+                for (var i = 0; i < 100; i++)
+                {
+                    generatedJob = await Json(admin, "/api/web/jobs/" + generatedId);
+                    if (generatedJob.GetProperty("state").GetString() == "Succeeded") break;
+                    await Task.Delay(100);
+                }
+                Assert(generatedJob.GetProperty("state").GetString() == "Succeeded" && generatedJob.GetProperty("outputs").GetArrayLength() == 1, canvasMode + " actual successful output");
+                Assert(generatedJob.GetProperty("targetNodeId").GetGuid() == nodeId && generatedJob.GetProperty("attachmentState").GetString() == "none", canvasMode + " no background attachment target");
+                JsonElement completedMessage = default;
+                for (var i = 0; i < 100; i++)
+                {
+                    generatedSession = await Json(admin, "/api/web/chat/sessions/" + generated.Session);
+                    completedMessage = generatedSession.GetProperty("messages").EnumerateArray().Single(m => m.GetProperty("id").GetString() == generated.Message);
+                    if (completedMessage.GetProperty("skillState").GetString() == "completed") break;
+                    await Task.Delay(100);
+                }
+                if (concurrentReply is not null)
+                {
+                    await concurrentReply; mode = "success";
+                    generatedSession = await Json(admin, "/api/web/chat/sessions/" + generated.Session);
+                    Assert(generatedSession.GetProperty("messages").GetArrayLength() == 4 && generatedSession.GetProperty("messages")[3].GetProperty("content").GetString() == "继续沟通", "background completion preserves concurrent streaming messages");
+                }
+                Assert(completedMessage.GetProperty("skillState").GetString() == "completed" && completedMessage.GetProperty("actions").EnumerateArray().Any(a => a.GetProperty("kind").GetString() == "attach_asset"), canvasMode + " successful output appends real canvas action");
+                if (canvasMode == "readonly")
+                {
+                    Assert(generatedBefore.SequenceEqual(File.ReadAllBytes(canvasPath)), "readonly output never writes canvas");
+                    await Json(admin, ActionPath(generated, "commit"), "{}", 403);
+                }
+                else
+                {
+                    if (canvasMode == "approval")
+                    {
+                        Assert(generatedBefore.SequenceEqual(File.ReadAllBytes(canvasPath)), "approval output waits for existing canvas confirmation");
+                        await Json(admin, ActionPath(generated, "preview"), "{}");
+                        await Json(admin, ActionPath(generated, "commit"), "{}");
+                    }
+                    else Assert(completedMessage.GetProperty("actionState").GetString() == "committed", "auto output uses shared commit without confirmation");
+                    var persisted = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(canvasPath))!;
+                    Assert(persisted["Canvas"]!["Nodes"]!.AsArray().Single(n => n!["Id"]!.GetValue<Guid>() == nodeId)!["Attachments"]!.AsArray().Any(a => a!["Reference"]!.GetValue<string>() == generatedJob.GetProperty("outputs")[0].GetProperty("ref").GetString()), canvasMode + " generated media persists on selected node");
+                    await Json(admin, ActionPath(generated, "undo"), "{}");
+                    var undoneCanvas = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(canvasPath))!;
+                    Assert(!undoneCanvas["Canvas"]!["Nodes"]!.AsArray().Single(n => n!["Id"]!.GetValue<Guid>() == nodeId)!["Attachments"]!.AsArray().Any(a => a!["Reference"]!.GetValue<string>() == generatedJob.GetProperty("outputs")[0].GetProperty("ref").GetString()), canvasMode + " attachment undo removes generated media");
+                    // 保存会补齐旧画布缺省字段；按同一持久化模型比较所有内容，仅允许修订号递增。
+                    var originalState = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(generatedBefore)!;
+                    var undoneState = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(File.ReadAllBytes(canvasPath))!;
+                    var originalCanvas = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(originalState with { Revision = undoneState.Revision }))!;
+                    var restoredCanvas = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(undoneState))!;
+                    Assert(System.Text.Json.Nodes.JsonNode.DeepEquals(originalCanvas, restoredCanvas), canvasMode + " undo restores all canvas content with a new revision");
+                    var undoneBytes = File.ReadAllBytes(canvasPath);
+                    await Task.Delay(1200);
+                    Assert(undoneBytes.SequenceEqual(File.ReadAllBytes(canvasPath)), "completed worker does not reattach undone media");
+                }
+                modelText = "回答";
+                await Send(generated.Session, "{\"text\":\"生成结果是什么\"}");
+                Assert(captured.Last().ToString().Contains("Succeeded") && captured.Last().ToString().Contains("asset://"), "successful output resource enters conversation context");
+            }
+            var referenceState = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(File.ReadAllBytes(canvasPath))!;
+            var referenceEntities = new[] { YEEYEEYEE.Desktop.EntityKind.Character, YEEYEEYEE.Desktop.EntityKind.Prop, YEEYEEYEE.Desktop.EntityKind.Scene }
+                .Select(kind => new YEEYEEYEE.Desktop.WorkflowEntity { Name = "Reference " + kind, Kind = kind, ManagedByProject = true }).ToArray();
+            foreach (var entity in referenceEntities) { entity.Variants.Clear(); entity.Variants.Add(new YEEYEEYEE.Desktop.WorkflowEntityVariant()); }
+            var referenceShot = new YEEYEEYEE.Desktop.WorkflowNode { Category = YEEYEEYEE.Desktop.NodeCategory.Storyboard, Title = "Required three references",
+                AssetRequirements = new() { Character = YEEYEEYEE.Desktop.AssetNeed.Required, Prop = YEEYEEYEE.Desktop.AssetNeed.Required, Scene = YEEYEEYEE.Desktop.AssetNeed.Required } };
+            foreach (var entity in referenceEntities) referenceShot.References.Add(new() { EntityId = entity.Id, VariantId = entity.Variants[0].Id });
+            referenceState.Canvas.Entities.AddRange(referenceEntities); referenceState.Canvas.Nodes.Add(referenceShot);
+            var referenceLibrary = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.ProjectEntityFile>(File.ReadAllBytes(entitiesPath), new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            referenceLibrary.Entities.AddRange(referenceEntities);
+            void SaveReferences() { File.WriteAllText(entitiesPath, JsonSerializer.Serialize(referenceLibrary, new JsonSerializerOptions(JsonSerializerDefaults.Web))); File.WriteAllText(canvasPath, JsonSerializer.Serialize(referenceState)); }
+            SaveReferences();
+            var jobCountBefore = (await Json(admin, "/api/web/jobs")).GetProperty("jobs").GetArrayLength();
+            string ReferenceRequest(string key) => JsonSerializer.Serialize(new { prompt = "three references", aspectRatio = "1:1", idempotencyKey = key, targetNodeId = referenceShot.Id });
+            await Json(admin, "/api/web/skills/web.text-to-image/invoke", ReferenceRequest("missing-entity-images"), 409);
+            Assert((await Json(admin, "/api/web/jobs")).GetProperty("jobs").GetArrayLength() == jobCountBefore, "missing entity images creates no job");
+            foreach (var entity in referenceEntities)
+            {
+                entity.Variants[0].Attachments.Add(new() { Kind = YEEYEEYEE.Desktop.AttachmentKind.Image, Reference = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=" });
+                entity.Variants[0].EnsureInitialVersion();
+            }
+            SaveReferences();
+            await Json(admin, "/api/web/skills/web.text-to-image/invoke", ReferenceRequest("zero-entity-capacity"), 409);
+            Assert((await Json(admin, "/api/web/jobs")).GetProperty("jobs").GetArrayLength() == jobCountBefore, "zero capacity creates no job");
+            imageConfig["ImageMaxReferenceImages"] = 3; imageConfig["ImageModel"] = "mock-reference-image"; File.WriteAllText(configPath, imageConfig.ToJsonString());
+            var threeJob = await Json(admin, "/api/web/skills/web.text-to-image/invoke", ReferenceRequest("all-three-entity-images"));
+            for (var i = 0; i < 100 && threeJob.GetProperty("state").GetString() is "Queued" or "Running"; i++)
+            { await Task.Delay(50); threeJob = await Json(admin, "/api/web/jobs/" + threeJob.GetProperty("jobId").GetString()); }
+            Assert(threeJob.GetProperty("state").GetString() == "Succeeded", "three references generates successfully");
+            lock (referenceCounts) Assert(referenceCounts.Last() == 3, "actual image HTTP request contains all three required references");
+            Console.WriteLine("Entity reference generation regression passed: missing images and zero capacity create no jobs, all three images reach actual provider request");
+            await WaitAttachment(threeJob.GetProperty("jobId").GetGuid(), state => state == "attached");
+            var outputFixture = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.RecentCanvasState>(File.ReadAllBytes(canvasPath))!;
+            var outputNode = outputFixture.Canvas.Nodes.Single(n => n.Id == nodeId);
+            outputNode.Category = YEEYEEYEE.Desktop.NodeCategory.Prop;
+            outputNode.References.Clear(); outputNode.References.Add(new() { EntityId = referenceEntities[1].Id, VariantId = referenceEntities[1].Variants[0].Id });
+            File.WriteAllText(canvasPath, JsonSerializer.Serialize(outputFixture));
+            foreach (var outputMode in new[] { "readonly", "approval", "auto" })
+            {
+                var outputLibraryBefore = File.ReadAllBytes(entitiesPath);
+                var versionBefore = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.ProjectEntityFile>(outputLibraryBefore, new JsonSerializerOptions(JsonSerializerDefaults.Web))!.Entities.Single(e => e.Id == referenceEntities[1].Id).Variants[0].CurrentVersion;
+                var generated = await Proposal(outputMode, SkillOutput("web.text-to-image"));
+                JsonElement outputMessage = default;
+                for (var i = 0; i < 100; i++)
+                {
+                    var outputSession = await Json(admin, "/api/web/chat/sessions/" + generated.Session);
+                    outputMessage = outputSession.GetProperty("messages")[1];
+                    if (outputMessage.GetProperty("skillState").GetString() == "completed") break;
+                    await Task.Delay(100);
+                }
+                Assert(outputMessage.GetProperty("skillState").GetString() == "completed", "entity output finishes " + outputMode);
+                if (outputMode == "readonly") Assert(outputLibraryBefore.SequenceEqual(File.ReadAllBytes(entitiesPath)), "readonly leaves entity library unchanged");
+                else
+                {
+                    if (outputMode == "approval")
+                    {
+                        Assert(outputLibraryBefore.SequenceEqual(File.ReadAllBytes(entitiesPath)), "approval waits before entity commit");
+                        // 产物已回挂（附件动作是服务端追加的）：先按最新动作预检，再提交。
+                        await Json(admin, ActionPath(generated, "preview"), "{}");
+                        await Json(admin, ActionPath(generated, "commit"), "{}");
+                    }
+                    var committedVariant = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.ProjectEntityFile>(File.ReadAllBytes(entitiesPath), new JsonSerializerOptions(JsonSerializerDefaults.Web))!.Entities.Single(e => e.Id == referenceEntities[1].Id).Variants[0];
+                    Assert(committedVariant.CurrentVersion == versionBefore + 1 && committedVariant.Attachments[0].Reference.StartsWith("asset://"), "entity image commits authoritative variant version " + outputMode);
+                    if (outputMode == "approval")
+                    {
+                        var referencedCanvas = new YEEYEEYEE.Desktop.RecentCanvasState();
+                        var referencedNode = new YEEYEEYEE.Desktop.WorkflowNode();
+                        referencedNode.References.Add(new() { EntityId = referenceEntities[1].Id, VariantId = committedVariant.Id, VariantVersionId = committedVariant.Versions.Single(v => v.Number == committedVariant.CurrentVersion).Id });
+                        referencedCanvas.Canvas.Nodes.Add(referencedNode);
+                        var referencedPath = Path.Combine(Path.GetDirectoryName(canvasPath)!, "undo-reference-fixture.json");
+                        File.WriteAllText(referencedPath, JsonSerializer.Serialize(referencedCanvas));
+                        var committedBytes = File.ReadAllBytes(entitiesPath);
+                        await Json(admin, ActionPath(generated, "undo"), "{}", status: 409);
+                        Assert(committedBytes.SequenceEqual(File.ReadAllBytes(entitiesPath)), "undo preserves externally referenced generated version");
+                        File.Delete(referencedPath);
+                    }
+                    await Json(admin, ActionPath(generated, "undo"), "{}");
+                    var restoredVariant = JsonSerializer.Deserialize<YEEYEEYEE.Desktop.ProjectEntityFile>(File.ReadAllBytes(entitiesPath), new JsonSerializerOptions(JsonSerializerDefaults.Web))!.Entities.Single(e => e.Id == referenceEntities[1].Id).Variants[0];
+                    Assert(restoredVariant.CurrentVersion == versionBefore && restoredVariant.Attachments.Count == 1, "undo restores authoritative entity variant " + outputMode);
+                }
+            }
+            Console.WriteLine("Entity output regression passed: unique bound target, authoritative version commit, readonly/approval/auto and undo");
             var attachmentScene = await Json(admin, "/api/web/scene");
             var attachmentNode = await Json(admin, "/api/web/records", JsonSerializer.Serialize(new { baseRevision = attachmentScene.GetProperty("revision").GetInt64(), recordType = "general", title = "Attachment fixture" }));
             var attachmentNodeId = attachmentNode.GetProperty("nodeId").GetGuid();
+            // 节点菜单里的「出视频」能不能点，取决于这份计划里的 canRun：视频链路在这个 fixture 里是配好的，
+            // 所以一个**写了内容**的分镜必须拿到「可跑」的出视频建议——否则菜单那一项永远灰着，等于没接。
+            var planScene = await Json(admin, "/api/web/scene");
+            var storyboardNode = await Json(admin, "/api/web/records", JsonSerializer.Serialize(new { baseRevision = planScene.GetProperty("revision").GetInt64(), recordType = "storyboard", title = "镜头 A" }));
+            var storyboardNodeId = storyboardNode.GetProperty("nodeId").GetGuid();
+            var storyboardScene = await Json(admin, "/api/web/scene");
+            await Json(admin, "/api/web/records/" + storyboardNodeId, JsonSerializer.Serialize(new { baseRevision = storyboardScene.GetProperty("revision").GetInt64(), title = "镜头 A", content = "主角推门进城，雨夜霓虹" }), method: "PUT");
+            var storyboardPlan = await Json(admin, $"/api/web/records/{storyboardNodeId}/assist");
+            var storyboardVideo = storyboardPlan.GetProperty("suggestions").EnumerateArray()
+                .Single(item => item.GetProperty("id").GetString() == "storyboard-video");
+            Assert(storyboardVideo.GetProperty("canRun").GetBoolean() && storyboardVideo.GetProperty("blocked").GetString()!.Length == 0,
+                "configured video link makes the storyboard video suggestion runnable: " + storyboardVideo);
             var attachedJob = await Json(admin, "/api/web/skills/web.text-to-video/invoke", JsonSerializer.Serialize(new { prompt = "mock attach video", seconds = 2, idempotencyKey = "attach-success", targetNodeId = attachmentNodeId }));
             var attachedJobId = attachedJob.GetProperty("jobId").GetGuid();
             await WaitAttachment(attachedJobId, state => state == "attached");
@@ -526,10 +1273,20 @@ internal static class ChatRegression
             var editScene = await Json(admin, "/api/web/scene");
             await Json(admin, "/api/web/records/" + attachmentNodeId, JsonSerializer.Serialize(new { baseRevision = editScene.GetProperty("revision").GetInt64(), title = "Later user edit", content = "Must survive background output" }), method: "PUT");
             var editedBytes = File.ReadAllBytes(canvasPath);
-            var blockedOutput = await WaitAttachment(conflictJob.GetProperty("jobId").GetGuid(), state => state.Contains("REVISION_CONFLICT"));
-            Assert(blockedOutput.GetProperty("state").GetString() == "Succeeded" && blockedOutput.GetProperty("outputs").GetArrayLength() == 1, "conflicting output retained in job");
-            Assert(File.ReadAllBytes(canvasPath).SequenceEqual(editedBytes), "revision conflict preserves later user edit bytes");
-            Console.WriteLine("Attachment background HTTP regression passed: real MP4 fixture output, canvas persistence, owner isolation, restart deduplication and later-edit revision conflict (local backend fixture)");
+            // 第二个任务是从**同一版**画布提交的，其间用户还改过这个节点。
+            // 回挂要按**当前快照**受保护地追加：用户那笔编辑与先前那件产物都留着——
+            // 既不被旧修订挡掉（那正是原先的缺陷），也不会被覆盖掉。
+            var appendedOutput = await WaitAttachment(conflictJob.GetProperty("jobId").GetGuid(), state => state == "attached");
+            Assert(appendedOutput.GetProperty("state").GetString() == "Succeeded"
+                && appendedOutput.GetProperty("outputs").GetArrayLength() == 1, "second output stays retained in its own job");
+            var appendedCanvas = JsonDocument.Parse(File.ReadAllBytes(canvasPath)).RootElement;
+            var appendedNode = appendedCanvas.GetProperty("Canvas").GetProperty("Nodes").EnumerateArray()
+                .Single(node => node.GetProperty("Id").GetGuid() == attachmentNodeId);
+            Assert(appendedNode.GetProperty("Title").GetString() == "Later user edit"
+                && appendedNode.GetProperty("Content").GetString() == "Must survive background output", "appending keeps the later user edit");
+            Assert(appendedNode.GetProperty("Attachments").GetArrayLength() == 2, "second output appends beside the first without overwriting it");
+            Assert(!File.ReadAllBytes(canvasPath).SequenceEqual(editedBytes), "protected append writes the canvas exactly once");
+            Console.WriteLine("Attachment background HTTP regression passed: real MP4 fixture output, canvas persistence, owner isolation, restart deduplication and shared-baseline append preserving later user edits (local backend fixture)");
             var filmCanvas = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(canvasPath))!;
             var filmNodes = filmCanvas["Canvas"]!["Nodes"]!.AsArray();
             var attachedNode = filmNodes.Single(n => n!["Id"]!.GetValue<Guid>() == attachmentNodeId)!;
@@ -537,7 +1294,7 @@ internal static class ChatRegression
             var filmInputPath = videoReference.StartsWith("asset://", StringComparison.Ordinal)
                 ? Path.Combine(project, "assets", Path.GetFileName(videoReference[8..])) : videoReference;
             var filmInput = File.ReadAllBytes(filmInputPath);
-            // Keep the real encoded video and byte offsets; disable the unequal audio track as padding.
+            // 保留真实编码视频与字节偏移，将长度不等的音轨禁用为填充数据。
             for (var offset = 0; offset + 8 <= filmInput.Length;)
             {
                 var size = checked((int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(filmInput.AsSpan(offset, 4)));

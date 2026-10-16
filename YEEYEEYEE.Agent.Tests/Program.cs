@@ -1,4 +1,4 @@
-﻿using System.Buffers.Binary;
+using System.Buffers.Binary;
 using System.Drawing;
 using System.Net;
 using System.Net.Http;
@@ -21,6 +21,10 @@ var tests = new (string Name, Action Run)[]
     ("资产依赖：必要参考过滤、容量、失败隔离与请求快照", AssetDependencyRegression),
     ("资产需求：Agent确认、省略保留、旧数据与预览兼容", AssetRequirementsRegression),
     ("资产提交：缺文件和超容量不发送HTTP请求", ImageReferencesFailBeforeHttp),
+    ("图片诊断：提交异常阶段、底层原因与密钥脱敏", ImageSubmissionFailureDiagnostics),
+    ("图片诊断：下载异常阶段与签名URL脱敏", ImageDownloadFailureDiagnostics),
+    ("图片诊断：提交及下载超时携带阶段", ImageTimeoutDiagnostics),
+    ("图片诊断：响应重定向与正文脱敏", ImageResponseDiagnostics),
     ("一键资产前检：Unknown 在补图前整批阻断，状态变化重验", OneClickUnknownPreflight),
     ("视频资产前检：失效、版本缺失、图片缺失、采用首帧", VideoAssetPreflightReferences),
     ("视频资产前检：空镜不强制角色，无引用必须显式确认", VideoAssetPreflightEmptyShot),
@@ -318,8 +322,11 @@ var tests = new (string Name, Action Run)[]
     ("版本状态：五档（历史保留/已采纳/当前适用/需要确认/未来版本）与三个边界", CanvasNodeVersionStatusHasFiveStates),
     ("换画布不许把自身状态当来源：必须是真复制（旧 R16-1 清空画布那条路）", CanvasSwitchNeverAliasesItsOwnState),
     ("出视频：按「提交 → 轮询 → 下载」跑通并把文件落到资产目录", VideoProviderSubmitsPollsAndDownloads),
+    ("出视频：AnyAIAPI官方协议、参考图、路径与不重复提交", VideoProviderUsesOfficialProtocol),
+    ("出视频：无效charset回退、合法编码、失败阶段与安全诊断", VideoProviderHandlesInvalidCharset),
     ("出视频：一次只收一张图（首帧），多出来的参考图要如实说出来而不是静默丢", VideoProviderSaysWhatItCouldNotUse),
     ("出视频：任务失败带出接口原因，返回体不认识就把原文报出来（不产空文件）", VideoProviderReportsFailureAndUnknownShape),
+    ("出视频：单次状态查询挂住不判死，失败也带回接口站任务号", VideoProviderPollTimeoutDoesNotFailTheTask),
     ("出视频：密钥绝不外送到别的域（预签名 CDN 只收字节）", VideoProviderNeverSendsKeyToForeignHost),
     ("出视频：容器按文件头认（mp4 / webm / 认不出退回 mp4）", VideoFormatSnifferReadsContainer),
     ("出视频：地址 + 模型齐了才给真执行方，缺的时候指明去哪里配", VideoProviderFactoryNeedsEndpointAndModel),
@@ -2443,6 +2450,120 @@ static void AssetRequirementsRegression()
     Expect(old.AssetRequirements.Character == AssetNeed.Unknown && old.Content == "保留正文" && old.Attachments[0].Reference == "old.png", "旧数据内容保留，缺字段默认未知");
     var malformed = AgentActionParser.Parse("""{"actions":[{"kind":"update_node","target":"空镜","assetRequirements":{"character":true,"scene":"typo"}}]}""").Actions[0];
     Expect(malformed.AssetRequirements!.Character == AssetNeed.Unknown && malformed.AssetRequirements.Scene == AssetNeed.Unknown, "非法或遗漏需求不能虚构确认");
+}
+
+static void ImageSubmissionFailureDiagnostics()
+{
+    const string key = "diagnostic-key+/ secret";
+    foreach (var source in new[] { "request", "image", "chat" })
+    {
+        var calls = 0;
+        using var client = new HttpClient(new StubHttpHandler(message =>
+        {
+            calls++;
+            throw new HttpRequestException(HttpRequestError.SecureConnectionError,
+                $"TLS failed at {message.RequestUri}; key={key}; encoded={Uri.EscapeDataString(key)}",
+                new IOException("transport closed", new InvalidOperationException("certificate rejected",
+                    new Exception("fourth-level", new Exception("must-not-appear")))), HttpStatusCode.BadGateway);
+        }));
+        var provider = new OpenAiCompatibleImageProvider(new AiProviderConfig
+        {
+            ImageEndpoint = "https://api.example.invalid/v1", ImageModel = "test",
+            ImageApiKey = source == "image" ? key : "", ApiKey = source == "chat" ? key : ""
+        }, client);
+        var result = provider.GenerateAsync(new ImageGenerationRequest
+        {
+            Prompt = "测试", AuthStyle = "query", ApiKey = source == "request" ? key : ""
+        }).GetAwaiter().GetResult();
+        Expect(result.Status == ImageGenerationStatus.Failed && calls == 1, "提交异常应失败且不重试");
+        Expect(result.Error.Contains("提交请求") && result.Error.Contains("HttpRequestError=SecureConnectionError")
+            && result.Error.Contains("StatusCode=BadGateway"), "提交阶段和HTTP分类应保留");
+        Expect(result.Error.Contains("IOException: transport closed")
+            && result.Error.Contains("InvalidOperationException: certificate rejected")
+            && result.Error.Contains("Exception: fourth-level") && !result.Error.Contains("must-not-appear"), "底层异常链应保留且有深度上限");
+        Expect(!result.Error.Contains(key) && !result.Error.Contains(Uri.EscapeDataString(key))
+            && !result.Error.Contains("api_key="), "各密钥来源及提交URL都应脱敏");
+        Expect(result.Error.Contains("初始URI=https://api.example.invalid/v1/images/generations")
+            && result.Error.Contains("请求HTTP=1.1") && result.Error.Contains("耗时ms=")
+            && result.Error.Contains("未获得响应，无法判定重定向"), "握手失败记录安全连接信息且不臆断重定向");
+    }
+}
+
+static void ImageDownloadFailureDiagnostics()
+{
+    const string url = "https://download-user:download-password@cdn.example.invalid/image.png?X-Amz-Signature=signature-secret&token=download-token#fragment-secret";
+    var calls = 0;
+    using var client = new HttpClient(new StubHttpHandler(message =>
+    {
+        calls++;
+        if (message.Method == HttpMethod.Post)
+            return JsonResponse(JsonSerializer.Serialize(new { data = new[] { new { url } } }));
+        throw new HttpRequestException(HttpRequestError.ConnectionError, "download failed: " + url,
+            new IOException("connection reset at " + url + "\nAuthorization: Bearer other-authorization-secret"));
+    }));
+    var provider = new OpenAiCompatibleImageProvider(new AiProviderConfig
+    {
+        ImageEndpoint = "https://api.example.invalid/v1", ImageModel = "test", ImageApiKey = "active-key"
+    }, client);
+    var result = provider.GenerateAsync(new ImageGenerationRequest { Prompt = "测试" }).GetAwaiter().GetResult();
+    Expect(result.Status == ImageGenerationStatus.Failed && calls == 2, "仅提交及下载各一次，不重试");
+    Expect(result.Error.Contains("下载图片") && result.Error.Contains("HttpRequestError=ConnectionError")
+        && result.Error.Contains("StatusCode=无") && result.Error.Contains("IOException: connection reset"), "下载阶段及底层原因应保留");
+    Expect(result.Error.Contains("初始URI=https://cdn.example.invalid/image.png")
+        && result.Error.Contains("未获得响应，无法判定重定向"), "下载失败记录下载目标，不能沿用提交响应推断重定向");
+    foreach (var secret in new[] { "download-user", "download-password", "X-Amz-Signature", "signature-secret", "download-token", "fragment-secret", "other-authorization-secret" })
+        Expect(!result.Error.Contains(secret), "下载URL及授权信息不得泄露：" + secret);
+}
+
+static void ImageResponseDiagnostics()
+{
+    const string prompt = "private prompt body";
+    var calls = 0;
+    using var client = new HttpClient(new StubHttpHandler(_ =>
+    {
+        calls++;
+        return new HttpResponseMessage(HttpStatusCode.BadGateway)
+        {
+            Version = new Version(2, 0),
+            RequestMessage = new HttpRequestMessage(HttpMethod.Post,
+                "https://final-user:final-password@redirect.example.invalid:9443/render?token=final-secret#fragment-secret"),
+            Content = new StringContent(prompt + " data:image/png;base64,private-reference-body")
+        };
+    }));
+    var provider = new OpenAiCompatibleImageProvider(new AiProviderConfig
+    {
+        ImageEndpoint = "https://initial-user:initial-password@api.example.invalid:8443/v1", ImageModel = "test"
+    }, client);
+    var result = provider.GenerateAsync(new ImageGenerationRequest { Prompt = prompt }).GetAwaiter().GetResult();
+    Expect(calls == 1 && result.Status == ImageGenerationStatus.Failed, "502仅提交一次");
+    Expect(result.Error.Contains("初始URI=https://api.example.invalid:8443/v1/images/generations")
+        && result.Error.Contains("最终URI=https://redirect.example.invalid:9443/render")
+        && result.Error.Contains("响应HTTP=2.0") && result.Error.Contains("耗时ms="), "响应最终URI及版本可用于判断重定向");
+    foreach (var secret in new[] { "initial-user", "initial-password", "final-user", "final-password", "final-secret", "fragment-secret", prompt, "private-reference-body" })
+        Expect(!result.Error.Contains(secret), "连接诊断不记录凭据、签名或正文：" + secret);
+}
+
+static void ImageTimeoutDiagnostics()
+{
+    foreach (var downloading in new[] { false, true })
+    {
+        var calls = 0;
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+        {
+            calls++;
+            if (downloading && calls == 1)
+                return JsonResponse("""{"data":[{"url":"https://cdn.example.invalid/image.png?signature=secret"}]}""");
+            throw new TaskCanceledException("timeout");
+        }));
+        var provider = new OpenAiCompatibleImageProvider(new AiProviderConfig
+        {
+            ImageEndpoint = "https://api.example.invalid/v1", ImageModel = "test"
+        }, client);
+        var result = provider.GenerateAsync(new ImageGenerationRequest { Prompt = "测试" }).GetAwaiter().GetResult();
+        Expect(result.Status == ImageGenerationStatus.Failed && result.Error.Contains("超时")
+            && result.Error.Contains(downloading ? "下载图片" : "提交请求"), "超时应包含对应阶段");
+        Expect(calls == (downloading ? 2 : 1), "超时不应重试");
+    }
 }
 
 static void ImageReferencesFailBeforeHttp()
@@ -14385,6 +14506,173 @@ static void VideoProviderSubmitsPollsAndDownloads()
 	finally { HttpVideoProvider.PollInterval = previousInterval; }
 }
 
+static void VideoProviderHandlesInvalidCharset()
+{
+    using var stores = new IsolatedStores();
+    var previousInterval = HttpVideoProvider.PollInterval;
+    HttpVideoProvider.PollInterval = TimeSpan.Zero;
+    try
+    {
+        foreach (var charset in new[] { "invalid-video-charset", "\"invalid-video-charset\"", "\"utf-16\"", "" })
+        foreach (var failureStage in new[] { "", "提交", "查询视频任务状态", "下载视频" })
+        {
+            var posts = 0;
+            var polls = 0;
+            var downloads = 0;
+            HttpResponseMessage TextResponse(string text, bool failed)
+            {
+                var encoding = charset == "\"utf-16\"" ? Encoding.Unicode : Encoding.UTF8;
+                var bytes = encoding.GetPreamble().Concat(encoding.GetBytes(text)).ToArray();
+                var response = new HttpResponseMessage(failed ? HttpStatusCode.BadGateway : HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(bytes)
+                };
+                response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json")
+                {
+                    CharSet = charset.Length == 0 ? null : charset
+                };
+                return response;
+            }
+            var handler = new StubHttpHandler(message =>
+            {
+                string stage;
+                if (message.Method == HttpMethod.Post) { posts++; stage = "提交"; }
+                else if (message.RequestUri!.AbsolutePath.EndsWith("/content", StringComparison.Ordinal)) { downloads++; stage = "下载视频"; }
+                else { polls++; stage = "查询视频任务状态"; }
+                if (failureStage == stage)
+                    return TextResponse("服务拒绝 sk-test-private private-prompt private-negative https://cdn.example/video?token=private-signature Bearer private-auth", true);
+                if (stage == "提交") return TextResponse("""{"id":"charset-1","status":"queued"}""", false);
+                if (stage == "查询视频任务状态") return TextResponse("""{"id":"charset-1","status":"completed"}""", false);
+                return BytesResponse(Mp4Bytes());
+            });
+            var config = new AiProviderConfig { VideoEndpoint = "https://video.anyaiapi.top/v1", VideoModel = "sora-2", VideoApiKey = "sk-test-private" };
+            var result = new HttpVideoProvider(config, new HttpClient(handler)).GenerateAsync(new VideoGenerationRequest
+            {
+                Prompt = "private-prompt", NegativePrompt = "private-negative"
+            }).GetAwaiter().GetResult();
+            Expect(posts == 1 && polls == (failureStage == "提交" ? 0 : 1)
+                && downloads == (failureStage is "提交" or "查询视频任务状态" ? 0 : 1), "charset处理不得重复请求或在失败后继续");
+            if (failureStage.Length == 0)
+            {
+                Expect(result.Status == VideoGenerationStatus.Succeeded, "提交和轮询应兼容编码：" + result.Error);
+                Expect(File.ReadAllBytes(result.FilePath).SequenceEqual(Mp4Bytes()), "视频字节必须保持不变");
+            }
+            else
+            {
+                Expect(result.Status == VideoGenerationStatus.Failed && result.Error.Contains(failureStage)
+                    && result.Error.Contains("502") && result.Error.Contains("服务拒绝"), "诊断必须保留阶段、状态和正确解码正文：" + result.Error);
+                foreach (var secret in new[] { "sk-test-private", "private-prompt", "private-negative", "private-signature", "private-auth", "cdn.example" })
+                    Expect(!result.Error.Contains(secret), "失败诊断不得暴露私密值：" + secret);
+            }
+        }
+    }
+    finally { HttpVideoProvider.PollInterval = previousInterval; }
+}
+
+static void VideoProviderUsesOfficialProtocol()
+{
+	using var stores = new IsolatedStores();
+	var previousInterval = HttpVideoProvider.PollInterval;
+	HttpVideoProvider.PollInterval = TimeSpan.Zero;
+	var frame = Path.Combine(AssetStore.EnsureDirectory(), "reference.png");
+	File.WriteAllBytes(frame, new byte[] { 0x89, 0x50, 0x4E, 0x47 });
+	try
+	{
+		foreach (var scenario in new[]
+		{
+			(BaseUrl: "https://video.anyaiapi.top/v1", Path: "", Reference: false),
+			(BaseUrl: "https://video.anyaiapi.top/v1", Path: "", Reference: true),
+			(BaseUrl: "https://api.example.com/v1", Path: "/videos", Reference: false),
+			(BaseUrl: "https://api.example.com/v1", Path: "/v1/videos", Reference: true)
+		})
+		{
+			var urls = new List<string>();
+			var handler = new StubHttpHandler(message =>
+			{
+				urls.Add(message.RequestUri!.ToString());
+				if (message.Method == HttpMethod.Post)
+				{
+					Expect(urls[^1] == scenario.BaseUrl + "/videos", "官方提交路径应去重版本段");
+					if (scenario.Reference)
+					{
+						// 供应商前置的宝塔 WAF 只认浏览器 / curl 那种表单导线：每部分第一行必须是 Content-Disposition、
+						// name 与 filename 必须带引号、不得出现 filename*。缺一条就整份被拒（回 HTTP 200 的 HTML）。
+						var raw = message.Content!.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+						var wire = Encoding.UTF8.GetString(raw);
+						foreach (var field in new[]
+						{
+							"Content-Disposition: form-data; name=\"model\"\r\n\r\nsora-2\r\n",
+							"Content-Disposition: form-data; name=\"prompt\"\r\n\r\nrain\r\n",
+							"Content-Disposition: form-data; name=\"seconds\"\r\n\r\n4\r\n",
+							"Content-Disposition: form-data; name=\"size\"\r\n\r\n1280x720\r\n",
+							"Content-Disposition: form-data; name=\"reference_mode\"\r\n\r\nasset\r\n"
+						})
+							Expect(wire.Contains(field, StringComparison.Ordinal), "官方协议多部分字段导线：" + field);
+						Expect(wire.Contains("Content-Disposition: form-data; name=\"input_reference\"; filename=\"reference.png\"\r\nContent-Type: application/octet-stream\r\n\r\n", StringComparison.Ordinal),
+							"参考图字段必须先是带引号的 Content-Disposition，再是 Content-Type");
+						Expect(!wire.Contains("filename*", StringComparison.Ordinal), "导线不得出现 filename*");
+						Expect(!wire.Contains("Content-Type: text/plain", StringComparison.Ordinal), "文本字段不得带 Content-Type");
+						Expect(!wire.Contains("name=model", StringComparison.Ordinal), "name 的值必须带引号");
+						Expect(!wire.Contains("name=duration", StringComparison.Ordinal) && !wire.Contains("name=resolution", StringComparison.Ordinal)
+							&& !wire.Contains("name=image", StringComparison.Ordinal), "官方协议不得发送旧字段");
+						Expect(raw.AsSpan().IndexOf(File.ReadAllBytes(frame)) >= 0, "参考图字节应上传");
+					}
+					else
+					{
+						using var body = JsonDocument.Parse(message.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
+						Expect(body.RootElement.GetProperty("seconds").GetInt32() == 4, "JSON官方秒数字段");
+						Expect(body.RootElement.GetProperty("size").GetString() == "1280x720", "JSON官方尺寸字段");
+						Expect(!body.RootElement.TryGetProperty("duration", out _) && !body.RootElement.TryGetProperty("resolution", out _), "JSON不得发送旧字段");
+					}
+					return JsonResponse("""{"id":"official-1","status":"queued"}""");
+				}
+				if (message.RequestUri.AbsolutePath.EndsWith("/content", StringComparison.Ordinal))
+				{
+					var response = BytesResponse(Mp4Bytes());
+					response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("video/mp4") { CharSet = "invalid-video-charset" };
+					return response;
+				}
+				return JsonResponse("""{"id":"official-1","status":"completed"}""");
+			});
+			var config = new AiProviderConfig { VideoEndpoint = scenario.BaseUrl, VideoModel = "sora-2", VideoApiKey = "test-key" };
+			var result = new HttpVideoProvider(config, new HttpClient(handler)).GenerateAsync(new VideoGenerationRequest
+			{
+				Prompt = "rain", EndpointPath = scenario.Path, Seconds = 4, Width = 1280, Height = 720,
+				ReferenceImages = scenario.Reference ? new[] { frame } : Array.Empty<string>()
+			}).GetAwaiter().GetResult();
+			Expect(result.Status == VideoGenerationStatus.Succeeded, "官方协议全链路应成功：" + result.Error);
+			Expect(urls.SequenceEqual(new[] { scenario.BaseUrl + "/videos", scenario.BaseUrl + "/videos/official-1", scenario.BaseUrl + "/videos/official-1/content" }), "提交、轮询与下载路径均应正确");
+			Expect(File.ReadAllBytes(result.FilePath).SequenceEqual(Mp4Bytes()), "二进制下载不得文本解码");
+		}
+
+		foreach (var status in new[] { HttpStatusCode.BadRequest, HttpStatusCode.InternalServerError, HttpStatusCode.BadGateway })
+		{
+			foreach (var polling in new[] { false, true })
+			{
+				var posts = 0;
+				var polls = 0;
+				var handler = new StubHttpHandler(message =>
+				{
+					if (message.Method == HttpMethod.Post)
+					{
+						posts++;
+						if (polling) return JsonResponse("""{"id":"failed-1","status":"queued"}""");
+					}
+					else polls++;
+					return new HttpResponseMessage(status) { Content = new StringContent("rejected") };
+				});
+				var config = new AiProviderConfig { VideoEndpoint = "https://video.anyaiapi.top/v1", VideoModel = "sora-2" };
+				var result = new HttpVideoProvider(config, new HttpClient(handler)).GenerateAsync(new VideoGenerationRequest { Prompt = "x", Seconds = 4 }).GetAwaiter().GetResult();
+				Expect(result.Status == VideoGenerationStatus.Failed && result.Error.Contains(((int)status).ToString()), "HTTP失败应如实报告");
+				Expect(posts == 1 && polls == (polling ? 1 : 0), "官方400及500/502不得自动重试");
+			}
+		}
+		Expect(HttpVideoProvider.CollectionPathOf("/v1/videos/") == "/v1/videos", "版本化集合路径不得取成/v1");
+		Expect(HttpVideoProvider.CollectionPathOf("/v1/videos/generations") == "/v1/videos", "版本化旧提交路径仍取父级");
+	}
+	finally { HttpVideoProvider.PollInterval = previousInterval; }
+}
+
 /// <summary>
 /// 视频接口只收一张图（首帧），多带的参考图必须如实说出来。
 /// </summary>
@@ -14507,6 +14795,62 @@ static void VideoProviderReportsFailureAndUnknownShape()
 		Expect(retried.Status == VideoGenerationStatus.Failed && retried.Error.Contains("400"), "两次都不成要如实报 400：" + retried.Error);
 	}
 	finally { HttpVideoProvider.PollInterval = previousInterval; }
+}
+
+/// <summary>
+/// 状态查询**挂住不返回**时不能把整条任务判死，失败也必须带上接口站任务号。
+///
+/// 这条是真事故的回填：状态路由整个不答，单次请求一路挂到 HttpClient 的 5 分钟超时，
+/// 于是把一条**早已出好**的视频判成失败，任务记录里连任务号都没有，只能去接口站后台人工翻。
+/// 现在：单次挂住只算「这一次没答上来」，按轮询间隔再问；连续多次都不答才失败，
+/// 并且报错里要写清「连续几次没在多少秒内返回」与任务号。
+/// </summary>
+static void VideoProviderPollTimeoutDoesNotFailTheTask()
+{
+	using var stores = new IsolatedStores();
+	var previousInterval = HttpVideoProvider.PollInterval;
+	var previousTimeout = HttpVideoProvider.PollRequestTimeout;
+	HttpVideoProvider.PollInterval = TimeSpan.Zero;                                        // 测试不白等
+	HttpVideoProvider.PollRequestTimeout = TimeSpan.FromMilliseconds(80);                  // 单次上限压到 80ms
+	try
+	{
+		var config = new AiProviderConfig { Endpoint = "https://api.example.com/v1", ApiKey = "sk-secret", VideoModel = "veo-3" };
+		static bool IsSubmit(HttpRequestMessage request) =>
+			request.RequestUri!.AbsolutePath.EndsWith("/videos/generations", StringComparison.Ordinal);
+
+		// ① 前两次状态查询挂着不答，第三次给出结果：整条任务应当成功，并且带回任务号。
+		var polls = 0;
+		var flaky = new HangingStatusHandler(request =>
+		{
+			if (IsSubmit(request)) return JsonResponse("""{"id":"vid-hang","status":"queued"}""");
+			if (request.RequestUri!.AbsolutePath.EndsWith("/content", StringComparison.Ordinal)) return BytesResponse(Mp4Bytes());
+			polls++;
+			if (polls <= 2) return null;   // null = 这一次挂着不答
+			return JsonResponse("""{"id":"vid-hang","status":"completed","url":"https://api.example.com/v1/videos/vid-hang/content"}""");
+		});
+		var recovered = new HttpVideoProvider(config, new HttpClient(flaky))
+			.GenerateAsync(new VideoGenerationRequest { Prompt = "x", Seconds = 4 }).GetAwaiter().GetResult();
+		Expect(recovered.Status == VideoGenerationStatus.Succeeded, "单次状态查询挂住不该把整条任务判死：" + recovered.Error);
+		Expect(recovered.ExternalTaskId == "vid-hang", "成功结果要带回接口站任务号，实际：" + recovered.ExternalTaskId);
+		Expect(polls >= 3, "挂住的那两次之后应当再问一次，实际问了 " + polls + " 次");
+
+		// ② 一直不答：如实说「连续几次没在多少秒内返回」，带上任务号，且不许再报成「20 分钟」。
+		var dead = new HangingStatusHandler(request =>
+			IsSubmit(request) ? JsonResponse("""{"id":"vid-dead","status":"queued"}""") : null);
+		var failed = new HttpVideoProvider(config, new HttpClient(dead))
+			.GenerateAsync(new VideoGenerationRequest { Prompt = "x", Seconds = 4 }).GetAwaiter().GetResult();
+		Expect(failed.Status == VideoGenerationStatus.Failed, "一直不答应如实失败");
+		Expect(failed.FilePath.Length == 0, "失败时不得给出文件路径");
+		Expect(failed.Error.Contains("vid-dead"), "失败也要带上任务号，人工才查得到：" + failed.Error);
+		Expect(failed.Error.Contains("没有在"), "要说清是「单次没答上来」而不是别的：" + failed.Error);
+		Expect(!failed.Error.Contains("20 分钟"), "单次超时不得再报成整体 20 分钟：" + failed.Error);
+		Expect(failed.ExternalTaskId == "vid-dead", "失败结果也要带上任务号，实际：" + failed.ExternalTaskId);
+	}
+	finally
+	{
+		HttpVideoProvider.PollInterval = previousInterval;
+		HttpVideoProvider.PollRequestTimeout = previousTimeout;
+	}
 }
 
 /// <summary>
@@ -17199,6 +17543,26 @@ sealed class StubHttpHandler : HttpMessageHandler
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
         Task.FromResult(respond(request));
+}
+
+/// <summary>
+/// 「这次请求挂着不返回」的桩：<paramref name="respond"/> 返回 null 表示这一次不答，
+/// 一直等到取消令牌触发（真实现场：状态路由整个不响）。
+/// **它必须尊重令牌**——正是「单次请求有自己的上限」这件事要被钉住：
+/// 挂住只该算一次没答上来，不该把整条任务一起判死。
+/// </summary>
+sealed class HangingStatusHandler : HttpMessageHandler
+{
+    private readonly Func<HttpRequestMessage, HttpResponseMessage?> respond;
+
+    public HangingStatusHandler(Func<HttpRequestMessage, HttpResponseMessage?> respond) => this.respond = respond;
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (respond(request) is { } response) return response;
+        await Task.Delay(System.Threading.Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+        throw new InvalidOperationException("不可达：挂住的那条请求只会在取消时结束。");
+    }
 }
 
 /// <summary>

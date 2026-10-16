@@ -474,6 +474,21 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
         if (authStyle == "query" && apiKey.Length > 0)
             url += (url.Contains('?') ? "&" : "?") + "api_key=" + Uri.EscapeDataString(apiKey);
 
+        var stage = "准备请求";
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var initialUri = DiagnosticUri(Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri : null);
+        var requestVersion = http.DefaultRequestVersion.ToString();
+        string? finalUri = null;
+        string? responseVersion = null;
+        void ObserveResponse(HttpResponseMessage response)
+        {
+            finalUri = DiagnosticUri(response.RequestMessage?.RequestUri);
+            responseVersion = response.Version.ToString();
+        }
+        ImageGenerationResult DiagnosticFailure(string error) =>
+            Failed($"失败阶段：{stage}。初始URI={initialUri}；请求HTTP={requestVersion}；"
+                + (responseVersion is null ? "最终URI=未知（未获得响应，无法判定重定向）" : $"最终URI={finalUri}；响应HTTP={responseVersion}")
+                + $"；耗时ms={clock.ElapsedMilliseconds}。{RedactDiagnostic(error, apiKey, request.Prompt, request.NegativePrompt)}", model);
         try
         {
             using var message = new HttpRequestMessage(new HttpMethod(method), url);
@@ -510,15 +525,29 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
                 message.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
             }
 
+            stage = "提交请求";
+            requestVersion = message.Version.ToString();
             using var response = await http.SendAsync(message, cancellationToken);
+            ObserveResponse(response);
+            stage = "读取响应";
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
             if (!response.IsSuccessStatusCode)
-                return Failed($"图像接口返回 {(int)response.StatusCode}：{Trim(body, 300)}", model);
+                return DiagnosticFailure($"图像接口返回 {(int)response.StatusCode}（响应正文未记录）。");
 
-            var bytes = await ReadImageBytesAsync(body, cancellationToken);
+            stage = "解析图片";
+            var bytes = await ReadImageBytesAsync(body, cancellationToken, downloadUri =>
+            {
+                stage = "下载图片";
+                initialUri = DiagnosticUri(downloadUri);
+                requestVersion = http.DefaultRequestVersion.ToString();
+                finalUri = null;
+                responseVersion = null;
+                clock.Restart();
+            }, ObserveResponse);
             if (bytes is null || bytes.Length == 0)
-                return Failed("图像接口没有返回可用的图片数据。", model);
+                return DiagnosticFailure("图像接口没有返回可用的图片数据。");
 
+            stage = "保存图片";
             var path = SaveAssets(bytes);
             return new ImageGenerationResult
             {
@@ -531,27 +560,56 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
                     : string.Empty
             };
         }
-        catch (HttpRequestException error) { return Failed($"图像接口请求失败：{error.Message}", model); }
-        catch (TaskCanceledException) { return Failed("图像接口请求超时。", model); }
-        catch (IOException error) { return Failed($"保存图片失败：{error.Message}", model); }
+        catch (HttpRequestException error)
+        {
+            var details = $"图像接口请求失败（HttpRequestError={error.HttpRequestError}, StatusCode={error.StatusCode?.ToString() ?? "无"}）：";
+            Exception? current = error;
+            for (var depth = 0; current is not null && depth < 4; depth++, current = current.InnerException)
+                details += (depth == 0 ? "" : " → ") + current.GetType().Name + ": "
+                    + Trim(RedactDiagnostic(current.Message, apiKey), 300);
+            return DiagnosticFailure(details);
+        }
+        catch (TaskCanceledException) { return DiagnosticFailure("图像接口请求超时。"); }
+        catch (IOException error) { return DiagnosticFailure($"图片读写失败：{error.Message}"); }
         catch (JsonException error)
         {
-            return Failed($"图像接口返回的内容不是可识别的 JSON：{error.Message}", model);
+            return DiagnosticFailure($"图像接口返回的内容不是可识别的 JSON：{error.Message}");
         }
         catch (FormatException error)
         {
-            return Failed($"图像接口返回的图片数据格式错误：{error.Message}", model);
+            return DiagnosticFailure($"图像接口返回的图片数据格式错误：{error.Message}");
         }
         catch (InvalidOperationException error)
         {
-            return Failed($"图像接口返回的数据结构不符合预期：{error.Message}", model);
+            return DiagnosticFailure($"图像接口返回的数据结构不符合预期：{error.Message}");
         }
     }
 
     private static string ComposePrompt(string prompt, string negativePrompt) =>
         string.IsNullOrWhiteSpace(negativePrompt) ? prompt : $"{prompt}\n避免出现：{negativePrompt}";
 
-    private async Task<byte[]?> ReadImageBytesAsync(string body, CancellationToken cancellationToken)
+    private static string DiagnosticUri(Uri? uri) => uri is { IsAbsoluteUri: true }
+        ? new UriBuilder(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath).Uri.GetLeftPart(UriPartial.Path)
+        : "未知";
+
+    private static string RedactDiagnostic(string text, string apiKey, params string[] privateText)
+    {
+        foreach (var value in privateText)
+            if (!string.IsNullOrEmpty(value)) text = text.Replace(value, "[正文已隐藏]", StringComparison.Ordinal);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\b[a-z][a-z0-9+.-]*://[^\s""'<>]+", "[URL已隐藏]",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (apiKey.Length > 0)
+        {
+            text = text.Replace(Uri.EscapeDataString(apiKey), "[密钥已隐藏]", StringComparison.OrdinalIgnoreCase);
+            text = text.Replace(apiKey, "[密钥已隐藏]", StringComparison.Ordinal);
+        }
+        return System.Text.RegularExpressions.Regex.Replace(text,
+            @"\b(Authorization\s*[:=]\s*|Bearer\s+|x-api-key\s*[:=]\s*)[^\r\n""']+", "$1[授权已隐藏]",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    }
+
+    private async Task<byte[]?> ReadImageBytesAsync(string body, CancellationToken cancellationToken, Action<Uri> downloading,
+        Action<HttpResponseMessage> observeResponse)
     {
         using var document = JsonDocument.Parse(body);
         if (!document.RootElement.TryGetProperty("data", out var data) || data.GetArrayLength() == 0) return null;
@@ -559,7 +617,14 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
         if (first.TryGetProperty("b64_json", out var base64) && !string.IsNullOrWhiteSpace(base64.GetString()))
             return Convert.FromBase64String(base64.GetString()!);
         if (first.TryGetProperty("url", out var url) && !string.IsNullOrWhiteSpace(url.GetString()))
-            return await http.GetByteArrayAsync(url.GetString()!, cancellationToken);
+        {
+            var downloadUri = new Uri(url.GetString()!, UriKind.Absolute);
+            downloading(downloadUri);
+            using var response = await http.GetAsync(downloadUri, cancellationToken);
+            observeResponse(response);
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        }
         return null;
     }
 

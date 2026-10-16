@@ -63,7 +63,7 @@ export function ProjectWorkbench() {
       switchCanvas(next.id)
     } catch (e) { setNotice(errorMessage(e)) } finally { setBusy(false) }
   }
-  return <>
+  return <div className="df-project-workbench">
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 16px', background: '#171922', color: '#eee', flexWrap: 'wrap' }}>
       <label>项目与画布 <select aria-label="项目与画布" value={selected} disabled={busy} onChange={e => switchCanvas(e.target.value)}>
         <option value="">默认画布</option>
@@ -83,5 +83,5 @@ export function ProjectWorkbench() {
       {notice && <span role="alert">{notice}</span>}
     </div>
     {destination === null && <WebCanvasApp onSwitchBlocked={setSwitchBlocked} />}
-  </>
+  </div>
 }

@@ -64,7 +64,8 @@ internal sealed record EditLease(
     string DisplayName,
     string Client,
     DateTimeOffset AcquiredAt,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    Guid? OwnerId = null);
 
 internal sealed record EditLeaseResult(
     EditLeaseStatus Status,

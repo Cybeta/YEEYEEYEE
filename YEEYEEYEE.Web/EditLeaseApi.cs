@@ -17,7 +17,7 @@ internal static class EditLeaseApi
 {
     private static EditLeaseStore? store => WebProjectApi.Current is { } mode ? WebProjectApi.Leases(mode) : null;
     /// <summary>申请。请求体的字段名沿用仓库里其他接口的写法（camelCase，由框架按 Web 默认规则绑定）。</summary>
-    public sealed record AcquireRequest(string? Scope, Guid? TargetId, string? Client, bool? Force);
+    public sealed record AcquireRequest(string? Scope, Guid? TargetId, string? Client, bool? Force, Guid? OwnerId = null);
 
     private static IResult Error(int status, string code, string message) =>
         Results.Json(new { code, message }, statusCode: status);
@@ -121,8 +121,10 @@ internal static class EditLeaseApi
             if (force && user.Role != UserRole.Admin)
                 return Error(403, "ADMIN_REQUIRED", "强制接管别人的编辑锁需要管理员");
 
-            var acquired = store.Acquire(body.Scope!, body.TargetId, user, client, force);
-            // 幂等的重复申请（同一个人同一个目标）也会广播一次。代价是别人的一次 GET，
+            if (body.OwnerId == Guid.Empty)
+                return Error(400, "INVALID_REQUEST", "ownerId 不能是空标识");
+            var acquired = store.Acquire(body.Scope!, body.TargetId, user, client, force, body.OwnerId);
+            // 幂等的重复申请（同一个持有周期同一个目标）也会广播一次。代价是别人的一次 GET，
             // 换来的是服务端不用为了判断「是不是新锁」再读一遍锁文件——这笔账划算。
             if (acquired.Status == EditLeaseStatus.Ok)
                 hub.EditsChanged(force ? "force" : "acquire", WebAccessGuard.ActorName(context));

@@ -1,0 +1,83 @@
+.df-agent-preview-layer,
+.df-agent-preview-layer *,
+.df-agent-preview-legend {
+  pointer-events: none;
+}
+
+.df-agent-preview-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+}
+
+.df-agent-preview-layer svg {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.df-agent-preview-layer .is-added,
+.df-agent-preview-legend .is-added { --preview-color: #4ade80; }
+.df-agent-preview-layer .is-updated,
+.df-agent-preview-legend .is-updated { --preview-color: #facc15; }
+.df-agent-preview-layer .is-removed,
+.df-agent-preview-legend .is-removed { --preview-color: #f87171; }
+
+.df-agent-preview-card {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  box-sizing: border-box;
+  border: 2px dashed var(--preview-color);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--preview-color) 12%, var(--df-surface-1));
+  color: var(--df-text);
+  opacity: 0.9;
+}
+
+.df-agent-preview-label { color: var(--preview-color); font-size: 11px; }
+.df-agent-preview-layer line { stroke: var(--preview-color); stroke-width: 3; stroke-dasharray: 7 4; }
+.df-agent-preview-layer text { fill: var(--preview-color); font-size: 12px; paint-order: stroke; stroke: var(--df-surface-1); stroke-width: 4px; }
+.df-agent-preview-layer marker path { fill: var(--preview-color); }
+
+.df-agent-preview-legend {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--df-surface-1);
+  font-size: 12px;
+}
+.df-agent-preview-legend span { color: var(--preview-color); }
+
+/* 虚影卡上的附件 / 引用变化摘要：只有一行计数（详情在右侧审批区展开，虚影层不吃指针事件）。 */
+.df-agent-preview-asset-summary {
+  color: var(--preview-color);
+  font-size: 11px;
+}
+
+/* 审批区里可展开的附件 / 引用变更详情。三种变更各自一套色，与虚影、图例同一组值。 */
+.df-agent-preview-change-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+}
+.df-agent-preview-change-detail summary { cursor: pointer; font-size: 12px; }
+
+.df-preview-asset-node.is-added { --preview-color: #4ade80; }
+.df-preview-asset-node.is-updated { --preview-color: #facc15; }
+.df-preview-asset-node.is-removed { --preview-color: #f87171; }
+
+.df-preview-asset-change { color: var(--preview-color); flex: none; }
+
+/* 一行差异：文字在前、媒体在后；窄面板里换行而不是横向溢出。 */
+.df-preview-asset-row { gap: 6px; align-items: center; }
+.df-preview-asset-row img { width: 44px; height: 44px; }
