@@ -10,6 +10,14 @@ public sealed class WebChatMessage
     public string Role { get; set; } = "user";
     public string Content { get; set; } = "";
     public List<string> AttachmentIds { get; set; } = new();
+
+    /// <summary>
+    /// 发送时落下的附件元数据（名称 / MIME / 种类 / 字节数）。
+    ///
+    /// 为什么要存这一份：消息里本来只有附件 ID，历史回显时既说不出名字也说不出类型，
+    /// 界面就只能渲染成「查看附件 1」。字节仍然按 ID 走下载接口，这里只回显元数据。
+    /// </summary>
+    public List<ChatAttachmentInfo> Attachments { get; set; } = new();
     public string? TargetNodeId { get; set; }
     public string? TargetChapterId { get; set; }
     public string? Source { get; set; }

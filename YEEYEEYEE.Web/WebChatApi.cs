@@ -14,13 +14,19 @@ internal static class WebChatApi
     private static WebChatStore chatStore = null!;
     internal static WebChatStore.Attachment? Attachment(HttpContext c, string session, string id) => Owner(c) is { } owner && chatStore.Get(owner, session) is not null ? chatStore.GetAttachment(owner, session, id) : null;
     public sealed record SendRequest(string? Text, bool Retry = false, string Mode = "approval", string? ChapterId = null, string? NodeId = null, long? BaseRevision = null, string[]? AttachmentIds = null, string? Source = null, string? TargetNodeTitle = null);
-    public sealed record SkillInput(string? AspectRatio);
+    /// <summary>聊天内发起/调整一次技能调用时可以提交的东西：比例、任意声明参数、实体引用。</summary>
+    public sealed record SkillInput(string? AspectRatio, Dictionary<string, JsonElement>? Parameters = null, List<AgentEntityReference>? EntityReferences = null);
     private static readonly ConcurrentDictionary<string, CancellationTokenSource> Running = new();
     private static readonly System.Text.RegularExpressions.Regex EmptyJsonTail = new(
         @"(?:\A|\n)[ \t]*```json[^\S\r\n]*\r?\n\s*(?:\{\s*\}\s*)?(?:```\s*)?\z",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
         TimeSpan.FromMilliseconds(100));
     private static IResult Error(int status, string code, string message) => Results.Json(new { code, message }, statusCode: status);
+    /// <summary>
+    /// 转交给技能调用入口的请求体选项：与浏览器直连那条路用同一套（camelCase + 大小写不敏感）。
+    /// 两条路进来的是同一次逻辑调用，形状不一致会让幂等比对把同一批输入判成两批。
+    /// </summary>
+    private static readonly JsonSerializerOptions InvocationJson = new(JsonSerializerDefaults.Web);
     private static string? Owner(HttpContext c) => WebAccessGuard.CurrentUser(c) is { } user ? WebProjectApi.ScopedOwner(user.Id.ToString()) : null;
     private static YEEYEEYEE.Host.SingleMachineExecutionService execution = null!;
 
@@ -37,6 +43,67 @@ internal static class WebChatApi
     /// <summary>这条消息此刻**待执行**的那一批动作（已提交过的不再重复执行）。</summary>
     private static AgentAction[] PendingActions(WebChatMessage message) =>
         message.Actions.Skip(message.CommittedActionCount).ToArray();
+
+    /// <summary>把附件 ID 摊成消息里回显的元数据；取不到的（会话被删、ID 不属于本会话）直接跳过。</summary>
+    private static List<ChatAttachmentInfo> DescribeAttachments(WebChatStore store, string owner, string session, IEnumerable<string> ids) =>
+        ids.Select(id => store.GetAttachment(owner, session, id))
+            .Where(attachment => attachment is not null)
+            .Select(attachment => new ChatAttachmentInfo(attachment!.Id, attachment.Name, attachment.Type,
+                WebChatAttachments.KindOf(attachment.Type), attachment.Data.Length))
+            .ToList();
+
+    /// <summary>
+    /// 把 <c>parameters</c> 里与既有动作字段同名的值并回字段本身。
+    ///
+    /// 为什么要有这一步：同一个语义在协议里只能有一个来源——模型写在 parameters 里的 aspectRatio /
+    /// 参考图 / 时长，与写在平铺字段里的必须落到同一处；否则下游（比例校验、参考图校验、视频尺寸）
+    /// 读的是平铺字段，parameters 里那一份就成了「收下但没人看」的静默丢弃。
+    /// 类型 / 范围 / 枚举在调用前已由 WebChatSkillParameters 校验过，这里只做搬运。
+    /// </summary>
+    private static void ApplyTypedParameters(AgentAction action)
+    {
+        if (action.Parameters.Count == 0) return;
+        if (action.Parameters.TryGetValue("prompt", out var prompt) && prompt.ValueKind == JsonValueKind.String)
+            action.Content = prompt.GetString()!;
+        if (action.Parameters.TryGetValue("aspectRatio", out var ratio) && ratio.ValueKind == JsonValueKind.String)
+            action.AspectRatio = ratio.GetString()!;
+        if (action.Parameters.TryGetValue("seconds", out var seconds) && seconds.TryGetInt32(out var secondsValue))
+            action.Seconds = secondsValue;
+        if (action.Parameters.TryGetValue("width", out var width) && width.TryGetInt32(out var widthValue))
+            action.Width = widthValue;
+        if (action.Parameters.TryGetValue("height", out var height) && height.TryGetInt32(out var heightValue))
+            action.Height = heightValue;
+        if (action.Parameters.TryGetValue("referenceAttachmentIds", out var references) && references.ValueKind == JsonValueKind.Array)
+            action.ReferenceAttachmentIds = references.EnumerateArray()
+                .Where(item => item.ValueKind == JsonValueKind.String)
+                .Select(item => item.GetString()!.Trim()).ToArray();
+    }
+
+    /// <summary>
+    /// 用前端提交的那一整套可编辑参数**替换**这条动作上的旧值。
+    ///
+    /// 为什么是替换而不是合并：界面上显示的就是这一整套——「把关掉的框清空」必须是「不要这个值」。
+    /// 合并会让清空悄悄退回模型原来给的值，界面就在说谎。所以先清掉所有可编辑参数的旧值，
+    /// 再并入提交上来的。同一语义有两个来源（平铺字段与 parameters）时两边都要清，
+    /// 只清一处等于换个地方继续留着旧值。
+    /// 比例的平铺字段不清：它由技能入口的比例校验单独把关（IMAGE_RATIO_REQUIRED），
+    /// 而且前端每次都会把它一起提交上来。
+    /// </summary>
+    private static void ReplaceEditableParameters(AgentAction action, IReadOnlyDictionary<string, JsonElement> submitted)
+    {
+        foreach (var spec in WebChatSkillParameters.Declare(action.Target).Where(spec => spec.Editable))
+        {
+            action.Parameters.Remove(spec.Name);
+            switch (spec.Name)
+            {
+                case "seconds": action.Seconds = null; break;
+                case "width": action.Width = null; break;
+                case "height": action.Height = null; break;
+                case "referenceAttachmentIds": action.ReferenceAttachmentIds = Array.Empty<string>(); break;
+            }
+        }
+        foreach (var pair in submitted) action.Parameters[pair.Key] = pair.Value;
+    }
 
     /// <summary>
     /// 一批动作的身份指纹：提交时拿它核对「用户批准的是不是这一版」。
@@ -162,32 +229,37 @@ internal static class WebChatApi
         {
             if (Owner(c) is not { } owner || store.Get(owner, id) is null) return Error(404, "CHAT_NOT_FOUND", "会话不存在");
             if (!WebAccessGuard.Permissions(c).Contains("skill.invoke")) return Error(403, "CHAT_FORBIDDEN", "没有附件上传权限");
-            if (c.Request.ContentLength is null or > 5242880) return Error(413, "ATTACHMENT_TOO_LARGE", "附件最多5MiB，须提供长度");
-            var type = c.Request.ContentType?.Split(';')[0];
-            if (type is not ("image/png" or "image/jpeg" or "text/plain")) return Error(415, "ATTACHMENT_TYPE_INVALID", "仅支持PNG、JPEG与UTF-8纯文本");
+            // 类型、签名、大小上限都按**注册表**来：加一种类型只改一处，上传、下载、参考图校验与前端
+            // 可选类型不会各写一份而走散。认不出的类型明确拒绝，不按扩展名猜。
+            var type = WebChatAttachments.Normalize(c.Request.ContentType);
+            if (WebChatAttachments.Resolve(type) is not { } declared)
+                return Error(415, "ATTACHMENT_TYPE_INVALID", $"不支持的附件类型：{(type.Length == 0 ? "未声明 Content-Type" : type)}");
+            if (c.Request.ContentLength is null or > WebChatAttachments.HardLimit)
+                return Error(413, "ATTACHMENT_TOO_LARGE", $"附件最多{WebChatAttachments.HardLimit / 1024 / 1024}MiB，须提供长度");
             using var data = new MemoryStream(); var buffer = new byte[65536]; int read;
             while ((read = await c.Request.Body.ReadAsync(buffer, c.RequestAborted)) > 0)
             {
-                if (data.Length + read > 5242880) return Error(413, "ATTACHMENT_TOO_LARGE", "附件最多5MiB");
+                if (data.Length + read > declared.MaxBytes)
+                    return Error(413, "ATTACHMENT_TOO_LARGE", $"{declared.Kind}类附件最多{declared.MaxBytes / 1024}KiB");
                 await data.WriteAsync(buffer.AsMemory(0, read), c.RequestAborted);
             }
             var bytes = data.ToArray();
             if (bytes.Length == 0) return Error(400, "ATTACHMENT_EMPTY", "附件不能为空");
-            if (type == "image/png" && !bytes.AsSpan().StartsWith(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }) || type == "image/jpeg" && (bytes.Length < 3 || bytes[0] != 255 || bytes[1] != 216 || bytes[2] != 255))
-                return Error(415, "ATTACHMENT_TYPE_INVALID", "图片签名与类型不符");
-            if (type == "text/plain")
-            {
-                if (bytes.Length > 65536) return Error(413, "ATTACHMENT_TOO_LARGE", "文本附件最多64KiB");
-                try { if (new System.Text.UTF8Encoding(false, true).GetString(bytes).Contains('\0')) return Error(415, "ATTACHMENT_TYPE_INVALID", "文本不能包含二进制数据"); }
-                catch (System.Text.DecoderFallbackException) { return Error(415, "ATTACHMENT_TYPE_INVALID", "文本必须为UTF-8"); }
-            }
+            if (!WebChatAttachments.SignatureValid(bytes, type)) return Error(415, "ATTACHMENT_TYPE_INVALID", "附件内容与声明的类型不符");
             var name = Path.GetFileName(c.Request.Query["name"].ToString());
             if (string.IsNullOrWhiteSpace(name) || name.Length > 200) return Error(400, "ATTACHMENT_NAME_INVALID", "文件名须为1至200字");
-            try { var attachment = store.SaveAttachment(owner, id, name, type, bytes); return Results.Json(new { attachment.Id, attachment.Name, attachment.Type, size = bytes.Length }); }
+            try
+            {
+                var attachment = store.SaveAttachment(owner, id, name, type, bytes);
+                return Results.Json(new { attachment.Id, attachment.Name, attachment.Type, kind = WebChatAttachments.KindOf(type), size = bytes.Length });
+            }
             catch (InvalidOperationException ex) { return Error(409, "ATTACHMENT_LIMIT", ex.Message); }
         });
+        // 支持 Range：视频/音频要能拖动播放，图片照旧整段返回。
         app.MapGet("/api/web/chat/sessions/{id}/attachments/{attachmentId}", (HttpContext c, string id, string attachmentId) =>
-            Attachment(c, id, attachmentId) is { } attachment ? Results.Bytes(attachment.Data, attachment.Type) : Error(404, "ATTACHMENT_NOT_FOUND", "附件不存在"));
+            Attachment(c, id, attachmentId) is { } attachment
+                ? Results.Bytes(attachment.Data, attachment.Type, enableRangeProcessing: true)
+                : Error(404, "ATTACHMENT_NOT_FOUND", "附件不存在"));
 
         var hub = app.Services.GetRequiredService<CanvasEventHub>();
         async Task<IResult> StartSkill(HttpContext c, string owner, WebChatSession session, WebChatMessage message)
@@ -199,6 +271,45 @@ internal static class WebChatApi
             {
                 message.SkillState = "blocked"; message.SkillError = "SKILL_INPUT_UNSUPPORTED：Web聊天技能不支持该文件或实体引用参数";
                 store.Save(owner, session); return Error(400, "SKILL_INPUT_UNSUPPORTED", message.SkillError);
+            }
+            // 任意命名参数：先把 parameters 里与既有字段同名的值并回字段本身（同一语义只留一个来源），
+            // 再按**技能自己的声明**逐项校验。不认识 / 类型不符 / 枚举越界 / 缺必填都按稳定错误码明确
+            // 拒绝整条回复——收下再丢掉就是静默丢参数，那正是这个能力要消灭的东西。
+            ApplyTypedParameters(action);
+            var satisfied = new List<string> { "prompt" };
+            if (!string.IsNullOrEmpty(action.AspectRatio)) satisfied.Add("aspectRatio");
+            if (action.Seconds is not null) satisfied.Add("seconds");
+            if (action.Width is not null) satisfied.Add("width");
+            if (action.Height is not null) satisfied.Add("height");
+            if (action.ReferenceAttachmentIds.Count > 0) satisfied.Add("referenceAttachmentIds");
+            if (!WebChatSkillParameters.TryValidate(action.Target, action.Parameters, satisfied, out var accepted, out var parameterCode, out var parameterMessage, out var rejectedParameter))
+            {
+                // 出错的参数在卡片上有控件 → 留在 `failed`：用户改一下就能重新提交。
+                // 没有控件（模型自己编的键）→ 只能 `blocked`：界面上无论怎么改都过不了这一次。
+                message.SkillState = WebChatSkillParameters.IsEditable(action.Target, rejectedParameter) ? "failed" : "blocked";
+                message.SkillError = parameterCode + "：" + parameterMessage;
+                store.Save(owner, session); return Error(400, parameterCode!, parameterMessage!);
+            }
+            // 实体引用：只信 ID，显示名与版本信息由画布 / 项目库回填；解析不出来就整条拒绝。
+            // 引用在卡片上可增可删，所以这类失败一律留在可重试状态（用户重挑一个再提交）。
+            if (action.EntityReferences.Count > 0)
+            {
+                if (canvasStore is null)
+                {
+                    message.SkillState = "failed"; message.SkillError = "SKILL_ENTITY_INVALID：实体引用需要项目画布";
+                    store.Save(owner, session); return Error(400, "SKILL_ENTITY_INVALID", "实体引用需要项目画布");
+                }
+                try { action.EntityReferences = canvasStore.ResolveEntityReferences(action.EntityReferences).ToList(); }
+                catch (InvalidDataException ex)
+                {
+                    message.SkillState = "failed"; message.SkillError = "SKILL_ENTITY_INVALID：" + ex.Message;
+                    store.Save(owner, session); return Error(400, "SKILL_ENTITY_INVALID", ex.Message);
+                }
+                catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException)
+                {
+                    message.SkillState = "failed"; message.SkillError = "SKILL_ENTITY_INVALID：无法安全读取画布实体";
+                    store.Save(owner, session); return Error(409, "SKILL_ENTITY_INVALID", "无法安全读取画布实体");
+                }
             }
             var inputs = new Dictionary<string, object> { ["prompt"] = action.Content };
             if (message.TargetNodeId is { } nodeId)
@@ -228,7 +339,15 @@ internal static class WebChatApi
             }
             else if (action.Target == "web.text-to-video")
             {
-                if (action.Seconds is { } seconds) inputs["seconds"] = seconds;
+                // ComfyUI 那条视频路认的是 videoFrames（LTX 的 video_length 只吃 1+8k），秒数给它是
+                // **读不到的**——以前这里只放 seconds，用户要的时长就被静默丢掉了。所以按后端如实择一：
+                // 接口站那条路又明确拒收 videoFrames，两边都发必然被自己的服务端挡回来。
+                var comfyUiVideo = string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase);
+                if (action.Seconds is { } seconds)
+                {
+                    if (comfyUiVideo) inputs["videoFrames"] = WebChatSkillParameters.VideoFramesForSeconds(seconds);
+                    else inputs["seconds"] = seconds;
+                }
                 if (action.Width is { } width) inputs["width"] = width;
                 if (action.Height is { } height) inputs["height"] = height;
                 if (!string.IsNullOrEmpty(action.AspectRatio))
@@ -249,6 +368,12 @@ internal static class WebChatApi
                 message.SkillState = "blocked"; message.SkillError = "SKILL_INPUT_UNSUPPORTED：该技能不支持图片比例参数";
                 store.Save(owner, session); return Error(400, "SKILL_INPUT_UNSUPPORTED", message.SkillError);
             }
+            // 声明通过的扩展参数（negativePrompt、seed、model、videoFrames 等）原样带进执行层输入；
+            // 执行器读的就是这份 inputs，任务记录与幂等比对也以它为准。
+            // 参考图**不在这里落输入**：它是聊天侧的概念，下面按「确实有图」时才转成
+            // referenceImages/referenceAttachmentIds——留一个空的同名字段只会让下游多一个看不懂的键。
+            foreach (var pair in accepted) if (pair.Key != "referenceAttachmentIds") inputs[pair.Key] = pair.Value;
+            if (action.EntityReferences.Count > 0) inputs["entityReferences"] = action.EntityReferences;
             var images = action.ReferenceAttachmentIds.ToArray();
             var available = session.Messages.TakeWhile(m => m.Id != message.Id).Where(m => m.Role == "user").SelectMany(m => m.AttachmentIds).ToHashSet();
             if (images.Any(a => !available.Contains(a))) return Error(400, "REFERENCE_INVALID", "参考图必须是本条回复之前的用户附件");
@@ -259,7 +384,7 @@ internal static class WebChatApi
             inputs["idempotencyKey"] = message.SkillIdempotencyKey;
             message.SkillState = "preview";
             store.Save(owner, session);
-            var result = await invokeSkill(action.Target, c, JsonSerializer.SerializeToElement(inputs));
+            var result = await invokeSkill(action.Target, c, JsonSerializer.SerializeToElement(inputs, InvocationJson));
             var value = JsonSerializer.SerializeToElement((result as IValueHttpResult)?.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web));
             if (value.TryGetProperty("jobId", out var jobId) && jobId.TryGetGuid(out var job))
             {
@@ -289,6 +414,13 @@ internal static class WebChatApi
                 {
                     if (WebImageGeneration.Size(body.AspectRatio) is null) return Error(400, "IMAGE_RATIO_REQUIRED", "请选择图片比例");
                     message.SkillActions[0].AspectRatio = body.AspectRatio!;
+                }
+                // 用户在聊天内编辑的参数与实体引用按**界面显示的那一整套**替换：
+                // 清空的框、移除的引用都必须是「不要它了」，合并回旧值等于界面在说谎。
+                if (message.SkillActions.Count == 1)
+                {
+                    if (body.Parameters is not null) ReplaceEditableParameters(message.SkillActions[0], body.Parameters);
+                    if (body.EntityReferences is not null) message.SkillActions[0].EntityReferences = body.EntityReferences;
                 }
                 return await StartSkill(c, owner, session!, message);
             }
@@ -463,7 +595,7 @@ internal static class WebChatApi
                     var ids = body.AttachmentIds ?? Array.Empty<string>();
                     if (ids.Length > 8 || ids.Distinct().Count() != ids.Length || ids.Any(a => store.GetAttachment(o, id, a) is null)) { await Error(400, "ATTACHMENT_INVALID", "每条消息最多8个当前会话附件").ExecuteAsync(c); return; }
                     if (!config.SupportsImageInput && ids.Any(a => store.GetAttachment(o, id, a)!.Type.StartsWith("image/"))) { await Error(400, "CHAT_IMAGE_UNSUPPORTED", "当前模型不支持图片输入").ExecuteAsync(c); return; }
-                    session.Messages.Add(new WebChatMessage { Content = body.Text.Trim(), AttachmentIds = ids.ToList(), TargetNodeId = body.NodeId, TargetChapterId = body.ChapterId, BaseRevision = body.BaseRevision, Mode = body.Mode, Source = body.Source, TargetNodeTitle = body.TargetNodeTitle });
+                    session.Messages.Add(new WebChatMessage { Content = body.Text.Trim(), AttachmentIds = ids.ToList(), Attachments = DescribeAttachments(store, o, id, ids), TargetNodeId = body.NodeId, TargetChapterId = body.ChapterId, BaseRevision = body.BaseRevision, Mode = body.Mode, Source = body.Source, TargetNodeTitle = body.TargetNodeTitle });
                     if (session.Messages.Count == 1) session.Title = body.Text.Trim()[..Math.Min(40, body.Text.Trim().Length)];
                 }
                 if (body.Mode is not ("readonly" or "approval" or "auto")) { await Error(400, "CHAT_MODE_INVALID", "模式无效").ExecuteAsync(c); return; }
@@ -498,6 +630,8 @@ internal static class WebChatApi
                 skillContext += "\nWeb图片 API：" + (WebImageGeneration.IsConfigured(config) ? $"已配置，技能 web.text-to-image，模型 {config.ImageModel}，参考容量 {WebImageGeneration.ReferenceCapacity(config)}。" : "未配置，不可调用 web.text-to-image。") + "需保持人物、场景或道具外观时自主选参考图；纯创作可不带参考。需要参考但模型容量不足时必须提示用户选择支持参考图的模型，不得删掉参考继续生成。图片提议由宿主在聊天内请求用户选择比例后才提交。";
                 skillContext += "\nWeb技能协议：调用技能时必须在回复末尾输出一个json代码块，顶层是包含actions数组的对象，完整示例：{\"actions\":[{\"kind\":\"invoke_skill\",\"target\":\"web.text-to-image\",\"content\":\"完整提示词\",\"reason\":\"理由\",\"aspectRatio\":\"1:1\",\"referenceAttachmentIds\":[]}]}。不得输出裸动作对象或顶层数组。target必须是一个确切技能ID：web.text-to-image、comfyui.text-to-image或web.text-to-video。一次一个。图片aspectRatio最终以用户在聊天内选择为准；视频web.text-to-video支持seconds整数秒、width与height整数尺寸，或aspectRatio为16:9（1280x720）或9:16（720x1280），须按用户要求明确传递，如15秒传seconds:15。视频可用referenceAttachmentIds选择一张已上传图片作首帧；绑定节点未指定附件时宿主使用当前分镜采用图片作首帧，失效或缺失的必要资产会阻止调用。referenceAttachmentIds由你自主选择用户已上传的图片附件ID，不需要参考时为空；宿主不会自动传全部附件。生成成功后宿主会把媒体附件动作追加到本条回复的所选节点：readonly只沟通不写入，approval等待画布审批，auto通过同样的权限、锁、预检与修订校验后自动提交。附件动作由宿主根据真实产物创建，不要自行编造attach_asset或声称未提交产物已回挂；设定图可提供entityTarget和variantTarget完整ID作为输出目标，必须绑定发送时的选中节点；设定节点仅有唯一对应引用时宿主可解析，否则用ask请求明确绑定，不得按标题猜测。实体图槽与节点附件独立，节点有图不表示实体有图。分镜必需参考由服务端从绑定实体变体解析并全部提交，缺图、失效版本或容量不足会阻止创建任务，不得以纯文本降级。不支持任意路径或外部网络参考。已预授权且有skill.invoke权限的非画布技能在readonly、approval、auto中均可执行；服务端仍逐次检查预授权，未获授权返回SKILL_NOT_APPROVED，未知技能返回SKILL_NOT_FOUND。宿主返回任务ID仅表示已提交，只有任务Succeeded且有产物才能说生成完成。";
                 skillContext += "\n调用技能前必须先在本次回复中完整输出可解析且非空的动作协议，包含实际invoke_skill动作及必需参数；不得仅声明正在调用技能，不得输出空json代码块或空对象。若还缺少必要信息，输出有效ask而非声称任务已发起。只有宿主返回任务ID后才能说任务已提交。";
+                skillContext += "\nWeb技能参数：技能声明的参数放在动作的parameters对象里，键名与类型必须与声明一致。服务端逐项校验，不认识返回SKILL_PARAM_UNKNOWN、类型或范围不符返回SKILL_PARAM_TYPE、枚举越界返回SKILL_PARAM_INVALID、缺必填返回SKILL_PARAM_REQUIRED、该技能确实不支持该参数返回SKILL_INPUT_UNSUPPORTED；这些情况下整条回复都会被拒绝，不会静默忽略参数。当前声明：" + string.Join("；", new[] { WebImageGeneration.SkillId, "comfyui.text-to-image", "web.text-to-video" }.Select(skill => skill + "→" + WebChatSkillParameters.DescribeForModel(skill))) + "。";
+                skillContext += "\nWeb实体引用：需要把人物、场景、道具或项目节点作为结构化引用交给技能时，在动作里输出entityReferences数组，每项形如{\"kind\":\"character|scene|prop|node\",\"id\":\"完整GUID\",\"variantId\":\"可选\",\"versionId\":\"可选\"}。只写ID：显示名与版本由宿主按ID回填，写错名字不会被采信；引用解析不到、类型对不上或缺少ID时整条按SKILL_ENTITY_INVALID拒绝。";
                 history[0] = new AiChatMessage { Role = "user", Content = skillContext };
                 var reply = new WebChatMessage { Id = retryMessage?.Id ?? Guid.NewGuid().ToString("N"), Role = "assistant", State = "streaming", Model = config.Model, ContextWindow = config.ContextWindow, Mode = body.Mode, BaseRevision = contextRevision, TargetNodeId = body.NodeId, TargetChapterId = body.ChapterId, Source = body.Source, TargetNodeTitle = body.TargetNodeTitle };
                 session.Messages.Add(reply); store.Save(o, session);

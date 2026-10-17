@@ -303,7 +303,24 @@ internal sealed class VideoThumbnailService : IDisposable
             }
             catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException or FormatException or InvalidDataException) { result.TrySetException(error); }
         }
-        internal static string Page(string id) => """
+        public void Dispose()
+        {
+            if (disposed) return; disposed = true;
+            result?.TrySetCanceled();
+            view.WebMessageReceived -= OnMessage;
+            view.NavigationStarted -= OnNavigation; view.NewWindowRequested -= OnNewWindow;
+            session?.Dispose(); session = null;
+            window.Content = null; window.Close();
+        }
+    }
+
+    /// <summary>
+    /// 取帧页面：一段只碰本会话媒体地址的静态 HTML。取帧时间必须区分极短视频与常规视频——
+    /// 固定 0.5 秒会让短于 0.5 秒的片子永远取不到帧；时长读不出来、没有可用视频轨、解码失败、
+    /// 超时四条路都要**明确结束**并回一个原因，不许挂着等（宿主另有 20 秒预算，那是兜底不是唯一防线）。
+    /// 移到外层是为了让这条规则能在离线回归里被直接盯住（它本来就不依赖宿主的任何状态）。
+    /// </summary>
+    internal static string Page(string id) => """
             <!doctype html><html><head><meta charset="utf-8">
             <meta http-equiv="Content-Security-Policy" content="default-src 'none'; media-src 'self'; script-src 'nonce-thumbnail'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; connect-src 'none'">
             <style>html,body{margin:0;background:#000}video{width:640px;height:360px;object-fit:contain}</style></head><body>
@@ -318,14 +335,4 @@ internal sealed class VideoThumbnailService : IDisposable
             v.addEventListener('loadedmetadata',()=>{if(done)return;if(!Number.isFinite(v.duration)||v.duration<=0){send({error:'invalid duration'});return}const target=v.duration<1?v.duration/2:0.5;v.addEventListener('seeked',draw,{once:true});v.currentTime=target},{once:true});
             </script></body></html>
             """.Replace("__ID__", JsonSerializer.Serialize(id), StringComparison.Ordinal);
-        public void Dispose()
-        {
-            if (disposed) return; disposed = true;
-            result?.TrySetCanceled();
-            view.WebMessageReceived -= OnMessage;
-            view.NavigationStarted -= OnNavigation; view.NewWindowRequested -= OnNewWindow;
-            session?.Dispose(); session = null;
-            window.Content = null; window.Close();
-        }
-    }
 }

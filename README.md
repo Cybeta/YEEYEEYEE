@@ -4,7 +4,7 @@
 
 [![构建与测试](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/build.yml/badge.svg)](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/build.yml)
 
-YEEYEEYEE 把 **企划、章节、分镜、图片、视频和成片** 放在同一个项目里。角色、道具和场景作为设定被分镜引用，设定更新后提示受影响内容。当前源码准备版本为 **0.1.5.3**；发行状态以 [GitHub Releases](https://github.com/Cybeta/YEEYEEYEE/releases) 为准。
+YEEYEEYEE 把 **企划、章节、分镜、图片、视频和成片** 放在同一个项目里。角色、道具和场景作为设定被分镜引用，设定更新后提示受影响内容。当前源码版本为 **0.1.5.5**；发行状态以 [GitHub Releases](https://github.com/Cybeta/YEEYEEYEE/releases) 为准。
 
 ## 界面预览
 
@@ -19,6 +19,8 @@ YEEYEEYEE 把 **企划、章节、分镜、图片、视频和成片** 放在同�
 ### 下载运行
 
 从[最新发行版](https://github.com/Cybeta/YEEYEEYEE/releases/latest)下载 `win-x64.zip`，解压运行 `YEEYEEYEE.Desktop.Avalonia.exe`。需要 Windows、.NET 10 运行时和 Microsoft Edge WebView2 Runtime。建议放在可写目录，应用内更新需要替换程序文件。
+
+`0.1.5.4` 及更早的便携安装如果程序旁有 `Projects`、配置或密钥，请先按 [Desktop 进度与待办](docs/Desktop进度与待办.md#0154-首次升级与手动迁移) 手动迁移，不要直接点应用内升级。
 
 ### 从源码运行
 
@@ -70,7 +72,9 @@ dotnet run --project YEEYEEYEE.Web
 docker compose up -d --build
 ```
 
-Docker 默认 `http://localhost:8080`。首次启动创建管理员账号；公网部署前设置初始化令牌，配置反向代理和 HTTPS。创建/打开项目需配置可写的 `YEEYEEYEE__WebProjectsDirectory`，数据与配置要持久化。部署条件和待验收项见 [Web 进度与待办](docs/Web进度与待办.md)。
+Docker 默认 `http://localhost:8080`。首次启动创建管理员账号；公网部署前设置初始化令牌，配置反向代理和 HTTPS。创建/打开项目需配置可写的 `YEEYEEYEE__WebProjectsDirectory`，数据与配置要持久化。
+
+Windows ZIP 使用独立的版本目录与固定 `data` 目录：解压后先运行 `install-web.ps1 -InstallRoot <安装目录> [-LegacyDataDir <旧目录>]` 完成首次安装/旧布局迁移，日常用 `start-web.ps1` 启动；升级用 `upgrade-web.ps1 -ZipPath <新包> [-ExpectedSha256 <哈希>]`，回滚用 `rollback-web.ps1`。数据恢复会丢失备份之后的写入，必须显式确认，并且只接受带完成记录且文件校验通过的备份。完整命令见包内 `README-WEB.txt`，边界见 [Web 进度与待办](docs/Web进度与待办.md)。
 
 ## 资产与媒体
 

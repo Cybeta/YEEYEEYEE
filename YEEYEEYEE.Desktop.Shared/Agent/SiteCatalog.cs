@@ -130,6 +130,7 @@ public sealed class SiteWorkflow
 
     /// <summary>API 正文落在哪个文件（相对 <see cref="SiteCatalog.PayloadDirectory"/> 的文件名）。</summary>
     public string PayloadFile { get; set; } = string.Empty;
+    public string RawDraftFile { get; set; } = string.Empty;
 
     /// <summary>
     /// 导入体检的结论：这份工作流有几个必填输入是**我们转换时丢的**。
@@ -830,7 +831,7 @@ public static class SiteCatalog
                 var directory = PayloadDirectory(site.Id);
                 if (!System.IO.Directory.Exists(directory)) return 0;
                 var keep = new HashSet<string>(
-                    site.Workflows.Select(workflow => workflow.PayloadFile).Where(name => name.Length > 0),
+                    site.Workflows.SelectMany(workflow => new[] { workflow.PayloadFile, workflow.RawDraftFile }).Where(name => name.Length > 0),
                     StringComparer.OrdinalIgnoreCase);
                 foreach (var path in System.IO.Directory.EnumerateFiles(directory, "*.json"))
                 {

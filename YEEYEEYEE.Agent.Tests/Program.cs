@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using YEEYEEYEE.Core;
 using YEEYEEYEE.Desktop;
+using YEEYEEYEE.Desktop.Avalonia;
 using YEEYEEYEE.Host;
 
 // Agent 操作层的离线校验：提议解析、操作执行、审批预检、画布虚影预览、附件加载与多模态报文。
@@ -83,7 +84,12 @@ var tests = new (string Name, Action Run)[]
     ("更新：重启标记能原样存回（前一版 / 目标版 / 更新内容）", UpdateMarkerRoundTrips),
     ("更新：替换脚本只含 ASCII（PS5 会把无 BOM 的 UTF-8 当 ANSI 读）", UpdateSwapScriptIsAsciiOnly),
     ("更新：替换脚本实测——真换掉一个目录并留下结果文件", UpdateSwapScriptActuallyReplacesDirectory),
+    ("更新：用户数据搬不过去时退回旧版，原目录与工程原样保留", UpdateSwapScriptRestoresWhenUserDataCannotBeMoved),
+    ("更新：新版本启动失败时退回旧版，不留下半换状态", UpdateSwapScriptRestoresWhenNewVersionCannotStart),
     ("更新：代理交给平台（不许关掉 UseProxy、也不许自己塞一个代理）", UpdateClientLeavesProxyToTheSystem),
+    ("更新：分端发行后只挑桌面包，Web 包在前在后都不选、只有 Web 包时不更新", UpdatePackageSelectionPrefersDesktopOverWeb),
+    ("更新：只有 Web 包时说清「没有适用的桌面更新包」", UpdateSelfUpdateBlockerNamesWebOnlyRelease),
+    ("更新：下载并解压更新包（本地测试源），坏包与下载失败都明确报错", UpdateDownloadValidatesPackageOrFailsLoudly),
     ("出图批次：整批还在跑时单张一律不能操作（漏文件那条路的入口）", BatchSlotsAreNotActionableWhileRunning),
     ("出图开奖：按张数排布（一行最多 3 张 / 4 张 2×2 / 卡片固定 2:3 / 末行按自己的张数居中）", GachaCardLayoutIsPinnedByCount),
     ("出图开奖：分数 → 档位（9 分以上金 / 7-8 红 / 5-6 紫 / 3-4 蓝 / 2 分以下白；光点从金到白严格递减）", QualityTierFollowsScore),
@@ -368,6 +374,10 @@ var tests = new (string Name, Action Run)[]
     ("技能参考图：ref:N 按槽位寻址，三视图角色不再把道具/场景的下标推后", SkillReferenceRefIndexAddressesSlotsNotFlattenedImages),
     ("技能参考图：变体带多张图只占一个槽位（取第一张）", SkillReferenceSlotTakesFirstImagePerEntity),
     ("技能参考图：越界/槽位没图要报降级说明，不静默丢掉", SkillReferenceOutOfRangeIsReportedNotSilentlyDropped),
+    ("媒体边界：路径校验按支持范围放行与拒绝", MediaCoverPathValidationMatchesSupport),
+    ("媒体边界：令牌会话按 Range 服务字节、拒绝越权与释放文件句柄", MediaSessionServesBytesAndReleases),
+    ("媒体边界：封面取帧时间与失败降级（页面脚本规则）", MediaCoverPageRulesHandleShortAndBrokenMedia),
+    ("媒体边界：探测支持/损坏/空/截断样本，且不卡住", MediaProbeClassifiesSamplesWithoutHanging),
 };
 
 // 可按测试名或方法名筛选，便于只运行相关回归。
@@ -3162,12 +3172,14 @@ static void ComfyUiLibraryInstallKeepsUserChoices()
 
         var payloadDirectory = SiteCatalog.PayloadDirectory(site.Id);
         var payloadFiles = Directory.GetFiles(payloadDirectory, "*.json");
-        Expect(payloadFiles.Length == 4, "正文该按份落文件，实际 " + payloadFiles.Length + " 个");
+        Expect(payloadFiles.Length == 8, "四份工作流应各保存 API 正文和 UI 原稿，实际 " + payloadFiles.Length + " 个");
         foreach (var workflow in site.Workflows)
         {
             Expect(workflow.PayloadFile.Length > 0, "每份都要指向自己的正文文件：" + workflow.Key);
             var payload = SiteCatalog.LoadPayload(site.Id, workflow.PayloadFile);
             Expect(payload is not null && payload.Contains("\"class_type\""), "正文要读得回来：" + workflow.Key);
+            Expect(workflow.RawDraftFile != workflow.PayloadFile && workflow.RawDraftFile.StartsWith("ui.", StringComparison.Ordinal), "UI 原稿应独立保存：" + workflow.Key);
+            Expect(SiteCatalog.LoadPayload(site.Id, workflow.RawDraftFile) == result.RawDrafts[workflow.Key], "UI 原稿应原样读回：" + workflow.Key);
         }
 
         // 用户自己的取舍：关掉一份、并且把这个家族的推荐改到另一份上。
@@ -3232,15 +3244,16 @@ static void ComfyUiLibraryPrunesAndDeletesPayloads()
         Expect(site is not null && error.Length == 0, "落盘失败：" + error);
 
         var payloadDirectory = SiteCatalog.PayloadDirectory(site!.Id);
-        Expect(Directory.GetFiles(payloadDirectory, "*.json").Length == 2, "先要有两份正文");
+        Expect(Directory.GetFiles(payloadDirectory, "*.json").Length == 4, "先要有两份 API 正文和两份 UI 原稿");
 
         // ① 服务器上删了一份工作流 → 它留下的正文是孤儿。清掉，否则目录越滚越大，
         //    而且留着的是**旧图**：名字还在、内容已经不是那一份了。
         site.Workflows.RemoveAt(0);
         var removed = SiteCatalog.PrunePayloads(site);
-        Expect(removed == 1, "该清掉 1 个孤儿正文，实际 " + removed);
+        Expect(removed == 2, "该清掉同一工作流的孤儿正文和原稿，实际 " + removed);
         var remaining = Directory.GetFiles(payloadDirectory, "*.json");
-        Expect(remaining.Length == 1, "被引用的那份要活着，实际 " + remaining.Length);
+        Expect(remaining.Length == 2, "被引用的正文和原稿要保留，实际 " + remaining.Length);
+        Expect(remaining.Select(Path.GetFileName).ToHashSet().SetEquals(new[] { site.Workflows[0].PayloadFile, site.Workflows[0].RawDraftFile }), "保留的应恰好是剩余工作流的正文和原稿");
 
         // ② 手工丢进去的文件也算孤儿。
         var stray = Path.Combine(payloadDirectory, "stray.json");
@@ -9754,6 +9767,118 @@ static void UpdateCheckComparesVersionsAndReportsFailures()
 		"没有发行版信息时说的是「还没有发布」，不是「已经是最新」");
 }
 
+// 分端发行之后，同一个发行版里同时挂着桌面包与 Web 包，**两个都是 .zip**。
+// 「取第一个 zip」等于把挑哪个包交给上传顺序：顺序一变，桌面端就下到 Web 包，
+// 解压出来没有主程序，替换之后等于把安装目录搬空（见 UpdateInstaller 的三条安全前提）。
+/// <summary>
+/// 钉住更新包选择只认桌面包：Web 包不论排在前后都不能被选中，只有 Web 包时宁可不更新。
+/// </summary>
+static void UpdatePackageSelectionPrefersDesktopOverWeb()
+{
+	static ReleaseAsset zip(string name) => new(name, "https://example.com/" + name, 1);
+	static ReleaseInfo Release(params ReleaseAsset[] assets) =>
+		new("v0.1.5.4", "n", "b", "u", null, assets);
+
+	var webFirst = Release(zip("yeeeyee-web-0.1.5.4-win-x64.zip"), zip("yeeeyee-0.1.5.4-win-x64.zip"));
+	Expect(UpdateChecker.FindPackage(webFirst)?.Name == "yeeeyee-0.1.5.4-win-x64.zip",
+		"Web 包排在前面时也必须挑桌面包，实际 " + UpdateChecker.FindPackage(webFirst)?.Name);
+
+	var desktopFirst = Release(zip("yeeeyee-0.1.5.4-win-x64.zip"), zip("yeeeyee-web-0.1.5.4-win-x64.zip"));
+	Expect(UpdateChecker.FindPackage(desktopFirst)?.Name == "yeeeyee-0.1.5.4-win-x64.zip",
+		"桌面包排在前面时还是挑桌面包");
+
+	var explicitDesktop = Release(zip("yeeeyee-0.1.5.5-win-x64.zip"), zip("yeeeyee-desktop-0.1.5.5-win-x64.zip"));
+	Expect(UpdateChecker.FindPackage(explicitDesktop)?.Name == "yeeeyee-desktop-0.1.5.5-win-x64.zip",
+		"名字里明确带 desktop 记号的优先");
+
+	var onlyWeb = Release(zip("yeeeyee-web-0.1.5.4-win-x64.zip"));
+	Expect(UpdateChecker.FindPackage(onlyWeb) is null, "只有 Web 包时不能拿它顶替桌面包，宁可返回 null");
+
+	var webviewNamed = Release(zip("yeeeyee-webview-0.1.5.4-win-x64.zip"));
+	Expect(UpdateChecker.FindPackage(webviewNamed)?.Name == "yeeeyee-webview-0.1.5.4-win-x64.zip",
+		"webview 这类名字不是 Web 服务包，按词元切分不该被排除");
+
+	var exeOnly = Release(new ReleaseAsset("yeeeyee-0.1.5.4-win-x64.exe", "https://example.com/a.exe", 1));
+	Expect(UpdateChecker.FindPackage(exeOnly)?.Name == "yeeeyee-0.1.5.4-win-x64.exe", "没有 zip 时退回 exe");
+}
+
+// 「下载并解压更新包」是更新链路里唯一从外网取文件的一步，失败时必须明确报错，
+// 不能让调用方以为拿到了可用的包（换上去等于把安装目录搬空）。
+// 网络用现成的 StubHttpHandler 顶掉：不碰 GitHub，也不动正式发行资产。
+/// <summary>
+/// 钉住下载链路：桌面包能下载并解压出主程序；包里没有主程序、或服务端报错时都要抛出。
+/// </summary>
+static void UpdateDownloadValidatesPackageOrFailsLoudly()
+{
+	var exeName = Path.GetFileName(Environment.ProcessPath ?? string.Empty);
+	Expect(exeName.Length > 0, "拿不到当前主程序名，构造不出「像样」的更新包");
+
+	static byte[] BuildPackage(string exeName, bool includeExe)
+	{
+		using var buffer = new MemoryStream();
+		using (var zip = new System.IO.Compression.ZipArchive(buffer, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+		{
+			if (includeExe)
+			{
+				using var program = zip.CreateEntry(exeName).Open();
+				program.Write(new byte[] { 0x4D, 0x5A });
+			}
+			using var readme = new StreamWriter(zip.CreateEntry("README.txt").Open());
+			readme.Write("YEEYEEYEE");
+		}
+		return buffer.ToArray();
+	}
+
+	var good = BuildPackage(exeName, includeExe: true);
+	var withoutExe = BuildPackage(exeName, includeExe: false);
+
+	static HttpResponseMessage Bytes(byte[] payload) =>
+		new(HttpStatusCode.OK) { Content = new ByteArrayContent(payload) };
+
+	using var http = new HttpClient(new StubHttpHandler(request =>
+	{
+		var path = request.RequestUri!.AbsolutePath;
+		if (path.EndsWith("/missing.zip", StringComparison.OrdinalIgnoreCase))
+			return new HttpResponseMessage(HttpStatusCode.NotFound);
+		if (path.EndsWith("/corrupt.zip", StringComparison.OrdinalIgnoreCase))
+			return Bytes(System.Text.Encoding.UTF8.GetBytes("this is not a zip archive"));
+		return path.EndsWith("/no-exe.zip", StringComparison.OrdinalIgnoreCase) ? Bytes(withoutExe) : Bytes(good);
+	}));
+
+	static bool DownloadThrows(HttpClient client, ReleaseAsset asset, string version)
+	{
+		try
+		{
+			UpdateInstaller.DownloadAsync(client, asset, version).GetAwaiter().GetResult();
+			return false;
+		}
+		catch (Exception error) when (error is InvalidOperationException or HttpRequestException or System.IO.InvalidDataException or IOException)
+		{
+			return true;
+		}
+	}
+
+	// ① 正常包：下载 + 解压，解压结果里真有主程序才放行
+	var asset = new ReleaseAsset("yeeeyee-9.9.9-win-x64.zip", "https://example.com/yeeeyee-9.9.9-win-x64.zip", good.Length);
+	var package = UpdateInstaller.DownloadAsync(http, asset, "9.9.9").GetAwaiter().GetResult();
+	Expect(package.Version == "9.9.9", "下载回来的包要带上目标版本，实际 " + package.Version);
+	Expect(File.Exists(Path.Combine(package.StagingDirectory, exeName)), "解压结果里必须有主程序：" + package.StagingDirectory);
+	Expect(File.Exists(Path.Combine(package.StagingDirectory, "README.txt")), "解压结果应含包内其它文件");
+	Expect(package.Size == good.Length, "包大小要如实报出来");
+
+	// ② 包里没有主程序：必须抛——这种包换上去就是把安装目录搬空
+	var noExe = new ReleaseAsset("yeeeyee-9.9.9-no-exe.zip", "https://example.com/no-exe.zip", withoutExe.Length);
+	Expect(DownloadThrows(http, noExe, "9.9.8"), "包里没有主程序时必须抛错");
+
+	// ③ 服务端报错：必须抛，不能当成「拿到了一个空包」
+	var missing = new ReleaseAsset("yeeeyee-9.9.9-missing.zip", "https://example.com/missing.zip", 1);
+	Expect(DownloadThrows(http, missing, "9.9.7"), "下载失败时必须抛错");
+
+	// ④ 下载到的不是 zip：解压失败也必须抛，原安装不能被当成「已准备好更新」
+	var corrupt = new ReleaseAsset("yeeeyee-9.9.9-corrupt.zip", "https://example.com/corrupt.zip", 26);
+	Expect(DownloadThrows(http, corrupt, "9.9.6"), "损坏的 zip 必须抛错");
+}
+
 /// <summary>
 /// 更新检查的次数额度：`/releases/latest` 是未认证接口，每 IP 每小时 60 次。
 /// 反复启动的程序很容易烧光，之后每次启动只剩一句「次数用完了」——像是「这软件不更新了」。
@@ -9946,8 +10071,26 @@ static void UpdateSwapScriptActuallyReplacesDirectory()
 
 		File.Copy(hostname, Path.Combine(target, "app.exe"));
 		File.WriteAllText(Path.Combine(target, "old.txt"), "旧版");
+		// 便携部署的默认项目位置就在程序旁边的 Projects 里。替换会把整个程序目录换掉，
+		// 这里放一份用户工程，钉住「换完还在」——不搬回来的话它会随旧目录一起被删掉。
+		var userProject = Path.Combine(target, "Projects", "我的项目");
+		Directory.CreateDirectory(userProject);
+		File.WriteAllText(Path.Combine(userProject, "project.json"), "用户工程");
+		// 旧版或便携部署还可能把配置、密钥、站点与自定义形象留在程序旁边；这些都必须跟着走。
+		File.WriteAllText(Path.Combine(target, "ai-config.json"), "{\"selected\":\"old\"}");
+		File.WriteAllBytes(Path.Combine(target, "ai-key.bin"), new byte[] { 1, 2, 3, 4 });
+		File.WriteAllText(Path.Combine(target, "recent-projects.json"), "[\"我的项目\"]");
+		var sites = Path.Combine(target, "sites", "local");
+		Directory.CreateDirectory(sites);
+		File.WriteAllText(Path.Combine(sites, "site.json"), "{\"id\":\"local\"}");
+		var art = Path.Combine(target, "provider-art");
+		Directory.CreateDirectory(art);
+		File.WriteAllText(Path.Combine(art, "custom.png"), "user image");
 		File.Copy(hostname, Path.Combine(staging, "app.exe"));
 		File.WriteAllText(Path.Combine(staging, "new.txt"), "新版");
+		var shippedArt = Path.Combine(staging, "provider-art");
+		Directory.CreateDirectory(shippedArt);
+		File.WriteAllText(Path.Combine(shippedArt, "default.png"), "shipped image");
 
 		File.WriteAllText(script, UpdateInstaller.SwapScript, new System.Text.UTF8Encoding(false));
 
@@ -9968,7 +10111,9 @@ static void UpdateSwapScriptActuallyReplacesDirectory()
 			"-WaitPid", int.MaxValue.ToString(),
 			"-ResultPath", result,
 			"-FromVersion", "0.1.0",
-			"-ToVersion", "0.2.0"
+			"-ToVersion", "0.2.0",
+			// 测试用 hostname.exe 冒充主程序，它跑完就退；存活检查在专门的用例里验证。
+			"-LivenessSeconds", "0"
 		})
 		{
 			start.ArgumentList.Add(argument);
@@ -9989,6 +10134,16 @@ static void UpdateSwapScriptActuallyReplacesDirectory()
 		Expect(File.Exists(Path.Combine(target, "new.txt")), "目标目录应已换成新内容");
 		Expect(!File.Exists(Path.Combine(target, "old.txt")), "旧内容应被换走");
 		Expect(File.Exists(Path.Combine(target, "app.exe")), "换完之后主程序要在目标目录里");
+		Expect(File.Exists(Path.Combine(target, "Projects", "我的项目", "project.json")),
+			"程序旁边的用户工程必须被搬到新版目录里，不能随旧目录一起删掉");
+		Expect(File.ReadAllText(Path.Combine(target, "ai-config.json")).Contains("old"), "配置要跟着走");
+		Expect(File.ReadAllBytes(Path.Combine(target, "ai-key.bin")).SequenceEqual(new byte[] { 1, 2, 3, 4 }),
+			"密钥文件必须逐字节保留");
+		Expect(File.Exists(Path.Combine(target, "recent-projects.json")), "最近项目列表要跟着走");
+		Expect(File.Exists(Path.Combine(target, "sites", "local", "site.json")), "用户站点目录要跟着走");
+		Expect(File.ReadAllText(Path.Combine(target, "provider-art", "custom.png")) == "user image",
+			"用户自定义形象要覆盖包内同名默认图");
+		Expect(File.Exists(Path.Combine(target, "provider-art", "default.png")), "包内默认形象不能被搬运动作删掉");
 	}
 	finally
 	{
@@ -9996,6 +10151,160 @@ static void UpdateSwapScriptActuallyReplacesDirectory()
 		catch (IOException) { }
 		catch (UnauthorizedAccessException) { }
 	}
+}
+
+/// <summary>
+/// 用户数据搬不过去时必须**整套退回旧版**：不能留下「新版程序 + 旧数据还在旁边」的半换状态。
+/// 这里用「新版目录里已经有一个同名文件 Projects」制造真实冲突。
+/// </summary>
+static void UpdateSwapScriptRestoresWhenUserDataCannotBeMoved()
+{
+	var root = Path.Combine(Path.GetTempPath(), "yeeeyee-swap-carry-" + Guid.NewGuid().ToString("N")[..8]);
+	var target = Path.Combine(root, "app");
+	var staging = Path.Combine(root, "staging");
+	try
+	{
+		var hostname = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "hostname.exe");
+		if (!File.Exists(hostname))
+		{
+			Expect(condition: true, "这台机器上没有 hostname.exe，跳过替换脚本实测");
+			return;
+		}
+
+		Directory.CreateDirectory(Path.Combine(target, "Projects", "我的项目"));
+		File.Copy(hostname, Path.Combine(target, "app.exe"));
+		File.WriteAllText(Path.Combine(target, "old.txt"), "旧版");
+		File.WriteAllText(Path.Combine(target, "Projects", "我的项目", "project.json"), "用户工程");
+
+		Directory.CreateDirectory(staging);
+		File.Copy(hostname, Path.Combine(staging, "app.exe"));
+		File.WriteAllText(Path.Combine(staging, "new.txt"), "新版");
+		// 冲突：新版目录里这里是个文件，旧版里这里是目录。
+		File.WriteAllText(Path.Combine(staging, "Projects"), "not a directory");
+
+		var applied = RunSwapScriptForTest(root, target, staging, "app.exe");
+		Expect(applied is not null, "结果文件要能读懂");
+		Expect(applied!.Ok == false, "用户数据搬不过去时不能报成功");
+		Expect(applied.Error.Contains("carry user data"), "失败原因要说清是用户数据没搬过去：" + applied.Error);
+		Expect(File.Exists(Path.Combine(target, "old.txt")), "旧版程序必须原样回来");
+		Expect(File.Exists(Path.Combine(target, "Projects", "我的项目", "project.json")), "用户工程必须还在原处");
+		Expect(!File.Exists(Path.Combine(target, "new.txt")), "半换的新版不能留在目标目录里");
+		Expect(Directory.GetDirectories(root, "app.failed-*").Length == 1, "换到一半的新版应被挪到 failed 目录留证");
+	}
+	finally
+	{
+		try { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+		catch (IOException) { }
+		catch (UnauthorizedAccessException) { }
+	}
+}
+
+/// <summary>
+/// 新版本文件已经换上去、但进程起不来时，必须退回旧版，而不是把用户留在「打不开的新版」上。
+/// </summary>
+static void UpdateSwapScriptRestoresWhenNewVersionCannotStart()
+{
+	var root = Path.Combine(Path.GetTempPath(), "yeeeyee-swap-start-" + Guid.NewGuid().ToString("N")[..8]);
+	var target = Path.Combine(root, "app");
+	var staging = Path.Combine(root, "staging");
+	try
+	{
+		var hostname = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "hostname.exe");
+		if (!File.Exists(hostname))
+		{
+			Expect(condition: true, "这台机器上没有 hostname.exe，跳过替换脚本实测");
+			return;
+		}
+
+		Directory.CreateDirectory(Path.Combine(target, "Projects", "我的项目"));
+		File.Copy(hostname, Path.Combine(target, "app.exe"));
+		File.WriteAllText(Path.Combine(target, "old.txt"), "旧版");
+		File.WriteAllText(Path.Combine(target, "Projects", "我的项目", "project.json"), "用户工程");
+
+		Directory.CreateDirectory(staging);
+		File.WriteAllText(Path.Combine(staging, "app.exe"), "this is not an executable");
+		File.WriteAllText(Path.Combine(staging, "new.txt"), "新版");
+
+		var applied = RunSwapScriptForTest(root, target, staging, "app.exe");
+		Expect(applied is not null, "结果文件要能读懂");
+		Expect(applied!.Ok == false, "启动失败时不能报成功");
+		Expect(applied.Error.Contains("restarting failed"), "失败原因要指向启动失败：" + applied.Error);
+		Expect(File.Exists(Path.Combine(target, "old.txt")), "旧版程序必须恢复");
+		Expect(File.Exists(Path.Combine(target, "app.exe")), "恢复后的主程序要在目标目录里");
+		Expect(File.Exists(Path.Combine(target, "Projects", "我的项目", "project.json")), "用户工程必须还在");
+		Expect(!File.Exists(Path.Combine(target, "new.txt")), "打不开的新版不能留在目标目录里");
+	}
+	finally
+	{
+		try { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+		catch (IOException) { }
+		catch (UnauthorizedAccessException) { }
+	}
+}
+
+static UpdateApplyResult? RunSwapScriptForTest(string root, string target, string staging, string exeName)
+{
+	var result = Path.Combine(root, "last-update.json");
+	var script = Path.Combine(root, "apply-update.ps1");
+	File.WriteAllText(script, UpdateInstaller.SwapScript, new System.Text.UTF8Encoding(false));
+
+	var start = new System.Diagnostics.ProcessStartInfo
+	{
+		FileName = "powershell.exe",
+		UseShellExecute = false,
+		CreateNoWindow = true,
+		RedirectStandardOutput = true,
+		RedirectStandardError = true
+	};
+	foreach (var argument in new[]
+	{
+		"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
+		"-TargetDir", target,
+		"-SourceDir", staging,
+		"-ExeName", exeName,
+		"-WaitPid", int.MaxValue.ToString(),
+		"-ResultPath", result,
+		"-FromVersion", "0.1.0",
+		"-ToVersion", "0.2.0",
+		"-LivenessSeconds", "0"
+	})
+	{
+		start.ArgumentList.Add(argument);
+	}
+
+	using var process = System.Diagnostics.Process.Start(start);
+	Expect(process is not null, "应该能把替换脚本拉起来");
+	if (process is null) return null;
+	Expect(process.WaitForExit(120000), "替换脚本应在 120 秒内跑完");
+	if (!File.Exists(result)) return null;
+	return System.Text.Json.JsonSerializer.Deserialize<UpdateApplyResult>(File.ReadAllText(result));
+}
+
+/// <summary>
+/// 发行版只有 Web 包时，界面必须说「没有适用的桌面更新包」，而不是含糊地说没有 zip。
+/// </summary>
+static void UpdateSelfUpdateBlockerNamesWebOnlyRelease()
+{
+	static ReleaseInfo Release(params ReleaseAsset[] assets) =>
+		new("v0.1.5.5", "n", "b", "u", null, assets);
+
+	var webOnly = new UpdateCheckResult(
+		UpdateCheckState.UpdateAvailable, new Version(0, 1, 5, 4), new Version(0, 1, 5, 5),
+		Release(new ReleaseAsset("yeeeyee-web-0.1.5.5-win-x64.zip", "https://example.com/web.zip", 1)),
+		"有新版本");
+	var blocker = UpdateService.DescribeSelfUpdateBlocker(webOnly);
+	Expect(blocker is not null && blocker.Contains("Web 服务包") && blocker.Contains("没有适用的桌面更新包"),
+		"只有 Web 包时要明确说没有适用的桌面更新包：" + blocker);
+
+	var both = new UpdateCheckResult(
+		UpdateCheckState.UpdateAvailable, new Version(0, 1, 5, 4), new Version(0, 1, 5, 5),
+		Release(
+			new ReleaseAsset("yeeeyee-web-0.1.5.5-win-x64.zip", "https://example.com/web.zip", 1),
+			new ReleaseAsset("yeeeyee-0.1.5.5-win-x64.zip", "https://example.com/desktop.zip", 1)),
+		"有新版本");
+	var bothBlocker = UpdateService.DescribeSelfUpdateBlocker(both);
+	Expect(bothBlocker is null || !bothBlocker.Contains("只提供 Web 服务包"),
+		"桌面包存在时不能说成只有 Web 包：" + bothBlocker);
 }
 
 /// <summary>
@@ -17425,6 +17734,329 @@ static void Mp4ConcatSyncBoundaries()
         var actual = Enumerable.Range(0, count).Select(i => BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(at + 12 + i * 4, 4))).ToArray();
         Expect(actual.SequenceEqual(reverse ? new[] {1, 3, 4, 5, 6} : new[] {1, 2, 3, 4, 6}), "同步索引必须保留原始事实");
     }
+}
+
+// ── 媒体封面提取与异常媒体的边界（Desktop：WebView2 取帧 + 令牌会话；当前不走 FFmpeg）────────
+//
+// 产品出封面不走 FFmpeg：由一个隐藏的 WebView2 页面取帧（VideoThumbnailService.Page），
+// 播放与取帧都靠 LocalVideoPlayer.MediaSession 这个「带随机令牌的环回 HTTP 服务」把文件喂给 Chromium。
+// 这一段把能离线判定的部分钉住：路径支持范围、令牌会话的服务与释放、取帧页面脚本的时间/错误规则、
+// 以及容器探针在支持/损坏/空/截断样本上的结论。真机 WebView2 取帧本身仍需实机验收。
+
+/// <summary>按仓库相对路径找一个样本文件（用于「拿真文件量一遍」；找不到就返回 null，不硬报错）。</summary>
+static string? FindRepoFile(string relative)
+{
+    for (var directory = new DirectoryInfo(Environment.GetEnvironmentVariable("DREAM_TEST_REPO_ROOT") ?? AppContext.BaseDirectory);
+        directory is not null; directory = directory.Parent)
+    {
+        var path = Path.Combine(directory.FullName, relative);
+        if (File.Exists(path)) return path;
+    }
+    return null;
+}
+
+/// <summary>只读扫描采样条目的编码四字码（不解码）。用来如实记录「实测的是什么编码」。</summary>
+static string Mp4VideoCodec(byte[] data)
+{
+    foreach (var code in new[] { "avc1", "hvc1", "hev1", "av01", "vp09", "vp08", "mp4v" })
+    {
+        var needle = Encoding.ASCII.GetBytes(code);
+        for (var index = 0; index + 4 <= data.Length; index++)
+            if (data[index] == needle[0] && data[index + 1] == needle[1]
+                && data[index + 2] == needle[2] && data[index + 3] == needle[3]) return code;
+    }
+    return "unknown";
+}
+
+/// <summary>把 mvhd 的电影时长补上：合成的 TinyMp4 默认不写这一格，
+/// 而真实的「只有音频」文件是有电影时长的——补上才代表现场那种形状。</summary>
+static byte[] WithMovieDuration(byte[] mp4, uint duration, uint timescale = 1000)
+{
+    for (var index = 0; index + 20 <= mp4.Length; index++)
+        if (mp4[index] == (byte)'m' && mp4[index + 1] == (byte)'v' && mp4[index + 2] == (byte)'h' && mp4[index + 3] == (byte)'d')
+        {
+            BinaryPrimitives.WriteUInt32BigEndian(mp4.AsSpan(index + 4 + 12, 4), timescale);
+            BinaryPrimitives.WriteUInt32BigEndian(mp4.AsSpan(index + 4 + 16, 4), duration);
+            break;
+        }
+    return mp4;
+}
+
+/// <summary>要求某次调用被拒，并且报的错含指定关键词（不能是别的异常）。</summary>
+static void ExpectMediaReject(Func<string> action, string keyword, string label)
+{
+    try
+    {
+        var accepted = action();
+        throw new InvalidOperationException(label + "——却被放行到 " + accepted);
+    }
+    catch (Exception error) when (error is ArgumentException or IOException or NotSupportedException)
+    {
+        Expect(error.Message.Contains(keyword, StringComparison.Ordinal),
+            label + "：报错应含「" + keyword + "」，实际：" + error.Message);
+    }
+}
+
+/// <summary>
+/// 封面/播放的入口路径校验：只放行「本机绝对路径、扩展名属于视频、确实存在、不经符号链接」这几类，
+/// 其余（相对路径、UNC/网络、流地址、越界的 asset 引用、音频/图片、缺失文件）一律当场拒绝并说清原因——
+/// 不支持的文件在这一步就被挡住，不会进到 WebView2 里卡住。
+/// </summary>
+static void MediaCoverPathValidationMatchesSupport()
+{
+    var directory = NewTempDirectory("media-path");
+    var previous = Environment.GetEnvironmentVariable("YEEYEEYEE_ASSET_DIR");
+    try
+    {
+        var assets = Path.Combine(directory, "assets");
+        Directory.CreateDirectory(assets);
+        Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", assets);
+
+        var clip = Path.Combine(directory, "clip.mp4");
+        File.WriteAllBytes(clip, TinyMp4([512, 512], 1024, [1024, 1000], 1024));
+        Expect(LocalVideoPlayer.ValidatePath(clip) == Path.GetFullPath(clip), "本机绝对 mp4 路径应放行");
+
+        // webm 也是支持范围（ComfyUI 的 SaveWEBM 产物就是这个容器）
+        var webm = Path.Combine(directory, "clip.webm");
+        File.WriteAllBytes(webm, new byte[] { 0x1A, 0x45, 0xDF, 0xA3 });
+        Expect(LocalVideoPlayer.ValidatePath(webm) == Path.GetFullPath(webm), "webm 也属于支持范围");
+
+        var assetClip = Path.Combine(assets, "asset-clip.mp4");
+        File.WriteAllBytes(assetClip, TinyMp4([512], 1024, [1024], 1024));
+        Expect(LocalVideoPlayer.ValidatePath("asset://asset-clip.mp4") == Path.GetFullPath(assetClip),
+            "asset:// 引用应解析到资产目录里的那个文件");
+
+        var audio = Path.Combine(directory, "voice.mp3");
+        File.WriteAllBytes(audio, new byte[] { 1, 2, 3 });
+        ExpectMediaReject(() => LocalVideoPlayer.ValidatePath(audio), "类型不受支持", "音频文件不是视频");
+
+        var image = Path.Combine(directory, "still.png");
+        File.WriteAllBytes(image, new byte[] { 137, 80, 78, 71 });
+        ExpectMediaReject(() => LocalVideoPlayer.ValidatePath(image), "类型不受支持", "图片不是视频");
+
+        ExpectMediaReject(() => LocalVideoPlayer.ValidatePath(Path.Combine(directory, "missing.mp4")), "不存在", "缺失文件要报不存在");
+        ExpectMediaReject(() => LocalVideoPlayer.ValidatePath("clip.mp4"), "绝对", "相对路径要拒绝");
+        ExpectMediaReject(() => LocalVideoPlayer.ValidatePath(@"\\server\share\clip.mp4"), "绝对", "UNC 网络路径要拒绝");
+        ExpectMediaReject(() => LocalVideoPlayer.ValidatePath("http://host/clip.mp4"), "绝对", "http 地址要拒绝");
+        ExpectMediaReject(() => LocalVideoPlayer.ValidatePath("asset://../secret.mp4"), "无效的本地资产引用", "asset 引用不得越出资产目录");
+        ExpectMediaReject(() => LocalVideoPlayer.ValidatePath("asset://sub/clip.mp4"), "无效的本地资产引用", "asset 引用不得带路径分隔");
+
+        Directory.Delete(directory, recursive: true);
+    }
+    finally { Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", previous); }
+}
+
+/// <summary>
+/// 取帧/播放共用的令牌会话：只服务「本会话那一枚随机令牌」下的两个地址（页面与媒体），
+/// Range 要真的按字节切片，别的令牌/别的路径/别的方法一律拒；关掉之后**监听与文件句柄都要放开**——
+/// 源文件必须能当场改名删除（「退出后文件可独占打开」这条的离线版）。
+/// </summary>
+static void MediaSessionServesBytesAndReleases()
+{
+    var directory = NewTempDirectory("media-session");
+    var source = Path.Combine(directory, "clip.mp4");
+    var payload = TinyMp4([512, 512, 512], 1024, [1024, 1000, 1000, 1000, 1000], 1024);
+    File.WriteAllBytes(source, payload);
+    var html = "<!doctype html><html><body>cover</body></html>";
+    using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+    var session = new LocalVideoPlayer.MediaSession(source, html);
+    var pageUri = session.PageUri;
+    var origin = pageUri.GetLeftPart(UriPartial.Authority);
+    var token = pageUri.AbsolutePath.Split('/')[1];
+    var mediaUri = new Uri(origin + "/" + token + "/media");
+    try
+    {
+        var page = client.GetAsync(pageUri).GetAwaiter().GetResult();
+        Expect(page.StatusCode == HttpStatusCode.OK, "页面应返回 200，实际 " + page.StatusCode);
+        Expect(page.Content.Headers.ContentType?.MediaType == "text/html", "页面要声明 html");
+        Expect(Encoding.UTF8.GetString(page.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()) == html,
+            "页面正文应是给定的那一份");
+
+        var full = client.GetAsync(mediaUri).GetAwaiter().GetResult();
+        Expect(full.StatusCode == HttpStatusCode.OK, "整段媒体应 200，实际 " + full.StatusCode);
+        Expect(full.Content.Headers.ContentType?.MediaType == "video/mp4", "媒体要按扩展名给 video/mp4");
+        Expect(full.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult().SequenceEqual(payload),
+            "整段字节要与源文件逐字节一致");
+
+        using var rangeRequest = new HttpRequestMessage(HttpMethod.Get, mediaUri);
+        rangeRequest.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 9);
+        var ranged = client.SendAsync(rangeRequest).GetAwaiter().GetResult();
+        Expect(ranged.StatusCode == HttpStatusCode.PartialContent, "Range 请求应 206，实际 " + ranged.StatusCode);
+        Expect(ranged.Content.Headers.ContentRange?.ToString() == $"bytes 0-9/{payload.Length}",
+            "Content-Range 要对，实际 " + ranged.Content.Headers.ContentRange);
+        Expect(ranged.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult().SequenceEqual(payload.Take(10)),
+            "Range 回来的应是前 10 个字节");
+
+        using var beyond = new HttpRequestMessage(HttpMethod.Get, mediaUri);
+        beyond.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(payload.Length + 100, payload.Length + 200);
+        var unsatisfiable = client.SendAsync(beyond).GetAwaiter().GetResult();
+        Expect(unsatisfiable.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable,
+            "越界 Range 应 416，实际 " + unsatisfiable.StatusCode);
+
+        var alien = client.GetAsync(new Uri(origin + "/" + new string('0', 64) + "/index.html")).GetAwaiter().GetResult();
+        Expect(alien.StatusCode == HttpStatusCode.NotFound, "别的令牌要 404，实际 " + alien.StatusCode);
+        var post = client.PostAsync(pageUri, new StringContent("x")).GetAwaiter().GetResult();
+        Expect(post.StatusCode == HttpStatusCode.MethodNotAllowed, "非 GET/HEAD 要 405，实际 " + post.StatusCode);
+    }
+    finally { session.Dispose(); }
+
+    // 关掉之后：源文件必须能当场改名 + 删除（句柄真的放开了）
+    var renamed = source + ".moved";
+    File.Move(source, renamed);
+    File.Delete(renamed);
+    Expect(!File.Exists(source), "会话关闭后源文件要能改名/删除");
+
+    // 监听也要关掉：再打同一地址应当连不上，而不是挂着
+    try
+    {
+        client.GetAsync(pageUri).GetAwaiter().GetResult();
+        throw new InvalidOperationException("会话关闭后监听仍在应答——会一直挂着不结束");
+    }
+    catch (HttpRequestException) { }
+    catch (TaskCanceledException) { throw new InvalidOperationException("会话关闭后连接被拖住，直到超时"); }
+
+    // 失败/取消之后还能继续处理有效文件：同一套代码再开一个会话，照样把新文件喂得出去
+    var secondPath = Path.Combine(directory, "second.mp4");
+    File.WriteAllBytes(secondPath, payload);
+    var again = new LocalVideoPlayer.MediaSession(secondPath, html);
+    try
+    {
+        var retried = client.GetAsync(new Uri(again.PageUri.AbsoluteUri.Replace("index.html", "media"))).GetAwaiter().GetResult();
+        Expect(retried.StatusCode == HttpStatusCode.OK
+            && retried.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult().SequenceEqual(payload),
+            "上一个会话关闭后，新会话应能正常服务新的有效文件");
+    }
+    finally { again.Dispose(); }
+
+    Directory.Delete(directory, recursive: true);
+}
+
+/// <summary>
+/// 取帧页面脚本的规则（在 WebView2 里跑的那一段）：
+/// · 极短视频取中点、常规视频取 0.5 秒——固定 0.5 秒会让短片永远取不到帧；
+/// · 时长读不出来 / 没有可用视频轨 / 解码失败 / 超时，四条路都要**明确结束**并带回原因，不许挂着；
+/// · 无论成功失败都要停掉 video 并清掉 src。
+/// 另外把缓存目录的清理规则钉住：过期、超字节预算要清，陈旧中间文件要清，刚写的中间文件和不认识的名字不动。
+/// </summary>
+static void MediaCoverPageRulesHandleShortAndBrokenMedia()
+{
+    var page = VideoThumbnailService.Page("probe-1");
+    Expect(page.Contains("v.duration<1?v.duration/2:0.5", StringComparison.Ordinal),
+        "取帧时间要区分极短视频（取中点）与常规视频（0.5 秒）");
+    Expect(page.Contains("invalid duration", StringComparison.Ordinal), "时长读不出来要明确报错");
+    Expect(page.Contains("frame unavailable", StringComparison.Ordinal), "没有可用视频帧要明确报错，不当成成功");
+    Expect(page.Contains("video decode error", StringComparison.Ordinal), "解码失败要报出错误码");
+    Expect(page.Contains("thumbnail timeout", StringComparison.Ordinal) && page.Contains("15000", StringComparison.Ordinal),
+        "页面自身要有超时兜底，避免在宿主预算之外无限等");
+    Expect(page.Contains("\"probe-1\"", StringComparison.Ordinal), "请求 id 要以 JSON 字符串嵌进页面，回消息才对得上");
+    Expect(page.Contains("v.removeAttribute('src')", StringComparison.Ordinal), "结束时要把解码资源放掉");
+
+    var directory = NewTempDirectory("thumb-cache");
+    var recent = new string('A', 64);
+    var second = new string('B', 64);
+    var oldest = new string('C', 64);
+    var expired = new string('D', 64);
+    foreach (var (name, age, size) in new (string, TimeSpan, int)[]
+    {
+        (recent, TimeSpan.FromMinutes(1), 10),
+        (second, TimeSpan.FromMinutes(2), 10),
+        (oldest, TimeSpan.FromMinutes(3), 10),
+        (expired, TimeSpan.FromDays(40), 10)
+    })
+    {
+        var path = Path.Combine(directory, name + ".png");
+        File.WriteAllBytes(path, new byte[size]);
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow - age);
+    }
+    var staleTmp = Path.Combine(directory, recent + ".png." + new string('e', 32) + ".tmp");
+    File.WriteAllBytes(staleTmp, new byte[3]);
+    File.SetLastWriteTimeUtc(staleTmp, DateTime.UtcNow - TimeSpan.FromDays(2));
+    var freshTmp = Path.Combine(directory, second + ".png." + new string('f', 32) + ".tmp");
+    File.WriteAllBytes(freshTmp, new byte[3]);
+    File.SetLastWriteTimeUtc(freshTmp, DateTime.UtcNow);
+    var junk = Path.Combine(directory, "hello.png");
+    File.WriteAllBytes(junk, new byte[3]);
+
+    VideoThumbnailService.TrimCache(directory, DateTime.UtcNow, maxBytes: 20, maxEntries: 100);
+
+    Expect(File.Exists(Path.Combine(directory, recent + ".png")), "最近的缓存要留着");
+    Expect(File.Exists(Path.Combine(directory, second + ".png")), "字节预算内的缓存要留着");
+    Expect(!File.Exists(Path.Combine(directory, oldest + ".png")), "超出字节预算的最旧缓存要清掉");
+    Expect(!File.Exists(Path.Combine(directory, expired + ".png")), "过期缓存要清掉");
+    Expect(!File.Exists(staleTmp), "超过一天的中间文件要清掉（失败/取消留下的 .tmp）");
+    Expect(File.Exists(freshTmp), "刚写的中间文件不许误删（可能还在写）");
+    Expect(File.Exists(junk), "不认识的缓存文件名不许动");
+
+    Directory.Delete(directory, recursive: true);
+}
+
+/// <summary>
+/// 容器探针在代表性样本上的结论：支持形状量得出轨道/帧/画面；没有视频轨时画面如实为 0；
+/// 空文件、伪装成 mp4 的文本、截断到没有 moov 的文件都**当场说清读不出来**，既不抛异常也不挂着；
+/// 量完之后不留文件占用（源文件能删）。
+/// </summary>
+static void MediaProbeClassifiesSamplesWithoutHanging()
+{
+    var directory = NewTempDirectory("media-probe");
+    uint[] video = [512, 512, 512];
+    uint[] audio = [1024, 1000, 1000, 1000, 1000];
+
+    var regular = Path.Combine(directory, "regular.mp4");
+    File.WriteAllBytes(regular, TinyMp4(video, 1024, audio, 1024));
+    var probed = Mp4Concatenator.Probe(regular);
+    Expect(probed.Readable && probed.Tracks == 2 && probed.Frames == 3 && probed.Width == 864 && probed.Height == 480,
+        "常规双轨 mp4 要量得出轨道/帧/画面：" + probed.Describe());
+
+    // 只有音频（没有可用视频轨）：可读，但画面尺寸与帧数如实为 0，不当成有画面
+    var audioOnly = Path.Combine(directory, "audio-only.mp4");
+    File.WriteAllBytes(audioOnly, WithMovieDuration(TinyMp4([512, 512], 1024, [1024, 1000, 1000], 1024, videoHandler: "soun"), 125));
+    var audioInfo = Mp4Concatenator.Probe(audioOnly);
+    Expect(audioInfo.Readable && audioInfo.Frames == 0 && audioInfo.Width == 0 && audioInfo.Height == 0,
+        "没有视频轨要如实报 0 画面：" + audioInfo.Describe());
+
+    var empty = Path.Combine(directory, "empty.mp4");
+    File.WriteAllBytes(empty, Array.Empty<byte>());
+    Expect(!Mp4Concatenator.Probe(empty).Readable, "空文件读不出来");
+
+    var fake = Path.Combine(directory, "fake.mp4");
+    File.WriteAllText(fake, "这不是一段视频，只是一段文本。");
+    var fakeInfo = Mp4Concatenator.Probe(fake);
+    Expect(!fakeInfo.Readable && fakeInfo.Problem.Contains("ftyp", StringComparison.Ordinal),
+        "伪装成 mp4 的文本要说清不是 mp4，实际：" + fakeInfo.Problem);
+
+    // 头部截断：连 ftyp 都没完整 —— 读不出来
+    var cutHead = Path.Combine(directory, "cut-head.mp4");
+    var full = TinyMp4(video, 1024, audio, 1024);
+    File.WriteAllBytes(cutHead, full.Take(20).ToArray());
+    var cutHeadInfo = Mp4Concatenator.Probe(cutHead);
+    Expect(!cutHeadInfo.Readable && cutHeadInfo.Problem.Contains("moov", StringComparison.Ordinal),
+        "头部截断到只剩 ftyp 要读不出来，实际：" + cutHeadInfo.Problem);
+
+    // 尾部截断：moov 在前面还在，探针只量容器事实所以照样读得出来（如实，不假装整段完好）；
+    // 但文件本身已经不可解码——这是「读得出容器」与「播得动」两件事的分界。
+    var cutTail = Path.Combine(directory, "cut-tail.mp4");
+    File.WriteAllBytes(cutTail, full.Take(full.Length - 100).ToArray());
+    var cutTailInfo = Mp4Concatenator.Probe(cutTail);
+    Expect(cutTailInfo.Readable && cutTailInfo.Frames == 3,
+        "尾部截断（moov 完整）探针应仍如实报出容器事实：" + cutTailInfo.Describe());
+
+    // 真文件：仓库里的 H.264 样本，顺带把实测编码记下来（判据要求记录实测编码与样本）
+    var real = FindRepoFile(Path.Combine("YEEYEEYEE.Web.Tests", "fixtures", "mock-comfyui-output.mp4"));
+    if (real is not null)
+    {
+        var info = Mp4Concatenator.Probe(real);
+        Expect(info.Readable && info.Seconds > 0, "真实 H.264 样本要量得出时长：" + info.Describe());
+        Console.WriteLine("媒体样本：mock-comfyui-output.mp4 编码=" + Mp4VideoCodec(File.ReadAllBytes(real)) + " · " + info.Describe());
+    }
+    else Console.WriteLine("媒体样本：仓库里没有 mock-comfyui-output.mp4，真文件这一项跳过");
+
+    foreach (var path in new[] { regular, audioOnly, empty, fake, cutHead, cutTail })
+    {
+        File.Delete(path);
+        Expect(!File.Exists(path), "探测不得留下文件占用：" + Path.GetFileName(path));
+    }
+
+    Directory.Delete(directory, recursive: true);
 }
 
 static class Sample

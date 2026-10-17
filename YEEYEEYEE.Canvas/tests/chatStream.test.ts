@@ -127,7 +127,8 @@ describe('chat stream', () => {
     expect(panel).toContain('[nodeAgentRequest, ready, busy, streaming, canChat]')
     expect(panel).toContain('run !== previewRun.current')
     expect(panel).toContain('if (inFlight.current || streaming || !message) return')
-    expect(panel).toContain('m.targetNodeId ?')
+    // 参考图提示仍按「本条消息有没有来源节点」分岔（参数编辑器把它当 prop 传进去）。
+    expect(panel).toContain('hasTargetNode={!!m.targetNodeId}')
   })
   it('preserves fragmented Chinese UTF-8, thinking, text, usage and terminal snapshot', async () => {
     const bytes = new TextEncoder().encode('event: thinking\ndata: {"text":"思考"}\n\nevent: text\ndata: {"text":"正文"}\n\nevent: usage\ndata: {"inputTokens":7}\n\nevent: done\ndata: {"id":"session"}\n\n')

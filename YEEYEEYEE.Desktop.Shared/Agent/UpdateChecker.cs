@@ -157,12 +157,58 @@ public static class UpdateChecker
             : new UpdateCheckResult(UpdateCheckState.UpToDate, current, latest, release, $"已经是最新版本（{AppVersion.Text(current)}）。");
     }
 
-    /// <summary>从发行版里挑出可下载的更新包：优先 <c>.zip</c>，没有就返回 null（让界面如实说没有包）。</summary>
+    /// <summary>
+    /// 从发行版里挑出**桌面端**的更新包，没有就返回 null（让界面如实说没有包）。
+    ///
+    /// **不能只取第一个 <c>.zip</c>**：同一个发行版会同时挂着桌面包与 Web 包
+    /// （<c>yeeeyee-&lt;版本&gt;-win-x64.zip</c> 与 <c>yeeeyee-web-&lt;版本&gt;-win-x64.zip</c>），
+    /// 两个都是 zip。取第一个等于把「挑哪个包」交给上传顺序——顺序一变，桌面端就下到 Web 包，
+    /// 解压出来没有主程序，替换之后等于把安装目录搬空。所以这里按名字认包：
+    /// 带 <c>web</c> 记号的排除；剩下的 zip 里优先带 <c>desktop</c> 记号的，都没有就取第一个非 Web 的；
+    /// 只有 Web 包时**返回 null**（不能拿它顶替），最后才退回 <c>.exe</c>。
+    /// </summary>
     public static ReleaseAsset? FindPackage(ReleaseInfo? release)
     {
         if (release is null) return null;
-        return release.Assets.FirstOrDefault(asset => asset.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-            ?? release.Assets.FirstOrDefault(asset => asset.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+
+        var zips = release.Assets
+            .Where(asset => asset.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (zips.Count > 0)
+        {
+            var desktopZips = zips.Where(asset => !HasNameToken(asset.Name, "web")).ToList();
+            return desktopZips.FirstOrDefault(asset => HasNameToken(asset.Name, "desktop"))
+                ?? desktopZips.FirstOrDefault();
+        }
+
+        return release.Assets.FirstOrDefault(asset => asset.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// 这个发行版是不是**只有 Web 服务包**。界面要据此说清「没有适用的桌面更新包」，
+    /// 而不是含糊地说一句「没有 zip 包」——两者对用户意味着完全不同的下一步。
+    /// </summary>
+    public static bool HasWebPackageOnly(ReleaseInfo? release)
+    {
+        if (release is null) return false;
+        var zips = release.Assets
+            .Where(asset => asset.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        return zips.Count > 0
+            && zips.All(asset => HasNameToken(asset.Name, "web"))
+            && !release.Assets.Any(asset => asset.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// 文件名的词元里有没有这个词。按 <c>. - _ 空格</c> 切词逐个比，而不是找子串：
+    /// 找子串会把 <c>webview</c>、<c>website</c> 这类无关名字也算成 Web 包。
+    /// </summary>
+    private static bool HasNameToken(string fileName, string token)
+    {
+        var stem = Path.GetFileNameWithoutExtension(fileName);
+        return stem
+            .Split(new[] { '.', '-', '_', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+            .Any(part => string.Equals(part, token, StringComparison.OrdinalIgnoreCase));
     }
 
     private static ReleaseInfo ParseRelease(string? json)

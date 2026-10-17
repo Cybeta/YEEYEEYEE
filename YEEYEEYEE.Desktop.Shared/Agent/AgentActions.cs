@@ -23,6 +23,18 @@ public sealed class AgentAction
     public int? Height { get; set; }
     public IReadOnlyList<string> ReferenceAttachmentIds { get; set; } = Array.Empty<string>();
 
+    /// <summary>
+    /// 技能参数：<c>parameters</c> 对象里的任意命名参数，值保留原始 JSON。
+    ///
+    /// 为什么不在这里逐个定类型：参数类型由**技能自己的声明**决定（见 WebChatSkillParameters），
+    /// 协议层只负责如实搬运；在这里猜类型等于让协议比技能更懂它要什么。
+    /// 收进来的每一个都必须在技能声明里找得到，否则整条回复按错误返回，不静默丢弃。
+    /// </summary>
+    public Dictionary<string, JsonElement> Parameters { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>实体引用：人物 / 场景 / 道具 / 项目节点（见 <see cref="AgentEntityReference"/>）。</summary>
+    public List<AgentEntityReference> EntityReferences { get; set; } = new();
+
     /// <summary>目标：节点或实体的 id 或标题；修改与删除必填。推荐用 id（完整 Guid 或 8 位短 id 前缀）——同名对象多时 id 最稳。连线的终点节点也用它。</summary>
     public string Target { get; set; } = string.Empty;
 
@@ -102,6 +114,40 @@ public sealed class AgentAction
     private string Quote(string value) => string.IsNullOrWhiteSpace(value) ? string.Empty : $"「{value}」";
 
     private string NormalizeEntityKind() => string.IsNullOrWhiteSpace(EntityKind) ? "实体" : EntityKind;
+}
+
+/// <summary>
+/// 一次**实体引用**：把人物 / 场景 / 道具 / 项目节点作为结构化信息带进技能调用与聊天记录。
+///
+/// 为什么不能只记名字：名字是标签，不是身份——同名实体、同名节点都存在，按名字回查迟早挂错人。
+/// 所以身份是「类型 + ID（+ 变体/版本）」；<see cref="Name"/> 只是宿主按 ID 解析后**回填**的显示名，
+/// 调用方（模型或浏览器）给的名字一律不采信。
+/// </summary>
+public sealed class AgentEntityReference
+{
+    /// <summary>引用类型：character / scene / prop / node。</summary>
+    public string Kind { get; set; } = string.Empty;
+
+    /// <summary>实体 ID 或项目节点 ID（完整 GUID）。</summary>
+    public string Id { get; set; } = string.Empty;
+
+    /// <summary>显示名（宿主解析后回填）。</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>变体 ID（人物 / 场景 / 道具用；节点引用为空）。</summary>
+    public string VariantId { get; set; } = string.Empty;
+
+    /// <summary>变体名（宿主解析后回填）。</summary>
+    public string VariantName { get; set; } = string.Empty;
+
+    /// <summary>锁定版本 ID；空表示跟随最新版本。</summary>
+    public string VersionId { get; set; } = string.Empty;
+
+    /// <summary>锁定版本号（宿主解析后回填），例如 <c>v3</c>。</summary>
+    public string Version { get; set; } = string.Empty;
+
+    /// <summary>节点引用的分类（宿主解析后回填）；实体引用为空。</summary>
+    public string Category { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -194,7 +240,7 @@ public static class AgentActionParser
             parsed.Add(new AgentAction
             {
                 Kind = kind.Trim(),
-                UnsupportedSkillFields = kind.Trim() == "invoke_skill" ? item.EnumerateObject().Where(p => p.Name is not ("kind" or "target" or "content" or "reason" or "aspectRatio" or "referenceAttachmentIds" or "entityTarget" or "variantTarget" or "seconds" or "width" or "height") || p.Name is "aspectRatio" or "entityTarget" or "variantTarget" && p.Value.ValueKind != JsonValueKind.String || p.Name is "seconds" or "width" or "height" && (p.Value.ValueKind != JsonValueKind.Number || !p.Value.TryGetInt32(out _)) || p.Name == "referenceAttachmentIds" && (p.Value.ValueKind != JsonValueKind.Array || p.Value.EnumerateArray().Any(v => v.ValueKind != JsonValueKind.String))).Select(p => p.Name).ToArray() : Array.Empty<string>(),
+                UnsupportedSkillFields = kind.Trim() == "invoke_skill" ? item.EnumerateObject().Where(p => p.Name is not ("kind" or "target" or "content" or "reason" or "aspectRatio" or "referenceAttachmentIds" or "entityTarget" or "variantTarget" or "seconds" or "width" or "height" or "parameters" or "entityReferences") || p.Name is "aspectRatio" or "entityTarget" or "variantTarget" && p.Value.ValueKind != JsonValueKind.String || p.Name is "seconds" or "width" or "height" && (p.Value.ValueKind != JsonValueKind.Number || !p.Value.TryGetInt32(out _)) || p.Name == "referenceAttachmentIds" && (p.Value.ValueKind != JsonValueKind.Array || p.Value.EnumerateArray().Any(v => v.ValueKind != JsonValueKind.String)) || p.Name == "parameters" && p.Value.ValueKind != JsonValueKind.Object || p.Name == "entityReferences" && p.Value.ValueKind != JsonValueKind.Array).Select(p => p.Name).ToArray() : Array.Empty<string>(),
                 Target = Read(item, "target"),
                 Source = Read(item, "source"),
                 Title = Read(item, "title"),
@@ -207,6 +253,8 @@ public static class AgentActionParser
                 Width = item.TryGetProperty("width", out var width) && width.ValueKind == JsonValueKind.Number && width.TryGetInt32(out var widthValue) ? widthValue : null,
                 Height = item.TryGetProperty("height", out var height) && height.ValueKind == JsonValueKind.Number && height.TryGetInt32(out var heightValue) ? heightValue : null,
                 ReferenceAttachmentIds = ReadStringArray(item, "referenceAttachmentIds"),
+                Parameters = ReadParameters(item),
+                EntityReferences = ReadEntityReferences(item),
                 EntityKind = Read(item, "entityKind"),
                 Path = Read(item, "path"),
                 WorkTreeKind = Read(item, "workTreeKind"),
@@ -247,6 +295,52 @@ public static class AgentActionParser
             if (entry.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(entry.GetString()))
                 values.Add(entry.GetString()!.Trim());
         return values;
+    }
+
+    /// <summary>
+    /// 读技能参数对象。值原样克隆：这里**不判类型**——类型由技能自己的声明说了算，
+    /// 校验（含类型、范围、枚举、必填）在服务端按声明跑，协议层只负责如实搬运。
+    /// </summary>
+    private static Dictionary<string, JsonElement> ReadParameters(JsonElement item)
+    {
+        var values = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        if (!item.TryGetProperty("parameters", out var element) || element.ValueKind != JsonValueKind.Object) return values;
+        foreach (var property in element.EnumerateObject()) values[property.Name] = property.Value.Clone();
+        return values;
+    }
+
+    /// <summary>
+    /// 读实体引用数组。**读不懂的那一条照样留下占位**（类型 / ID 为空）：
+    /// 静默跳过就等于让「模型写了引用、宿主装作没看见」——那正是这个字段要防的事，
+    /// 服务端会拿着占位按 SKILL_ENTITY_INVALID 明确拒掉整条回复。
+    /// </summary>
+    private static List<AgentEntityReference> ReadEntityReferences(JsonElement item)
+    {
+        var values = new List<AgentEntityReference>();
+        if (!item.TryGetProperty("entityReferences", out var element) || element.ValueKind != JsonValueKind.Array) return values;
+        foreach (var entry in element.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object) { values.Add(new AgentEntityReference()); continue; }
+            values.Add(new AgentEntityReference
+            {
+                Kind = First(entry, "kind", "entityKind", "type"),
+                Id = First(entry, "id", "entityId", "targetId"),
+                VariantId = First(entry, "variantId"),
+                VersionId = First(entry, "versionId", "variantVersionId")
+            });
+        }
+        return values;
+    }
+
+    /// <summary>按候选键名取第一个非空字符串；都不在就是空串。</summary>
+    private static string First(JsonElement item, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var value = Read(item, name);
+            if (!string.IsNullOrWhiteSpace(value)) return value.Trim();
+        }
+        return string.Empty;
     }
 
     /// <summary>反问单独解析：有 question 才算，光有 ask 键不算。</summary>

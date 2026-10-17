@@ -1,6 +1,27 @@
 export type ChatUsage = { inputTokens: number; completionTokens: number; cacheHitTokens: number; cacheMissTokens: number }
 export type ChatUsageReport = { chips: string[]; details: string[]; hasAnything: boolean; summary: string }
-export type ChatMessage = { id: string; role: string; attachmentIds?: string[]; content: string; thinking: string; state: string; error?: string; usage?: ChatUsage; usageReport?: ChatUsageReport; contextWindow?: number; firstTokenSeconds?: number; decodeSeconds?: number; model: string; targetNodeId?: string | null; targetChapterId?: string | null; baseRevision?: number; source?: string; targetNodeTitle?: string; mode?: string; actionState?: string; committedRevision?: number; actions?: { kind: string; title: string; target: string; reason: string }[]; ask?: { question: string; options: string[] }; hints?: string[]; actionErrors?: string[]; skillActions?: { kind: string; target: string; content: string; reason: string; aspectRatio?: string; referenceAttachmentIds?: string[] }[]; skillState?: string; skillError?: string; skillJobIds?: string[] }
+/**
+ * 聊天消息里的技能提议。`parameters` 是技能声明过的任意参数（值原样保留），
+ * `entityReferences` 是宿主按 ID 解析后回填的实体引用（名字与版本以这里为准）。
+ */
+export type ChatSkillAction = {
+  kind: string
+  target: string
+  content: string
+  reason: string
+  aspectRatio?: string
+  referenceAttachmentIds?: string[]
+  parameters?: Record<string, unknown>
+  entityReferences?: {
+    kind: string; id: string; name?: string; variantId?: string; variantName?: string
+    versionId?: string; version?: string; category?: string
+  }[]
+}
+
+/** 消息里回显的附件元数据（字节按 ID 走下载接口）。 */
+export type ChatAttachment = { id: string; name: string; type: string; kind: string; size: number }
+
+export type ChatMessage = { id: string; role: string; attachmentIds?: string[]; attachments?: ChatAttachment[]; content: string; thinking: string; state: string; error?: string; usage?: ChatUsage; usageReport?: ChatUsageReport; contextWindow?: number; firstTokenSeconds?: number; decodeSeconds?: number; model: string; targetNodeId?: string | null; targetChapterId?: string | null; baseRevision?: number; source?: string; targetNodeTitle?: string; mode?: string; actionState?: string; committedRevision?: number; actions?: { kind: string; title: string; target: string; reason: string }[]; ask?: { question: string; options: string[] }; hints?: string[]; actionErrors?: string[]; skillActions?: ChatSkillAction[]; skillState?: string; skillError?: string; skillJobIds?: string[] }
 export type ChatSession = { id: string; title: string; updatedAt: string; messages: ChatMessage[]; jobIds?: string[] }
 export type ChatEvent = { type: string; data: unknown }
 

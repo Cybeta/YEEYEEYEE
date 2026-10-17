@@ -145,7 +145,7 @@ function MediaSettings({ canManage, onChanged }: { canManage: boolean; onChanged
   </div>
 }
 
-export function SettingsPanel({ canManage = false }: { canManage?: boolean }) {
+export function SettingsPanel({ canManage = false, onSkillsChanged }: { canManage?: boolean; onSkillsChanged?: () => Promise<void> }) {
   const [page, setPage] = useState<SettingsPage>('models')
   const [settings, setSettings] = useState<WebSettings | null>(null)
   const [error, setError] = useState('')
@@ -231,7 +231,7 @@ export function SettingsPanel({ canManage = false }: { canManage?: boolean }) {
         </div>
       </div>
       <div id="settings-skills" role="tabpanel" aria-labelledby="settings-skills-tab" hidden={page !== 'skills'}>
-        <SkillSettings canManage={canManage} />
+        <SkillSettings canManage={canManage} onChanged={onSkillsChanged} />
         {!canManage && <div className="df-notice">技能与工作流由管理员管理。</div>}
       </div>
       <div id="settings-collaboration" role="tabpanel" aria-labelledby="settings-collaboration-tab" hidden={page !== 'collaboration'}>

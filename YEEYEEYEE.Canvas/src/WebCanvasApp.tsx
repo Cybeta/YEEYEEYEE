@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { errorMessage, request } from './api'
+import { errorMessage, request, SESSION_LOST_EVENT } from './api'
 import { mapAssets, recordReferences, resolveReference, type Asset } from './assets'
 import { ALL_CHAPTERS_ID, chapterIdOf } from './ChapterView'
 import { CANVAS_VERSION } from './Protocol/VersionedMessages'
@@ -142,9 +142,33 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
    */
   const drafting = useRef(false)
   drafting.current = dirty || editorFocused
+  /** 当前登录态的 ref：会话失效的监听只注册一次，读它拿到的才是最新那份。 */
+  const authRef = useRef(auth)
+  authRef.current = auth
+  /** 会话失效只处理一次——几条轮询可能在同一刻各撞上一次 401。 */
+  const expiryHandled = useRef(false)
+  /** 会话在半路失效的原因，交给登录面板显示。 */
+  const [sessionExpired, setSessionExpired] = useState(false)
   useEffect(() => {
     onSwitchBlocked?.(dirty || saving || loading || layoutBusy || taskBusy)
   }, [dirty, saving, loading, layoutBusy, taskBusy, onSwitchBlocked])
+  /**
+   * 登录在半路失效（cookie 过期、被停用、口令被改）。
+   *
+   * 这时候每一条轮询都会一直撞 401 空转下去，界面却只会显示几句「暂时读不到」。
+   * 所以收到信号就重问一次身份：拿回来的是「未登录」，于是闸门回到登录页、画布卸载、
+   * 轮询随 `enabled=false` 停下（SSE 那边 401 时 `EventSource` 自己就放弃重连了，不会无限重试）。
+   */
+  useEffect(() => {
+    const onLost = () => {
+      if (expiryHandled.current || !authRef.current?.user) return
+      expiryHandled.current = true
+      setSessionExpired(true)
+      void refreshSession()
+    }
+    window.addEventListener(SESSION_LOST_EVENT, onLost)
+    return () => window.removeEventListener(SESSION_LOST_EVENT, onLost)
+  }, [])
   useEffect(() => {
     if (!dirty) return
     const prevent = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
@@ -206,6 +230,8 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
     onEditsChanged: () => void refreshLeases(),
     // 有人上线/下线：立刻重取名单。载荷只说「谁变了」，名单形状只有一处（GET /api/web/presence）。
     onPresenceChanged: () => void refreshPresence(),
+    // 断线重连：这条流不重放断线期间的事件，必须自己补取一次快照，否则那段时间的改动会一直看不到。
+    onReconnected: () => void resyncAfterReconnect(),
     onCanvasChanged: (event) => {
       // 产物回挂这条推送：任务本身的进度/成败也要跟着更新一次（任务列表与画布是两份数据）。
       if (event.scope === 'job-output') void refreshJobs()
@@ -348,14 +374,44 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
     }
   }
 
+  /**
+   * 断线重连之后的「补课」。
+   *
+   * SSE 只说「变了」、不投递内容，**也不重放**断线期间那些事件（服务端不留档）。
+   * 所以自动重连只保证「之后的新推送接得上」，那段空档必须**自己重新取一次快照**才能补上——
+   * 不补的话，界面会一直停在断线前那一版，而且连「有变动」的提示都不会出现。
+   *
+   * 手上干净就直接跟上（复用 followScene：不动选中与视角）；有草稿时不覆盖，只按修订差异提示一句，
+   * 与收到 canvas.changed 时是同一条判据——把决定权留给用户，而不是替他丢掉刚敲的那几行。
+   */
+  async function resyncAfterReconnect() {
+    if (loading || saving) return
+    if (!dirty && !editorFocused) { await followScene(); return }
+    const run = ++followRun.current
+    try {
+      const next = parseScene(await request('/api/web/scene'))
+      if (run !== followRun.current) return
+      if (scene && next.revision !== scene.revision) {
+        setRemoteChange({ revision: next.revision, text: '断线期间有改动' })
+        setLayoutPlan(null)
+      }
+    } catch {
+      // 补取失败不打扰用户：下一次推送、轮询或手动重载还会再发现。
+    }
+  }
+
   /** 问一次服务端「我是谁」。没登录就什么都不加载——**别在没身份的时候去打画布接口**。 */
   async function refreshSession() {
     try {
       const state = parseAuthState(await request<unknown>('/api/auth/state'))
       setAuth(state)
       setAuthFailure('')
-      if (state.user) void loadScene()
-      else {
+      if (state.user) {
+        // 重新登录成功：上一条「会话已失效」的提示与去重标记一起清掉，否则下次真失效时它不再响。
+        expiryHandled.current = false
+        setSessionExpired(false)
+        void loadScene()
+      } else {
         setScene(null)
         setAssets([])
         setAssetsReady(false)
@@ -548,7 +604,8 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
     </div>
   </div>
 
-  if (gateOf(auth) !== 'ready') return <SessionPanel state={auth} onChanged={() => void refreshSession()} />
+  if (gateOf(auth) !== 'ready') return <SessionPanel state={auth} onChanged={() => void refreshSession()}
+    initialNotice={sessionExpired ? '登录已失效，请重新登录' : undefined} />
 
   const user = auth.user!
   const bounds = canvasBounds(records)
@@ -1335,7 +1392,13 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
               />
             )
             : dockMode === 'settings'
-              ? <SettingsPanel canManage={role === 'Admin'} />
+              ? <SettingsPanel canManage={role === 'Admin'} onSkillsChanged={async () => {
+                const run = generation.current
+                const catalog = await request<{ skills: WebSkill[] }>('/api/web/skills')
+                if (run !== generation.current) return
+                if (!Array.isArray(catalog.skills)) throw new Error('技能目录响应格式不正确')
+                setSkills(catalog.skills)
+              }} />
               : null}
               <div hidden={dockMode !== 'agent'} style={{ height: '100%' }}><AgentPanel
                 userId={myUserId}

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 
@@ -75,6 +76,39 @@ internal sealed class MockComfyUiServer : IAsyncDisposable
             if (segments.FirstOrDefault() == "api") segments = segments.Skip(1).ToArray();
             switch (context.Request.HttpMethod, segments.FirstOrDefault())
             {
+                case ("GET", "ws") when context.Request.IsWebSocketRequest:
+                    using (var socket = (await context.AcceptWebSocketAsync(null)).WebSocket)
+                    {
+                        var buffer = new byte[65536];
+                        while (socket.State == WebSocketState.Open)
+                        {
+                            var received = await socket.ReceiveAsync(buffer.AsMemory(), lifetime!.Token);
+                            if (received.MessageType == WebSocketMessageType.Close)
+                            {
+                                await socket.CloseOutputAsync(socket.CloseStatus ?? WebSocketCloseStatus.NormalClosure, socket.CloseStatusDescription, lifetime.Token);
+                                break;
+                            }
+                            await socket.SendAsync(buffer.AsMemory(0, received.Count), received.MessageType, received.EndOfMessage, lifetime.Token);
+                        }
+                    }
+                    break;
+                case ("GET", "redirect-relative"):
+                    context.Response.RedirectLocation = "assets/main.js";
+                    context.Response.StatusCode = 302;
+                    break;
+                case ("GET", "redirect-external"):
+                    context.Response.RedirectLocation = "https://outside.invalid/";
+                    context.Response.StatusCode = 302;
+                    break;
+                case ("GET", "headers"):
+                    context.Response.Headers["Set-Cookie"] = "upstream-secret=1";
+                    context.Response.Headers["X-Upstream-Secret"] = "private";
+                    await JsonAsync(context, new { authorization = context.Request.Headers["Authorization"], cookie = context.Request.Headers["Cookie"], origin = context.Request.Headers["Origin"], host = context.Request.Headers["Host"] });
+                    break;
+                case ("GET", "assets"):
+                    context.Response.ContentType = "application/javascript";
+                    await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes($"const api = '{BaseAddress}api'; const ws = '{BaseAddress.ToString().Replace("http:", "ws:")}ws';"));
+                    break;
                 case ("GET", "userdata"):
                     if (segments.Length == 1) await JsonAsync(context, new[] { new { path = "video/api.json" }, new { path = "video/ui.json" } });
                     else if (Uri.UnescapeDataString(context.Request.Url!.AbsolutePath).EndsWith("ui.json", StringComparison.Ordinal)) await JsonAsync(context, new { nodes = Array.Empty<object>() });

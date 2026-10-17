@@ -381,6 +381,8 @@ export function attachmentKindLabel(kind: string): string {
     case 'Image': return '图片'
     case 'Video': return '视频'
     case 'Audio': return '音频'
+    case 'Text': return '文本'
+    case 'Document': return '文档'
     case 'Other': return '其他'
     default: return kind.trim() || '未知类型'
   }

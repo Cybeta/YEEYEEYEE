@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { canvasUrl, errorMessage, request } from '../api'
-import type { AttachmentSummary } from '../assets'
-import { canCommitChatPreview, chatActionsKey, chatPreviewKey, readChatStream, type ChatMessage, type ChatSession } from './chatStream'
+import { mapAssets, type AttachmentSummary, type Asset } from '../assets'
+import { canCommitChatPreview, chatActionsKey, chatPreviewKey, readChatStream, type ChatMessage, type ChatSession, type ChatSkillAction } from './chatStream'
 import { ChatUsageRow } from './ChatUsageRow'
 import './agentPreview.css'
 import { attachmentFileUrl, entityThumbUrl } from './assetImages'
+import {
+  arrayParameterValue, attachmentAccept, attachmentMaxBytes, attachmentPreviewMode, buildParameterPayload,
+  decodeEntityReference, editableParameters, encodeEntityReference, entityReferenceKindLabel, entityReferenceLabel,
+  entityReferenceOptions, formatBytes, initialParameterValues, parseSkillCatalog, referenceAttachmentChoices,
+  skillDeclaration, toggleArrayParameter,
+  type ArrayChoice, type ChatEntityReference, type ChatParameterValues, type ChatSkillCatalog,
+  type EntityReferenceInput, type EntityReferenceOption
+} from './chatSkillParams'
 
 import type { AgentPanelProps, NodeAgentRequest } from './AgentPanel'
 import {
@@ -41,16 +49,182 @@ function GeneratedOutputs({ jobId }: { jobId: string }) {
   </div>
 }
 
+/**
+ * 聊天附件的就地预览。
+ *
+ * 图片 / 视频 / 音频各有各的标签；其余类型（文本、PDF）**不硬渲染**——链接已经在那儿，
+ * 点开就能看，硬塞一个 iframe 只会多一处失败面。读不到时只留一句说明，不把整块聊天搞挂。
+ */
+function ChatAttachmentPreview({ url, kind, name }: { url: string; kind: string; name: string }) {
+  const [failure, setFailure] = useState('')
+  const mode = attachmentPreviewMode(kind)
+  if (mode === 'link') return null
+  if (failure) return <span className="df-dim" role="status">预览失败（{failure}），可用链接打开。</span>
+  if (mode === 'image')
+    return <a href={url} target="_blank" rel="noreferrer" title={name}>
+      <img className="df-attachment-thumb" src={url} alt={name} loading="lazy" onError={() => setFailure('文件不可读或已失效')} />
+    </a>
+  if (mode === 'video')
+    return <video src={url} controls preload="metadata" style={{ maxWidth: 240, maxHeight: 160 }} onError={() => setFailure('视频不可读')} />
+  return <audio src={url} controls preload="metadata" onError={() => setFailure('音频不可读')} />
+}
+
+/** 已添加的引用在下拉里的显示名；找不到就回落到 ID，连 ID 都没有就如实说缺 ID（不编名字）。 */
+function referenceChoiceLabel(choices: EntityReferenceOption[] | null, reference: EntityReferenceInput): string {
+  const value = encodeEntityReference(reference)
+  const found = choices?.find(choice => choice.value === value)?.label
+  if (found) return found
+  return reference.id || '（缺少 ID）'
+}
+
+/**
+ * 参数编辑器的初值：模型给的参数，加上**平铺字段**里的参考图。
+ *
+ * 参考图在这条协议里有两个来源（`parameters.referenceAttachmentIds` 与平铺的
+ * `referenceAttachmentIds`），而界面显示的就该是最终会生效的那一套——漏掉平铺那份，
+ * 用户会看到一个空的选择框，一提交却把模型选好的参考图顶掉。
+ */
+function initialSkillParameters(action: ChatSkillAction): Record<string, unknown> {
+  return { ...action.parameters, referenceAttachmentIds: action.referenceAttachmentIds ?? [] }
+}
+
+/** 引用编辑器的初值：模型这条动作上**已解析**的引用（界面显示这一套，提交即替换）。 */
+function resolvedEntityReferences(action: ChatSkillAction): EntityReferenceInput[] {
+  return (action.entityReferences ?? []).map(reference => ({
+    kind: reference.kind,
+    id: reference.id,
+    variantId: reference.variantId || undefined,
+    versionId: reference.versionId || undefined
+  }))
+}
+
+/**
+ * 技能提议的参数与实体引用编辑器。
+ *
+ * 控件**由服务端声明驱动**：只有声明里 `editable` 的参数才出现在这里，类型决定控件形态。
+ * 所以「技能多一个参数」不需要改这个组件——改服务端声明就够了；两边各写一份的话，
+ * 迟早出现「服务端声明了、界面看不见」或「界面能填、服务端不收」。
+ * 这里**不做比服务端更宽**的判断：值照原样提交，稳定错误码由服务端给。
+ */
+function SkillProposalEditor({ action, catalog, values, onValues, references, onReferences, choices, arrayChoices, onLoadChoices, hasTargetNode, busy, streaming, canChat, onSubmit }: {
+  action: ChatSkillAction
+  catalog: ChatSkillCatalog | null
+  values: ChatParameterValues
+  onValues: (next: ChatParameterValues) => void
+  references: EntityReferenceInput[]
+  onReferences: (next: EntityReferenceInput[]) => void
+  choices: EntityReferenceOption[] | null
+  /** 数组参数（参考图附件）的候选：本条会话已上传的图片。 */
+  arrayChoices: ArrayChoice[]
+  onLoadChoices: () => void
+  hasTargetNode: boolean
+  busy: boolean
+  streaming: boolean
+  canChat: boolean
+  onSubmit: () => void
+}) {
+  const specs = editableParameters(skillDeclaration(catalog, action.target))
+  const { errors } = buildParameterPayload(specs, values)
+  // 枚举没选中就不许发起：比例这类选择必须由用户明确点一下，替他默认一个就是替他做决定。
+  const pendingChoice = specs.some(spec => spec.kind === 'enum' && !(values[spec.name] ?? '').trim())
+  const isImage = action.target === 'web.text-to-image' || action.target === 'comfyui.text-to-image'
+  return <div className="df-section">
+    <span>发起前确认参数 · {action.target}{action.target === 'comfyui.text-to-image' ? ' · ComfyUI' : action.target === 'web.text-to-image' ? ' · 图片 API' : ''}</span>
+    {isImage && <span className="df-dim">{action.referenceAttachmentIds?.length ? `使用 ${action.referenceAttachmentIds.length} 张聊天参考图；实体必要参考仍会校验` : hasTargetNode ? '实体参考图由服务端按本条消息的来源节点校验；实体必要参考仍会校验' : '参考图由服务端按当前上下文校验'}</span>}
+    {specs.length === 0 && <span className="df-dim">该技能没有可编辑参数，可直接发起。</span>}
+    {specs.map(spec => <div key={spec.name} className="df-agent-parameter">
+      <span className="df-dim">{spec.description || spec.name}{spec.required ? '（必填）' : ''}</span>
+      {spec.kind === 'enum'
+        ? <div className="df-row df-wrap">{spec.options.map(option => <button key={option} className="df-mini-button" aria-pressed={values[spec.name] === option} disabled={busy || streaming} onClick={() => onValues({ ...values, [spec.name]: option })}>{option}</button>)}</div>
+        : spec.kind === 'boolean'
+          ? <select aria-label={spec.description || spec.name} className="df-select" value={values[spec.name] ?? ''} disabled={busy || streaming} onChange={event => onValues({ ...values, [spec.name]: event.target.value })}>
+              <option value="">未指定</option><option value="true">是</option><option value="false">否</option>
+            </select>
+          : spec.kind === 'array' && arrayChoices.length > 0
+            ? <div className="df-section">
+                <div className="df-row df-wrap">{arrayChoices.map(choice => {
+                  const selected = arrayParameterValue(values[spec.name] ?? '').includes(choice.value)
+                  return <button key={choice.value} className="df-mini-button" aria-pressed={selected} disabled={busy || streaming} onClick={() => onValues({ ...values, [spec.name]: toggleArrayParameter(values[spec.name] ?? '', choice.value) })}>{choice.label}</button>
+                })}</div>
+                <span className="df-dim">已选 {arrayParameterValue(values[spec.name] ?? '').length} 项；全部取消表示不使用参考图。</span>
+              </div>
+            : spec.kind === 'array' || spec.kind === 'object'
+              ? <textarea aria-label={spec.description || spec.name} className="df-input" rows={2} value={values[spec.name] ?? ''} disabled={busy || streaming} placeholder={spec.kind === 'array' ? '["a","b"]' : '{"键":"值"}'} onChange={event => onValues({ ...values, [spec.name]: event.target.value })} />
+              : <input aria-label={spec.description || spec.name} className="df-input" value={values[spec.name] ?? ''} disabled={busy || streaming} onChange={event => onValues({ ...values, [spec.name]: event.target.value })} />}
+    </div>)}
+    <details className="df-agent-parameter" onToggle={event => { if ((event.target as HTMLDetailsElement).open) onLoadChoices() }}>
+      <summary>实体引用 · {references.length} 项</summary>
+      <span className="df-dim">人物、场景、道具或项目节点。只提交 ID：显示名与版本由服务端按 ID 回填。</span>
+      {references.map((reference, index) => <span key={`${reference.kind}:${reference.id}:${reference.variantId ?? ''}:${index}`} className="df-row">
+        <span>{entityReferenceKindLabel(reference.kind)}「{referenceChoiceLabel(choices, reference)}」</span>
+        <button className="df-mini-button" disabled={busy} onClick={() => onReferences(references.filter((_, position) => position !== index))}>移除</button>
+      </span>)}
+      {choices === null
+        ? <span className="df-dim">展开后加载可引用的人物、场景、道具与项目节点。</span>
+        : choices.length === 0
+          ? <span className="df-dim">当前画布与资源库里没有可引用的对象。</span>
+          : <select aria-label="添加实体引用" className="df-select" value="" disabled={busy} onChange={event => { const decoded = decodeEntityReference(event.target.value); if (decoded) onReferences([...references, decoded]) }}>
+              <option value="">添加实体引用…</option>
+              {choices.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+            </select>}
+    </details>
+    {!!action.entityReferences?.length && <span className="df-dim">服务端已解析：{action.entityReferences.map((reference: ChatEntityReference) => entityReferenceLabel(reference)).join('、')}</span>}
+    {!!errors.length && <span role="alert" className="df-notice is-error">{errors.join('；')}</span>}
+    <div className="df-row">
+      <button className="df-primary-button" disabled={busy || streaming || !canChat || !!errors.length || pendingChoice} onClick={onSubmit}>按所选参数生成</button>
+    </div>
+  </div>
+}
+
 export function ChatPanel({ userId, canChat, chapterId, nodeId, baseRevision, canCommit, records, nodeAgentRequest, onNodeAgentConsumed, onPreviewChange, onChanged }: AgentPanelProps) {
   const [mode, setMode] = useState('approval')
-  const [imageRatios, setImageRatios] = useState<Record<string, string>>({})
-  async function generateImage(messageId: string) {
+  /** 服务端下发的技能参数声明与附件类型；取不到时退化为「只收提示词 + 旧的可选类型」。 */
+  const [catalog, setCatalog] = useState<ChatSkillCatalog | null>(null)
+  /** 这条技能提议上用户填过的参数（按消息 ID 存；没填过的用声明 + 模型给的值现算）。 */
+  const [parameters, setParameters] = useState<Record<string, ChatParameterValues>>({})
+  /** 这条技能提议上用户编辑过的实体引用（没编辑过的用模型已解析的那一套，见 referenceSelection）。 */
+  const [references, setReferences] = useState<Record<string, EntityReferenceInput[]>>({})
+  /**
+   * 这条提议**此刻界面上显示的那一套引用**：用户改过就按用户的，没改过就按模型已解析的。
+   *
+   * 编辑器与提交必须问同一处：分开写的话，「显示着 4 条引用、一提交却发空数组」这种
+   * 界面与请求不一致的问题就会悄悄出现（而且不会报错，只是引用凭空消失）。
+   */
+  const referenceSelection = (messageId: string, action: ChatSkillAction) =>
+    references[messageId] ?? resolvedEntityReferences(action)
+  /** 可引用的对象清单：展开实体引用时才去加载（画布节点 + 项目资源库）。 */
+  const [entityChoices, setEntityChoices] = useState<EntityReferenceOption[] | null>(null)
+  async function loadEntityChoices() {
+    if (entityChoices) return
+    const nodes = records
+      .filter(record => typeof record.recordId === 'string' && record.recordId.trim().length > 0)
+      .map(record => ({ id: record.recordId, title: typeof record.record.title === 'string' ? record.record.title : '' }))
+    let assets: Asset[] = []
+    try { assets = mapAssets(await request('/api/web/assets')).entities } catch { assets = [] }
+    if (mounted.current) setEntityChoices(entityReferenceOptions(nodes, assets))
+  }
+  async function generateSkill(messageId: string, skillId: string) {
     if (inFlight.current || streaming || !canChat) return
     const sessionId = selected
+    const action = session?.messages.find(message => message.id === messageId)?.skillActions?.[0]
+    if (!action) return
+    const specs = editableParameters(skillDeclaration(catalog, skillId))
+    const values = parameters[messageId] ?? initialParameterValues(specs, action.parameters)
+    const payload = buildParameterPayload(specs, values)
+    if (payload.errors.length) { setNotice(payload.errors.join('；')); return }
     inFlight.current = true
     setBusy(true); setNotice('')
     try {
-      await request(`/api/web/chat/sessions/${sessionId}/skills/${messageId}/invoke`, { method: 'POST', body: JSON.stringify({ aspectRatio: imageRatios[messageId] }) })
+      await request(`/api/web/chat/sessions/${sessionId}/skills/${messageId}/invoke`, {
+        method: 'POST',
+        // 比例仍然单独给一份：图片这条路在技能入口就按它把关（IMAGE_RATIO_REQUIRED），
+        // 放在 parameters 里对「入口校验」是不可见的。
+        body: JSON.stringify({
+          aspectRatio: typeof payload.parameters.aspectRatio === 'string' ? payload.parameters.aspectRatio : null,
+          parameters: payload.parameters,
+          entityReferences: referenceSelection(messageId, action)
+        })
+      })
       await refresh()
     } catch (e) { clearPreview(); setNotice(errorMessage(e)); await refresh().catch(() => {}) } finally { inFlight.current = false; setBusy(false) }
   }
@@ -80,12 +254,18 @@ export function ChatPanel({ userId, canChat, chapterId, nodeId, baseRevision, ca
   const [ready, setReady] = useState(false)
   const [selected, setSelected] = useState('')
   const [text, setText] = useState('')
-  const [attachments, setAttachments] = useState<{ id: string; name: string; type: string }[]>([])
+  const [attachments, setAttachments] = useState<{ id: string; name: string; type: string; kind?: string; size?: number }[]>([])
+  const accept = attachmentAccept(catalog)
+  // 上传前先按服务端声明的上限拦一道：省掉一次注定 413 的往返；服务端仍会再校验一次。
+  const sizeHint = catalog?.attachmentTypes.length
+    ? catalog.attachmentTypes.map(type => `${type.mime}≤${formatBytes(type.maxBytes)}`).join('、')
+    : '见服务端声明'
   async function upload(file: File) {
     setBusy(true); setNotice('')
     try {
       if (attachments.length >= 8) throw new Error('每条消息最多8个附件')
-      if (file.size > (file.type.startsWith('image/') ? 5242880 : 65536)) throw new Error('图片最多5MiB，文本最多64KiB')
+      const limit = attachmentMaxBytes(catalog, file.type)
+      if (limit > 0 && file.size > limit) throw new Error(`${file.type || '该类型'} 最多 ${formatBytes(limit)}`)
       let id = selected
       if (!id) { const next = await request<ChatSession>('/api/web/chat/sessions', { method: 'POST' }); id = next.id; update(next); setSelected(id) }
       const response = await fetch(canvasUrl(`/api/web/chat/sessions/${id}/attachments?name=${encodeURIComponent(file.name)}`), { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': file.type || 'text/plain' }, body: file })
@@ -104,6 +284,12 @@ export function ChatPanel({ userId, canChat, chapterId, nodeId, baseRevision, ca
   currentContext.current = { selected, baseRevision, canCommit }
   const session = sessions.find(s => s.id === selected)
   const streaming = session?.messages.at(-1)?.state === 'streaming'
+  // 本条会话里已上传的图片附件（按出现顺序、按 ID 去重）：参考图参数的可选来源。
+  const arrayChoices = referenceAttachmentChoices(
+    (session?.messages ?? []).flatMap(message => message.attachments ?? [])
+      .filter(attachment => attachment.kind === 'Image')
+      .filter((attachment, index, all) => all.findIndex(item => item.id === attachment.id) === index)
+      .map(attachment => ({ id: attachment.id, name: attachment.name })))
   const selectionKey = `yeeeyee.chat.selected.${userId}.${new URLSearchParams(window.location.search).get('canvas') ?? 'default'}`
   async function refresh() {
     const list = await request<ChatSession[]>('/api/web/chat/sessions')
@@ -130,6 +316,15 @@ export function ChatPanel({ userId, canChat, chapterId, nodeId, baseRevision, ca
       setReady(true)
     }).catch(e => { if (mounted.current) { setNotice(errorMessage(e)); setReady(true) } })
     return () => { mounted.current = false; active.current?.abort(); clearPreview() }
+  }, [userId])
+  // 技能声明与附件类型由服务端下发；取不到就退化为「只收提示词 + 旧的可选类型」——
+  // 服务端仍然照自己的声明校验，所以退化只会让界面少几个控件，不会让参数悄悄生效。
+  useEffect(() => {
+    let active = true
+    void request<unknown>('/api/web/skills')
+      .then(raw => { if (active) setCatalog(parseSkillCatalog(raw)) })
+      .catch(() => { if (active) setCatalog(null) })
+    return () => { active = false }
   }, [userId])
   const pendingGeneration = sessions.some(s => s.messages.some(m => m.skillState === 'submitted'))
   useEffect(() => {
@@ -325,17 +520,35 @@ export function ChatPanel({ userId, canChat, chapterId, nodeId, baseRevision, ca
         <span className="df-agent-message-role">{m.role === 'user' ? '你' : `Agent · ${m.model}`}</span>
         {m.thinking && <details className="df-agent-thinking"><summary>思考 · {m.thinking.length} 字<span className="df-agent-thinking-preview"><span>{m.thinking.trimEnd().slice(-600)}</span></span></summary><div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{m.thinking}</div></details>}
         <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{(m.role === 'assistant' ? m.content.replace(/^[ \t]*```json[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*```[ \t]*(?=\r?$)/gim, '') : m.content) || (m.state === 'streaming' ? '等待模型回复…' : '')}</div>
-        {m.attachmentIds?.map((attachmentId, index) => <a key={attachmentId} href={canvasUrl(`/api/web/chat/sessions/${session.id}/attachments/${attachmentId}`)} target="_blank" rel="noreferrer">查看附件 {index + 1}</a>)}
+        {/* 附件按种类预览：图片 / 视频 / 音频就地渲染，文本与文档保留下载链接（不硬渲染）。
+            没有元数据的历史消息只有 ID，照旧给一条链接，不退化成什么都不显示。 */}
+        {!!m.attachments?.length
+          ? <div className="df-row df-wrap">{m.attachments.map(attachment => <span key={attachment.id} className="df-agent-attachment">
+              <a href={canvasUrl(`/api/web/chat/sessions/${session.id}/attachments/${attachment.id}`)} target="_blank" rel="noreferrer">{attachment.name}</a>
+              <span className="df-dim">{attachmentKindLabel(attachment.kind)}</span>
+              <ChatAttachmentPreview url={canvasUrl(`/api/web/chat/sessions/${session.id}/attachments/${attachment.id}`)} kind={attachment.kind} name={attachment.name} />
+            </span>)}</div>
+          : m.attachmentIds?.map((attachmentId, index) => <a key={attachmentId} href={canvasUrl(`/api/web/chat/sessions/${session.id}/attachments/${attachmentId}`)} target="_blank" rel="noreferrer">查看附件 {index + 1}</a>)}
         {m.role === 'assistant' && <span className="df-dim">执行 {m.id} · {m.state}{m.actionState ? ` · ${m.actionState}` : ''}</span>}
         {m.targetNodeId && <span className="df-agent-context">来源节点：{m.targetNodeTitle || m.targetNodeId} · {m.targetNodeId} · 章节 {m.targetChapterId ?? '未归档'} · 基准修订 {m.baseRevision ?? '—'}{m.source ? ` · ${m.source}` : ''}</span>}
         {m.error && <span role="alert" className="df-notice is-error">{m.error}</span>}
         {m.ask && <div className="df-section"><strong>{m.ask.question}</strong>{m.ask.options.map(option => <button key={option} className="df-mini-button" disabled={busy || streaming} onClick={() => setText(option)}>{option}</button>)}<span className="df-dim">也可在输入框填写回答后发送。</span></div>}
-        {['preview', 'failed'].includes(m.skillState ?? '') && m.skillActions?.length === 1 && ['web.text-to-image', 'comfyui.text-to-image'].includes(m.skillActions[0].target) && <div className="df-section">
-          <span>生图前请选择比例 · {m.skillActions[0].target === 'web.text-to-image' ? '图片 API' : 'ComfyUI'} · {m.skillActions[0].referenceAttachmentIds?.length ? `使用 ${m.skillActions[0].referenceAttachmentIds.length} 张聊天参考图；实体必要参考仍会校验` : m.targetNodeId ? '实体参考图由服务端按本条消息的来源节点校验；实体必要参考仍会校验' : '参考图由服务端按当前上下文校验'}</span>
-          <div className="df-row df-wrap">{['1:1', '16:9', '9:16', '4:3', '3:4'].map(ratio => <button key={ratio} className="df-mini-button" aria-pressed={imageRatios[m.id] === ratio} disabled={busy || streaming} onClick={() => setImageRatios(current => ({ ...current, [m.id]: ratio }))}>{ratio}</button>)}
-            <button className="df-primary-button" disabled={busy || streaming || !canChat || !imageRatios[m.id]} onClick={() => void generateImage(m.id)}>按所选比例生成</button>
-          </div>
-        </div>}
+        {['preview', 'failed'].includes(m.skillState ?? '') && m.skillActions?.length === 1 && <SkillProposalEditor
+          action={m.skillActions[0]}
+          catalog={catalog}
+          values={parameters[m.id] ?? initialParameterValues(editableParameters(skillDeclaration(catalog, m.skillActions[0].target)), initialSkillParameters(m.skillActions[0]))}
+          onValues={next => setParameters(current => ({ ...current, [m.id]: next }))}
+          references={referenceSelection(m.id, m.skillActions[0])}
+          onReferences={next => setReferences(current => ({ ...current, [m.id]: next }))}
+          choices={entityChoices}
+          arrayChoices={arrayChoices}
+          onLoadChoices={() => void loadEntityChoices()}
+          hasTargetNode={!!m.targetNodeId}
+          busy={busy}
+          streaming={streaming}
+          canChat={canChat}
+          onSubmit={() => void generateSkill(m.id, m.skillActions![0].target)}
+        />}
         {m.skillState === 'submitted' && <span className="df-dim">生成请求已提交；完成后按本条对话的画布权限处理回挂。可继续对话。</span>}
         {m.skillError && <span role="alert" className="df-notice is-error">{m.skillError}</span>}
         {m.skillState === 'completed' && m.skillJobIds?.map(jobId => <GeneratedOutputs key={jobId} jobId={jobId} />)}
@@ -367,11 +580,11 @@ export function ChatPanel({ userId, canChat, chapterId, nodeId, baseRevision, ca
     {!canChat && <span className="df-notice">当前账号没有模型调用权限。</span>}
     {mode === 'auto' && !canCommit && <span role="alert" className="df-notice is-error">自动提交需要可编辑画布且没有未保存修改；请先保存，或切换到审批模式。</span>}
     <div className="df-agent-composer">
-    <input ref={fileInput} hidden aria-label="聊天附件" type="file" accept="image/png,image/jpeg,text/plain,.txt" disabled={busy || streaming || !canChat} onChange={e => { const file = e.target.files?.[0]; if (file) void upload(file); e.target.value = '' }} />
-    {!!attachments.length && <div className="df-row df-wrap">{attachments.map(a => <div key={a.id} className="df-agent-attachment"><a href={canvasUrl(`/api/web/chat/sessions/${selected}/attachments/${a.id}`)} target="_blank" rel="noreferrer">{a.name}</a><button className="df-mini-button" disabled={busy} onClick={() => setAttachments(current => current.filter(item => item.id !== a.id))}>移除</button></div>)}</div>}
+    <input ref={fileInput} hidden aria-label="聊天附件" type="file" accept={accept} disabled={busy || streaming || !canChat} onChange={e => { const file = e.target.files?.[0]; if (file) void upload(file); e.target.value = '' }} />
+    {!!attachments.length && <div className="df-row df-wrap">{attachments.map(a => <div key={a.id} className="df-agent-attachment"><a href={canvasUrl(`/api/web/chat/sessions/${selected}/attachments/${a.id}`)} target="_blank" rel="noreferrer">{a.name}</a>{a.kind && <span className="df-dim">{attachmentKindLabel(a.kind)}</span>}<ChatAttachmentPreview url={canvasUrl(`/api/web/chat/sessions/${selected}/attachments/${a.id}`)} kind={a.kind ?? 'Other'} name={a.name} /><button className="df-mini-button" disabled={busy} onClick={() => setAttachments(current => current.filter(item => item.id !== a.id))}>移除</button></div>)}</div>}
     <textarea aria-label="聊天消息" className="df-input" maxLength={16000} rows={3} value={text} disabled={busy || !canChat} onChange={e => setText(e.target.value)} placeholder="和 Agent 讨论创作" onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
     <div className="df-agent-composer-actions">
-      <button type="button" className="df-tool-button" title="添加PNG/JPEG（5MiB）或UTF-8文本（64KiB）" disabled={busy || streaming || !canChat} onClick={() => fileInput.current?.click()}>附件</button>
+      <button type="button" className="df-tool-button" title={`可上传：${sizeHint}`} disabled={busy || streaming || !canChat} onClick={() => fileInput.current?.click()}>附件</button>
       {last && ['failed', 'cancelled', 'interrupted'].includes(last.state) && <button className="df-mini-button" disabled={busy || streaming || !canChat} onClick={() => void send(true)}>重试回复</button>}
       <div className="df-agent-submit">
         {streaming || active.current

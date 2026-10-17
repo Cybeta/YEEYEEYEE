@@ -15,6 +15,15 @@ internal static class WebSkillJobApi
     private const string VideoSkillId = "web.text-to-video";
     private static IResult Error(int status, string code, string message) => Results.Json(new { code, message }, statusCode: status);
 
+    /// <summary>
+    /// 读实体引用用的选项：**大小写不敏感**。
+    ///
+    /// 这条请求体有两个来源：浏览器发来的（camelCase）与聊天侧转交的（内部序列化，PascalCase）。
+    /// 按大小写绑定会让其中一边的引用整批变成空字段——那会退化成「引用被静默丢掉」，
+    /// 而这正是本能力要消灭的事。所以这里两种写法都认。
+    /// </summary>
+    private static readonly JsonSerializerOptions EntityReferenceOptions = new(JsonSerializerDefaults.Web);
+
     public static Func<string, HttpContext, JsonElement, Task<IResult>> Map(WebApplication app)
     {
         var execution = app.Services.GetRequiredService<SingleMachineExecutionService>();
@@ -47,7 +56,7 @@ internal static class WebSkillJobApi
             && !string.IsNullOrWhiteSpace(app.Configuration["ComfyUI:Checkpoint"]);
         bool VideoApproved() => string.Equals(LegacyConfig.Text(app.Configuration, "WebVideoApprovalMode"), "preapproved-local-video", StringComparison.Ordinal)
             && WebInvocationExecutor.VideoLinkReady(app.Configuration);
-        WebWorkflowCatalog.Entry? Workflow(string id) => WebWorkflowCatalog.Load(app.Configuration["ComfyUI:BaseUrl"]!).FirstOrDefault(e => e.Id == id);
+        WebWorkflowCatalog.Entry? Workflow(string id) => WebWorkflowCatalog.Load(ComfyUiConversion.BaseUrl(app.Configuration)).FirstOrDefault(e => e.Id == id);
         bool Known(string id) => id is SkillId or VideoSkillId or WebImageGeneration.SkillId || WebWorkflowCatalog.IsWorkflow(id);
         bool InvokeAllowed(SessionContext session) => session.ServerClaims.Contains("skill.invoke");
         bool SkillAllowed(SessionContext session, string skillId) => InvokeAllowed(session)
@@ -76,19 +85,21 @@ internal static class WebSkillJobApi
         {
             var session = Session(context);
             var skills = new List<object>();
-            if (SkillAllowed(session, WebImageGeneration.SkillId)) skills.Add(new { id = WebImageGeneration.SkillId, name = "Web 图片 API", capability = "TextToImage", approval = "configured-web-image", referenceCapacity = WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels()), aspectRatios = new[] { "1:1", "16:9", "9:16", "4:3", "3:4" } });
-            if (SkillAllowed(session, SkillId)) skills.Add(new { id = SkillId, name = "本机 ComfyUI 文生图", capability = "TextToImage", approval = "preapproved-local-image" });
+            if (SkillAllowed(session, WebImageGeneration.SkillId)) skills.Add(new { id = WebImageGeneration.SkillId, name = "Web 图片 API", capability = "TextToImage", approval = "configured-web-image", referenceCapacity = WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels()), aspectRatios = new[] { "1:1", "16:9", "9:16", "4:3", "3:4" }, parameters = WebChatSkillParameters.Describe(WebImageGeneration.SkillId) });
+            if (SkillAllowed(session, SkillId)) skills.Add(new { id = SkillId, name = "本机 ComfyUI 文生图", capability = "TextToImage", approval = "preapproved-local-image", parameters = WebChatSkillParameters.Describe(SkillId) });
             // 视频这条技能由**两种执行器**之一承担，它们认的请求体不一样：ComfyUI 那条认 videoFrames（秒折帧）
             // 与边长档位；接口站那条只认 seconds / width / height，并且**明确拒收** videoFrames 与 seed
             // （见下面 Invoke 里的 SKILL_INPUT_UNSUPPORTED）。客户端看不见配置，所以这里如实把后端告诉它——
             // 不说的话，前端只能按 ComfyUI 的体去发，接口站那条路必然被自己的服务端挡回来。
-            if (SkillAllowed(session, VideoSkillId)) skills.Add(new { id = VideoSkillId, name = "Web 文生视频", capability = "TextToVideo", approval = "preapproved-local-video",
+            if (SkillAllowed(session, VideoSkillId)) skills.Add(new { id = VideoSkillId, name = "Web 文生视频", capability = "TextToVideo", approval = "preapproved-local-video", parameters = WebChatSkillParameters.Describe(VideoSkillId),
                 videoBackend = string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase) ? "comfyui" : "http" });
             if (InvokeAllowed(session) && app.Configuration["WebWorkflowApprovalMode"] == "preapproved-local-workflows")
-                skills.AddRange(WebWorkflowCatalog.Load(app.Configuration["ComfyUI:BaseUrl"]!).Select(e => (object)new {
+                skills.AddRange(WebWorkflowCatalog.Load(ComfyUiConversion.BaseUrl(app.Configuration)).Select(e => (object)new {
                     id = e.Id, name = e.Workflow.Title, capability = e.Capability.ToString(), approval = "preapproved-local-workflows",
-                    inputs = new[] { "prompt" }, outputs = new[] { e.Workflow.Kind } }));
-            return Results.Json(new { skills = skills.ToArray() });
+                    inputs = new[] { "prompt" }, outputs = new[] { e.Workflow.Kind }, parameters = WebChatSkillParameters.Describe(e.Id) }));
+            // 附件可选类型也由服务端声明：前端 accept、预览方式与提示都照它渲染，
+            // 不两边各写一份（写散了就会出现「能选不能传」或「能传不能看」）。
+            return Results.Json(new { skills = skills.ToArray(), attachments = WebChatAttachments.Describe(), attachmentAccept = WebChatAttachments.AcceptAttribute() });
         });
         async Task<IResult> Invoke(string skillId, HttpContext context, JsonElement body)
         {
@@ -99,9 +110,17 @@ internal static class WebSkillJobApi
             if (!SkillAllowed(session, skillId)) return Denied();
             if (body.ValueKind != JsonValueKind.Object) return Error(400, "INVALID_REQUEST", "请求必须是 JSON 对象");
             var isVideo = skillId == VideoSkillId;
-            var allowedFields = workflow is not null ? new[] { "prompt", "idempotencyKey", "targetNodeId" } : isVideo
+            // 白名单＝手写字段 ∪ **技能自己声明的参数名**：加一个声明就多收一个参数，
+            // 不必再回来改这段列表（漏改一处就是「声明了但一调用就 400」）。
+            var declared = WebChatSkillParameters.Declare(skillId);
+            var declaredNames = declared.Select(spec => spec.Name).ToArray();
+            var baseFields = workflow is not null ? new[] { "prompt", "idempotencyKey", "targetNodeId" } : isVideo
                 ? new[] { "prompt", "negativePrompt", "model", "seconds", "width", "height", "videoFrames", "seed", "idempotencyKey", "targetNodeId", "chatSessionId", "referenceAttachmentIds" }
                 : new[] { "prompt", "aspectRatio", "idempotencyKey", "targetNodeId", "chatSessionId", "referenceAttachmentIds", "candidateBatch" };
+            var allowedFields = baseFields.Concat(declaredNames)
+                // 实体引用只对有实体库的技能有意义；工作流绑定不了它，收下就是静默丢弃。
+                .Concat(workflow is null ? new[] { "entityReferences" } : Array.Empty<string>())
+                .Distinct(StringComparer.Ordinal).ToArray();
             var invalidVideoFields = isVideo && (
                 (body.TryGetProperty("negativePrompt", out var negative) && (negative.ValueKind != JsonValueKind.String || negative.GetString()!.Length > 4000)) ||
                 (body.TryGetProperty("width", out var width) && (width.ValueKind != JsonValueKind.Number || !width.TryGetInt32(out var widthValue) || widthValue is < 64 or > 2048)) ||
@@ -216,6 +235,42 @@ internal static class WebSkillJobApi
             if (isVideo && body.TryGetProperty("height", out var selectedHeight)) inputs["height"] = selectedHeight.Clone();
             if (isVideo && body.TryGetProperty("videoFrames", out var selectedFrames)) inputs["videoFrames"] = selectedFrames.Clone();
             if (isVideo && body.TryGetProperty("seed", out var selectedSeed)) inputs["seed"] = selectedSeed.Clone();
+            // 声明过的任意参数：手写映射之外的那些（例如图片技能新增的 negativePrompt / seed）
+            // 按同一个声明逐项校验后原样落进执行层输入。手写过的字段不再重复搬一遍——
+            // 两边都以同一份 inputs 为准，重复搬运只会让「谁是权威」变模糊。
+            var handMapped = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "prompt", "aspectRatio", "idempotencyKey", "targetNodeId", "chatSessionId",
+                "referenceAttachmentIds", "candidateBatch"
+            };
+            if (isVideo) handMapped.UnionWith(new[] { "model", "seconds", "width", "height", "videoFrames", "seed", "negativePrompt" });
+            var declaredSupplied = declared
+                .Where(spec => body.TryGetProperty(spec.Name, out _))
+                .ToDictionary(spec => spec.Name, spec => body.GetProperty(spec.Name).Clone(), StringComparer.Ordinal);
+            if (!WebChatSkillParameters.TryValidate(skillId, declaredSupplied, Array.Empty<string>(), out var acceptedParameters, out var parameterCode, out var parameterMessage, out _))
+                return Error(400, parameterCode!, parameterMessage!);
+            foreach (var spec in declared.Where(spec => !handMapped.Contains(spec.Name)))
+                if (acceptedParameters.TryGetValue(spec.Name, out var declaredValue)) inputs[spec.Name] = declaredValue;
+            // 实体引用：与聊天内同一条校验（类型 / ID / 变体 / 版本都要能对上），
+            // 通过的引用原样进输入，执行层与任务记录都看得到；解析不出来就明确拒绝。
+            if (body.TryGetProperty("entityReferences", out var entityReferences))
+            {
+                if (workflow is not null) return Error(400, "SKILL_INPUT_UNSUPPORTED", "工作流技能不支持实体引用");
+                if (entityReferences.ValueKind != JsonValueKind.Array)
+                    return Error(400, "SKILL_ENTITY_INVALID", "entityReferences 必须是数组");
+                var declaredReferences = entityReferences.Deserialize<List<AgentEntityReference>>(EntityReferenceOptions) ?? new List<AgentEntityReference>();
+                if (declaredReferences.Count == 0) return Error(400, "SKILL_ENTITY_INVALID", "entityReferences 不能为空数组");
+                if (WebProjectApi.Current is not { IsProject: true } referenceMode)
+                    return Error(409, "SKILL_ENTITY_INVALID", "实体引用需要项目画布");
+                try
+                {
+                    var resolved = WebProjectApi.Store(referenceMode)!.ResolveEntityReferences(declaredReferences);
+                    inputs["entityReferences"] = JsonSerializer.SerializeToElement(resolved, EntityReferenceOptions);
+                }
+                catch (InvalidDataException ex) { return Error(409, "SKILL_ENTITY_INVALID", ex.Message); }
+                catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException)
+                { return Error(409, "SKILL_ENTITY_INVALID", "无法安全读取画布实体"); }
+            }
             if (workflow is not null)
             {
                 inputs["workflowRevision"] = JsonSerializer.SerializeToElement(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(workflow.Payload))));

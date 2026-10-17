@@ -10,6 +10,10 @@ import './session.css'
  * 登录 / 首次建号 / 账号管理。**全部走会话 cookie**：
  * 服务端把登录态放在 HttpOnly cookie 里，前端不保存任何令牌，
  * 所以刷新页面仍然登录着，而脚本也读不到凭据（这正是不用 localStorage 存令牌的原因）。
+ *
+ * `initialNotice` 是**进入这个面板时的第一句话**：会话在半路失效（cookie 过期、被停用、口令被改）时
+ * 由调用方传「登录已失效，请重新登录」，好让回来的原因写在脸上，而不是一句笼统的默认提示。
+ * 用 state 的初值只用一次——用户一点按钮，这里就换成操作结果了。
  */
 
 type Notice = { kind: 'info' | 'error' | 'success'; message: string }
@@ -22,7 +26,7 @@ async function send<T>(path: string, method: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   })
 }
 
-export function SessionPanel({ state, onChanged }: { state: AuthState; onChanged: () => void }) {
+export function SessionPanel({ state, onChanged, initialNotice }: { state: AuthState; onChanged: () => void; initialNotice?: string }) {
   const gate = gateOf(state)
   const [username, setUsername] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -30,7 +34,7 @@ export function SessionPanel({ state, onChanged }: { state: AuthState; onChanged
   const [confirm, setConfirm] = useState('')
   const [setupToken, setSetupToken] = useState('')
   const [busy, setBusy] = useState(false)
-  const [notice, setNotice] = useState<Notice>({ kind: 'info', message: sessionNotice(state) })
+  const [notice, setNotice] = useState<Notice>({ kind: 'info', message: initialNotice ?? sessionNotice(state) })
 
   async function run(action: () => Promise<Notice>) {
     if (busy) return

@@ -12,10 +12,10 @@ internal static class WebSettingsApi
     private static IResult Error(int status, string code, string message) =>
         Results.Json(new { code, message }, statusCode: status);
 
-    private static readonly object ModelGate = new();
+    internal static readonly object ModelGate = new();
     internal static string ServerConfigPath { get; private set; } = Path.Combine(AppContext.BaseDirectory, "web-ai-config.json");
     internal static AiProviderConfig LoadModels() => AiProviderSettings.Load(migrateSecrets: false, filePath: ServerConfigPath, applyEnvironmentOverrides: false);
-    public sealed record WorkflowImport(string? DisplayName, string[]? Paths);
+    public sealed record WorkflowImport(string? DisplayName, string[]? Paths, string? BaseUrl = null);
     public sealed record WorkflowMutation(string Key, string Operation, string? Name = null, bool? Enabled = null);
     public sealed record SkillMutation(string Operation, string? Name = null, bool? Enabled = null);
     public sealed record ModelSelection(string Revision);
@@ -174,9 +174,12 @@ internal static class WebSettingsApi
             if (WebAccessGuard.CurrentUser(context)?.Role != UserRole.Admin) return Error(403, "MODEL_ADMIN_REQUIRED", "工作流导入需要管理员权限");
             try
             {
-                var http = factory.CreateClient("comfyui");
-                var paths = await ComfyUiLibrary.ReadManifestAsync(http.BaseAddress!.ToString(), http, context.RequestAborted);
-                return Results.Json(new { paths });
+                var conversion = app.Services.GetRequiredService<ComfyUiConversion>();
+                var baseUrl = ComfyUiConversion.BaseUrl(app.Configuration, context.Request.Query["baseUrl"]);
+                using var http = conversion.Client(ComfyUiConversion.Target(baseUrl));
+                var paths = await ComfyUiLibrary.ReadManifestAsync(baseUrl, http, context.RequestAborted);
+                return Results.Json(new { paths, conversionConfigured = conversion.Configured,
+                    conversionOrigin = conversion.ConversionOrigin?.GetLeftPart(UriPartial.Authority) });
             }
             catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or InvalidOperationException or OperationCanceledException)
             { return Error(502, "WORKFLOW_READ_FAILED", "工作流清单无法读取"); }
@@ -187,8 +190,9 @@ internal static class WebSettingsApi
             if ((input.DisplayName?.Length ?? 0) > 200 || input.Paths is { Length: > 500 }) return Error(400, "INVALID_REQUEST", "导入内容过长");
             try
             {
-                var http = factory.CreateClient("comfyui");
-                var result = await ComfyUiLibrary.FetchAsync(http.BaseAddress!.ToString(), http, cancellationToken: context.RequestAborted, selectedPaths: input.Paths);
+                var baseUrl = ComfyUiConversion.BaseUrl(app.Configuration, input.BaseUrl);
+                using var http = app.Services.GetRequiredService<ComfyUiConversion>().Client(ComfyUiConversion.Target(baseUrl));
+                var result = await ComfyUiLibrary.FetchAsync(baseUrl, http, cancellationToken: context.RequestAborted, selectedPaths: input.Paths);
                 lock (ModelGate)
                 {
                     var previous = SiteCatalog.Load().Sites.FirstOrDefault(s => string.Equals(s.BaseUrl, result.BaseUrl, StringComparison.OrdinalIgnoreCase));
@@ -468,7 +472,7 @@ internal static class WebSettingsApi
                     }
                     if (input.ReuseImageKeyForVideo) root["VideoApiKey"] = savedImageKey;
                     SaveModels(root);
-                    return Results.Json(new { saved = true, revision = ModelRevision(), message = "已保存服务端独立媒体配置；图片与 HTTP 视频 API 设置将在下一次任务生效，ComfyUI 仍使用服务启动配置" });
+                    return Results.Json(new { saved = true, revision = ModelRevision(), message = "已保存服务端独立媒体配置；图片与 HTTP 视频 API 设置将在下一次任务生效，已导入工作流按已保存的 ComfyUI 地址调用，内置生成技能仍使用服务启动配置" });
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
                 { return Error(503, "SETTINGS_SAVE_FAILED", "媒体配置保存失败"); }

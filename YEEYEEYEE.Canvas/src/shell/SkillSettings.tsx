@@ -1,10 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { errorMessage, request } from '../api'
+import { startWorkflowConversion, type WorkflowImportResult } from './workflowConversion'
 
 type Skill = { id: string; name: string; enabled: boolean; description: string }
 type Workflow = { key: string; title: string; enabled: boolean; kind: string; converted: boolean; error: string; lastImportError: string }
 type Site = { id: string; displayName: string; workflows: Workflow[] }
-export function SkillSettings({ canManage }: { canManage: boolean }) {
+export function SkillSettings({ canManage, onChanged }: { canManage: boolean; onChanged?: () => Promise<void> }) {
+  const [baseUrl, setBaseUrl] = useState('')
+  const [mediaLoaded, setMediaLoaded] = useState(false)
+  const [listing, setListing] = useState<{ baseUrl: string; conversionConfigured: boolean; conversionOrigin: string | null } | null>(null)
+  const [results, setResults] = useState<WorkflowImportResult | null>(null)
+  const conversion = useRef<ReturnType<typeof startWorkflowConversion> | null>(null)
+  const running = useRef(false)
+  const mounted = useRef(false)
   const [skills, setSkills] = useState<Skill[]>([])
   const [sites, setSites] = useState<Site[]>([])
   async function loadWorkflows() {
@@ -24,11 +32,39 @@ export function SkillSettings({ canManage }: { canManage: boolean }) {
     setSkills(result.skills); setNotice(result.errors.join('；'))
     await loadWorkflows()
   }
-  useEffect(() => { if (canManage) void scan().catch(error => setNotice(errorMessage(error))) }, [canManage])
+  useEffect(() => {
+    mounted.current = true
+    if (canManage) {
+      void scan().catch(error => { if (mounted.current) setNotice(errorMessage(error)) })
+      void request<{ comfyUiBaseUrl: string }>('/api/web/settings/media').then(media => {
+        if (mounted.current) setBaseUrl(current => current || media.comfyUiBaseUrl)
+      }).catch(error => { if (mounted.current) setNotice(errorMessage(error)) })
+        .finally(() => { if (mounted.current) setMediaLoaded(true) })
+    }
+    return () => { mounted.current = false; conversion.current?.cancel(); conversion.current = null }
+  }, [canManage])
   async function run(action: () => Promise<void>) {
+    if (running.current) return
+    running.current = true
     setBusy(true)
-    try { await action() } catch (error) { setNotice(errorMessage(error)) }
-    finally { setBusy(false) }
+    try { await action() } catch (error) { if (mounted.current) setNotice(errorMessage(error)) }
+    finally { running.current = false; if (mounted.current) setBusy(false) }
+  }
+  async function imported(result: WorkflowImportResult) {
+    if (!mounted.current) return
+    setResults(result)
+    setNotice(`导入成功 ${result.converted} 份，失败 ${result.failed} 份。`)
+    await Promise.all([loadWorkflows(), result.converted > 0 ? onChanged?.() : undefined])
+  }
+  function officialImport() {
+    if (running.current || !listing) return
+    void run(async () => {
+      setResults(null)
+      const current = startWorkflowConversion(selected, listing.baseUrl)
+      conversion.current = current
+      try { await imported(await current.result) }
+      finally { if (conversion.current === current) conversion.current = null }
+    })
   }
   async function mutate(skill: Skill, operation: string, name?: string) {
     await request(`/api/web/settings/skills/${encodeURIComponent(skill.id)}`, { method: 'POST', body: JSON.stringify({ operation, name, enabled: !skill.enabled }) })
@@ -44,16 +80,32 @@ export function SkillSettings({ canManage }: { canManage: boolean }) {
       <button className="df-mini-button" disabled={busy} onClick={() => void run(() => mutate(skill, 'enabled'))}>{skill.enabled ? '停用' : '启用'}</button>
       <button className="df-mini-button" disabled={busy} onClick={() => { if (window.confirm(`删除技能“${skill.name}”？`)) void run(() => mutate(skill, 'delete')) }}>删除</button>
     </div>)}
-    <span className="df-muted">从服务端配置的 ComfyUI 导入到桌面共享工作流库。UI 格式需要官方前端导出器；当前 Web 服务只可直接处理 API 格式，失败会逐项报告。</span>
-    <button className="df-mini-button" disabled={busy} onClick={() => void run(async () => {
-      const result = await request<{ paths: string[] }>('/api/web/settings/workflows'); setPaths(result.paths); setSelected(result.paths)
+    <span className="df-muted">导入到桌面共享工作流库。UI 格式使用独立窗口中的官方前端转换；API 格式由服务端直接导入。</span>
+    <label className="df-field">ComfyUI 地址
+      <input className="df-input" value={baseUrl} disabled={busy || !mediaLoaded} maxLength={2048} placeholder="默认使用媒体配置地址" onChange={event => {
+        setBaseUrl(event.target.value); setListing(null); setPaths([]); setSelected([]); setResults(null)
+      }} />
+    </label>
+    <button className="df-mini-button" disabled={busy || !mediaLoaded} onClick={() => void run(async () => {
+      const snapshot = baseUrl.trim()
+      setListing(null); setPaths([]); setSelected([]); setResults(null)
+      const result = await request<{ paths: string[]; conversionConfigured: boolean; conversionOrigin: string | null }>(`/api/web/settings/workflows?baseUrl=${encodeURIComponent(snapshot)}`)
+      setPaths(result.paths); setSelected(result.paths); setListing({ baseUrl: snapshot, conversionConfigured: result.conversionConfigured, conversionOrigin: result.conversionOrigin })
     })}>读取 ComfyUI 工作流清单</button>
+    {listing && <span className="df-muted">清单地址：{listing.baseUrl || '服务端默认地址'}。{listing.conversionConfigured && listing.conversionOrigin ? `官方转换来源：${listing.conversionOrigin}` : '未配置官方转换来源，可使用“仅导入 API 格式”；UI 格式需配置官方转换来源。'}</span>}
     {paths.map(path => <label key={path}><input type="checkbox" checked={selected.includes(path)} disabled={busy} onChange={event => setSelected(ids => event.target.checked ? [...ids, path] : ids.filter(id => id !== path))} />{path}</label>)}
-    <button className="df-mini-button" disabled={busy || selected.length === 0} onClick={() => void run(async () => {
-      const result = await request<{ converted: number; failed: number; workflows: { title: string; converted: boolean; note: string; error: string }[] }>('/api/web/settings/workflows/import', { method: 'POST', body: JSON.stringify({ paths: selected }) })
-      setNotice(`导入成功 ${result.converted} 份，失败 ${result.failed} 份。${result.workflows.filter(w => !w.converted).map(w => `${w.title}：${w.error || w.note}`).join('；')}`)
-      await loadWorkflows()
-    })}>导入所选工作流</button>
+    <button className="df-mini-button" disabled={busy || selected.length === 0 || !listing?.conversionConfigured || !listing.conversionOrigin} onClick={officialImport}>通过官方前端导入所选工作流</button>
+    {busy && conversion.current && <button className="df-mini-button" onClick={() => conversion.current?.cancel()}>取消转换</button>}
+    <button className="df-mini-button" disabled={busy || selected.length === 0 || !listing} onClick={() => void run(async () => {
+      if (!listing) return
+      setResults(null)
+      await imported(await request<WorkflowImportResult>('/api/web/settings/workflows/import', { method: 'POST', body: JSON.stringify({ paths: selected, baseUrl: listing.baseUrl }) }))
+    })}>仅导入 API 格式</button>
+    {results?.workflows.map((workflow, index) => <div className="df-card" key={`${workflow.key}-${index}`}>
+      <span>{workflow.title || workflow.key} · {workflow.converted ? '导入成功' : '导入失败'}</span>
+      {workflow.note && <span className="df-muted">{workflow.note}</span>}
+      {workflow.error && <span className="df-notice is-error">{workflow.error}</span>}
+    </div>)}
     {sites.map(site => <div key={site.id}>
       <span className="df-heading">{site.displayName} · 已安装工作流</span>
       {site.workflows.map(workflow => <div className="df-card" key={workflow.key}>

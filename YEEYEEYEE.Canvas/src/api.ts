@@ -48,6 +48,21 @@ export function canvasUrl(path: string): string {
     ? `${path}${path.includes('?') ? '&' : '?'}canvas=${encodeURIComponent(canvas)}` : path
 }
 
+/**
+ * 「这次会话已经不作数了」的进程内信号。
+ *
+ * 守卫接口回 401 的意思是 cookie 过期 / 被停用 / 口令被改，跟「这次凭据填错了」不是一回事。
+ * 它可能出现在编辑锁、在线名单、任务这几条轮询里，而「回登录页 + 别再空转」是同一件事——
+ * 让每个调用方自己判，迟早会漏掉一条，那条就会一直按 15 秒重试下去。
+ * 所以统一在唯一的 HTTP 入口里发一次，由界面去收。
+ */
+export const SESSION_LOST_EVENT = 'yeeeyee:session-lost'
+
+/** 广播「会话已失效」。非浏览器环境（测试、SSR）静默跳过。 */
+export function notifySessionLost(): void {
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(SESSION_LOST_EVENT))
+}
+
 export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers)
   if (options?.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
@@ -59,6 +74,8 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
   })
   const data: unknown = await response.json().catch(() => null)
   if (!response.ok) {
+    // 只认 /api/web 这一路：/api/auth/login 的 401 是「这次凭据不对」，不是「会话在半路失效」。
+    if (response.status === 401 && path.startsWith('/api/web/')) notifySessionLost()
     const failure = data && typeof data === 'object' ? data as { code?: unknown; message?: unknown } : {}
     const code = typeof failure.code === 'string' ? failure.code : ''
     const message = typeof failure.message === 'string' ? failure.message : `HTTP ${response.status}`

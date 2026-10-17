@@ -13,20 +13,20 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
     private readonly IVideoProvider videoProvider;
     private readonly ComfyUiExecutor comfyUiExecutor;
     private readonly bool comfyUiVideoBackend;
-    private readonly HttpClient workflowHttp;
+    private readonly ComfyUiConversion workflowConversion;
     private readonly IConfiguration configuration;
 
     public WebInvocationExecutor(
         IInvocationExecutor imageExecutor,
         IVideoProvider videoProvider,
         ComfyUiExecutor comfyUiExecutor,
-        bool comfyUiVideoBackend, HttpClient workflowHttp, IConfiguration configuration)
+        bool comfyUiVideoBackend, ComfyUiConversion workflowConversion, IConfiguration configuration)
     {
         this.imageExecutor = imageExecutor;
         this.videoProvider = videoProvider;
         this.comfyUiExecutor = comfyUiExecutor;
         this.comfyUiVideoBackend = comfyUiVideoBackend;
-        this.workflowHttp = workflowHttp;
+        this.workflowConversion = workflowConversion;
         this.configuration = configuration;
     }
 
@@ -37,13 +37,15 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
         {
             if (!session.ServerClaims.Contains("skill.invoke") || configuration["WebWorkflowApprovalMode"] != "preapproved-local-workflows")
                 throw new InvalidOperationException("工作流未获服务端预授权");
-            var entry = WebWorkflowCatalog.Load(workflowHttp.BaseAddress!.ToString()).FirstOrDefault(e => e.Id == invocation.Tool)
+            var entry = WebWorkflowCatalog.Load(ComfyUiConversion.BaseUrl(configuration)).FirstOrDefault(e => e.Id == invocation.Tool)
                 ?? throw new InvalidOperationException("工作流已停用、删除或输入声明不可用");
             var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(entry.Payload)));
             if (!invocation.Inputs.TryGetValue("workflowRevision", out var revision) || revision.GetString() != hash)
                 throw new InvalidOperationException("工作流正文已变化，请重新调用");
-            return await new ComfyUiExecutor(workflowHttp, call => WebWorkflowCatalog.Bind(entry, call))
+            using var http = workflowConversion.Client(ComfyUiConversion.Target(entry.Site.BaseUrl));
+            var output = await new ComfyUiExecutor(http, call => WebWorkflowCatalog.Bind(entry, call))
                 .ExecuteAsync(session, invocation, job, cancellationToken).ConfigureAwait(false);
+            return output with { ExternalTaskId = WebComfyUiTasks.Bind(entry.Site.BaseUrl, output.ExternalTaskId!) };
         }
         if (invocation.Tool == WebImageGeneration.SkillId)
         {
@@ -64,6 +66,9 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
             var image = await new OpenAiCompatibleImageProvider(config, imageHttp).GenerateAsync(new ImageGenerationRequest
             {
                 Prompt = ReadString(invocation.Inputs, "prompt"), Width = size.Width, Height = size.Height,
+                // 反向提示词由 provider 拼进 prompt；这是声明里放开 negativePrompt 的落地处，
+                // 不传下去就等于声明了却没人用（静默丢参数）。
+                NegativePrompt = ReadString(invocation.Inputs, "negativePrompt"),
                 ReferenceImages = references
             }, cancellationToken).ConfigureAwait(false);
             if (image.Status != ImageGenerationStatus.Succeeded)
@@ -109,6 +114,8 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
         var result = await provider.GenerateAsync(new VideoGenerationRequest
         {
             Prompt = ReadString(invocation.Inputs, "prompt"),
+            // 反向提示词此前被这条路吞掉了（声明收下、请求里没有）；ComfyUI 视频工作流是认它的。
+            NegativePrompt = ReadString(invocation.Inputs, "negativePrompt"),
             Model = ReadString(invocation.Inputs, "model"),
             Seconds = ReadInt(invocation.Inputs, "seconds"),
             Width = ReadInt(invocation.Inputs, "width"),

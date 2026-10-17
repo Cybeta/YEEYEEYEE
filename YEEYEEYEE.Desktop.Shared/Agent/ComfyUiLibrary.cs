@@ -205,7 +205,8 @@ public static class ComfyUiLibrary
         IProgress<ComfyUiLibraryProgress>? progress = null,
         CancellationToken cancellationToken = default,
         ComfyUiFrontendExporterFactory? exporterFactory = null,
-        IReadOnlyCollection<string>? selectedPaths = null)
+        IReadOnlyCollection<string>? selectedPaths = null,
+        int? requestedWorkerCount = null)
     {
         var normalized = ProviderImporter.NormalizeBaseUrl(baseUrl);
         if (normalized.Length == 0)
@@ -262,6 +263,12 @@ public static class ComfyUiLibrary
             var next = -1;
             var done = 0;
             var workerCount = SelectWorkerCount(out var workerDecision);
+            if (requestedWorkerCount is not null)
+            {
+                if (requestedWorkerCount is < 1 or > 2) throw new ArgumentOutOfRangeException(nameof(requestedWorkerCount));
+                workerCount = requestedWorkerCount.Value;
+                workerDecision = $"调用方指定 {workerCount} 个导出 worker。";
+            }
             notes.Add(workerDecision);
             notes.Add(workerCount == 2
                 ? "使用官方 ComfyUI 前端双 worker 动态 FIFO 导出；每个 worker 独立页面，禁止生成和写请求，不应用学习规则。"
@@ -434,7 +441,17 @@ public static class ComfyUiLibrary
                 workflow.LastImportError = string.Empty;
                 successfulPayloads[workflow.Key] = payload!;
             }
-            if (old is not null) workflow.Enabled = old.Enabled;
+            if (old is not null)
+            {
+                workflow.Enabled = old.Enabled;
+                workflow.RawDraftFile = old.RawDraftFile;
+            }
+            if (result.RawDrafts.TryGetValue(workflow.Key, out var rawDraft))
+            {
+                workflow.RawDraftFile = "ui." + SiteCatalog.PayloadFileName(workflow.Key, rawDraft);
+                if (!SiteCatalog.SavePayload(id, workflow.RawDraftFile, rawDraft, out var rawError))
+                    return (null, $"工作流原稿写盘失败（{workflow.Key}）：{rawError}");
+            }
             site.Workflows.Add(workflow);
         }
 
@@ -664,11 +681,13 @@ public static class ComfyUiLibrary
             return (workflow, null, null);
         }
 
+        string? rawDraft = null;
         try
         {
             var source = JsonNode.Parse(content) as JsonObject
                 ?? throw new InvalidOperationException("工作流不是 JSON 对象");
             var isUi = source["nodes"] is JsonArray;
+            rawDraft = isUi ? content : null;
             var api = isUi
                 ? await exporter.ExportAsync(source, cancellationToken).ConfigureAwait(false)
                 : source["prompt"] is JsonObject prompt ? prompt : source;
@@ -697,7 +716,7 @@ public static class ComfyUiLibrary
             // 一句笼统的「转换失败」会把我们自己的缺陷（比如空引用）和「这份文件引用了没装的节点」
             // 混成同一句话，前者需要修代码，后者只需要换一份工作流。
             workflow.Error = $"转换失败（{error.GetType().Name}）：{error.Message}";
-            return (workflow, null, null);
+            return (workflow, null, rawDraft);
         }
     }
 

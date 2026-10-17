@@ -17,6 +17,14 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.9" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="..\YEEYEEYEE.Desktop.Avalonia\Agent\ComfyUi.Guard.js" LogicalName="ComfyUi.Guard.js" />
+    <EmbeddedResource Include="..\YEEYEEYEE.Desktop.Avalonia\Agent\ComfyUi.Inspect.js" LogicalName="ComfyUi.Inspect.js" />
+    <EmbeddedResource Include="..\YEEYEEYEE.Desktop.Avalonia\Agent\ComfyUi.Export.js" LogicalName="ComfyUi.Export.js" />
+    <EmbeddedResource Include="ComfyUi.Controller.js" LogicalName="ComfyUi.Controller.js" />
+    <EmbeddedResource Include="ComfyUi.Frame.js" LogicalName="ComfyUi.Frame.js" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <!--

@@ -194,12 +194,78 @@ internal sealed class ProjectCanvasSceneStore
         return (candidates[0].Entity.Id, candidates[0].Variant!.Id);
     }
 
+    /// <summary>
+    /// 把调用方提交的实体引用解析成权威的类型、ID、显示名与版本信息。
+    ///
+    /// **只信 ID**：显示名由这里按 ID 回填，调用方给的名字一律丢掉——同名实体、同名节点都存在，
+    /// 采信名字等于让数据决定引用的是谁。解析不出来就抛领域异常，由调用方按 SKILL_ENTITY_INVALID 明确拒绝。
+    /// </summary>
+    internal IReadOnlyList<AgentEntityReference> ResolveEntityReferences(IReadOnlyList<AgentEntityReference> references)
+    {
+        if (references.Count == 0) return Array.Empty<AgentEntityReference>();
+        var current = Load();
+        var library = CheckProjectAuthority(current.State);
+        var canvas = current.State.Canvas;
+        // 人物 / 场景 / 道具本来就只存在**项目资源库**里（画布里只有按引用补进来的快照），
+        // 所以解析的权威是库；画布本地（非托管）实体也认，但不认库实体的旧快照——
+        // 拿快照解析等于让一份过期副本决定引用的是谁。
+        WorkflowEntity? Find(Guid id) =>
+            library?.Entities.FirstOrDefault(entity => entity.Id == id)
+            ?? canvas.Entities.FirstOrDefault(entity => entity.Id == id && !entity.ManagedByProject);
+        var resolved = new List<AgentEntityReference>(references.Count);
+        foreach (var reference in references)
+        {
+            if (string.Equals(reference.Kind?.Trim(), "node", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!Guid.TryParse(reference.Id, out var nodeId)) throw new InvalidDataException("节点引用必须提供完整节点 ID");
+                var node = canvas.Nodes.FirstOrDefault(item => item.Id == nodeId) ?? throw new InvalidDataException("引用的节点不在当前画布");
+                resolved.Add(new AgentEntityReference
+                {
+                    Kind = "node", Id = node.Id.ToString(), Name = node.Title, Category = node.Category.ToString()
+                });
+                continue;
+            }
+            var kind = reference.Kind?.Trim().ToLowerInvariant() switch
+            {
+                "character" => EntityKind.Character,
+                "scene" => EntityKind.Scene,
+                "prop" => EntityKind.Prop,
+                _ => throw new InvalidDataException($"引用类型须为 character、scene、prop 或 node（收到「{reference.Kind}」）")
+            };
+            if (!Guid.TryParse(reference.Id, out var entityId)) throw new InvalidDataException("实体引用必须提供完整实体 ID");
+            var entity = Find(entityId) ?? throw new InvalidDataException("引用的实体不在当前画布或项目资源库中");
+            if (entity.Kind != kind)
+                throw new InvalidDataException($"实体类型与声明的引用类型不一致：{entity.Name} 是{WorkflowEntity.KindName(entity.Kind)}");
+            var variant = string.IsNullOrEmpty(reference.VariantId)
+                ? entity.Variants.FirstOrDefault()
+                : entity.Variants.FirstOrDefault(item => item.Id.ToString() == reference.VariantId)
+                    ?? throw new InvalidDataException("引用的变体不存在");
+            if (variant is null) throw new InvalidDataException("实体没有任何可引用的变体");
+            var version = string.IsNullOrEmpty(reference.VersionId)
+                ? null
+                : variant.Versions.FirstOrDefault(item => item.Id.ToString() == reference.VersionId)
+                    ?? throw new InvalidDataException("引用的锁定版本不存在");
+            resolved.Add(new AgentEntityReference
+            {
+                Kind = kind.ToString().ToLowerInvariant(),
+                Id = entity.Id.ToString(),
+                Name = entity.Name,
+                VariantId = variant.Id.ToString(),
+                VariantName = variant.Name,
+                VersionId = version?.Id.ToString() ?? string.Empty,
+                Version = version is null ? string.Empty : "v" + version.Number
+            });
+        }
+        return resolved;
+    }
+
     public (long Revision, string Context) AgentContextSnapshot(string? chapterId, string? nodeId, bool requireWritable = false)
     {
         var current = Load();
         if (requireWritable && (current.Open.UnsupportedFormat || current.Open.Validation.HasErrors || current.Open.Migration.Ambiguities.Count > 0))
             throw new InvalidDataException("画布只读或有未解决校验问题");
-        ProjectEntityScope.RefreshSnapshots(current.State.Canvas, CheckProjectAuthority(current.State) ?? new ProjectEntityFile());
+        var authority = CheckProjectAuthority(current.State);
+        ProjectEntityScope.RefreshSnapshots(current.State.Canvas, authority ?? new ProjectEntityFile());
         var canvas = current.State.Canvas;
         var selected = canvas.Nodes.FirstOrDefault(n => n.Id.ToString() == nodeId);
         if (!string.IsNullOrEmpty(chapterId) && !Guid.TryParse(chapterId, out _)) throw new InvalidDataException("章节ID无效");
@@ -210,9 +276,14 @@ internal sealed class ProjectCanvasSceneStore
         // 目标节点可能被章节筛选排除、或落在 100 条的截断之外——它是这次请求的操作对象，
         // 必须始终出现在清单里：清单之外只留一个标题时，同名节点会让模型挑错人。
         if (selected is not null && nodes.All(n => n.Id != selected.Id)) nodes.Insert(0, selected);
+        // 资源视觉内容一栏列的是**项目库现有的人物/场景/道具**，不是画布快照里那几份。
+        // 为什么要按库列：模型要靠这里的 id 才写得对实体引用，而项目库里新建的设定在挂到节点之前
+        // 不会进画布快照（ProjectEntityScope 只补「被引用到的」那些），只列快照等于让模型永远引用不到它。
+        var library = canvas.Entities.Where(entity => !entity.ManagedByProject).ToList();
+        if (authority is not null) library.AddRange(authority.Entities.Select(ProjectEntityScope.CloneEntity));
         var context = new AgentContext(selected?.Title ?? "", selected?.Content ?? "",
             string.Join("\n", nodes.Select(n => $"{n.Id} | {n.Category} | {n.Title} | {n.Content} | assetRequirements={JsonSerializer.Serialize(n.AssetRequirements)} | references={JsonSerializer.Serialize(n.References)}")),
-            string.Join("\n", canvas.Entities.Select(e => $"{e.Id} | {e.Kind} | {e.Name} | variants=" + string.Join(",", e.Variants.Select(v => $"{v.Id}:v{v.CurrentVersion}:imageAvailable={v.Attachments.Any(a => a.Kind == AttachmentKind.Image && WebGenerationReferences.Locate(a) is not null)}")))),
+            string.Join("\n", library.Select(e => $"{e.Id} | {e.Kind} | {e.Name} | variants=" + string.Join(",", e.Variants.Select(v => $"{v.Id}:v{v.CurrentVersion}:imageAvailable={v.Attachments.Any(a => a.Kind == AttachmentKind.Image && WebGenerationReferences.Locate(a) is not null)}")))),
             "", "", JsonSerializer.Serialize(canvas.WorkTree), TargetIdentity(canvas, selected));
         return (current.Revision, $"当前章节ID：{chapterId ?? "全部"}；基准修订：{current.Revision}\n" + context.Describe(24000, includeDesktopSkills: false) + "\nWeb能力边界：生成技能使用Web聊天提供的invoke_skill协议与服务端预授权；模型不能声称调用了桌面技能或任务已完成。write_file不支持。审批模式只预览，用户提交后才写盘。实体修改受项目资源权威校验约束。");
     }

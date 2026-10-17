@@ -228,7 +228,8 @@ param(
     [Parameter(Mandatory=$true)][int]$WaitPid,
     [Parameter(Mandatory=$true)][string]$ResultPath,
     [string]$FromVersion = "",
-    [string]$ToVersion = ""
+    [string]$ToVersion = "",
+    [int]$LivenessSeconds = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -249,6 +250,68 @@ function Write-Result([bool]$ok, [string]$errorText) {
     try {
         [System.IO.File]::WriteAllText($ResultPath, $payload, (New-Object System.Text.UTF8Encoding($false)))
     } catch { }
+}
+
+# Copy a single user file. The new package normally does not contain these names; if it does,
+# only an identical file is accepted. Silently overwriting user data is never allowed.
+function Copy-UserFile([string]$source, [string]$target) {
+    if (Test-Path -LiteralPath $target) {
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+        if ($sourceHash -eq $targetHash) { return }
+        throw "the new package already contains a different file: $target"
+    }
+    Copy-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop
+}
+
+# Merge a user directory into the new version. A name collision means the package or another
+# copy of the data already exists there; stop instead of guessing which one wins.
+function Copy-UserTree([string]$source, [string]$target) {
+    if (-not (Test-Path -LiteralPath $target)) {
+        Copy-Item -LiteralPath $source -Destination $target -Recurse -Force -ErrorAction Stop
+        return
+    }
+    if (-not (Get-Item -LiteralPath $target).PSIsContainer) {
+        throw "a file already exists where a directory is expected: $target"
+    }
+    foreach ($entry in Get-ChildItem -LiteralPath $source -Force) {
+        $destination = Join-Path $target $entry.Name
+        if ($entry.PSIsContainer) { Copy-UserTree $entry.FullName $destination }
+        else { Copy-UserFile $entry.FullName $destination }
+    }
+}
+
+# Package-shipped defaults (for example provider-art) may share a name with a user-adjusted
+# copy. Here the user copy is the one that must survive, so overwrite is intentional.
+function Copy-OverlayTree([string]$source, [string]$target) {
+    if (-not (Test-Path -LiteralPath $target)) { New-Item -ItemType Directory -Force -Path $target | Out-Null }
+    foreach ($entry in Get-ChildItem -LiteralPath $source -Force) {
+        $destination = Join-Path $target $entry.Name
+        if ($entry.PSIsContainer) { Copy-OverlayTree $entry.FullName $destination }
+        else { Copy-Item -LiteralPath $entry.FullName -Destination $destination -Force -ErrorAction Stop }
+    }
+}
+
+$stamp = (Get-Date).ToString('yyyyMMddHHmmss')
+$old = $TargetDir + '.old-' + $stamp
+$failed = $TargetDir + '.failed-' + $stamp
+
+# Put the previous installation back exactly as it was. Used for every failure after the
+# swap point: the old directory is kept until the new process proves it can stay alive.
+function Restore-Previous([string]$reason) {
+    try {
+        if (Test-Path -LiteralPath $TargetDir) {
+            Move-Item -LiteralPath $TargetDir -Destination $failed -ErrorAction Stop
+        }
+        Move-Item -LiteralPath $old -Destination $TargetDir -ErrorAction Stop
+    } catch {
+        Log ("ROLLBACK FAILED: " + $_.Exception.Message + " ; previous files are at " + $old)
+        Write-Result $false ($reason + " ; rollback failed: " + $_.Exception.Message + " ; previous files are at " + $old)
+        exit 1
+    }
+    Log ("previous version restored: " + $reason)
+    Write-Result $false ($reason + " ; previous version restored")
+    exit 1
 }
 
 try {
@@ -280,9 +343,6 @@ try {
         exit 1
     }
 
-    $stamp = (Get-Date).ToString('yyyyMMddHHmmss')
-    $old = $TargetDir + '.old-' + $stamp
-
     Log "moving $TargetDir -> $old"
     try {
         Move-Item -LiteralPath $TargetDir -Destination $old -ErrorAction Stop
@@ -306,22 +366,68 @@ try {
         exit 1
     }
 
+    # Carry user data that lives beside a portable install. Configuration and keys normally
+    # live in the user config directory (see AppPaths), but old or portable copies can still
+    # sit here; losing them would be silent data loss.
+    $carryError = ""
+    foreach ($item in @('Projects', 'sites')) {
+        $from = Join-Path $old $item
+        if (-not (Test-Path -LiteralPath $from)) { continue }
+        Log ("carrying user data forward: " + $item)
+        try { Copy-UserTree $from (Join-Path $TargetDir $item) }
+        catch { $carryError = "$item : " + $_.Exception.Message; break }
+    }
+    if ($carryError.Length -eq 0) {
+        $fromArt = Join-Path $old 'provider-art'
+        if (Test-Path -LiteralPath $fromArt) {
+            Log "carrying user data forward: provider-art"
+            try { Copy-OverlayTree $fromArt (Join-Path $TargetDir 'provider-art') }
+            catch { $carryError = "provider-art : " + $_.Exception.Message }
+        }
+    }
+    if ($carryError.Length -eq 0) {
+        foreach ($file in @('ai-config.json', 'ai-key.bin', 'recent-projects.json')) {
+            $from = Join-Path $old $file
+            if (-not (Test-Path -LiteralPath $from)) { continue }
+            Log ("carrying user data forward: " + $file)
+            try { Copy-UserFile $from (Join-Path $TargetDir $file) }
+            catch { $carryError = "$file : " + $_.Exception.Message; break }
+        }
+    }
+    if ($carryError.Length -gt 0) {
+        Log ("could not carry user data forward: " + $carryError)
+        Restore-Previous ("could not carry user data forward (" + $carryError + ")")
+    }
+
     $exePath = Join-Path $TargetDir $ExeName
     Log "starting $exePath"
+    $child = $null
     try {
-        Start-Process -FilePath $exePath -WorkingDirectory $TargetDir
+        $child = Start-Process -FilePath $exePath -WorkingDirectory $TargetDir -PassThru -ErrorAction Stop
     } catch {
         Log ("start failed: " + $_.Exception.Message)
-        Write-Result $false ("files were replaced but restarting failed: " + $_.Exception.Message)
-        exit 1
+        Restore-Previous ("files were replaced but restarting failed: " + $_.Exception.Message)
+    }
+
+    if ($LivenessSeconds -gt 0) {
+        Start-Sleep -Seconds $LivenessSeconds
+        $alive = $null
+        if ($child -ne $null) { $alive = Get-Process -Id $child.Id -ErrorAction SilentlyContinue }
+        if ($alive -eq $null) {
+            Log "the new version exited within $LivenessSeconds seconds"
+            Restore-Previous ("the new version exited within " + $LivenessSeconds + " seconds")
+        }
     }
 
     Write-Result $true ""
     Log "update applied"
 
-    Start-Sleep -Seconds 5
-    Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue
-    Log "done"
+    if ($LivenessSeconds -gt 0) {
+        Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue
+        Log "done"
+    } else {
+        Log "liveness check disabled; the previous directory is kept for inspection"
+    }
 }
 catch {
     Log ("unexpected: " + $_.Exception.Message)

@@ -85,7 +85,13 @@ public static class UpdateService
     public static string? DescribeSelfUpdateBlocker(UpdateCheckResult result)
     {
         if (UpdateChecker.FindPackage(result.Release) is null)
-            return "这个发行版没有附带 zip 更新包，只能在发布页手动下载。";
+        {
+            // 分端发行后，「只有 Web 包」是一种真实且会持续出现的情况。
+            // 必须点明「没有适用的桌面更新包」，否则用户会以为安装包坏了或更新器坏了。
+            return UpdateChecker.HasWebPackageOnly(result.Release)
+                ? "这个发行版只提供 Web 服务包，没有适用的桌面更新包。请到发布页手动下载桌面安装包。"
+                : "这个发行版没有附带桌面包，只能在发布页手动下载。";
+        }
 
         if (!AppPaths.CanWriteProgramRoot())
             return $"程序目录不可写（{AppPaths.ProgramRoot}），无法在应用内替换；请从发布页下载后手动安装。";

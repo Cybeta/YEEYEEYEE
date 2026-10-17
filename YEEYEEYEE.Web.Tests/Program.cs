@@ -8,6 +8,12 @@ using System.Text.Json.Nodes;
 using YEEYEEYEE.Core;
 using YEEYEEYEE.Host;
 
+if (args.Contains("--conversion-only"))
+{
+    await ConversionRegression.Run();
+    return;
+}
+
 if (args.Contains("--canvas-preview-only"))
 {
     var current = new YEEYEEYEE.Desktop.WorkflowCanvasState();
@@ -116,6 +122,9 @@ if (args.Contains("--settings-only"))
         settingsOnly: true);
     return;
 }
+
+var workflowOnly = args.Contains("--workflow-only");
+if (!workflowOnly) await ConversionRegression.Run();
 
 var root = Path.Combine(Path.GetTempPath(), "yeeeyee-web-tests-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
@@ -303,8 +312,48 @@ JsonElement? PresenceOf(JsonElement snapshot, Guid userId)
         if (person.GetProperty("userId").GetGuid() == userId) return person.Clone();
     return null;
 }
+async Task WorkflowRegression(HttpClient videoClient, MockComfyUiServer mock)
+{
+    await Check(videoClient, HttpMethod.Get, "/api/web/settings/workflows", 200);
+    var imported = await Check(videoClient, HttpMethod.Post, "/api/web/settings/workflows/import", 200,
+        "{\"paths\":[\"video/api.json\",\"video/ui.json\"]}");
+    Assert(imported.GetProperty("converted").GetInt32() == 1 && imported.GetProperty("failed").GetInt32() == 1, "API import and UI rejection: " + imported);
+    Assert(imported.GetProperty("workflows").EnumerateArray().Single(w => !w.GetProperty("converted").GetBoolean()).GetProperty("error").GetString()!.Length > 0, "UI rejection reason missing");
+    var installedSite = (await Check(videoClient, HttpMethod.Get, "/api/web/settings/workflows/installed", 200)).GetProperty("sites")[0];
+    var installedKey = installedSite.GetProperty("workflows").EnumerateArray().Single(w => w.GetProperty("converted").GetBoolean()).GetProperty("key").GetString();
+    var managePath = $"/api/web/settings/workflows/{installedSite.GetProperty("id").GetString()}/manage";
+    await Check(videoClient, HttpMethod.Post, managePath, 200, JsonSerializer.Serialize(new { key = installedKey, operation = "rename", name = "HTTP imported workflow" }));
+    var workflowSkill = (await Check(videoClient, HttpMethod.Get, "/api/web/skills", 200)).GetProperty("skills").EnumerateArray().Single(s => s.GetProperty("name").GetString() == "HTTP imported workflow");
+    var workflowId = workflowSkill.GetProperty("id").GetString();
+    await Check(videoClient, HttpMethod.Post, $"/api/web/skills/{workflowId}/invoke", 400, "{\"prompt\":\"x\",\"idempotencyKey\":\"workflow-invalid\",\"workflow\":{}}");
+    var workflowJob = await Check(videoClient, HttpMethod.Post, $"/api/web/skills/{workflowId}/invoke", 200, "{\"prompt\":\"imported HTTP success\",\"idempotencyKey\":\"workflow-success\"}");
+    var workflowJobId = workflowJob.GetProperty("jobId").GetGuid();
+    for (var i = 0; i < 100 && workflowJob.GetProperty("state").GetString() is "Queued" or "Running"; i++)
+    {
+        await Task.Delay(50);
+        workflowJob = await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{workflowJobId}", 200);
+    }
+    Assert(workflowJob.GetProperty("state").GetString() == "Succeeded" && mock.LastPrompt.Contains("imported HTTP success", StringComparison.Ordinal), "Imported graph execution and prompt binding: " + workflowJob);
+    using (var output = await videoClient.GetAsync($"/api/web/jobs/{workflowJobId}/outputs/0"))
+        Assert(output.IsSuccessStatusCode && output.Content.Headers.ContentType?.MediaType == "video/mp4" && (await output.Content.ReadAsByteArrayAsync()).Length > 100, "Imported workflow binary download");
+    await Check(videoClient, HttpMethod.Post, managePath, 200, JsonSerializer.Serialize(new { key = installedKey, operation = "enabled", enabled = false }));
+    await Check(videoClient, HttpMethod.Post, $"/api/web/skills/{workflowId}/invoke", 404, "{\"prompt\":\"x\",\"idempotencyKey\":\"workflow-disabled\"}");
+    await Check(videoClient, HttpMethod.Post, managePath, 200, JsonSerializer.Serialize(new { key = installedKey, operation = "delete" }));
+    Console.WriteLine("Workflow HTTP regression passed: API import/install, UI rejection, rename, declared inputs, actual prompt binding, poll/download, disable/delete");
+}
 try
 {
+    if (workflowOnly)
+    {
+        await using var workflowMock = new MockComfyUiServer();
+        await workflowMock.StartAsync();
+        await Start(videoApproval: "preapproved-local-video", comfyUiBaseUrl: workflowMock.BaseAddress, comfyUiVideoBackend: true, comfyUiPollingInterval: TimeSpan.FromMilliseconds(50));
+        using var workflowClient = new HttpClient(new HttpClientHandler { CookieContainer = new CookieContainer() })
+            { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+        await Setup(workflowClient, "{\"username\":\"skillowner\",\"password\":\"Password123!\"}");
+        await WorkflowRegression(workflowClient, workflowMock);
+        return;
+    }
     await ChatRegression.Run(dll, root);
     JobAttachRegression.Run();
     NodeAgentTargetRegression.Run();
@@ -378,32 +427,7 @@ try
     Stop();
     await Start(videoApproval: "preapproved-local-video", comfyUiBaseUrl: mock.BaseAddress, comfyUiVideoBackend: true, comfyUiPollingInterval: TimeSpan.FromMilliseconds(50));
     using var videoClient = SkillClient();
-    await Check(videoClient, HttpMethod.Get, "/api/web/settings/workflows", 200);
-    var imported = await Check(videoClient, HttpMethod.Post, "/api/web/settings/workflows/import", 200,
-        "{\"paths\":[\"video/api.json\",\"video/ui.json\"]}");
-    Assert(imported.GetProperty("converted").GetInt32() == 1 && imported.GetProperty("failed").GetInt32() == 1, "API import and UI rejection: " + imported);
-    Assert(imported.GetProperty("workflows").EnumerateArray().Single(w => !w.GetProperty("converted").GetBoolean()).GetProperty("error").GetString()!.Length > 0, "UI rejection reason missing");
-    var installedSite = (await Check(videoClient, HttpMethod.Get, "/api/web/settings/workflows/installed", 200)).GetProperty("sites")[0];
-    var installedKey = installedSite.GetProperty("workflows").EnumerateArray().Single(w => w.GetProperty("converted").GetBoolean()).GetProperty("key").GetString();
-    var managePath = $"/api/web/settings/workflows/{installedSite.GetProperty("id").GetString()}/manage";
-    await Check(videoClient, HttpMethod.Post, managePath, 200, JsonSerializer.Serialize(new { key = installedKey, operation = "rename", name = "HTTP imported workflow" }));
-    var workflowSkill = (await Check(videoClient, HttpMethod.Get, "/api/web/skills", 200)).GetProperty("skills").EnumerateArray().Single(s => s.GetProperty("name").GetString() == "HTTP imported workflow");
-    var workflowId = workflowSkill.GetProperty("id").GetString();
-    await Check(videoClient, HttpMethod.Post, $"/api/web/skills/{workflowId}/invoke", 400, "{\"prompt\":\"x\",\"idempotencyKey\":\"workflow-invalid\",\"workflow\":{}}");
-    var workflowJob = await Check(videoClient, HttpMethod.Post, $"/api/web/skills/{workflowId}/invoke", 200, "{\"prompt\":\"imported HTTP success\",\"idempotencyKey\":\"workflow-success\"}");
-    var workflowJobId = workflowJob.GetProperty("jobId").GetGuid();
-    for (var i = 0; i < 100 && workflowJob.GetProperty("state").GetString() is "Queued" or "Running"; i++)
-    {
-        await Task.Delay(50);
-        workflowJob = await Check(videoClient, HttpMethod.Get, $"/api/web/jobs/{workflowJobId}", 200);
-    }
-    Assert(workflowJob.GetProperty("state").GetString() == "Succeeded" && mock.LastPrompt.Contains("imported HTTP success", StringComparison.Ordinal), "Imported graph execution and prompt binding: " + workflowJob);
-    using (var output = await videoClient.GetAsync($"/api/web/jobs/{workflowJobId}/outputs/0"))
-        Assert(output.IsSuccessStatusCode && output.Content.Headers.ContentType?.MediaType == "video/mp4" && (await output.Content.ReadAsByteArrayAsync()).Length > 100, "Imported workflow binary download");
-    await Check(videoClient, HttpMethod.Post, managePath, 200, JsonSerializer.Serialize(new { key = installedKey, operation = "enabled", enabled = false }));
-    await Check(videoClient, HttpMethod.Post, $"/api/web/skills/{workflowId}/invoke", 404, "{\"prompt\":\"x\",\"idempotencyKey\":\"workflow-disabled\"}");
-    await Check(videoClient, HttpMethod.Post, managePath, 200, JsonSerializer.Serialize(new { key = installedKey, operation = "delete" }));
-    Console.WriteLine("Workflow HTTP regression passed: API import/install, UI rejection, rename, declared inputs, actual prompt binding, poll/download, disable/delete");
+    await WorkflowRegression(videoClient, mock);
     var videoCatalog = await Check(videoClient, HttpMethod.Get, "/api/web/skills", 200);
     Assert(videoCatalog.GetProperty("skills").EnumerateArray().Any(item => item.GetProperty("id").GetString() == "web.text-to-video" && item.GetProperty("capability").GetString() == "TextToVideo"), "Video skill catalog");
     // 客户端看不见 WebVideoBackend 配置，只能由这里如实告诉它：两种后端认的请求体不一样，
@@ -2174,11 +2198,47 @@ try
         var afterLeave = await Check(presenceAdmin, HttpMethod.Get, "/api/web/presence", 200);
         Assert(PresenceOf(afterLeave, presenceId) is null,
             "断开并等过 TTL 之后，名单里不该还有他：" + afterLeave.GetRawText());
+
+        // ---------- 掉线不释放租约 + 重新上线恢复正常 ----------
+        // 在线与锁是**两条独立的依据**：掉线（甚至过了在线 TTL）都不该动他仍然有效的编辑锁——
+        // 「人不在线」不等于「他没在编辑」，提前释放会让他下次心跳回来时把内容写飞。
+        // 这一段只查名单与锁，不再读观察者的帧：申请编辑锁会广播 edits.changed，
+        // 混进来会打乱后面 presence 帧的读取顺序。
+        var offlineNode = Guid.NewGuid();
+        var backOnline = await presenceUser.GetAsync("/api/web/events", HttpCompletionOption.ResponseHeadersRead);
+        try
+        {
+            var offlineLease = (await Check(presenceUser, HttpMethod.Post, "/api/web/edits", 200,
+                JsonSerializer.Serialize(new { scope = "node", targetId = offlineNode, client = "web" })))
+                .GetProperty("lease").GetProperty("leaseId").GetGuid();
+            JsonElement? online = null;
+            for (var attempt = 0; attempt < 30; attempt++)
+            {
+                online = PresenceOf(await Check(presenceAdmin, HttpMethod.Get, "/api/web/presence", 200), presenceId);
+                if (online is { } found && found.GetProperty("basis").GetString() == "connection") break;
+                await Task.Delay(100);
+            }
+            Assert(online is { } live && live.GetProperty("basis").GetString() == "connection",
+                "重新上线应当以「活连接」依据回到名单：" + (online?.GetRawText() ?? "不在名单里"));
+            backOnline.Dispose();
+            // 断开是主路径（服务端立刻注销那条连接）；会话兜底的 last_seen 要等 TTL（这里 3 秒）才过期。
+            await Task.Delay(4000);
+            Assert(PresenceOf(await Check(presenceAdmin, HttpMethod.Get, "/api/web/presence", 200), presenceId) is null,
+                "重新断开并等过 TTL 之后，名单里不该还有他");
+            Assert((await Check(presenceAdmin, HttpMethod.Get, "/api/web/edits", 200)).GetProperty("leases")
+                .EnumerateArray().Any(lease => lease.GetProperty("leaseId").GetGuid() == offlineLease),
+                "掉线（甚至过了在线 TTL）不该释放仍然有效的编辑锁");
+            Assert((await Check(presenceUser, HttpMethod.Put, $"/api/web/edits/{offlineLease}", 200))
+                .GetProperty("lease").GetProperty("leaseId").GetGuid() == offlineLease,
+                "掉线的人回来应当还能续上自己的锁");
+            await Check(presenceUser, HttpMethod.Delete, $"/api/web/edits/{offlineLease}", 200);
+        }
+        finally { backOnline.Dispose(); }
     }
 
     Stop();
     Console.WriteLine("HTTP regression passed: auth, live canvas.edit revocation, byte-preserving denials, jobs, assets, conflicts, persistence, and project/standalone modes");
-    Console.WriteLine("Presence regression passed: SSE subscribe registers as connection basis with the live connection count, one person stays one regardless of connections, the two bases stay apart (recent before subscribing), join/leave broadcast presence.changed, disconnect plus TTL removes the person, anonymous gets 401");
+    Console.WriteLine("Presence regression passed: SSE subscribe registers as connection basis with the live connection count, one person stays one regardless of connections, the two bases stay apart (recent before subscribing), join/leave broadcast presence.changed, disconnect plus TTL removes the person, going offline (even past the TTL) never releases that user's still-valid node lease and reconnecting restores the connection basis, anonymous gets 401");
     Console.WriteLine("Auth regression passed: first user becomes admin, role-derived claims, session persistence, disable/password revocation, setup token");
     Console.WriteLine("Edit-lease regression passed: node/tree granularity, idempotent acquire, holder identity, heartbeat renew, expiry vs missing, admin force takeover, corrupt-file self-healing, restart persistence, canvas bytes untouched");
     Console.WriteLine("Layout regression passed: shared swimlane engine on the server, chapter scope, stale revision, tree-lease arbitration, preview equals what lands on disk, idempotent no-op, standalone refusal");

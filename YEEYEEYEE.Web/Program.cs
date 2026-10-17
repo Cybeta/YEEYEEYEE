@@ -57,17 +57,18 @@ builder.Services.AddSingleton<IInvocationExecutor>(services => new WebInvocation
     services.GetRequiredService<ComfyUiExecutor>(),
     services.GetRequiredService<IVideoProvider>(),
     services.GetRequiredService<ComfyUiExecutor>(),
-    comfyUiVideoBackend, services.GetRequiredService<IHttpClientFactory>().CreateClient("comfyui"), configuration));
+    comfyUiVideoBackend, services.GetRequiredService<ComfyUiConversion>(), configuration));
 var comfyUiWebSocketBaseUrl = configuration["ComfyUI:WebSocketBaseUrl"] ?? comfyUiBaseUrl;
 builder.Services.AddSingleton<ComfyUiProvider>(services => new ComfyUiProvider(
     services.GetRequiredService<IHttpClientFactory>().CreateClient("comfyui"), assetDirectory,
     new Uri(comfyUiWebSocketBaseUrl, UriKind.Absolute), comfyUiClientId));
-builder.Services.AddSingleton<IExternalTaskCanceller>(services => services.GetRequiredService<ComfyUiProvider>());
+builder.Services.AddSingleton<WebComfyUiTasks>();
+builder.Services.AddSingleton<IExternalTaskCanceller>(services => services.GetRequiredService<WebComfyUiTasks>());
 builder.Services.AddSingleton<SingleMachineExecutionService>();
 builder.Services.AddSingleton<ExternalTaskCallbackReceiver>(services =>
     new ExternalTaskCallbackReceiver(services.GetRequiredService<SingleMachineExecutionService>()));
 builder.Services.AddSingleton<ExternalTaskPoller>(services => new ExternalTaskPoller(
-    services.GetRequiredService<SingleMachineExecutionService>(), services.GetRequiredService<ComfyUiProvider>(), pollingInterval));
+    services.GetRequiredService<SingleMachineExecutionService>(), services.GetRequiredService<WebComfyUiTasks>(), pollingInterval));
 builder.Services.AddHostedService<ExternalTaskPollingHostedService>();
 // 账号库。建表在这里做一次（全是 IF NOT EXISTS），不要等到第一个请求进来才建——
 // 那样第一个请求会同时踩到建表与写库，出问题时的报错会指向错误的地方。
@@ -84,6 +85,7 @@ var callbackSecret = configuration["ComfyUI:CallbackSecret"];
 if (!string.IsNullOrWhiteSpace(callbackSecret))
     builder.Services.AddSingleton(_ => new HmacCallbackVerifier(new CallbackSignatureOptions { Secret = Convert.FromBase64String(callbackSecret) }));
 
+builder.Services.AddSingleton<ComfyUiConversion>();
 var app = builder.Build();
 var callbackReceiver = app.Services.GetRequiredService<ExternalTaskCallbackReceiver>();
 var canvasDistPath = string.IsNullOrWhiteSpace(configuredCanvasDist)
@@ -92,6 +94,7 @@ var canvasDistPath = string.IsNullOrWhiteSpace(configuredCanvasDist)
 
 // 守卫必须在场景/技能接口之前注册：它把身份解析成 <see cref="WebAccessGuard.PermissionsItem"/>，
 // 后面的写入判断靠它。
+app.Services.GetRequiredService<ComfyUiConversion>().Map(app);
 WebAccessGuard.Map(app, users);
 AuthApi.Map(app, users, userDatabasePath);
 WebProjectApi.Map(app);

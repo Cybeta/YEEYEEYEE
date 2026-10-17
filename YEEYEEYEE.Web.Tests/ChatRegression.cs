@@ -170,7 +170,7 @@ internal static class ChatRegression
         {
             using var req = new HttpRequestMessage(HttpMethod.Post, $"/api/web/chat/sessions/{id}/messages") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
             using var response = await admin.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
-            Assert(response.IsSuccessStatusCode, "stream status");
+            Assert(response.IsSuccessStatusCode, $"POST {req.RequestUri}: stream status {(int)response.StatusCode} ({response.StatusCode}), expected success");
             var text = await response.Content.ReadAsStringAsync(); Assert(text.Contains("event: done"), "terminal frame");
             var frames = text.Split("\n\n", StringSplitOptions.RemoveEmptyEntries);
             var snapshot = JsonDocument.Parse(frames[0].Split("\ndata: ")[1]).RootElement;
@@ -656,6 +656,21 @@ internal static class ChatRegression
                 }
                 return (sid, messageId);
             }
+            // 技能任务的完成回调（CompleteJob）会短暂占用会话忙碌标记来落库 skillState、
+            // 回挂产物并释放锁。只读提交如果在这段窗口里发出，会先得到 409 CHAT_BUSY，
+            // 而不是权限拒绝。等技能状态落定后再断言 403；真正的并发生成仍由
+            // “生成期间并行发送返回 409”的用例覆盖，不能放宽这里的权限断言。
+            async Task<JsonElement> WaitSkillSettled((string Session, string Message) p)
+            {
+                for (var i = 0; i < 100; i++)
+                {
+                    var session = await Json(admin, "/api/web/chat/sessions/" + p.Session);
+                    var message = session.GetProperty("messages").EnumerateArray().Single(m => m.GetProperty("id").GetString() == p.Message);
+                    if (message.GetProperty("skillState").GetString() is "completed" or "failed") return message;
+                    await Task.Delay(50);
+                }
+                throw new Exception("skill did not settle: " + p.Session);
+            }
             string ActionPath((string Session, string Message) p, string op) => $"/api/web/chat/sessions/{p.Session}/actions/{p.Message}/{op}";
             var ordinaryScene = await Json(admin, "/api/web/scene");
             var ordinaryBefore = File.ReadAllBytes(canvasPath);
@@ -861,17 +876,17 @@ internal static class ChatRegression
                 {
                     // 生成产物回挂会在服务端往同一条回复追加 attach_asset：等技能落定，再按**最新动作**
                     // 预检一次并提交（与前端同一条路——旧批准不会把没看见的动作一起执行掉）。
-                    for (var i = 0; i < 100; i++)
-                    {
-                        var current = (await Json(admin, "/api/web/chat/sessions/" + mixed.Session)).GetProperty("messages")[1];
-                        if (current.GetProperty("skillState").GetString() is "completed" or "failed") break;
-                        await Task.Delay(50);
-                    }
+                    await WaitSkillSettled(mixed);
                     await Json(admin, ActionPath(mixed, "preview"), "{}");
                     await Json(admin, ActionPath(mixed, "commit"), "{}");
                     Assert(File.ReadAllText(canvasPath).Contains("mixed approval"), "mixed approval uses existing commit");
                 }
-                if (canvasMode == "readonly") await Json(admin, ActionPath(mixed, "commit"), "{}", 403);
+                if (canvasMode == "readonly")
+                {
+                    // 等完成回调释放会话锁后再断言只读模式被拒；否则会偶发先撞上 409 CHAT_BUSY。
+                    await WaitSkillSettled(mixed);
+                    await Json(admin, ActionPath(mixed, "commit"), "{}", 403);
+                }
             }
             modelText = "回答"; await Send(autoSkill.Session, "{\"text\":\"任务结果是什么\"}");
             Assert(captured.Last().ToString().Contains("Failed") && captured.Last().ToString().Contains(autoJobId!), "actual job failure enters model context");
@@ -946,6 +961,52 @@ internal static class ChatRegression
             await Upload(other, imageBytes, "image/png", 404);
             await Json(other, $"/api/web/chat/sessions/{attachmentSession}/attachments/{imageAttachment}", status: 404);
             await Json(admin, $"/api/web/chat/sessions/{id}/messages", JsonSerializer.Serialize(new { text = "跨会话", attachmentIds = new[] { imageAttachment } }), 400);
+            // 更多文件类型：类型、签名、该类型上限与媒体种类都走**同一份服务端注册表**，
+            // 上传、下载、参考图判定与前端可选类型不会各写一份而走散。
+            var webpBytes = new byte[32];
+            Encoding.ASCII.GetBytes("RIFF").CopyTo(webpBytes, 0); Encoding.ASCII.GetBytes("WEBP").CopyTo(webpBytes, 8);
+            var gifBytes = Encoding.ASCII.GetBytes("GIF89a").Concat(new byte[] { 0x2C, 0x00, 0x00, 0x00 }).ToArray();
+            var pdfBytes = Encoding.ASCII.GetBytes("%PDF-1.4\n%离线用例\n%%EOF\n");
+            var mp4Bytes = new byte[32];
+            Encoding.ASCII.GetBytes("ftyp").CopyTo(mp4Bytes, 4); Encoding.ASCII.GetBytes("isom").CopyTo(mp4Bytes, 8);
+            var mp3Bytes = Encoding.ASCII.GetBytes("ID3").Concat(new byte[] { 0x03, 0x00, 0x00, 0x00 }).ToArray();
+            var markdownBytes = Encoding.UTF8.GetBytes("# 设定\n正文");
+            var webpAttachment = await Upload(admin, webpBytes, "image/webp");
+            var gifAttachment = await Upload(admin, gifBytes, "image/gif");
+            var pdfAttachment = await Upload(admin, pdfBytes, "application/pdf");
+            var mp4Attachment = await Upload(admin, mp4Bytes, "video/mp4");
+            var mp3Attachment = await Upload(admin, mp3Bytes, "audio/mpeg");
+            var markdownAttachment = await Upload(admin, markdownBytes, "text/markdown");
+            await Upload(admin, Encoding.UTF8.GetBytes("not a pdf"), "application/pdf", 415);
+            await Upload(admin, gifBytes, "image/webp", 415);
+            await Upload(admin, new byte[5242881], "image/png", 413);
+            await Upload(admin, mp4Bytes, "video/x-matroska", 415);
+            foreach (var (attachmentId, expectedType, expectedBytes) in new (string?, string, byte[])[] {
+                (webpAttachment, "image/webp", webpBytes), (gifAttachment, "image/gif", gifBytes),
+                (pdfAttachment, "application/pdf", pdfBytes), (mp4Attachment, "video/mp4", mp4Bytes),
+                (mp3Attachment, "audio/mpeg", mp3Bytes), (markdownAttachment, "text/markdown", markdownBytes) })
+            {
+                using var download = await admin.GetAsync($"/api/web/chat/sessions/{attachmentSession}/attachments/{attachmentId}");
+                Assert(download.IsSuccessStatusCode && download.Content.Headers.ContentType?.MediaType == expectedType
+                    && (await download.Content.ReadAsByteArrayAsync()).SequenceEqual(expectedBytes),
+                    "new attachment type keeps MIME and bytes: " + expectedType);
+            }
+            using (var ranged = new HttpRequestMessage(HttpMethod.Get, $"/api/web/chat/sessions/{attachmentSession}/attachments/{mp4Attachment}"))
+            {
+                ranged.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 3);
+                using var partial = await admin.SendAsync(ranged);
+                Assert(partial.StatusCode == HttpStatusCode.PartialContent, "media attachments serve range requests for in-page playback");
+            }
+            // 非图片类型不能当参考图：明确拒绝，不静默过滤掉再照跑。
+            await Json(admin, "/api/web/skills/comfyui.text-to-image/invoke", JsonSerializer.Serialize(new { prompt = "video reference", idempotencyKey = "reference-video", chatSessionId = attachmentSession, referenceAttachmentIds = new[] { mp4Attachment } }), 400);
+            // 可选类型与参数声明由服务端下发（前端的 accept 与编辑器照它渲染）。
+            var skillCatalog = await Json(admin, "/api/web/skills");
+            Assert(skillCatalog.GetProperty("attachments").EnumerateArray().Any(type => type.GetProperty("mime").GetString() == "application/pdf" && !type.GetProperty("referenceable").GetBoolean())
+                && skillCatalog.GetProperty("attachmentAccept").GetString()!.Contains("image/webp", StringComparison.Ordinal)
+                && skillCatalog.GetProperty("skills").EnumerateArray().Any(skill => skill.GetProperty("id").GetString() == "comfyui.text-to-image"
+                    && skill.GetProperty("parameters").EnumerateArray().Any(parameter => parameter.GetProperty("name").GetString() == "seed")),
+                "skill catalog declares attachment types and parameter specs");
+            Console.WriteLine("Chat attachment type regression passed: webp/gif/pdf/mp4/mp3/markdown upload, signature/limit rejection, MIME-preserving download, range serving, non-image reference refusal and server-declared catalog");
             modelText = "回答";
             await Send(attachmentSession, JsonSerializer.Serialize(new { text = "阅读附件", attachmentIds = new[] { textAttachment, imageAttachment } }));
             Assert(captured.Last().GetProperty("messages").EnumerateArray().Any(m => m.GetProperty("content").ValueKind == JsonValueKind.Array && m.GetProperty("content").EnumerateArray().Any(p => p.TryGetProperty("text", out var text) && text.GetString()!.Contains("附件真实正文"))) && captured.Last().ToString().Contains("data:image/png;base64,"), "actual model HTTP request includes text and image bytes");
@@ -1045,6 +1106,187 @@ internal static class ChatRegression
             Assert(File.ReadAllText(canvasPath).Contains(entityKey.ToString(), StringComparison.Ordinal),
                 "the bind writes a managed snapshot of that entity into the canvas");
             Console.WriteLine("Entity HTTP regression passed: permissions, CAS, descriptions, shared commit/rollback, protected versions, media bytes/rename/detach and historical media retention");
+            // ---- 聊天技能的任意参数与实体引用 ----
+            mode = "success";
+            // ① 参数校验：六种类型都在，每种错误都有自己的稳定错误码。
+            //    声明与校验是同一份实现，这里直接钉住它；技能侧的读取另外走真实调用链（见下）。
+            YEEYEEYEE.Web.ChatParameterSpec Param(string name, YEEYEEYEE.Web.ChatParameterKind kind, bool required = false, string[]? options = null, double? min = null, double? max = null) =>
+                new(name, kind, required, name, options ?? Array.Empty<string>(), false, min, max);
+            var declaredKinds = new List<YEEYEEYEE.Web.ChatParameterSpec> {
+                Param("s", YEEYEEYEE.Web.ChatParameterKind.String), Param("n", YEEYEEYEE.Web.ChatParameterKind.Number, min: 1, max: 10),
+                Param("b", YEEYEEYEE.Web.ChatParameterKind.Boolean), Param("e", YEEYEEYEE.Web.ChatParameterKind.Enum, options: new[] { "a", "b" }),
+                Param("l", YEEYEEYEE.Web.ChatParameterKind.Array), Param("o", YEEYEEYEE.Web.ChatParameterKind.Object),
+                Param("must", YEEYEEYEE.Web.ChatParameterKind.String, required: true)
+            };
+            bool Check(object parameters, out string? code)
+            {
+                var supplied = JsonSerializer.SerializeToElement(parameters).EnumerateObject()
+                    .ToDictionary(pair => pair.Name, pair => pair.Value.Clone(), StringComparer.Ordinal);
+                WebChatSkillParameters.TryValidate(declaredKinds, supplied, Array.Empty<string>(), out _, out code, out _, out _);
+                return code is null;
+            }
+            Assert(Check(new { s = "文本", n = 10, b = true, e = "a", l = new[] { "x", "y" }, o = new { key = "值", count = 2, flag = false }, must = "值" }, out var kindsCode) && kindsCode is null,
+                "six declared parameter kinds (string/number/boolean/enum/array/object) all validate");
+            Assert(!Check(new { must = "值", n = 1.5 }, out var decimalCode) && decimalCode == "SKILL_PARAM_TYPE", "decimal numbers are rejected instead of silently rounded");
+            Assert(!Check(new { must = "值", n = 11 }, out var rangeCode) && rangeCode == "SKILL_PARAM_TYPE", "out-of-range numbers are rejected");
+            Assert(!Check(new { must = "值", b = "true" }, out var booleanCode) && booleanCode == "SKILL_PARAM_TYPE", "a string is not accepted as a boolean");
+            Assert(!Check(new { must = "值", e = "c" }, out var enumCode) && enumCode == "SKILL_PARAM_INVALID", "enum values outside the declaration are rejected");
+            Assert(!Check(new { must = "值", l = new object[] { 1 } }, out var arrayCode) && arrayCode == "SKILL_PARAM_INVALID", "non-string array items are rejected");
+            Assert(!Check(new { must = "值", o = new { nested = new { deep = 1 } } }, out var objectCode) && objectCode == "SKILL_PARAM_INVALID", "nested object values are rejected");
+            Assert(!Check(new { must = "值", unknownKey = 1 }, out var unknownCode) && unknownCode == "SKILL_PARAM_UNKNOWN", "unknown parameter names are rejected instead of dropped");
+            Assert(!Check(new { must = "值", prompt = "x" }, out var protocolCode) && protocolCode == "SKILL_INPUT_UNSUPPORTED", "protocol-known parameters this skill does not take are rejected explicitly");
+            Assert(!Check(new { }, out var requiredCode) && requiredCode == "SKILL_PARAM_REQUIRED", "missing required parameters are rejected");
+            // 声明决定了界面能摆哪些控件：内置技能必须**真的**声明出可编辑的字符串/数字/枚举/数组，
+            // 否则浏览器上就没有对应的控件（布尔与对象当前没有内置技能声明，这一点如实记录在文档里）。
+            string[] Editable(string skill) => WebChatSkillParameters.Declare(skill)
+                .Where(spec => spec.Editable).Select(spec => spec.Name + ":" + spec.Kind.ToString().ToLowerInvariant()).OrderBy(name => name, StringComparer.Ordinal).ToArray();
+            Assert(Editable("comfyui.text-to-image").SequenceEqual(new[] { "aspectRatio:enum", "negativePrompt:string", "referenceAttachmentIds:array", "seed:number" }),
+                "local image skill declares editable enum/string/array/number parameters: " + string.Join("、", Editable("comfyui.text-to-image")));
+            Assert(Editable("web.text-to-image").Contains("referenceAttachmentIds:array") && !Editable("web.text-to-image").Contains("seed:number"),
+                "web image skill declares the array reference parameter but no seed (its provider does not read one)");
+            Assert(Editable("web.text-to-video").Contains("seconds:number") && Editable("web.text-to-video").Contains("width:number")
+                && Editable("web.text-to-video").Contains("height:number"), "video skill declares editable numeric parameters");
+            Assert(new[] { 1, 2, 15 }.Select(WebChatSkillParameters.VideoFramesForSeconds).SequenceEqual(new[] { 25, 49, 361 }),
+                "video seconds fold to 1+8k frames exactly like the node menu");
+
+            // ② 端到端：模型与前端提交的声明参数经聊天技能入口落到**执行层输入**（执行器读的就是这些键）。
+            //    提交只按界面显示的那一整套**替换**：清空/移除必须真的不再生效，而不是退回模型给的值。
+            async Task<(string Session, string Message)> ImageProposal(object[] entityReferences, string? negativePrompt = null, string[]? referenceAttachmentIds = null)
+            {
+                var action = new Dictionary<string, object?>
+                {
+                    ["kind"] = "invoke_skill", ["target"] = "comfyui.text-to-image",
+                    ["content"] = "参数与引用用例", ["entityReferences"] = entityReferences
+                };
+                if (negativePrompt is not null) action["parameters"] = new { negativePrompt };
+                if (referenceAttachmentIds is not null) action["referenceAttachmentIds"] = referenceAttachmentIds;
+                modelText = "```json\n" + JsonSerializer.Serialize(new { actions = new[] { action } }) + "\n```";
+                var sid = (await Json(admin, "/api/web/chat/sessions", "{}")).GetProperty("id").GetString()!;
+                var session = await Send(sid, "{\"text\":\"生成图片\",\"mode\":\"readonly\"}");
+                return (sid, session.GetProperty("messages")[1].GetProperty("id").GetString()!);
+            }
+            async Task<string> CardError(string sessionId) =>
+                (await Json(admin, "/api/web/chat/sessions/" + sessionId)).GetProperty("messages")[1].GetProperty("skillError").GetString() ?? "";
+            string InvokePath(string sessionId, string messageId) => $"/api/web/chat/sessions/{sessionId}/skills/{messageId}/invoke";
+            using var paramJobs = new YEEYEEYEE.Host.SqliteJobStore(Path.Combine(directory, "jobs.db"));
+            IReadOnlyDictionary<string, JsonElement> JobInputs(Guid jobId) => paramJobs.LoadAll().Single(job => job.JobId == jobId).Inputs;
+
+            var (unknownSession, unknownMessage) = await ImageProposal(Array.Empty<object>());
+            await Json(admin, InvokePath(unknownSession, unknownMessage), "{\"aspectRatio\":\"1:1\",\"parameters\":{\"unknownKey\":1}}", 400);
+            Assert((await CardError(unknownSession)).Contains("SKILL_PARAM_UNKNOWN"), "chat rejects an unknown parameter with a stable code");
+            var (parameterTypeSession, parameterTypeMessage) = await ImageProposal(Array.Empty<object>());
+            await Json(admin, InvokePath(parameterTypeSession, parameterTypeMessage), "{\"aspectRatio\":\"1:1\",\"parameters\":{\"seed\":\"42\"}}", 400);
+            Assert((await CardError(parameterTypeSession)).Contains("SKILL_PARAM_TYPE"), "chat rejects a wrongly typed parameter with a stable code");
+            var (unsupportedSession, unsupportedMessage) = await ImageProposal(Array.Empty<object>());
+            await Json(admin, InvokePath(unsupportedSession, unsupportedMessage), "{\"aspectRatio\":\"1:1\",\"parameters\":{\"width\":512}}", 400);
+            Assert((await CardError(unsupportedSession)).Contains("SKILL_INPUT_UNSUPPORTED"), "chat rejects a parameter this skill does not take instead of ignoring it");
+            // 界面没有控件的参数（模型自己编的 width）改不动 → 只能整条挡住。
+            Assert((await Json(admin, "/api/web/chat/sessions/" + unsupportedSession)).GetProperty("messages")[1].GetProperty("skillState").GetString() == "blocked",
+                "a parameter error without a card control blocks the proposal");
+            // 界面上有控件的参数（seed）改得动 → 留在可重试状态，改正后重新提交要能过。
+            var (retryableSession, retryableMessage) = await ImageProposal(Array.Empty<object>());
+            await Json(admin, InvokePath(retryableSession, retryableMessage), "{\"aspectRatio\":\"1:1\",\"parameters\":{\"seed\":\"不是数字\"}}", 400);
+            var retryableCard = (await Json(admin, "/api/web/chat/sessions/" + retryableSession)).GetProperty("messages")[1];
+            Assert(retryableCard.GetProperty("skillState").GetString() == "failed" && retryableCard.GetProperty("skillError").GetString()!.Contains("SKILL_PARAM_TYPE"),
+                "an editable parameter error stays retryable instead of blocking the card");
+            var correctedJob = await Json(admin, InvokePath(retryableSession, retryableMessage), "{\"aspectRatio\":\"1:1\",\"parameters\":{\"seed\":0}}");
+            Assert(JobInputs(correctedJob.GetProperty("jobId").GetGuid()).TryGetValue("seed", out var correctedSeed) && correctedSeed.GetInt32() == 0,
+                "a corrected value can be resubmitted from the same card");
+            var (parameterSession, parameterMessage) = await ImageProposal(Array.Empty<object>());
+            var parameterJob = await Json(admin, InvokePath(parameterSession, parameterMessage), "{\"aspectRatio\":\"1:1\",\"parameters\":{\"seed\":42,\"negativePrompt\":\"模糊\"}}");
+            var parameterInputs = JobInputs(parameterJob.GetProperty("jobId").GetGuid());
+            Assert(parameterInputs.TryGetValue("seed", out var seedValue) && seedValue.GetInt32() == 42
+                && parameterInputs.TryGetValue("negativePrompt", out var negativeValue) && negativeValue.GetString() == "模糊"
+                && parameterInputs.TryGetValue("aspectRatio", out var ratioValue) && ratioValue.GetString() == "1:1",
+                "declared chat parameters reach the execution-layer inputs");
+            // 界面显示什么就提交什么（替换，不是合并）：改过的按用户的、清空的真的不再生效。
+            var (editedSession, editedMessage) = await ImageProposal(Array.Empty<object>(), negativePrompt: "模型给的");
+            var editedJob = await Json(admin, InvokePath(editedSession, editedMessage),
+                JsonSerializer.Serialize(new { aspectRatio = "1:1", parameters = new { negativePrompt = "用户改的" }, entityReferences = Array.Empty<object>() }));
+            Assert(JobInputs(editedJob.GetProperty("jobId").GetGuid()).TryGetValue("negativePrompt", out var editedValue) && editedValue.GetString() == "用户改的",
+                "an edited parameter replaces the model value");
+            var (clearedSession, clearedMessage) = await ImageProposal(Array.Empty<object>(), negativePrompt: "模型给的");
+            var clearedJob = await Json(admin, InvokePath(clearedSession, clearedMessage),
+                JsonSerializer.Serialize(new { aspectRatio = "1:1", parameters = new { }, entityReferences = Array.Empty<object>() }));
+            Assert(!JobInputs(clearedJob.GetProperty("jobId").GetGuid()).ContainsKey("negativePrompt"),
+                "clearing a field removes the model value instead of merging it back");
+            var (zeroSession, zeroMessage) = await ImageProposal(Array.Empty<object>());
+            var zeroJob = await Json(admin, InvokePath(zeroSession, zeroMessage),
+                JsonSerializer.Serialize(new { aspectRatio = "1:1", parameters = new { seed = 0 }, entityReferences = Array.Empty<object>() }));
+            Assert(JobInputs(zeroJob.GetProperty("jobId").GetGuid()).TryGetValue("seed", out var zeroSeed) && zeroSeed.GetInt32() == 0,
+                "zero is submitted as a real value, not treated as unset");
+            // 参考图：模型选了它、用户在卡片上全部取消 → 这次就不再带参考图（清空平铺字段与参数两处）。
+            var referenceInputSession = (await Json(admin, "/api/web/chat/sessions", "{}")).GetProperty("id").GetString()!;
+            using (var referenceContent = new ByteArrayContent(imageBytes))
+            {
+                referenceContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/png");
+                using var uploaded = await admin.PostAsync($"/api/web/chat/sessions/{referenceInputSession}/attachments?name=ref.png", referenceContent);
+                var uploadedId = JsonDocument.Parse(await uploaded.Content.ReadAsStringAsync()).RootElement.GetProperty("id").GetString()!;
+                modelText = "回答";
+                await Send(referenceInputSession, JsonSerializer.Serialize(new { text = "参考图在这", attachmentIds = new[] { uploadedId } }));
+                modelText = "```json\n" + JsonSerializer.Serialize(new { actions = new[] { new { kind = "invoke_skill", target = "comfyui.text-to-image", content = "参考图替换用例", referenceAttachmentIds = new[] { uploadedId } } } }) + "\n```";
+                var referenceCard = await Send(referenceInputSession, "{\"text\":\"用它出图\",\"mode\":\"readonly\"}");
+                var referenceMessage = referenceCard.GetProperty("messages")[3].GetProperty("id").GetString();
+                var droppedJob = await Json(admin, InvokePath(referenceInputSession, referenceMessage),
+                    JsonSerializer.Serialize(new { aspectRatio = "1:1", parameters = new { referenceAttachmentIds = Array.Empty<string>() }, entityReferences = Array.Empty<object>() }));
+                var droppedInputs = JobInputs(droppedJob.GetProperty("jobId").GetGuid());
+                Assert(!droppedInputs.ContainsKey("referenceAttachmentIds")
+                    && (!droppedInputs.TryGetValue("referenceImages", out var keptImages) || keptImages.GetArrayLength() == 0),
+                    "clearing the reference images really removes the model's choice");
+            }
+
+            // ③ 实体引用：人物 / 场景 / 道具 / 项目节点——保存类型 + ID + 显示名 + 版本，并传给执行层。
+            await Json(admin, "/api/web/entities/manage", JsonSerializer.Serialize(new { operation = "createEntity", name = "引用场景", kind = "Scene", baseRevision = (await Json(admin, "/api/web/assets")).GetProperty("revision").GetInt64() }));
+            await Json(admin, "/api/web/entities/manage", JsonSerializer.Serialize(new { operation = "createEntity", name = "引用道具", kind = "Prop", baseRevision = (await Json(admin, "/api/web/assets")).GetProperty("revision").GetInt64() }));
+            var referenceAssets = await Json(admin, "/api/web/assets");
+            var sceneEntity = referenceAssets.GetProperty("entities").EnumerateArray().Single(entity => entity.GetProperty("name").GetString() == "引用场景");
+            var propEntity = referenceAssets.GetProperty("entities").EnumerateArray().Single(entity => entity.GetProperty("name").GetString() == "引用道具");
+            var characterEntity = referenceAssets.GetProperty("entities").EnumerateArray().Single(entity => entity.GetProperty("id").GetGuid() == entityKey);
+            var characterVariant = characterEntity.GetProperty("variants")[0];
+            var characterVersions = characterVariant.GetProperty("versions");
+            var lockedVersion = characterVersions[characterVersions.GetArrayLength() - 1];
+            var referenceEntries = new object[] {
+                new { kind = "character", id = entityKey.ToString(), variantId = variantKey.ToString(), versionId = lockedVersion.GetProperty("id").GetString() },
+                new { kind = "scene", id = sceneEntity.GetProperty("id").GetString() },
+                new { kind = "prop", id = propEntity.GetProperty("id").GetString() },
+                new { kind = "node", id = bindingNodeId.ToString() }
+            };
+            var (entitySession, entityMessage) = await ImageProposal(referenceEntries);
+            // 前端提交的是界面显示的那一整套引用（与服务端已解析的一致）：替换之后仍是这四条。
+            var entityJob = await Json(admin, InvokePath(entitySession, entityMessage),
+                JsonSerializer.Serialize(new { aspectRatio = "1:1", parameters = new { referenceAttachmentIds = Array.Empty<string>() }, entityReferences = referenceEntries }));
+            var echoedReferences = (await Json(admin, "/api/web/chat/sessions/" + entitySession))
+                .GetProperty("messages")[1].GetProperty("skillActions")[0].GetProperty("entityReferences");
+            Assert(echoedReferences.GetArrayLength() == 4, "all four reference kinds are stored on the chat message");
+            Assert(echoedReferences.EnumerateArray().Any(reference => reference.GetProperty("kind").GetString() == "character"
+                    && reference.GetProperty("name").GetString() == "HTTP角色"
+                    && reference.GetProperty("variantName").GetString() == "默认"
+                    && reference.GetProperty("version").GetString() == "v" + lockedVersion.GetProperty("number").GetInt32()),
+                "character reference keeps type, id, server-resolved display name and version");
+            Assert(echoedReferences.EnumerateArray().Any(reference => reference.GetProperty("kind").GetString() == "scene" && reference.GetProperty("name").GetString() == "引用场景")
+                && echoedReferences.EnumerateArray().Any(reference => reference.GetProperty("kind").GetString() == "prop" && reference.GetProperty("name").GetString() == "引用道具")
+                && echoedReferences.EnumerateArray().Any(reference => reference.GetProperty("kind").GetString() == "node" && reference.GetProperty("name").GetString() == "引用挂载"),
+                "scene, prop and project-node references resolve to authoritative names");
+            Assert(JobInputs(entityJob.GetProperty("jobId").GetGuid()).TryGetValue("entityReferences", out var storedReferences) && storedReferences.GetArrayLength() == 4,
+                "resolved entity references reach the execution-layer inputs");
+            // 在卡片上移除引用：提交的就是剩下的那几条（替换，不是把旧的合并回来）。
+            var (trimSession, trimMessage) = await ImageProposal(referenceEntries);
+            var trimJob = await Json(admin, InvokePath(trimSession, trimMessage),
+                JsonSerializer.Serialize(new { aspectRatio = "1:1", entityReferences = new[] { new { kind = "node", id = bindingNodeId.ToString() } } }));
+            Assert(JobInputs(trimJob.GetProperty("jobId").GetGuid()).TryGetValue("entityReferences", out var trimmedReferences)
+                && trimmedReferences.GetArrayLength() == 1 && trimmedReferences[0].GetProperty("name").GetString() == "引用挂载",
+                "removing references in the card replaces the set instead of merging the old ones back");
+            var (missingSession, missingMessage) = await ImageProposal(new object[] { new { kind = "character", id = Guid.NewGuid().ToString() } });
+            await Json(admin, InvokePath(missingSession, missingMessage), "{\"aspectRatio\":\"1:1\"}", 400);
+            Assert((await CardError(missingSession)).Contains("SKILL_ENTITY_INVALID"), "an unknown entity reference is rejected explicitly");
+            var (mismatchSession, mismatchMessage) = await ImageProposal(new object[] { new { kind = "prop", id = sceneEntity.GetProperty("id").GetString() } });
+            await Json(admin, InvokePath(mismatchSession, mismatchMessage), "{\"aspectRatio\":\"1:1\"}", 400);
+            Assert((await CardError(mismatchSession)).Contains("SKILL_ENTITY_INVALID"), "an entity kind mismatch is rejected instead of guessed");
+            var (shapeSession, shapeMessage) = await ImageProposal(new object[] { new { kind = "character" } });
+            await Json(admin, InvokePath(shapeSession, shapeMessage), "{\"aspectRatio\":\"1:1\"}", 400);
+            Assert((await CardError(shapeSession)).Contains("SKILL_ENTITY_INVALID"), "a reference without an id is rejected instead of silently dropped");
+            Console.WriteLine("Chat parameter and entity reference regression passed: six declared kinds with stable error codes, execution-layer inputs and four reference kinds echoed back");
+            modelText = "回答";
             await using var attachmentMock = new MockComfyUiServer();
             await attachmentMock.StartAsync(); attachmentBackend = attachmentMock.BaseAddress;
             Stop(); await Start();

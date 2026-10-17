@@ -81,3 +81,11 @@
 /* 一行差异：文字在前、媒体在后；窄面板里换行而不是横向溢出。 */
 .df-preview-asset-row { gap: 6px; align-items: center; }
 .df-preview-asset-row img { width: 44px; height: 44px; }
+
+/* 技能提议的参数行：说明在上、控件在下——多个参数时只有这样才能看清哪一行是哪一项。
+   窄面板里不横向溢出：说明文字换行、控件占满这一列（min-width:0 是 flex 子项能收缩的前提）。 */
+.df-agent-parameter { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.df-agent-parameter > * { min-width: 0; }
+.df-agent-parameter summary { cursor: pointer; overflow-wrap: anywhere; }
+.df-agent-parameter .df-dim, .df-agent-parameter summary ~ * { overflow-wrap: anywhere; }
+.df-agent-parameter textarea { min-height: 44px; }
