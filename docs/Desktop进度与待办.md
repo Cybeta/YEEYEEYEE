@@ -1,6 +1,6 @@
 # Desktop 进度与待办
 
-源码版本：`0.1.5.5`；本地发布候选：`0.1.5.5`（未上传）；核对日期：2026-10-17。本轮对已发布 `0.1.5.4` 的桌面发行 ZIP 与更新链路做了实机验收，并在源码中补齐更新安全边界。`0.1.5.4` 发行包内仍是旧更新器，**不能靠新包修复旧客户端这一次升级**；首次迁移路径见「0.1.5.4 首次升级与手动迁移」。版本唯一来源为 `YEEYEEYEE.Desktop.Avalonia.csproj` 的 `<Version>`（现为 `0.1.5.5`），界面通过 `AppVersion` 读取；候选包直接由 `tools/publish-release.ps1` 读取该版本生成。Web 状态见 [Web 进度与待办](Web进度与待办.md)。
+源码/已发布版本：`0.1.5.5`；发布提交：`aab82f17b9ef0d27194bdc98a0110304c4adb723`；tag：`v0.1.5.5`；核对日期：2026-10-17。发布资产见 [GitHub Release v0.1.5.5](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.5)。本轮对已发布 `0.1.5.4` 的桌面发行 ZIP 与更新链路做了实机验收，并在源码中补齐更新安全边界。`0.1.5.4` 发行包内仍是旧更新器，**不能靠新包修复旧客户端这一次升级**；首次迁移路径见「0.1.5.4 首次升级与手动迁移」。版本唯一来源为 `YEEYEEYEE.Desktop.Avalonia.csproj` 的 `<Version>`（现为 `0.1.5.5`），界面通过 `AppVersion` 读取；候选包直接由 `tools/publish-release.ps1` 读取该版本生成。Web 状态见 [Web 进度与待办](Web进度与待办.md)。
 
 ## 已实现
 
@@ -70,9 +70,10 @@
 5. 启动新目录里的程序，核对版本、最近项目、密钥可用、工程能打开；确认无误后再删除旧目录。
 6. 不要同时运行新旧两个实例，避免同一份项目被两边写入。
 
-## 本地发布候选（未上传）
+## 已发布 0.1.5.5
 
-- 桌面包：`artifacts/yeeeyee-0.1.5.5-win-x64.zip`，17,488,486 字节（16.68 MB），SHA-256 `E13F1EE309EC5898F7DD2952ECD652FEE4FA19DFCD528B6B27CCC9C7AF880B7B`；同目录 sidecar `yeeeyee-0.1.5.5-win-x64.zip.sha256`。
+- 发布：[GitHub Release v0.1.5.5](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.5)；发布提交 `aab82f17b9ef0d27194bdc98a0110304c4adb723`，tag `v0.1.5.5`。
+- 桌面包：`yeeeyee-0.1.5.5-win-x64.zip`，17,488,486 字节（16.68 MB），SHA-256 `E13F1EE309EC5898F7DD2952ECD652FEE4FA19DFCD528B6B27CCC9C7AF880B7B`；远端资产 digest 与本地一致。
 - 版本：主程序文件版本与产品版本 `0.1.5.5`，程序集版本 `0.1.5.5`；界面经 UI Automation 读取到 `v0.1.5.5`。
 - 包检查：55 个文件；主程序、`runtimeconfig.json`、`README.txt` 与 9 张 `provider-art` 图片齐全；不含 `YEEYEEYEE.Web.*`、`canvas-dist`、Web 安装/升级/回滚脚本、`Projects`、`data`、`config`、数据库、`ai-config.json`/`ai-key.bin`、`_generation.json`、PDB、FFmpeg、MP4/ZIP 或验收材料；常见凭据模式扫描 0 命中。
 - 最小启动烟测：隔离目录启动后主窗口出现（标题「YEEYEEYEE · Avalonia 工作台」），应用内版本标签为 `v0.1.5.5`；关闭请求后进程正常退出，程序目录可立即改名（无文件锁）。
@@ -123,7 +124,7 @@ MP4 旧候选已有真实两镜 normal/reverse 独立解码及隔离 WebView 播
 
 ## 未完成与限制
 
-- [ ] **待上传发布：** 修复在客户端代码/替换脚本里，`0.1.5.4` 发行包内是旧实现。`0.1.5.5` 已按最终源码重建并通过包检查与最小启动烟测，但未上传、未创建 tag；`0.1.5.4` 用户首次升级必须按「0.1.5.4 首次升级与手动迁移」处理，不能假设新包能修复旧更新器。
+- [x] **已发布：** `0.1.5.5` 已提交、推送并发布到 [GitHub Release v0.1.5.5](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.5)（发布提交 `aab82f17b9ef0d27194bdc98a0110304c4adb723`）。桌面与 Web 资产已上传并核对名称、大小与 SHA-256。`0.1.5.4` 用户首次升级仍必须按「0.1.5.4 首次升级与手动迁移」处理，不能假设新包能修复旧更新器。
 - [ ] 仅在 Windows x64、本机 PowerShell 5、隔离目录与本机 Chromium 浏览器上验证；未在安装管理器、服务托管、只读程序目录或多用户并发升级场景验收。
 - [ ] 全库 ComfyUI 兼容性与所有编码的 MP4 支持尚未成立；不宣称任意 MP4 可拼接。version 1、复杂编辑表及非同步首样本受支持边界约束。
 - [ ] 封面取帧/原位播放的编码支持**取决于系统 WebView2（Chromium）能解什么**：本机真实样本只有 H.264（`avc1`），HEVC / VP9 / AV1 / 10-bit 等一律未验证；也不宣称任意 mp4/webm/mkv 都能取到封面或播得动（不支持时按「取不到封面 + 播放入口明确报错」降级）。
@@ -136,5 +137,5 @@ MP4 旧候选已有真实两镜 normal/reverse 独立解码及隔离 WebView 播
 - 版本来源已对齐：`YEEYEEYEE.Desktop.Avalonia.csproj` 的 `<Version>` 为 `0.1.5.5`，`tools/publish-release.ps1` 与 `tools/publish-web.ps1` 不传 `-Version` 时都读取该值。界面通过 `AppVersion` 读取程序集信息版本，显示为 `v0.1.5.5`。
 - 桌面包 `yeeeyee-0.1.5.5-win-x64.zip` 已按最终源码重建，16.68 MB，SHA-256 `E13F1EE309EC5898F7DD2952ECD652FEE4FA19DFCD528B6B27CCC9C7AF880B7B`；Web 包见 [Web 进度与待办](Web进度与待办.md)。
 - 集中检查：Release 解决方案构建成功、0 错误、2 条既有 nullable 警告（`WebChatApi.cs:452`、`Web.Tests/ChatRegression.cs:1215`）；Agent 359、Core 31、Migration 8/8、G6V1 40 通过；Web 完整回归首次在并发聊天提交处返回 409 `CHAT_BUSY`，已定位为测试与技能完成回调抢跑并修复（产品源码未变），修复后 `--chat-only` 1/1、完整 runner 3/3 通过；前端 29 文件 346 项、TypeScript 与 Vite 构建通过。
-- 包检查与最小启动烟测见「本地发布候选（未上传）」。拟发布资产只有桌面包与 Web 包两个 ZIP；`0.1.5.6`～`0.1.5.9` 是验证包，不上传、不作为正式版本。
-- 本轮未创建 tag、未上传或修改任何发行资产，也未提交或推送代码。CI 仍执行 Windows 构建/五个控制台 runner、Node 22 前端测试/构建和 Linux Docker 构建，没有自动 Release 上传任务。
+- 包检查与最小启动烟测见「已发布 0.1.5.5」。发行资产只有桌面包与 Web 包两个 ZIP；`0.1.5.6`～`0.1.5.9` 是验证包，未上传、不作为正式版本。
+- 发布：提交 `aab82f17b9ef0d27194bdc98a0110304c4adb723`，tag `v0.1.5.5`，Release 见 [GitHub Release v0.1.5.5](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.5)。远端 CI 首次在 Docker 镜像构建失败（构建上下文缺少 Web 项目嵌入的 Agent JS），补充 `Dockerfile` 的 `COPY YEEYEEYEE.Desktop.Avalonia/Agent/` 后重跑通过；该修复不影响两个 ZIP 的内容与 SHA-256。

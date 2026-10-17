@@ -1,6 +1,6 @@
 # Web 进度与待办
 
-源码版本：`0.1.5.5`；本地发布候选：`0.1.5.5`（未上传）；核对日期：2026-10-17。这里记录当前源码能力与验证边界，不使用完成百分比。桌面状态见 [Desktop 进度与待办](Desktop进度与待办.md)，发行历史见 [发布说明](发布说明.md)。
+源码/已发布版本：`0.1.5.5`；发布提交：`aab82f17b9ef0d27194bdc98a0110304c4adb723`；tag：`v0.1.5.5`；核对日期：2026-10-17。发布资产见 [GitHub Release v0.1.5.5](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.5)。这里记录当前源码能力与验证边界，不使用完成百分比。桌面状态见 [Desktop 进度与待办](Desktop进度与待办.md)，发行历史见 [发布说明](发布说明.md)。
 
 ## 已实现
 
@@ -105,9 +105,10 @@
    - 拒绝后的状态：7 次均未出现 `web service stopped`，`current.txt` 保持 `0.1.5.6` 且字节未变，`/health` 正常，登录/项目/附件字节/业务文件可用，业务文件哈希未变化，未产生 `data-before-rollback-*`，本安装始终只有 1 个服务进程。
    - 完整恢复：通过校验后输出 `backup verified: 10 files, 190557 bytes`，停止服务并把当前数据移到 `data-before-rollback-*`，按完成记录逐文件复制并再次校验；恢复到 `0.1.5.5` 后 `/health` 正常，登录/项目/附件/业务文件可用，记录内所有文件都以记录中的哈希恢复，`backup-complete.json`/`backup-state.json` 未被复制进 `data`。
 
-### 本地发布候选（未上传）
+### 已发布 0.1.5.5
 
-- Web 包：`artifacts/yeeeyee-web-0.1.5.5-win-x64.zip`，2,358,774 字节（2.25 MB），SHA-256 `92B78C53A3C916E2A9348DFE3508073823E08A93263DC55DE23FA7296B6D8AC7`；同目录 sidecar `yeeeyee-web-0.1.5.5-win-x64.zip.sha256`。
+- 发布：[GitHub Release v0.1.5.5](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.5)；发布提交 `aab82f17b9ef0d27194bdc98a0110304c4adb723`，tag `v0.1.5.5`。
+- Web 包：`yeeeyee-web-0.1.5.5-win-x64.zip`，2,358,774 字节（2.25 MB），SHA-256 `92B78C53A3C916E2A9348DFE3508073823E08A93263DC55DE23FA7296B6D8AC7`；远端资产 digest 与本地一致。
 - 版本来源已对齐：桌面 csproj `<Version>` 为 `0.1.5.5`，`publish-web.ps1` 未传 `-Version` 时读取该值；包内 `release-manifest.json` 的 `version` 为 `0.1.5.5`、`dataFormat` 为 `1`，后端程序集版本为 `0.1.5.5`。
 - 包检查：27 个文件；含后端、`canvas-dist`、安装/升级/回滚/启动脚本、`README-WEB.txt` 与 `release-manifest.json`；清单中后端与首页哈希一致；`web-common.ps1` 含完成记录与恢复校验，`upgrade-web.ps1` 写完成记录，`rollback-web.ps1` 恢复前校验；不含桌面主程序、`Projects`、`data`、数据库、`web-ai-config.json`、`ai-key.bin`、PDB、FFmpeg、验收材料或 `0.1.5.6`～`0.1.5.9` 验证包；凭据模式扫描 0 命中。
 - 最小启动烟测：从最终包隔离安装到临时目录，`current.txt` 为 `0.1.5.5`，`/health` 返回 ok，首启初始化令牌生成；随后只停止该隔离实例。未触碰正式服务。
@@ -122,7 +123,7 @@
 - 结论：**测试抢跑**，不是产品忙碌状态未释放。`CompleteJob` 的 `finally` 会释放键；真正并发的聊天流在流式期间仍由同一缺陷之外的既有用例断言返回 409（`生成期间并行发送` 用例），本次未放宽该断言。
 - 修复：只读与审批分支在断言提交结果前，轮询等待该回复的 `skillState` 变为 `completed`/`failed`（明确的落库完成条件，非固定 sleep）；未重试 409，未修改产品源码。
 - 稳定性：修复后 `--chat-only` 1/1、完整 runner 3/3 通过（每次都会经过 mixed 的 readonly/approval/auto）。修复前 2 次完整运行中失败 1 次；3 次通过不能证明所有机器上彻底消除时序波动，但已把窗口从“完成回调全程”缩小到“状态落库到释放键之间的极短尾部”，与既有审批分支使用同一条件。若回调因拿不到键而跳过，新的等待会以 `skill did not settle` 失败，不会静默放过。
-- 影响范围：仅 `YEEYEEYEE.Web.Tests/ChatRegression.cs` 变化；产品源码与 Web 候选包未变，SHA-256 仍为 `92B78C53A3C916E2A9348DFE3508073823E08A93263DC55DE23FA7296B6D8AC7`，无需重建发行包。
+- 影响范围：仅 `YEEYEEYEE.Web.Tests/ChatRegression.cs` 变化；产品源码与 Web 发行包未变，包 SHA-256 仍为 `92B78C53A3C916E2A9348DFE3508073823E08A93263DC55DE23FA7296B6D8AC7`，无需重建，并已随 `v0.1.5.5` Release 上传。
 
 ### 未覆盖与限制
 
