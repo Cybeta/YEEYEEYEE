@@ -36,6 +36,10 @@ COPY YEEYEEYEE.Host/ YEEYEEYEE.Host/
 COPY YEEYEEYEE.Desktop.Core/ YEEYEEYEE.Desktop.Core/
 COPY YEEYEEYEE.Desktop.Shared/ YEEYEEYEE.Desktop.Shared/
 COPY YEEYEEYEE.Web/ YEEYEEYEE.Web/
+# Web 项目把桌面端 Agent 目录里的 ComfyUI Guard/Inspect/Export 三份脚本作为
+# EmbeddedResource 嵌入（见 YEEYEEYEE.Web.csproj）；构建上下文里没有这个目录时
+# publish 会报 CS1566。桌面端其余源码不参与 Web 镜像构建。
+COPY YEEYEEYEE.Desktop.Avalonia/Agent/ YEEYEEYEE.Desktop.Avalonia/Agent/
 # 两端共读的共享文件（界面文案 uiText.json、协议表 protocol.json）：它们住在**网页端项目**里
 # （那边的 TS 只能 import 项目内的文件），而 Desktop.Shared 与 Core 用 EmbeddedResource
 # 嵌的是同一个文件（见各自 csproj 里的说明），所以这条链上也得拷它们——
