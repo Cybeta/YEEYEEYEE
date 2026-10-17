@@ -66,13 +66,51 @@ npm.cmd --prefix YEEYEEYEE.Canvas run build
 dotnet run --project YEEYEEYEE.Web
 ```
 
-源码开发默认 `http://localhost:5000`。Docker 部署：
+源码开发默认 `http://localhost:5000`。Docker 部署有两种方式。
+
+**从源码构建（需要本机 Docker 与源码）**
 
 ```powershell
 docker compose up -d --build
 ```
 
-Docker 默认 `http://localhost:8080`。首次启动创建管理员账号；公网部署前设置初始化令牌，配置反向代理和 HTTPS。创建/打开项目需配置可写的 `YEEYEEYEE__WebProjectsDirectory`，数据与配置要持久化。
+**使用 Docker Hub 镜像（部署机器不需要源码）**
+
+镜像由 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 在发布 Release 或手动触发时构建并推送。仓库维护者需要先在 GitHub 仓库 Secrets 配置 `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`（Docker Hub 访问令牌，需写权限）；可选仓库变量 `DOCKERHUB_REPOSITORY` 覆盖完整镜像名，默认是 `<DOCKERHUB_USERNAME>/yeeeyee-web`。镜像标签包括版本号（如 `0.1.5.5`）、次版本、主版本、`sha-<提交>`，Release 时还会更新 `latest`。在维护者完成配置并运行工作流之前，请使用上面的源码构建方式。
+
+```powershell
+docker pull <dockerhub-user>/yeeeyee-web:0.1.5.5
+docker run -d --name yeeeyee-web `
+  -p 8080:8080 `
+  -v yeeeyee-data:/data `
+  -e YEEYEEYEE__SetupToken="<一次性初始化令牌>" `
+  -e YEEYEEYEE__WebProjectsDirectory=/data/projects `
+  -e YEEYEEYEE__AllowStandaloneWebScene=true `
+  -e YEEYEEYEE__WebScenePath=/data/scene.json `
+  <dockerhub-user>/yeeeyee-web:0.1.5.5
+```
+
+首次打开 `http://<部署机器>:8080` 创建管理员。没有设置 `YEEYEEYEE__SetupToken` 时，程序会生成一次性令牌并写在 `/data/.setup-token`，可以这样读取：
+
+```powershell
+docker exec yeeeyee-web cat /data/.setup-token
+```
+
+容器以非 root 用户运行；使用宿主机目录挂载时，目录必须对容器用户可写。生产部署应放在反向代理与 HTTPS 之后，并在暴露公网前设置固定的初始化令牌。
+
+**数据与升级**
+
+- 账号库、任务库、聊天库、素材、项目、配置与加密密钥都在 `/data` 卷。升级前备份整个卷；换机器后 `config` 下的密钥缺失会导致已有模型/媒体密钥无法解密。
+- 容器升级是“拉取新镜像 + 用同一个 `/data` 卷重建容器”，不是容器内的文件替换。ZIP 发行包里的 `install-web.ps1`、`upgrade-web.ps1`、`rollback-web.ps1` 与完整备份校验只适用于 Windows ZIP 布局，不适用于容器；容器部署请直接备份 `/data` 卷。
+- 使用 compose 配合 Docker Hub 镜像时：
+
+```powershell
+$env:YEEYEEYEE_IMAGE = "<dockerhub-user>/yeeeyee-web:0.1.5.5"
+docker pull $env:YEEYEEYEE_IMAGE
+docker compose up -d --no-build
+```
+
+- 健康检查地址为 `/health`；日志用 `docker logs -f yeeeyee-web`。当前发布工作流构建 `linux/amd64` 镜像。
 
 Windows ZIP 使用独立的版本目录与固定 `data` 目录：解压后先运行 `install-web.ps1 -InstallRoot <安装目录> [-LegacyDataDir <旧目录>]` 完成首次安装/旧布局迁移，日常用 `start-web.ps1` 启动；升级用 `upgrade-web.ps1 -ZipPath <新包> [-ExpectedSha256 <哈希>]`，回滚用 `rollback-web.ps1`。数据恢复会丢失备份之后的写入，必须显式确认，并且只接受带完成记录且文件校验通过的备份。完整命令见包内 `README-WEB.txt`，边界见 [Web 进度与待办](docs/Web进度与待办.md)。
 

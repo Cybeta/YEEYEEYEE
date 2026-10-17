@@ -116,6 +116,13 @@
 - 本批集中检查：Release 解决方案构建 0 错误、2 条既有 nullable 警告；Web 完整回归首次在并发聊天 `commit` 返回 409 `CHAT_BUSY`，定位与修复见下节；修复后 `--chat-only` 1/1、完整 runner 3/3 通过；前端 29 文件 346 项、TypeScript 与 Vite 构建通过。
 - `0.1.5.6`、`0.1.5.7`、`0.1.5.8`、`0.1.5.9` 仅用于验证升级/回滚，**不是发行候选**，不上传、不作为正式版本。`0.1.5.6` 的 SHA-256 为 `42CBB1FACE56F119BAE531720810EEA94C56400331DD0644958DEA61F2C239C6`，保留作验证记录。
 
+### Docker Hub 镜像发布（工作流已配置，尚未推送）
+
+- 新增 `.github/workflows/docker-publish.yml`：在 Release published 或手动触发时，从指定 tag 构建 `linux/amd64` 镜像并推送到 `<DOCKERHUB_USERNAME>/yeeeyee-web`（可用仓库变量 `DOCKERHUB_REPOSITORY` 覆盖完整镜像名）；标签包含版本、次版本、主版本、`sha-<提交>`，Release 时更新 `latest`。
+- 必需仓库 Secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`（Docker Hub 访问令牌，需写权限）。本机 Docker daemon 未运行，也没有 Docker Hub 凭据，因此**未执行推送**，不能声称 Docker Hub 上已有该镜像；工作流在缺少 Secrets 时会明确失败。
+- 容器镜像构建本身已在 `aab82f17` 的 CI 中通过。直接 `docker run` 时需要设置 `YEEYEEYEE__WebProjectsDirectory=/data/projects`、`YEEYEEYEE__AllowStandaloneWebScene=true`、`YEEYEEYEE__WebScenePath=/data/scene.json`；README 已给出命令与 Docker Hub / compose 两种用法。
+- 容器数据在 `/data` 卷（账号、任务、聊天、素材、项目、配置与密钥）。ZIP 布局的 `install/upgrade/rollback` 与完整备份校验不适用于容器；容器升级与备份以镜像标签和 `/data` 卷为单位。
+
 ### 2026-10-17 并发聊天 CHAT_BUSY 偶发失败定位
 
 - 现象：完整 Web 回归首次在 `mixed` 用例的 readonly 分支失败——`actions/<id>/commit` 期望 403（只读提议不能提交），实际得到 409 `CHAT_BUSY`。同一构建的 `--chat-only` 和随后完整重跑通过，说明不是稳定复现。
