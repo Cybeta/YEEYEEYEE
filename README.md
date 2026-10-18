@@ -1,8 +1,11 @@
 # YEEYEEYEE
 
 > 面向 AI 创作的 Windows 桌面工作区与 Web 协作服务
+>
+> 在 AI 协助下，我们只需要 YES，一切交给 Agent。
 
 [![构建与测试](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/build.yml/badge.svg)](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/build.yml)
+[![发布 Web 镜像到 Docker Hub](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/docker-publish.yml)
 
 YEEYEEYEE 把 **企划、章节、分镜、图片、视频和成片** 放在同一个项目里。角色、道具和场景作为设定被分镜引用，设定更新后提示受影响内容。当前源码版本为 **0.1.5.5**；发行状态以 [GitHub Releases](https://github.com/Cybeta/YEEYEEYEE/releases) 为准。
 
@@ -68,18 +71,15 @@ dotnet run --project YEEYEEYEE.Web
 
 源码开发默认 `http://localhost:5000`。Docker 部署有两种方式。
 
-**从源码构建（需要本机 Docker 与源码）**
+**使用 Docker Hub 镜像（推荐，部署机器不需要源码）**
+
+镜像由 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 构建：`main` 分支上 Web 相关改动合并后自动构建并推送，发布 Release 或手动触发时也会构建。镜像仓库是 [yuqing09/yeeyeeyee-web](https://hub.docker.com/r/yuqing09/yeeyeeyee-web)：
+
+- `yuqing09/yeeyeeyee-web:latest`：跟随 `main` 的最新可用版本
+- `yuqing09/yeeyeeyee-web:0.1.5.5`：版本号取自桌面工程的 `<Version>`，同时发布 `0.1.5`、`0` 与 `sha-<提交>`
 
 ```powershell
-docker compose up -d --build
-```
-
-**使用 Docker Hub 镜像（部署机器不需要源码）**
-
-镜像由 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 在发布 Release 或手动触发时构建并推送。仓库维护者需要先在 GitHub 仓库 Secrets 配置 `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`（Docker Hub 访问令牌，需写权限）；可选仓库变量 `DOCKERHUB_REPOSITORY` 覆盖完整镜像名，默认是 `<DOCKERHUB_USERNAME>/yeeeyee-web`。镜像标签包括版本号（如 `0.1.5.5`）、次版本、主版本、`sha-<提交>`，Release 时还会更新 `latest`。在维护者完成配置并运行工作流之前，请使用上面的源码构建方式。
-
-```powershell
-docker pull <dockerhub-user>/yeeeyee-web:0.1.5.5
+docker pull yuqing09/yeeyeeyee-web:latest
 docker run -d --name yeeeyee-web `
   -p 8080:8080 `
   -v yeeeyee-data:/data `
@@ -87,7 +87,7 @@ docker run -d --name yeeeyee-web `
   -e YEEYEEYEE__WebProjectsDirectory=/data/projects `
   -e YEEYEEYEE__AllowStandaloneWebScene=true `
   -e YEEYEEYEE__WebScenePath=/data/scene.json `
-  <dockerhub-user>/yeeeyee-web:0.1.5.5
+  yuqing09/yeeyeeyee-web:latest
 ```
 
 首次打开 `http://<部署机器>:8080` 创建管理员。没有设置 `YEEYEEYEE__SetupToken` 时，程序会生成一次性令牌并写在 `/data/.setup-token`，可以这样读取：
@@ -96,16 +96,22 @@ docker run -d --name yeeeyee-web `
 docker exec yeeeyee-web cat /data/.setup-token
 ```
 
-容器以非 root 用户运行；使用宿主机目录挂载时，目录必须对容器用户可写。生产部署应放在反向代理与 HTTPS 之后，并在暴露公网前设置固定的初始化令牌。
+容器以非 root 用户运行（镜像内 uid `1654`）；镜像已预建 `/data/projects`、`/data/config` 与 `/data/assets`，配置了 `YEEYEEYEE__WebProjectsDirectory` 时服务启动还会补建该父目录。使用宿主机目录挂载时，目录必须对容器用户可写。生产部署应放在反向代理与 HTTPS 之后，并在暴露公网前设置固定的初始化令牌。
+
+**从源码构建（需要本机 Docker 与源码）**
+
+```powershell
+docker compose up -d --build
+```
 
 **数据与升级**
 
-- 账号库、任务库、聊天库、素材、项目、配置与加密密钥都在 `/data` 卷。升级前备份整个卷；换机器后 `config` 下的密钥缺失会导致已有模型/媒体密钥无法解密。
+- 账号库、任务库、聊天库、素材、项目、配置与加密密钥都在 `/data` 卷。模型/媒体配置固定为 `/data/config/web-ai-config.json`，本机 AES-GCM 主密钥为 `/data/config/ai-key.bin`（权限 0600）；两者必须一起备份，否则已保存的密钥无法解密。升级前备份整个卷；换机器后 `config` 下的密钥缺失会导致已有模型/媒体密钥无法解密。
 - 容器升级是“拉取新镜像 + 用同一个 `/data` 卷重建容器”，不是容器内的文件替换。ZIP 发行包里的 `install-web.ps1`、`upgrade-web.ps1`、`rollback-web.ps1` 与完整备份校验只适用于 Windows ZIP 布局，不适用于容器；容器部署请直接备份 `/data` 卷。
 - 使用 compose 配合 Docker Hub 镜像时：
 
 ```powershell
-$env:YEEYEEYEE_IMAGE = "<dockerhub-user>/yeeeyee-web:0.1.5.5"
+$env:YEEYEEYEE_IMAGE = "yuqing09/yeeyeeyee-web:latest"
 docker pull $env:YEEYEEYEE_IMAGE
 docker compose up -d --no-build
 ```
@@ -118,7 +124,7 @@ Windows ZIP 使用独立的版本目录与固定 `data` 目录：解压后先运
 
 分镜的角色、场景、道具需求分别为“未知 / 无需求 / 必要”。未知、需求与引用冲突、失效引用、指定版本或图片缺失、版本决策待确认阻断生成。必要参考不能取消、裁剪或降级，超限或来源不支持参考必须调整配置。
 
-图像批次保存实际请求和引用指纹；每张候选提交前复核，采用时保留生成依据。视频使用已采用且依据有效的分镜首帧；候选图不算采用，确认需求不能补记旧产物依据。指纹不是图片文件内容哈希，不能保证检测同路径图片替换。
+图像批次保存实际请求和引用指纹；每张候选提交前复核，采用时保留生成依据。视频使用已采用且依据有效的分镜首帧；候选图不算采用，确认需求不能补记旧产物依据。引用指纹为参考图片记录流式 SHA-256 字节哈希，同路径替换即使大小与修改时间不变也能检出；旧指纹没有内容基线时只比较结构，不追溯判定历史替换，也不改写已有依据。哈希只在出图提交、视频前置检查和自检等明确检查点计算，不在画布渲染或高频轮询中读取图片。
 
 桌面视频单击原位播放，图片/视频双击打开应用内大窗；默认静音，按需创建并保持单活动播放器。封面由独立串行 WebView 解码，短于 1 秒取中点，其余取 0.5 秒；有界缓存与空闲释放。截图失败保留播放入口，音频使用系统播放器。
 
@@ -143,3 +149,7 @@ dotnet run --project YEEYEEYEE.Web.Tests -c Release --no-build
 npm.cmd --prefix YEEYEEYEE.Canvas test
 npm.cmd --prefix YEEYEEYEE.Canvas run build
 ```
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE) 发布，Copyright (c) 2026 Cybeta。你可以自由使用、修改、分发和商用，保留版权与许可声明即可。
