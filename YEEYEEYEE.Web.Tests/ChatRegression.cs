@@ -312,7 +312,9 @@ internal static class ChatRegression
                         await Json(admin, invokePath, "{\"aspectRatio\":\"9:16\"}", 409);
                         await Task.Delay(1200);
                         var pending = await Json(admin, "/api/web/chat/sessions/" + sid);
-                        Assert(pending.GetProperty("messages")[1].GetProperty("skillState").GetString() == "preview", "old failed job cannot overwrite pending new attempt");
+                        // 发起接口现在提交后立即返回，卡片会从 preview 落到 submitted；
+                        // 这里要盯的是「旧失败任务没有把这一条新尝试改回 failed」。
+                        Assert(pending.GetProperty("messages")[1].GetProperty("skillState").GetString() == "submitted", "old failed job cannot overwrite pending new attempt");
                     }
                     finally { imageGate.SetResult(); imageGate = null; }
                     var secondJob = await restart;
