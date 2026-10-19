@@ -1171,7 +1171,18 @@ internal static class ChatRegression
                 (await Json(admin, "/api/web/chat/sessions/" + sessionId)).GetProperty("messages")[1].GetProperty("skillError").GetString() ?? "";
             string InvokePath(string sessionId, string messageId) => $"/api/web/chat/sessions/{sessionId}/skills/{messageId}/invoke";
             using var paramJobs = new YEEYEEYEE.Host.SqliteJobStore(Path.Combine(directory, "jobs.db"));
-            IReadOnlyDictionary<string, JsonElement> JobInputs(Guid jobId) => paramJobs.LoadAll().Single(job => job.JobId == jobId).Inputs;
+            IReadOnlyDictionary<string, JsonElement> JobInputs(Guid jobId)
+            {
+                // 发起接口现在提交后立即返回，任务由后台线程登记落库；CI 上这段窗口更明显，
+                // 所以等它真正出现在任务库里再读输入，而不是假设响应回来就已经写完。
+                for (var attempt = 0; attempt < 200; attempt++)
+                {
+                    var stored = paramJobs.LoadAll().FirstOrDefault(job => job.JobId == jobId);
+                    if (stored is not null) return stored.Inputs;
+                    Thread.Sleep(10);
+                }
+                throw new Exception("Job never reached the store: " + jobId);
+            }
 
             var (unknownSession, unknownMessage) = await ImageProposal(Array.Empty<object>());
             await Json(admin, InvokePath(unknownSession, unknownMessage), "{\"aspectRatio\":\"1:1\",\"parameters\":{\"unknownKey\":1}}", 400);
