@@ -15955,9 +15955,15 @@ static int Mp4BoxCount(byte[] data, string type)
 /// </summary>
 static ulong Mp4MvhdDuration(byte[] data)
 {
-	for (var index = 0; index + 20 <= data.Length; index++)
+	for (var index = 0; index + 24 <= data.Length; index++)
 		if (data[index] == (byte)'m' && data[index + 1] == (byte)'v' && data[index + 2] == (byte)'h' && data[index + 3] == (byte)'d')
-			return BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(index + 20, 4));
+		{
+			// 拼接会挑一条公共精确时基（各轨时间刻度的最小公倍数），所以不能把原始
+			// duration 当毫秒读——这里按 mvhd 自己写的 timescale 换算回毫秒。
+			var timescale = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(index + 16, 4));
+			var duration = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(index + 20, 4));
+			return timescale == 0 ? 0 : (ulong)Math.Round(duration * 1000d / timescale, MidpointRounding.AwayFromZero);
+		}
 	return 0;
 }
 

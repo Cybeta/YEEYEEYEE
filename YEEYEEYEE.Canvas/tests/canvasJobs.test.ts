@@ -128,7 +128,7 @@ describe('卸载 / 换画布之后迟到的响应', () => {
     fetchMock.mockImplementationOnce(async () => response({ jobs: [{ jobId: 'new', state: 'Running', targetNodeId: 'B' }] }))
     render(true)
     await flush()
-    expect(hooks.states[0]).toEqual([{ jobId: 'new', state: 'Running', targetNodeId: 'B', outputs: [] }])
+    expect(hooks.states[0]).toEqual([{ jobId: 'new', state: 'Running', targetNodeId: 'B', outputs: [], quality: [] }])
   })
 
   it('只剩最后发出的那一次算数：先发的晚回来也不许覆盖后发的', async () => {
@@ -139,11 +139,11 @@ describe('卸载 / 换画布之后迟到的响应', () => {
     fetchMock.mockImplementationOnce(async () => response({ jobs: [{ jobId: 'second', state: 'Queued', targetNodeId: 'B' }] }))
     render(true)
     await flush()
-    expect(hooks.states[0]).toEqual([{ jobId: 'second', state: 'Queued', targetNodeId: 'B', outputs: [] }])
+    expect(hooks.states[0]).toEqual([{ jobId: 'second', state: 'Queued', targetNodeId: 'B', outputs: [], quality: [] }])
 
     resolveFirst(response({ jobs: [{ jobId: 'first', state: 'Running', targetNodeId: 'A' }] }))
     await flush()
-    expect(hooks.states[0]).toEqual([{ jobId: 'second', state: 'Queued', targetNodeId: 'B', outputs: [] }])
+    expect(hooks.states[0]).toEqual([{ jobId: 'second', state: 'Queued', targetNodeId: 'B', outputs: [], quality: [] }])
   })
 })
 
