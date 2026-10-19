@@ -70,10 +70,13 @@ ENV ASPNETCORE_URLS=http://+:8080 \
     YEEYEEYEE__UserDatabasePath=/data/users.db \
     YEEYEEYEE__ChatDatabasePath=/data/chat.db \
     YEEYEEYEE_CONFIG_HOME=/data/config \
+    YEEYEEYEE__WebAiConfigPath=/data/config/web-ai-config.json \
     YEEYEEYEE__AssetDirectory=/data/assets
 
 # 用镜像自带的非 root 用户（.NET 8 起就有，uid 由 APP_UID 给出）。不用 root 跑服务是底线。
-RUN mkdir -p /data && chown -R $APP_UID /data /app
+# /data/projects、/data/config 必须先在镜像里建好：新建卷是空的，项目创建与密钥落盘
+# 都要求父目录已存在（否则首个项目会以「项目存放位置不存在」失败）。
+RUN mkdir -p /data/projects /data/config /data/assets && chown -R $APP_UID /data /app
 USER $APP_UID
 
 VOLUME ["/data"]

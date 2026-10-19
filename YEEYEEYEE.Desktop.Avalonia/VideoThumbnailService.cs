@@ -224,6 +224,21 @@ internal sealed class VideoThumbnailService : IDisposable
         catch (Exception error) when (error is ArgumentException or InvalidOperationException or NotSupportedException or IOException) { return false; }
     }
     private void ReleaseHost() { idleTimer.Stop(); host?.Dispose(); host = null; }
+
+    /// <summary>
+    /// 播放前主动收掉空闲的截图宿主：同一进程里同时存在截图 WebView 与播放 WebView 时，
+    /// Avalonia 12.1 的 WebView2 适配层会在新控件初始化阶段以「oldValue 具有此属性的错误类型」
+    /// 终止进程（真机多视频画布打开大窗必现）。有截图在跑时不打断它，交给空闲计时器。
+    /// </summary>
+    internal void ReleaseIdleHost()
+    {
+        if (!Dispatcher.UIThread.CheckAccess()) return;
+        lock (gate)
+        {
+            if (pending.Count != 0 || activeRuns != 0) return;
+            ReleaseHost();
+        }
+    }
     public void Dispose()
     {
         Dispatcher.UIThread.VerifyAccess();

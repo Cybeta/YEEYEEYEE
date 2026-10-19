@@ -1,4 +1,5 @@
 import type { AttachmentSummary } from '../assets'
+import { parseQualities, type JobQuality } from './imageQuality'
 import { nodeStatusOf } from './records'
 
 /**
@@ -36,6 +37,11 @@ export type NodeJob = {
   attachmentState?: string
   /** 这个任务的产物，按服务端的顺序。回挂成功后节点上的附件与它**逐个对位**。 */
   outputs?: NodeJobOutput[]
+  /**
+   * 这个任务的判档结果，服务端按产物下标给。**读不懂的就丢掉**——
+   * 没有结果等于没判过，不能拿默认档补上。
+   */
+  quality?: JobQuality[]
 }
 
 /** 任务到这一步不会再变，界面该停了。取消算终态，但它**不是失败**。 */
@@ -346,7 +352,8 @@ export function parseJobs(raw: unknown): { jobs: NodeJob[]; invalidCount: number
       progressPercent: typeof row.progressPercent === 'number' && Number.isFinite(row.progressPercent) ? row.progressPercent : undefined,
       errorMessage: typeof row.errorMessage === 'string' ? row.errorMessage : undefined,
       attachmentState: typeof row.attachmentState === 'string' ? row.attachmentState : undefined,
-      outputs: parseOutputs(row.outputs)
+      outputs: parseOutputs(row.outputs),
+      quality: parseQualities(row.quality)
     })
   }
   return { jobs, invalidCount: list.length - jobs.length }

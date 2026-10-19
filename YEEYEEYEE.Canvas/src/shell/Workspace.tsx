@@ -5,6 +5,7 @@ import { layerOf } from '../Protocol/VersionedMessages'
 import { CanvasView, clampZoom, type CanvasApi, type Pan } from './CanvasView'
 import type { AgentCanvasPreview } from './agentPreview'
 import type { CandidateBatchView } from './candidateBatch'
+import type { BatchQualityRun } from './imageQuality'
 import { ghostMoves, type LayoutMove, type LayoutPlan, type LayoutScope } from './layoutPlan'
 import { describeLease, treeLease, type Lease } from './locks'
 import type { NodeJob } from './nodeMedia'
@@ -51,6 +52,14 @@ export type WorkspaceProps = {
   jobs?: NodeJob[]
   /** 节点出图的候选批次（临时卡片，见 candidateBatch.ts）。 */
   candidates?: CandidateBatchView[]
+  /** 开奖模式：候选区只露卡背，出好后主动点「开奖」。 */
+  gachaReveal?: boolean
+  /** 判档开关与每批状态：关着时候选卡写「未判档」。 */
+  showQuality?: boolean
+  qualityRuns?: Record<string, BatchQualityRun>
+  onSkipQuality?: (batchId: string, jobIds: string[]) => void
+  onRetryQuality?: (batchId: string, jobIds: string[]) => void
+  onRevealCandidates?: (batchId: string) => void
   onAdoptCandidate?: (nodeId: string, jobId: string, outputIndex: number) => void
   onDiscardCandidates?: (batchId: string) => void
   onOpenCandidate?: (jobId: string, outputIndex: number, name: string) => void
@@ -262,6 +271,12 @@ export function Workspace(props: WorkspaceProps) {
             ghosts={ghosts}
             jobs={props.jobs}
             candidates={props.candidates}
+            gachaReveal={props.gachaReveal}
+            showQuality={props.showQuality}
+            qualityRuns={props.qualityRuns}
+            onSkipQuality={props.onSkipQuality}
+            onRetryQuality={props.onRetryQuality}
+            onRevealCandidates={props.onRevealCandidates}
             onAdoptCandidate={props.onAdoptCandidate}
             onDiscardCandidates={props.onDiscardCandidates}
             onOpenCandidate={props.onOpenCandidate}

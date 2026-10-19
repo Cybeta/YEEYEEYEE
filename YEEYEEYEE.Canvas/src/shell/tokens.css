@@ -1378,6 +1378,23 @@ img.df-node-media-tile {
   color: var(--df-ink-2);
 }
 
+/* 候选卡右上角的档位小牌。没判过显示「未判档」，不拿白档颜色冒充。 */
+.df-candidate-quality {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  max-width: 72%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.df-candidate-card.is-cracked {
+  border-color: #8fa6bd;
+}
+
 .df-candidate-action {
   margin-top: 2px;
   padding: 1px 6px;
@@ -1399,8 +1416,10 @@ img.df-node-media-tile {
   position: absolute;
   pointer-events: auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  max-width: 460px;
   font-size: 10px;
   color: var(--df-ink-2);
 }
@@ -1461,6 +1480,14 @@ img.df-node-media-tile {
   color: var(--df-ink-3);
 }
 
+/* 选项下面的说明（例如判档会额外调用模型、可能产生费用与等待）。 */
+.df-menu-note {
+  padding: 0 10px 6px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--df-ink-3);
+}
+
 .df-menu-sep {
   display: block;
   height: 1px;
@@ -1480,6 +1507,14 @@ img.df-node-media-tile {
   margin-right: 2px;
   font-size: 11px;
   color: var(--df-ink-2);
+}
+
+/* 出图方式下拉：菜单里要和按钮同高，别把整行撑开 */
+.df-menu-select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  font-size: 11px;
 }
 
 /* ==================== 编辑锁 ==================== */
@@ -2292,4 +2327,849 @@ img.df-node-media-tile {
 .df-agent-chat a:focus-visible {
   outline: 2px solid var(--df-primary);
   outline-offset: 2px;
+}
+
+/* ==================== 出图开奖（卡背 / 全屏揭晓） ==================== */
+/* 候选区在开奖模式下只露卡背：颜色留给揭晓里卡背后那团光，画布上这一排不抢色。 */
+.df-candidate-card.is-facedown {
+  background: linear-gradient(180deg, #171a20 0%, #0c0e13 60%, #08090c 100%);
+  border-color: rgba(138, 168, 255, 0.55);
+  padding: 0;
+}
+
+.df-candidate-back {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.df-candidate-back-line {
+  position: absolute;
+  inset: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+}
+
+.df-candidate-back-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  background: rgba(255, 255, 255, 0.035);
+  transform: rotate(45deg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.df-candidate-back-mark span {
+  transform: rotate(-45deg);
+  font-size: 12px;
+  color: rgba(233, 237, 244, 0.86);
+}
+
+.df-candidate-card.is-facedown .df-candidate-state {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  bottom: 3px;
+  padding: 1px 2px;
+  border-radius: 4px;
+  background: rgba(6, 9, 14, 0.58);
+  font-size: 9px;
+}
+
+.df-candidate-card.is-facedown .df-candidate-note {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 5px;
+  text-align: center;
+  color: #a7c7ea;
+}
+
+.df-candidate-caption {
+  flex-wrap: wrap;
+  width: max-content;
+  max-width: min(420px, 90vw);
+}
+
+.df-candidate-action.is-primary {
+  border-color: var(--df-primary);
+  background: var(--df-primary-soft);
+  color: #cfe4ff;
+}
+
+.df-candidate-caption-note {
+  color: var(--df-ink-3);
+}
+
+.df-menu-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 0;
+  font-size: 11px;
+  color: var(--df-ink-2);
+  cursor: pointer;
+}
+
+.df-menu-check input {
+  accent-color: var(--df-primary);
+  cursor: pointer;
+}
+
+/* ---- 全屏揭晓 ---- */
+.df-gacha {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: #e8effa;
+  background: linear-gradient(180deg, #0b1220 0%, #06090e 62%, #04060a 100%);
+}
+
+.df-gacha-aurora {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: var(--df-aurora);
+  opacity: 0.75;
+}
+
+.df-gacha-spot {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(58% 48% at 50% 52%, rgba(77, 155, 255, 0.18) 0%, rgba(77, 155, 255, 0) 70%);
+  transition: opacity 600ms ease;
+}
+
+.df-gacha[data-phase="cards"] .df-gacha-spot,
+.df-gacha[data-phase="flips"] .df-gacha-spot,
+.df-gacha[data-phase="ready"] .df-gacha-spot {
+  opacity: 1;
+}
+
+.df-gacha-head {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 22px 24px 0;
+  max-height: 26vh;
+  overflow: auto;
+  text-align: center;
+}
+
+.df-gacha-title {
+  font-size: 17px;
+  color: #e8effa;
+}
+
+.df-gacha-sub {
+  font-size: 11px;
+  color: #8fa6bd;
+}
+
+.df-gacha-fail {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 10px;
+  color: #e0707e;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df-gacha-fail.is-muted {
+  color: #7c8ca0;
+}
+
+.df-gacha-stage {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 20px;
+}
+
+.df-gacha-whiteout {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: #fff;
+}
+
+.df-gacha[data-phase="burst"] .df-gacha-whiteout {
+  animation: df-gacha-whiteout 300ms cubic-bezier(0.3, 0.8, 0.3, 1) both;
+}
+
+@keyframes df-gacha-whiteout {
+  0% { opacity: 0; }
+  20% { opacity: 0.34; }
+  100% { opacity: 0; }
+}
+
+.df-gacha-pillar {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(230px, 46vw);
+  height: 62vh;
+  pointer-events: none;
+  opacity: 0;
+  filter: blur(16px);
+  transform: translate(-50%, -50%) scale(1, 0.22);
+}
+
+.df-gacha[data-phase="burst"] .df-gacha-pillar {
+  animation: df-gacha-pillar 700ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+@keyframes df-gacha-pillar {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(1, 0.22); }
+  24% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1, 1.5); }
+}
+
+.df-gacha-bloom {
+  position: absolute;
+  width: min(640px, 74vw);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.85) 0%, rgba(255, 255, 255, 0) 64%);
+}
+
+.df-gacha[data-phase="burst"] .df-gacha-bloom {
+  animation: df-gacha-bloom 560ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+@keyframes df-gacha-bloom {
+  0% { opacity: 0; transform: scale(0.7); }
+  22% { opacity: 0.85; }
+  100% { opacity: 0; transform: scale(1.35); }
+}
+
+.df-gacha-sparks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.df-gacha[data-phase="burst"] .df-gacha-sparks,
+.df-gacha[data-phase="cards"] .df-gacha-sparks {
+  opacity: 1;
+}
+
+.df-gacha-sparks span {
+  position: absolute;
+  left: 50%;
+  top: 52%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 12px 4px rgba(180, 210, 255, 0.75);
+  opacity: 0;
+}
+
+.df-gacha[data-phase="burst"] .df-gacha-sparks span {
+  animation: df-gacha-spark 620ms ease-out calc(var(--spark-i) * 55ms) both;
+}
+
+@keyframes df-gacha-spark {
+  0% { opacity: 1; transform: translate(-50%, 0) scale(0.6); }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--spark-x)), -120px) scale(1); }
+}
+
+.df-gacha-deck {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+  align-items: center;
+}
+
+.df-gacha-row {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 卡宽同时受三件事约束：张数给的基准、视口宽、视口高（横屏时由高决定）。 */
+.df-gacha-cell {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  width: min(
+    var(--gacha-w),
+    calc((100vw - 56px - (var(--gacha-cols) - 1) * 18px) / var(--gacha-cols)),
+    calc((100dvh - 170px) / var(--gacha-rows) / 1.5)
+  );
+  aspect-ratio: 2 / 3;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: default;
+  opacity: 0;
+  transform: translate(calc(-1 * var(--dx)), calc(-1 * var(--dy))) scale(0.94);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.df-gacha[data-phase="cards"] .df-gacha-cell,
+.df-gacha[data-phase="flips"] .df-gacha-cell,
+.df-gacha[data-phase="ready"] .df-gacha-cell {
+  opacity: 1;
+  transform: translate(0, 0) scale(1);
+  transition:
+    transform 520ms cubic-bezier(0.18, 1.28, 0.32, 1) var(--fly-delay),
+    opacity 260ms ease var(--fly-delay);
+}
+
+.df-gacha[data-phase="ready"] .df-gacha-cell {
+  cursor: pointer;
+}
+
+.df-gacha-cell:disabled {
+  cursor: default;
+}
+
+.df-gacha-cell:focus-visible {
+  outline: 2px solid var(--df-primary);
+  outline-offset: 4px;
+}
+
+.df-gacha-halo,
+.df-gacha-halo-boost {
+  position: absolute;
+  inset: -27%;
+  border-radius: 50%;
+  pointer-events: none;
+  filter: blur(1px);
+}
+
+.df-gacha-halo {
+  opacity: 0.55;
+  animation: df-gacha-drift 3.8s ease-in-out infinite alternate;
+}
+
+.df-gacha-halo-boost {
+  opacity: 0;
+  transition: opacity 240ms ease;
+}
+
+.df-gacha-cell.is-selected .df-gacha-halo-boost {
+  opacity: 0.85;
+}
+
+.df-gacha-deck.has-selection .df-gacha-cell:not(.is-selected) {
+  opacity: 0.45;
+  transition: transform 180ms ease, opacity 220ms ease;
+}
+
+.df-gacha-cell.is-selected {
+  transform: translate(0, 0) scale(1.06);
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.3, 1), opacity 220ms ease;
+}
+
+@keyframes df-gacha-drift {
+  from { opacity: 0.45; transform: translateY(7px); }
+  to { opacity: 0.72; transform: translateY(-7px); }
+}
+
+@media (hover: hover) {
+  .df-gacha[data-phase="ready"] .df-gacha-cell:not(.is-selected):not(:disabled):hover {
+    transform: translate(0, 0) scale(1.045);
+  }
+}
+
+.df-gacha-card-persp {
+  position: absolute;
+  inset: 0;
+  display: block;
+  perspective: 1100px;
+}
+
+.df-gacha-card-inner {
+  position: absolute;
+  inset: 0;
+  display: block;
+  transform-style: preserve-3d;
+  transform: rotateY(180deg);
+}
+
+.df-gacha-card-inner.is-up {
+  transform: rotateY(0deg);
+}
+
+.df-gacha-card-inner.is-flipping {
+  animation: df-gacha-flip 280ms cubic-bezier(0.3, 0.7, 0.3, 1) var(--flip-delay) both;
+}
+
+@keyframes df-gacha-flip {
+  0% { transform: rotateY(180deg); }
+  39% { transform: rotateY(90deg); }
+  100% { transform: rotateY(0deg); }
+}
+
+.df-gacha-back,
+.df-gacha-face {
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  border-radius: 14px;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.df-gacha-back {
+  transform: rotateY(180deg);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(180deg, #171a20 0%, #0e1015 55%, #08090c 100%);
+  box-shadow: 0 12px 26px -12px rgba(0, 0, 0, 0.75);
+}
+
+.df-gacha-back-line {
+  position: absolute;
+  inset: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 9px;
+}
+
+.df-gacha-emblem {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.df-gacha-emblem-ring {
+  width: 34%;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.035);
+  color: rgba(233, 237, 244, 0.9);
+  font-size: clamp(18px, 4vw, 32px);
+}
+
+.df-gacha-emblem-badge {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: rgba(150, 158, 170, 0.75);
+}
+
+.df-gacha-face {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #0a0c10;
+  box-shadow: 0 12px 26px -12px rgba(0, 0, 0, 0.75);
+}
+
+.df-gacha-cell.is-selected .df-gacha-face,
+.df-gacha-cell.is-selected .df-gacha-back {
+  border-width: 2px;
+  border-color: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 18px 34px -10px rgba(0, 0, 0, 0.78), 0 0 30px -6px rgba(255, 255, 255, 0.28);
+}
+
+.df-gacha-face img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.df-gacha-face-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(4, 5, 8, 0) 0%, rgba(4, 5, 8, 0) 58%, rgba(4, 5, 8, 0.75) 100%);
+}
+
+.df-gacha-face-line {
+  position: absolute;
+  inset: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 9px;
+}
+
+.df-gacha-corner {
+  position: absolute;
+  inset: 14px;
+  pointer-events: none;
+}
+
+.df-gacha-corner::before,
+.df-gacha-corner::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-style: solid;
+  border-color: rgba(255, 255, 255, 0.34);
+}
+
+.df-gacha-corner::before {
+  top: 0;
+  left: 0;
+  border-width: 1px 0 0 1px;
+}
+
+.df-gacha-corner::after {
+  right: 0;
+  bottom: 0;
+  border-width: 0 1px 1px 0;
+}
+
+.df-gacha-chip {
+  position: absolute;
+  padding: 1px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  background: rgba(8, 10, 14, 0.62);
+  font-size: 10px;
+  color: #c8d3e2;
+}
+
+.df-gacha-chip.is-top {
+  top: 10px;
+  left: 10px;
+}
+
+.df-gacha-chip.is-bottom {
+  bottom: 10px;
+  left: 10px;
+}
+
+.df-gacha-grade {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  max-width: 64%;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(8, 10, 14, 0.72);
+  font-size: 10px;
+  font-weight: 600;
+  color: #a9b5c6;
+  white-space: nowrap;
+}
+
+/* 裂纹卡：档位牌下面补一行命中的原词，光看「裂纹」不知道是哪儿裂的。 */
+.df-gacha-grade-hits {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 9px;
+  font-weight: 400;
+  opacity: 0.85;
+}
+
+/* 裂纹卡先压暗一层，再叠裂线；它压在图上、收边与档位牌之下。 */
+.df-gacha-crack-shade {
+  position: absolute;
+  inset: 0;
+  background: rgba(6, 8, 12, 0.23);
+  pointer-events: none;
+}
+
+/* 裂纹只画在卡面上，压在图片与压暗层之上、收边与档位牌之下。 */
+.df-gacha-cracks {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.df-gacha-cracks polyline {
+  fill: none;
+  stroke: rgba(233, 241, 250, 0.72);
+  stroke-width: 1.2;
+  stroke-linejoin: miter;
+  vector-effect: non-scaling-stroke;
+}
+
+.df-gacha-cell.is-cracked .df-gacha-face {
+  border-color: rgba(143, 166, 189, 0.55);
+}
+
+/* 档位是模型判断的免责声明：必须出现在画面上，不能只躺在文档里。 */
+.df-gacha-disclaimer {
+  max-width: 560px;
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: rgba(158, 148, 122, 0.92);
+  text-align: center;
+}
+
+/* 判档尚未结束 / 已跳过 / 失败：只是状态说明，不挡开奖与采用。 */
+.df-gacha-quality-note {
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: #8fa6bd;
+  text-align: center;
+}
+
+.df-gacha-broken {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  font-size: 12px;
+  color: #e5a3a3;
+  text-align: center;
+}
+
+.df-gacha-flash {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.75) 0%, rgba(255, 255, 255, 0) 62%);
+}
+
+.df-gacha-card-inner.is-flipping .df-gacha-flash {
+  animation: df-gacha-flash 420ms ease-out var(--flip-delay) both;
+}
+
+@keyframes df-gacha-flash {
+  0% { opacity: 0; }
+  28% { opacity: 0.85; }
+  100% { opacity: 0; }
+}
+
+.df-gacha-floor {
+  position: absolute;
+  left: 50%;
+  bottom: 9%;
+  z-index: 1;
+  width: min(90vw, 900px);
+  height: 1px;
+  transform: translateX(-50%);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.18) 50%, rgba(255, 255, 255, 0) 100%);
+  pointer-events: none;
+}
+
+.df-gacha-foot {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 10px 24px calc(16px + env(safe-area-inset-bottom));
+  background: linear-gradient(180deg, rgba(4, 6, 10, 0) 0%, rgba(4, 6, 10, 0.72) 100%);
+}
+
+.df-gacha-hint {
+  flex: 1 1 240px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #8fa6bd;
+}
+
+.df-gacha-hint-error {
+  display: block;
+  margin-bottom: 2px;
+  color: #ff9aa6;
+}
+
+.df-gacha-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.df-gacha-button {
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(26, 36, 49, 0.9);
+  color: #e9eff7;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.df-gacha-button:hover:not(:disabled) {
+  border-color: rgba(140, 197, 255, 0.6);
+}
+
+.df-gacha-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.df-gacha-button:focus-visible {
+  outline: 2px solid var(--df-primary);
+  outline-offset: 2px;
+}
+
+.df-gacha-button.is-primary {
+  border-color: #4d9bff;
+  background: linear-gradient(180deg, #4d9bff 0%, #2f80ed 100%);
+  color: #fff;
+}
+
+.df-gacha-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 520px;
+  padding: 20px;
+  text-align: center;
+  font-size: 12px;
+  color: #93a1b3;
+}
+
+.df-gacha-state-title {
+  font-size: 16px;
+  color: #e8effa;
+}
+
+.df-gacha-state-detail {
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.df-gacha-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.df-gacha-spinner {
+  width: 26px;
+  height: 26px;
+  border: 2px solid rgba(140, 197, 255, 0.2);
+  border-top-color: #4d9bff;
+  border-radius: 50%;
+  animation: df-gacha-spin 0.9s linear infinite;
+}
+
+@keyframes df-gacha-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 手机：按钮要完整可见、点得到；卡宽交给上面的视口约束，这里只调留白与触控尺寸。 */
+@media (max-width: 560px) {
+  .df-gacha-head {
+    padding: 14px 14px 0;
+    max-height: 24vh;
+  }
+
+  .df-gacha-title {
+    font-size: 15px;
+  }
+
+  .df-gacha-stage {
+    padding: 8px 12px;
+  }
+
+  .df-gacha-foot {
+    padding: 8px 14px calc(12px + env(safe-area-inset-bottom));
+  }
+
+  .df-gacha-hint {
+    flex-basis: 100%;
+    order: 2;
+  }
+
+  .df-gacha-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .df-gacha-button {
+    flex: 1 1 0;
+    min-height: 44px;
+    padding: 0 10px;
+    font-size: 13px;
+  }
+}
+
+/* 横屏矮视口：把纵向留白压到最小，卡排仍然完整可见。 */
+@media (max-height: 520px) and (orientation: landscape) {
+  .df-gacha-head {
+    padding-top: 8px;
+    max-height: 20vh;
+  }
+
+  .df-gacha-stage {
+    padding: 4px 16px;
+  }
+
+  .df-gacha-deck {
+    gap: 14px;
+  }
+
+  .df-gacha-chip,
+  .df-gacha-grade {
+    padding: 1px 4px;
+    font-size: 9px;
+  }
+
+  .df-gacha-chip.is-bottom {
+    bottom: 6px;
+    left: 6px;
+  }
+
+  .df-gacha-grade {
+    top: 6px;
+    right: 6px;
+  }
+
+  .df-gacha-foot {
+    padding-top: 4px;
+    padding-bottom: calc(6px + env(safe-area-inset-bottom));
+  }
+}
+
+/* 系统「减少动态效果」：不播放飞卡与翻面，直接落到可挑选的终态。 */
+@media (prefers-reduced-motion: reduce) {
+  .df-gacha *,
+  .df-gacha *::before,
+  .df-gacha *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

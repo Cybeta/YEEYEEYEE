@@ -10,6 +10,9 @@ using Microsoft.Extensions.FileProviders;
 var builder = WebApplication.CreateBuilder(args);
 var configuration = builder.Configuration;
 var databasePath = LegacyConfig.Text(configuration, "JobDatabasePath") ?? Path.Combine(AppContext.BaseDirectory, "yeeeyee.jobs.db");
+// 判档结果单独一个库：它属于任务的附加记录，不进任务快照，也不影响任务状态。
+var qualityDatabasePath = LegacyConfig.Text(configuration, "QualityDatabasePath")
+    ?? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(databasePath))!, "yeeeyee.quality.db");
 var comfyUiBaseUrl = configuration["ComfyUI:BaseUrl"] ?? throw new InvalidOperationException("ComfyUI:BaseUrl 未配置");
 var comfyUiClientId = configuration["ComfyUI:ClientId"];
 var comfyUiCheckpoint = configuration["ComfyUI:Checkpoint"];
@@ -27,6 +30,11 @@ var userDatabasePath = LegacyConfig.Text(configuration, "UserDatabasePath") ?? P
 var configuredCanvasDist = LegacyConfig.Text(configuration, "CanvasDistPath");
 var pollingInterval = configuration.GetValue<TimeSpan?>("ComfyUI:PollingInterval") ?? TimeSpan.FromSeconds(2);
 builder.Services.AddSingleton<IJobStore>(_ => new SqliteJobStore(databasePath));
+builder.Services.AddSingleton(_ => new WebJobQualityStore(qualityDatabasePath));
+builder.Services.AddSingleton(services => new WebImageQualityService(
+    services.GetRequiredService<WebJobQualityStore>(),
+    services.GetRequiredService<IHttpClientFactory>(),
+    assetDirectory));
 builder.Services.AddHttpClient("comfyui", client =>
 {
     client.BaseAddress = new Uri(comfyUiBaseUrl, UriKind.Absolute);
@@ -112,6 +120,7 @@ PresenceApi.Map(app, users);
 // 整画布写入（PUT /api/web/canvas）：桌面端把保存交给服务端，锁与修订都由服务端仲裁。
 WebCanvasApi.Map(app);
 var invokeWebSkill = WebSkillJobApi.Map(app);
+WebImageQualityApi.Map(app);
 WebSettingsApi.Map(app);
 WebChatApi.Map(app, invokeWebSkill);
 if (Directory.Exists(canvasDistPath))

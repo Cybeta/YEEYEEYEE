@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace YEEYEEYEE.Desktop;
 
 /// <summary>项目内资产的可移植引用与文件系统解析。</summary>
@@ -48,6 +50,30 @@ public static class AssetStore
     }
 
     public static bool Exists(string? reference) => Resolve(reference) is not null;
+
+    /// <summary>
+    /// 文件字节内容的 SHA-256（流式读取，不把整张图片读进内存）。读不到或读失败返回 <c>null</c>。
+    ///
+    /// 为什么按字节而不是按路径/大小/修改时间：同一路径被另一份图片覆盖时，文件大小与时间戳都可能
+    /// 与原来一样（复制时保留时间、两张同尺寸截图等），只比元数据会静默漏检。反过来，内容没变、
+    /// 只是改了修改时间，字节哈希也不会变——这正是「内容才是依据」的口径。
+    /// </summary>
+    public static string? ContentHashOfFile(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 81920, FileOptions.SequentialScan);
+            using var sha = SHA256.Create();
+            return Convert.ToHexString(sha.ComputeHash(stream));
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or ArgumentException or NotSupportedException)
+        {
+            return null;
+        }
+    }
 
     public static bool MoveToRecycleBin(string? reference)
     {

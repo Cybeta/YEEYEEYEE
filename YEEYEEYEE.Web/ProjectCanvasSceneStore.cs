@@ -524,6 +524,18 @@ internal sealed class ProjectCanvasSceneStore
                     VariantId = variant.Id,
                     VariantVersionId = versionId
                 });
+                // 网页端没有 Desktop 的「明确无/需要资产」对话框；挂上一条引用就说明这一镜需要
+                // 这类资产，否则 GenerationAudit 会因「无该类资产却有引用」拒绝生成。
+                if (node.Category == NodeCategory.Storyboard)
+                {
+                    node.AssetRequirements ??= new ShotAssetRequirements();
+                    switch (entity.Kind)
+                    {
+                        case EntityKind.Character: node.AssetRequirements.Character = AssetNeed.Required; break;
+                        case EntityKind.Scene: node.AssetRequirements.Scene = AssetNeed.Required; break;
+                        default: node.AssetRequirements.Prop = AssetNeed.Required; break;
+                    }
+                }
                 return (canvas, null);
             },
             (next, bytes) => new { revision = Revision(bytes), record = ProjectRecord(next.Canvas, nodeId.ToString()) });
@@ -1316,6 +1328,13 @@ internal sealed class ProjectCanvasSceneStore
                     Title = string.IsNullOrWhiteSpace(title) ? "新节点" : title.Trim(),
                     Category = category,
                     ExecutionStatus = NodeExecutionStatus.WaitingForUser,
+                    // Web 新建的分镜没有 Desktop 那个「确认资产需求」对话框；默认按「明确无资产」
+                    // 落盘，否则每次生成都会被 GenerationAudit 以「资产需求未知」拦下。
+                    // 之后在 Web 里挂引用时，AddReference 会把对应类别改为 Required，避免
+                    // 出现「已确认无该类资产、却存在该类引用」的矛盾。
+                    AssetRequirements = category == NodeCategory.Storyboard
+                        ? new ShotAssetRequirements { Character = AssetNeed.None, Scene = AssetNeed.None, Prop = AssetNeed.None }
+                        : new ShotAssetRequirements(),
                     X = siblings.Count == 0 ? 0f : siblings.Max(item => item.X) + PlaceholderSpacing,
                     Y = siblings.Count == 0 ? 0f : siblings.Max(item => item.Y),
                     ManualPosition = true

@@ -7,15 +7,31 @@
 [![构建与测试](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/build.yml/badge.svg)](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/build.yml)
 [![发布 Web 镜像到 Docker Hub](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Cybeta/YEEYEEYEE/actions/workflows/docker-publish.yml)
 
-YEEYEEYEE 把 **企划、章节、分镜、图片、视频和成片** 放在同一个项目里。角色、道具和场景作为设定被分镜引用，设定更新后提示受影响内容。当前源码版本为 **0.1.5.5**；发行状态以 [GitHub Releases](https://github.com/Cybeta/YEEYEEYEE/releases) 为准。
+YEEYEEYEE 是一个面向 AI 创作的项目工作区：把 **企划、章节、分镜、角色、场景、道具、图片、视频和成片** 放在同一个项目里。你可以在 Windows 桌面端使用完整工作区，也可以部署 Web 服务，在浏览器中与其他用户协作管理画布和素材。
+
+当前源码版本为 **0.1.5.6**；可下载版本和发行状态以 [GitHub Releases](https://github.com/Cybeta/YEEYEEYEE/releases) 为准。
+
+## 你可以用它做什么
+
+- 用项目、章节和画布组织从企划到成片的创作流程。
+- 用角色、场景、道具的设定图、变体和锁定版本作为分镜生成依据。
+- 让 Agent 先理解你的对话，再把拟新增、修改或删除的节点和连线显示成画布虚影；确认并审批后才写入正式画布。
+- 生成多张候选图，选择直接查看或使用开奖动画逐张揭晓，再把选中的图片收进分镜。
+- 可选使用支持图片输入的视觉模型进行质量判档；判档失败、跳过判档都不会阻止查看和采用。
+- 将已采用的分镜首帧用于视频任务，并把多个镜头按顺序拼接为成片。
 
 ## 界面预览
 
 <p align="center">
-  <img src="docs/screenshots/01-start.png" alt="主界面" width="32%" />
-  <img src="docs/screenshots/11-gacha-reveal.png" alt="抽卡开奖" width="32%" />
-  <img src="docs/screenshots/16-gacha-graded.png" alt="出图判档" width="32%" />
+  <img src="docs/screenshots/03-agent.png" alt="Agent 对话生成节点的画布虚影预览" width="48%" />
+  <img src="docs/screenshots/web-2-layout.png" alt="Web 项目画布与审批中的节点虚影" width="48%" />
 </p>
+<p align="center">
+  <img src="docs/screenshots/web-real-3-reveal-animation.png" alt="Web 真实服务端出图开奖动画" width="48%" />
+  <img src="docs/screenshots/web-real-24-image-source-menu.png" alt="Web 出图方式选择" width="48%" />
+</p>
+
+上面的 Agent 与画布截图展示的是预览层：虚影只代表待审批差异，不会直接改动正式节点。开奖和出图方式截图来自 Web 真实服务端验收；具体验证边界见 [Web 进度与待办](docs/Web进度与待办.md)。
 
 ## 快速开始
 
@@ -38,14 +54,24 @@ dotnet run --project YEEYEEYEE.Desktop.Avalonia
 
 在设置页填写聊天、图像和视频服务地址、模型和密钥。密钥按平台保存，不能把配置文件当成可跨机器迁移的凭据；加密不可用时应检查界面提示。判图质量需要支持图片输入的模型。也可接入本地或远程 ComfyUI。
 
-## 核心能力
+## Desktop 与 Web
 
-- 项目文件夹管理画布、素材、技能和工作流；企划、章节、分镜和成品按阶段组织。
-- 角色、道具、场景支持设定图、变体和版本引用。
-- 分镜批量出图、开奖展示、可选判档，采用图片作为视频首帧，成片无损拼接。
-- Desktop Agent 支持询问、动作预览与审批后执行。
-- Web 支持项目/画布工作台、登录权限、编辑租约、在线协作、资源版本、持久聊天、流式回复及受限动作/技能执行。
-- 管理员可在 Web 管理模型、媒体共享配置、技能和 API 格式工作流；任务执行地址仍取服务启动配置。
+### Windows Desktop
+
+桌面端适合单机创作和本地素材管理，包含项目工作区、画布、Agent 对话、动作预览与审批、设定引用、图片/视频生成、ComfyUI 官方前端工作流导出、媒体预览和成片处理。Agent 的动作先以预览形式呈现，确认后才执行。
+
+### Web 工作区
+
+Web 端适合浏览器访问和多人协作，提供：
+
+- 项目、画布、章节和节点管理，以及登录权限、在线名单、编辑租约和修订冲突检查。
+- 持久聊天、流式回复、附件预览、受限技能调用和动作审批。
+- Agent 节点差异虚影：新增、修改、删除的节点与连线先显示在画布上，审批后才提交正式画布。
+- 节点出图候选批次、出图方式选择（Web 图片 API、本机 ComfyUI 或已安装工作流）、开奖动画和选择采用；采用后的附件在刷新项目后仍可读取。
+- 可选质量判档。判档依赖支持图片输入的视觉模型，默认关闭；Web 裂纹卡不会自动重出，由用户自行决定是否重新生成。
+- 管理员模型、媒体共享、技能和 API 格式工作流设置。ComfyUI UI 工作流需要先通过官方前端导出 API，后续调用使用保存的 API JSON。
+
+Web 端的真实模型、浏览器视口和 mock 交互证据在 [Web 进度与待办](docs/Web进度与待办.md) 中分开记录。
 
 ## ComfyUI
 

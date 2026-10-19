@@ -43,6 +43,8 @@ services:
       YEEYEEYEE__WebScenePath: "/data/scene.json"
       # 工作台创建/打开项目使用同一持久卷里的可写父目录。
       YEEYEEYEE__WebProjectsDirectory: "/data/projects"
+      # 模型/媒体配置与加密密钥同在 /data/config：重建容器后已保存的密文仍能解密。
+      YEEYEEYEE__WebAiConfigPath: "/data/config/web-ai-config.json"
 
       # 若要改成**编辑桌面项目里的真画布**（浏览器与桌面端编辑同一份），做三件事：
       #   1) 注释掉上面那两行；

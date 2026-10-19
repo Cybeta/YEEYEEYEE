@@ -65,7 +65,10 @@ public static class UpdateChecker
         string repository = DefaultRepository,
         CancellationToken cancellationToken = default)
     {
-        var url = string.Format(LatestReleaseTemplate, repository);
+        // 本地更新测试源：只替换发行版接口地址，下载地址仍来自返回的 JSON。
+        // 正式发行不设这个变量，走 GitHub；设了也仍然只认 ReleaseAsset 里的包。
+        var url = EnvCompat.Get("UPDATE_ENDPOINT");
+        if (string.IsNullOrWhiteSpace(url)) url = string.Format(LatestReleaseTemplate, repository);
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, url);

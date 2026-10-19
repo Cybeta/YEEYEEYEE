@@ -52,9 +52,8 @@ public static class Mp4Concatenator
     ///     不是剪头，**一个样本都不能丢**（丢了等于把开头两帧真画面扔掉）；
     ///   · **音频轨没有 ctts**，而 1024@32k = 32ms 正好是一帧 AAC：那是编码器的预听样本，**要丢一帧**。
     ///
-    /// 按这条算，视频每段 124×512/12288 = 5.16667s，音频剪掉一帧后 (166358−1024)/32000 = 5.16669s，
-    /// 两者相等。**不剪的话音轨每段多 32ms，六段下来音频迟到 160ms**——这正是「拼接后音画慢慢不同步」
-    /// 的常见成因，而没人会想到是容器表的问题。
+    /// 实测源片视频为 124×512/12288 = 5.16667s，音频剪头后为 161×1024/32000 = 5.152s。
+    /// 剪头并不保证尾部对齐；音轨用逐段媒体编辑和空编辑保留源尾隙，避免差值累积。
     /// </summary>
     private static int PrimingSamplesToDrop(Track track)
     {
@@ -218,7 +217,7 @@ public static class Mp4Concatenator
         {
             return Write(files, outputPath);
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or OverflowException)
         {
             return Fail("写成品失败：" + error.Message);
         }
@@ -331,10 +330,67 @@ public static class Mp4Concatenator
         return string.Empty;
     }
 
+    private static uint CommonMovieTimescale(List<Mp4File> files)
+    {
+        ulong common = 1;
+        foreach (var scale in files.SelectMany(file => file.Tracks.Select(track => track.Timescale).Prepend(file.Timescale)))
+        {
+            var a = common;
+            var b = (ulong)scale;
+            while (b != 0) (a, b) = (b, a % b);
+            common = checked(common / a * scale);
+            if (common > uint.MaxValue)
+                throw new InvalidDataException("精确公共影片时基超出 32 位范围，无法无损拼接");
+        }
+        return (uint)common;
+    }
+
+    private static bool CanPreserveAudioTail(Mp4File file, int videoIndex, int audioIndex,
+        List<ulong> mediaDurations, List<ulong> trackDurations, uint movieTimescale)
+    {
+        var video = file.Tracks[videoIndex];
+        var audio = file.Tracks[audioIndex];
+        if (audio.HasCompositionOffsets || audio.Edit is not { MediaRate: 0x00010000 }
+            || video.Edit is not { MediaRate: 0x00010000 }
+            || audio.SampleEntry.Length < 8 || Encoding.ASCII.GetString(audio.SampleEntry, 4, 4) != "mp4a"
+            || audio.Samples.Count == 0 || audio.Samples.Any(sample => sample.Duration != 1024)) return false;
+        var esds = IndexOf(audio.SampleEntry, "esds");
+        var es = esds < 4 ? -1 : FindDescriptor(audio.SampleEntry, esds + 8, 0x03);
+        var config = es < 0 || es + 3 > audio.SampleEntry.Length || audio.SampleEntry[es + 2] != 0
+            ? -1 : FindDescriptor(audio.SampleEntry, es + 3, 0x04);
+        if (config < 0 || config + 13 > audio.SampleEntry.Length || audio.SampleEntry[config] != 0x40) return false;
+        var specific = FindDescriptor(audio.SampleEntry, config + 13, 0x05);
+        if (specific < 0 || specific >= audio.SampleEntry.Length
+            || (audio.SampleEntry[specific] >> 3) is not (1 or 2 or 3 or 4)) return false;
+        if (trackDurations[videoIndex] - trackDurations[audioIndex]
+            >= checked(1024UL * (movieTimescale / audio.Timescale))) return false;
+        foreach (var index in new[] { videoIndex, audioIndex })
+        {
+            var track = file.Tracks[index];
+            var expected = decimal.Round((decimal)mediaDurations[index] * file.Timescale / track.Timescale,
+                0, MidpointRounding.AwayFromZero);
+            if (track.Edit!.Duration != expected) return false;
+        }
+        long decodeTime = 0;
+        long minPts = long.MaxValue;
+        long maxEnd = long.MinValue;
+        foreach (var sample in video.Samples)
+        {
+            var pts = checked(decodeTime + sample.CompositionOffset);
+            minPts = Math.Min(minPts, pts);
+            maxEnd = Math.Max(maxEnd, checked(pts + sample.Duration));
+            decodeTime = checked(decodeTime + sample.Duration);
+        }
+        return minPts == video.EditMediaTime && maxEnd - minPts == checked((long)mediaDurations[videoIndex]);
+    }
+
     private static Mp4ConcatResult Write(List<Mp4File> files, string outputPath)
     {
-        var movieTimescale = files[0].Timescale;
+        var movieTimescale = CommonMovieTimescale(files);
         var head = files[0];
+        var audioEdits = head.Tracks.Select(_ => new List<EditEntry>()).ToList();
+        var mediaCursors = new ulong[head.Tracks.Count];
+        var gapMilliseconds = new List<double>();
 
         // ── 1. 按轨道把各段的样本并起来，并算出每段占多长 ──────────────────────
         var merged = head.Tracks.Select(_ => new List<Sample>()).ToList();
@@ -345,7 +401,8 @@ public static class Mp4Concatenator
         foreach (var file in files)
         {
             ulong longest = 0;
-            var trackSeconds = new List<double>();
+            var trackDurations = new List<ulong>();
+            var mediaDurations = new List<ulong>();
             for (var t = 0; t < file.Tracks.Count; t++)
             {
                 var track = file.Tracks[t];
@@ -354,8 +411,11 @@ public static class Mp4Concatenator
                 droppedPerTrack[t] += skip;
                 var kept = track.Samples.Skip(skip).ToList();
                 var duration = (ulong)kept.Sum(sample => (long)sample.Duration);
-                trackSeconds.Add(duration / (double)track.Timescale);
-                var inMovieTime = (ulong)Math.Round(duration * (double)movieTimescale / track.Timescale);
+                mediaDurations.Add(duration);
+                var inMovieTime = checked(duration * (movieTimescale / track.Timescale));
+                trackDurations.Add(inMovieTime);
+                if (track.Edit is { MediaRate: not 0x00010000 })
+                    throw new InvalidDataException("源编辑列表速率不是 1，无法无损拼接");
                 if (inMovieTime > longest) longest = inMovieTime;
 
                 if (kept.Count > 0 && !kept[0].IsSync)
@@ -363,13 +423,34 @@ public static class Mp4Concatenator
                 merged[t].AddRange(kept);
 
             }
-            // 并表会让各轨独立连续播放，不能用最长轨掩盖每段时长差，否则偏差会逐段累积。
-            if (trackSeconds.Max() - trackSeconds.Min() > 1d / movieTimescale)
-                throw new InvalidDataException("剪头后各轨时长不一致，接段会造成音画失步，无法无损拼接");
+            if (trackDurations.Max() != trackDurations.Min())
+            {
+                var video = file.Tracks.FindIndex(track => track.Handler == "vide");
+                var audio = file.Tracks.FindIndex(track => track.Handler == "soun");
+                if (file.Tracks.Count != 2 || video < 0 || audio < 0
+                    || trackDurations[audio] >= trackDurations[video]
+                    || !CanPreserveAudioTail(file, video, audio, mediaDurations, trackDurations, movieTimescale))
+                    throw new InvalidDataException("剪头后各轨时长不一致，且不满足单视频/AAC 音频短于一个样本的源尾隙条件，无法无损拼接");
+                gapMilliseconds.Add((trackDurations[video] - trackDurations[audio]) * 1000d / movieTimescale);
+            }
+            for (var t = 0; t < file.Tracks.Count; t++)
+            {
+                if (file.Tracks[t].Handler == "soun")
+                {
+                    audioEdits[t].Add(new EditEntry(trackDurations[t], checked((long)mediaCursors[t]), 0x00010000));
+                    if (trackDurations[t] < longest)
+                        audioEdits[t].Add(new EditEntry(longest - trackDurations[t], -1, 0x00010000));
+                }
+                mediaCursors[t] = checked(mediaCursors[t] + mediaDurations[t]);
+            }
             segmentDurations.Add(longest);
         }
 
-        var totalDuration = segmentDurations.Aggregate(0UL, (a, b) => a + b);
+        var totalDuration = segmentDurations.Aggregate(0UL, (a, b) => checked(a + b));
+        if (totalDuration >= uint.MaxValue || mediaCursors.Any(duration => duration >= uint.MaxValue))
+            throw new InvalidDataException("精确时基下的时长超出当前 32 位容器字段范围，无法无损拼接");
+        if (gapMilliseconds.Count == 0)
+            foreach (var edits in audioEdits) edits.Clear();
 
         // ── 2. 布局：ftyp + moov + mdat；样本按「段 → 轨道」顺序连续摆 ──────────
         // 保住「段」这个粒度（每段都自带关键帧），比按轨道把所有音频堆到文件末尾好：
@@ -396,10 +477,10 @@ public static class Mp4Concatenator
 
         // moov 的长度取决于样本表，而样本表里的 chunk 偏移取决于 moov 有多长 —— 先写一遍量长度，
         // 再带着正确偏移写第二遍。两遍的 stco 条数一样，所以长度相等。
-        var measuring = BuildMoov(head, merged, chunks, totalDuration, movieTimescale, droppedPerTrack);
+        var measuring = BuildMoov(head, merged, chunks, totalDuration, movieTimescale, droppedPerTrack, audioEdits);
         var headerLength = head.FtypBytes.Length + measuring.Length + 8;
         var fixedChunks = chunks.Select(chunk => (chunk.Track, chunk.Offset + headerLength, chunk.Count)).ToList();
-        var moov = BuildMoov(head, merged, fixedChunks, totalDuration, movieTimescale, droppedPerTrack);
+        var moov = BuildMoov(head, merged, fixedChunks, totalDuration, movieTimescale, droppedPerTrack, audioEdits);
 
         using (var output = File.Create(outputPath))
         {
@@ -415,6 +496,10 @@ public static class Mp4Concatenator
                 ? $"接缝对齐：视频不剪（它的 elst.media_time 是合成偏移），音频丢掉了 {primingDropped} 个预听样本——"
                   + "不丢的话音轨会逐段迟到，越拼越不同步。"
                 : "接缝对齐：各段都没有需要丢的预听样本。")
+            + (gapMilliseconds.Count > 0
+                ? $"保留源片尾部无音频区间：各段尾隙 {string.Join("、", gapMilliseconds.Select(gap => $"{gap:0.000}ms"))}，"
+                  + "使用音轨多条 elst 的空编辑补到画面边界，不拉长 AAC 样本；播放器须支持多条编辑及空编辑，尚未试听验证。"
+                : string.Empty)
             + "每条轨道的「样本组」（sgpd/sbgp）没有保留：那是可选的附加分组，合并会打乱样本下标，"
             + "丢掉不影响播放。";
         return new Mp4ConcatResult(true, outputPath, string.Empty, note);
@@ -422,7 +507,7 @@ public static class Mp4Concatenator
 
     private static byte[] BuildMoov(
         Mp4File head, List<List<Sample>> merged, List<(int Track, long Offset, int Count)> chunks,
-        ulong totalDuration, uint movieTimescale, int[] droppedPerTrack)
+        ulong totalDuration, uint movieTimescale, int[] droppedPerTrack, List<List<EditEntry>> audioEdits)
     {
         var payload = new MemoryStream();
         payload.Write(BuildMvhd(movieTimescale, totalDuration, head.NextTrackId));
@@ -432,7 +517,7 @@ public static class Mp4Concatenator
             payload.Write(BuildTrak(
                 head.Tracks[t], merged[t],
                 chunks.Where(chunk => chunk.Track == t).ToList(),
-                totalDuration, movieTimescale, droppedPerTrack[t]));
+                totalDuration, movieTimescale, droppedPerTrack[t], audioEdits[t]));
         }
         return Box("moov", payload.ToArray());
     }
@@ -454,18 +539,22 @@ public static class Mp4Concatenator
     }
 
     private static byte[] BuildTrak(Track track, List<Sample> samples, List<(int Track, long Offset, int Count)> chunks,
-        ulong totalDuration, uint movieTimescale, int droppedSamples)
+        ulong totalDuration, uint movieTimescale, int droppedSamples, List<EditEntry> edits)
     {
         var payload = new MemoryStream();
+        var outputEdits = edits.Count > 0 ? edits
+            : new List<EditEntry> { new(totalDuration, EditMediaTimeFor(track, droppedSamples), 0x00010000) };
+        if (track.BodyChildren.All(child => child.Type != "edts"))
+            payload.Write(BuildEdts(outputEdits));
         foreach (var child in track.BodyChildren)
         {
             switch (child.Type)
             {
                 case "tkhd":
-                    payload.Write(Box("tkhd", PatchDuration(track.TkhdPayload, track, totalDuration, movieTimescale, isTkhd: true)));
+                    payload.Write(Box("tkhd", PatchDuration(track.TkhdPayload, totalDuration, isTkhd: true)));
                     break;
                 case "edts":
-                    payload.Write(BuildEdts(totalDuration, EditMediaTimeFor(track, droppedSamples)));
+                    payload.Write(BuildEdts(outputEdits));
                     break;
                 case "mdia":
                     payload.Write(Box("mdia", BuildMdia(track, samples, chunks)));
@@ -496,7 +585,7 @@ public static class Mp4Concatenator
         foreach (var child in track.MdiaChildren)
         {
             if (child.Type == "mdhd")
-                payload.Write(Box("mdhd", PatchDuration(track.MdhdPayload, track, mediaDuration, track.Timescale, isTkhd: false)));
+                payload.Write(Box("mdhd", PatchDuration(track.MdhdPayload, mediaDuration, isTkhd: false)));
             else if (child.Type == "minf")
                 payload.Write(Box("minf", BuildMinf(track, samples, chunks)));
             else
@@ -534,26 +623,40 @@ public static class Mp4Concatenator
 
     /// <summary>编辑列表。movieDuration 是这段在影片时间轴上占的长度，mediaTime 是它的时间原点——
     /// **两者都得分轨道，别一律写 0**（见 <see cref="EditMediaTimeFor"/>）。</summary>
-    private static byte[] BuildEdts(ulong movieDuration, long mediaTime)
+    private static byte[] BuildEdts(IReadOnlyList<EditEntry> edits)
     {
-        var elst = new byte[20];
-        BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(4, 4), 1);                       // entry_count
-        BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(8, 4), (uint)Math.Min(movieDuration, uint.MaxValue));
-        BinaryPrimitives.WriteInt32BigEndian(elst.AsSpan(12, 4), (int)mediaTime);          // media_time
-        BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(16, 4), 0x00010000);             // rate 1.0
+        var version1 = edits.Any(edit => edit.MediaTime > int.MaxValue || edit.Duration > uint.MaxValue);
+        var stride = version1 ? 20 : 12;
+        var elst = new byte[checked(8 + edits.Count * stride)];
+        elst[0] = version1 ? (byte)1 : (byte)0;
+        BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(4, 4), checked((uint)edits.Count));
+        for (var index = 0; index < edits.Count; index++)
+        {
+            var edit = edits[index];
+            var offset = 8 + index * stride;
+            if (version1)
+            {
+                BinaryPrimitives.WriteUInt64BigEndian(elst.AsSpan(offset, 8), edit.Duration);
+                BinaryPrimitives.WriteInt64BigEndian(elst.AsSpan(offset + 8, 8), edit.MediaTime);
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(offset, 4), checked((uint)edit.Duration));
+                BinaryPrimitives.WriteInt32BigEndian(elst.AsSpan(offset + 4, 4), checked((int)edit.MediaTime));
+            }
+            BinaryPrimitives.WriteUInt32BigEndian(elst.AsSpan(offset + stride - 4, 4), edit.MediaRate);
+        }
         var payload = new MemoryStream();
         payload.Write(Box("elst", elst));
         return Box("edts", payload.ToArray());
     }
 
     /// <summary>改时长。tkhd 的时长以**影片时基**计，mdhd 的以**自身时基**计——这两处混了就会时长错。</summary>
-    private static byte[] PatchDuration(byte[] original, Track track, ulong duration, uint timescale, bool isTkhd)
+    private static byte[] PatchDuration(byte[] original, ulong duration, bool isTkhd)
     {
         var payload = (byte[])original.Clone();
         var version = payload[0];
-        var value = isTkhd && track.Timescale != timescale
-            ? (ulong)Math.Round(duration * (double)timescale / track.Timescale)
-            : duration;
+        var value = duration;
         // tkhd v0 duration 在 +20、v1 在 +28；mdhd v0 在 +16、v1 在 +24。
         var offset = isTkhd ? (version == 1 ? 28 : 20) : (version == 1 ? 24 : 16);
         if (offset + (version == 1 ? 8 : 4) > payload.Length)
@@ -710,12 +813,15 @@ internal sealed record Sample(long Offset, int Size, uint Duration, int Composit
 /// <summary>一个盒子原样（含盒头）：重建时会整段抄过去。</summary>
 internal sealed record RawChild(string Type, byte[] Bytes);
 
+internal sealed record EditEntry(ulong Duration, long MediaTime, uint MediaRate);
+
 /// <summary>一条轨道：结构部分的原始字节（照抄用）+ 拆开的样本表。</summary>
 internal sealed class Track
 {
     public string Handler { get; init; } = string.Empty;
     public uint Timescale { get; init; }
-    public long EditMediaTime { get; init; }
+    public EditEntry? Edit { get; init; }
+    public long EditMediaTime => Edit?.MediaTime ?? 0;
     public byte[] Data { get; init; } = Array.Empty<byte>();
     public List<Sample> Samples { get; init; } = new();
     public bool HasCompositionOffsets { get; init; }
@@ -828,7 +934,7 @@ internal sealed class Mp4File
         {
             Handler = handler,
             Timescale = timescale,
-            EditMediaTime = ReadEditMediaTime(data, trak),
+            Edit = ReadEdit(data, trak),
             Data = data,
             Samples = samples,
             HasCompositionOffsets = composition is not null,
@@ -843,20 +949,27 @@ internal sealed class Mp4File
         };
     }
 
-    private static long ReadEditMediaTime(byte[] data, Box trak)
+    private static EditEntry? ReadEdit(byte[] data, Box trak)
     {
         var edts = Boxes(data, trak.PayloadStart, trak.PayloadEnd).FirstOrDefault(box => box.Type == "edts");
-        if (edts is null) return 0;
+        if (edts is null) return null;
         var elst = Boxes(data, edts.PayloadStart, edts.PayloadEnd).FirstOrDefault(box => box.Type == "elst");
-        if (elst is null) return 0;
+        if (elst is null) return null;
+        if (elst.PayloadEnd - elst.PayloadStart < 8) throw new InvalidDataException("elst 头部不完整");
         var count = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(elst.PayloadStart + 4, 4));
-        if (count == 0) return 0;
-        // 多条就是「分段剪辑」，语义不只是时间原点，这一版不认。
+        if (count == 0) return null;
         if (count > 1) throw new InvalidDataException("编辑列表有多条（分段剪辑），这一版拼接不认");
         var version = data[elst.PayloadStart];
+        if (version is not (0 or 1) || elst.PayloadEnd - elst.PayloadStart < (version == 1 ? 28 : 20))
+            throw new InvalidDataException("elst 长度或版本不受当前拼接支持");
+        var offset = elst.PayloadStart + 8;
         return version == 1
-            ? BinaryPrimitives.ReadInt64BigEndian(data.AsSpan(elst.PayloadStart + 16, 8))
-            : BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(elst.PayloadStart + 12, 4));
+            ? new EditEntry(BinaryPrimitives.ReadUInt64BigEndian(data.AsSpan(offset, 8)),
+                BinaryPrimitives.ReadInt64BigEndian(data.AsSpan(offset + 8, 8)),
+                BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(offset + 16, 4)))
+            : new EditEntry(BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(offset, 4)),
+                BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 4, 4)),
+                BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(offset + 8, 4)));
     }
 
     private static List<uint> ExpandStts(byte[] data, Box box)

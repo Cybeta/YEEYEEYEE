@@ -13,6 +13,8 @@ import {
   type CandidateBatchView,
   type CandidateSlotView
 } from './candidateBatch'
+import { gachaBatchProgress } from './gachaRules'
+import { qualityBadge, qualityIsCracked, type BatchQualityRun } from './imageQuality'
 import {
   canvasBounds, chapterGroups, isEditableRecord, kindOf, NODE_KINDS, nodeStatusOf, nodeX, nodeY,
   recordContent, recordStatus, recordTitle, visibleEdges, type ShellEdge, type ViewRecord
@@ -105,6 +107,20 @@ export type CanvasViewProps = {
    * 不进正式画布数据、不参与连线、不参与命中测试的节点层。
    */
   candidates?: CandidateBatchView[]
+  /** 开奖模式：候选区先只露卡背与任务进度，出好的图也要等用户点「开奖」才揭晓。
+   * 关掉时保持原来的候选卡行为（直接看缩略图、逐张采用）。
+   */
+  gachaReveal?: boolean
+  /** 判档开关：关着时不摆档位，候选卡写「未判档」。 */
+  showQuality?: boolean
+  /** 每批判档的运行状态（正在判 / 模型不可用 / 失败 / 已跳过）。 */
+  qualityRuns?: Record<string, BatchQualityRun>
+  /** 用户明确跳过这一批判档：只改判档状态，不影响查看与采用。 */
+  onSkipQuality?: (batchId: string, jobIds: string[]) => void
+  /** 用户明确重试这一批判档（不会因为页面重渲染自动重试）。 */
+  onRetryQuality?: (batchId: string, jobIds: string[]) => void
+  /** 主动点「开奖」：整批落终态之后才允许，打开的是画布之外的全屏层。 */
+  onRevealCandidates?: (batchId: string) => void
   /** 采用某一件候选产物：由服务端校验归属、目标、权限、租约与锁定之后追加到原节点。 */
   onAdoptCandidate?: (nodeId: string, jobId: string, outputIndex: number) => void
   /** 丢弃某一批候选（只撤掉卡片；不会取消后台任务，也不会删产物文件）。 */
@@ -564,7 +580,9 @@ export function CanvasView(props: CanvasViewProps) {
       if (event.button !== 0) return
       // 按在节点卡上不要开始平移：那是「选中/拖节点」的手势。原生监听在 viewport 这一层先于
       // React 的合成事件触发，所以 React 那边的 stopPropagation 拦不住它，只能在这里判。
-      if ((event.target as HTMLElement | null)?.closest('.df-node')) return
+      // 候选卡与它下面那行按钮同理：它们是画布上的临时控件，按下不能被当成「空白处平移」——
+      // 一旦在这里捕获了指针，按钮就收不到 pointerup，click 永远不会发生。
+      if ((event.target as HTMLElement | null)?.closest('.df-node, .df-candidate-layer')) return
       // 与桌面端一致：按空白处先取消选中，再进入平移。
       onSelect(null)
       panning.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, originX: pan.x, originY: pan.y }
@@ -689,6 +707,15 @@ export function CanvasView(props: CanvasViewProps) {
             const owner = nodes.find((node) => node.recordId === batch.nodeId)
             if (!owner) return null
             const rects = candidateCardRects(batch.slots.length, { x: nodeX(owner), y: nodeY(owner) }, NODE_CARD_WIDTH, NODE_CARD_HEIGHT)
+            const progress = gachaBatchProgress(batch.slots)
+            const qualityRun = props.qualityRuns?.[batch.batchId]
+            const succeededJobIds = batch.slots
+              .filter(slot => slot.status === 'succeeded' && slot.jobId.length > 0)
+              .map(slot => slot.jobId)
+            // 说明行摆在卡排外侧：卡排在上方时放它上面，避免压在节点卡上（按钮会被节点挡住）。
+            const captionTop = Math.max(4, rects[0].top < nodeY(owner)
+              ? rects[0].top - 22
+              : rects[0].top + CANDIDATE_CARD.height + 4)
             return (
               <div key={batch.batchId} className="df-candidate-layer">
                 {batch.slots.map((slot, index) => (
@@ -699,12 +726,45 @@ export function CanvasView(props: CanvasViewProps) {
                     index={index}
                     startedAt={batch.startedAt}
                     nodeId={batch.nodeId}
+                    faceDown={props.gachaReveal === true}
+                    showQuality={props.showQuality === true}
                     onAdopt={props.onAdoptCandidate}
                     onOpen={props.onOpenCandidate}
                   />
                 ))}
-                <div className="df-candidate-caption" style={{ left: rects[0].left, top: rects[0].top + CANDIDATE_CARD.height + 4 }}>
+                <div className="df-candidate-caption" style={{ left: rects[0].left, top: captionTop }}>
                   <span>{batch.headline}</span>
+                  {/* 判档状态只说明进度与问题，**不挡开奖**：模型不可用时也能先看图、先采用。 */}
+                  {props.showQuality === true && qualityRun?.state === 'running' && (
+                    <span className="df-candidate-caption-note">{qualityRun.message || '正在判档…（可以先开奖）'}</span>
+                  )}
+                  {props.showQuality === true && (qualityRun?.state === 'unavailable' || qualityRun?.state === 'failed') && (
+                    <>
+                      <span className="df-candidate-fail" title={qualityRun.message}>{qualityRun.message}</span>
+                      <button type="button" className="df-candidate-action" onPointerDown={stopCanvasGesture}
+                        title="本次跳过判档：不写档位，仍可查看与采用"
+                        onClick={() => props.onSkipQuality?.(batch.batchId, succeededJobIds)}>跳过判档</button>
+                      <button type="button" className="df-candidate-action" onPointerDown={stopCanvasGesture}
+                        title="你明确要求再判一次（会再调用模型，可能产生费用）"
+                        onClick={() => props.onRetryQuality?.(batch.batchId, succeededJobIds)}>重试判档</button>
+                    </>
+                  )}
+                  {props.showQuality === true && qualityRun?.state === 'skipped' && (
+                    <span className="df-candidate-caption-note">判档已跳过</span>
+                  )}
+                  {props.gachaReveal && progress.terminal && progress.canReveal && (
+                    <button type="button" className="df-candidate-action is-primary" onPointerDown={stopCanvasGesture}
+                      title="整批已经结束，点开进入揭晓" onClick={() => props.onRevealCandidates?.(batch.batchId)}>开奖</button>
+                  )}
+                  {props.gachaReveal && progress.allFailed && (
+                    <span className="df-candidate-fail">全部失败，没有可开奖的图</span>
+                  )}
+                  {props.gachaReveal && !progress.terminal && (
+                    <span className="df-candidate-caption-note">等待全部结束</span>
+                  )}
+                  {props.gachaReveal && progress.terminal && !progress.canReveal && !progress.allFailed && (
+                    <span className="df-candidate-caption-note">没有待揭晓的图</span>
+                  )}
                   <button type="button" className="df-candidate-action" onPointerDown={stopCanvasGesture}
                     onClick={() => props.onDiscardCandidates?.(batch.batchId)}>丢弃这一批</button>
                 </div>
@@ -1060,12 +1120,16 @@ function stopCanvasGesture(event: React.PointerEvent) {
  * 状态与结果都来自任务（复用现有轮询与 SSE，不另开一套）；耗时由卡片自己按秒走——
  * 谁显示谁计时，整张画布不跟着每秒重画。
  */
-function CandidateCard({ slot, position, index, startedAt, nodeId, onAdopt, onOpen }: {
+function CandidateCard({ slot, position, index, startedAt, nodeId, faceDown = false, showQuality = false, onAdopt, onOpen }: {
   slot: CandidateSlotView
   position: { left: number; top: number }
   index: number
   startedAt: number
   nodeId: string
+  /** 开奖模式：成功的那几张也不露图，只显示卡背与「待开奖」。 */
+  faceDown?: boolean
+  /** 判档开关：关着时小牌写「未判档」，也不显示服务端可能已有的档位。 */
+  showQuality?: boolean
   onAdopt?: (nodeId: string, jobId: string, outputIndex: number) => void
   onOpen?: (jobId: string, outputIndex: number, name: string) => void
 }) {
@@ -1078,14 +1142,28 @@ function CandidateCard({ slot, position, index, startedAt, nodeId, onAdopt, onOp
   }, [busy])
   const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000))
   const name = `第 ${index + 1} 张 · ${slot.label}`
+  // 失败与取消不盖卡背：它们没有可揭晓的图，必须让人一眼看到真实状态。
+  const covered = faceDown && slot.status !== 'failed' && slot.status !== 'cancelled'
+  // 卡背盖着时不露档位：那会提前泄露开奖结果。
+  const quality = showQuality && !covered ? slot.quality : null
+  const badge = qualityBadge(quality)
+  const cracked = qualityIsCracked(quality)
+  const qualityTitle = quality?.reason?.trim()
+    || (quality?.negativeHits?.length ? `命中负面词：${quality.negativeHits.join('、')}` : '')
   return (
     <div
-      className={`df-candidate-card is-${slot.status}`}
+      className={`df-candidate-card is-${slot.status}${covered ? ' is-facedown' : ''}${cracked ? ' is-cracked' : ''}`}
       style={{ left: position.left, top: position.top, width: CANDIDATE_CARD.width, height: CANDIDATE_CARD.height }}
       onPointerDown={stopCanvasGesture}
     >
+      {covered && (
+        <span className="df-candidate-back" aria-hidden="true">
+          <span className="df-candidate-back-line" />
+          <span className="df-candidate-back-mark"><span>◈</span></span>
+        </span>
+      )}
       <span className="df-candidate-index" aria-hidden="true">{index + 1}</span>
-      {slot.status === 'succeeded' && slot.imageUrl
+      {slot.status === 'succeeded' && slot.imageUrl && !covered
         ? (
           <img
             className="df-candidate-thumb"
@@ -1099,15 +1177,23 @@ function CandidateCard({ slot, position, index, startedAt, nodeId, onAdopt, onOp
         )
         : (
           <span className="df-candidate-state">
-            {slot.label}
+            {covered && slot.status === 'succeeded' ? '待开奖' : slot.label}
             {/* 有可靠百分比就显示；没有就只说「生成中」+ 耗时，不编一个数字出来。 */}
             {slot.progress !== null && <span className="df-candidate-percent df-mono">{Math.round(slot.progress)}%</span>}
             {busy && <span className="df-dim df-mono">{seconds}s</span>}
           </span>
         )}
+      {slot.status === 'succeeded' && !covered && (
+        <span className="df-candidate-quality" style={{ color: badge.color }} title={qualityTitle || badge.text}>
+          {badge.text}
+        </span>
+      )}
       {slot.failure.length > 0 && <span className="df-candidate-fail" title={slot.failure}>{slot.failure}</span>}
       {slot.adopted && <span className="df-candidate-note">已采用</span>}
-      {slot.adoptable && (
+      {covered && slot.status === 'succeeded' && !slot.adopted && (
+        <span className="df-candidate-note">开奖后可挑</span>
+      )}
+      {slot.adoptable && !faceDown && (
         <button
           type="button"
           className="df-candidate-action"

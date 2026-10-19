@@ -100,6 +100,24 @@ describe('候选批次：成功与采用', () => {
     expect(views[0].slots[0].failure).toBe('')
   })
 
+  it('判档结果按任务与产物下标绑定：回复顺序、别的任务的结果都不会串格', () => {
+    const views = candidateBatchViews([batch([JOB_A, JOB_B])], [
+      job({
+        jobId: JOB_A, state: 'Succeeded', targetNodeId: NODE,
+        quality: [
+          { outputIndex: 1, status: 'graded', source: 'model', tier: 'red', score: 9 },
+          { outputIndex: 0, status: 'graded', source: 'model', tier: 'gold', score: 8, negativeHits: [] }
+        ]
+      }),
+      job({
+        jobId: JOB_B, state: 'Succeeded', targetNodeId: NODE,
+        quality: [{ outputIndex: 0, status: 'failed', reason: '模型超时' }]
+      })
+    ], [record(NODE, '镜头一')])
+    expect(views[0].slots[0].quality).toMatchObject({ status: 'graded', tier: 'gold', score: 8 })
+    expect(views[0].slots[1].quality).toMatchObject({ status: 'failed', reason: '模型超时' })
+  })
+
   it('节点附件里出现这件产物（服务端算出来的那个 ID）才算采用过', () => {
     const adopted = [{
       id: jobOutputAttachmentId(JOB_A, 0).toUpperCase(), kind: 'Image', name: '图片 · 3f2504e0 · 1', source: 'comfyui.text-to-image'
@@ -154,11 +172,11 @@ describe('候选卡的布局：跟着原节点走', () => {
 describe('批次摘要', () => {
   it('按真实计数说话，不编完成度', () => {
     expect(candidateHeadline([
-      { key: 'a', jobId: 'j', outputIndex: 0, status: 'succeeded', label: '已出好', progress: null, failure: '', adoptable: false, adopted: true, imageUrl: null },
-      { key: 'b', jobId: 'j', outputIndex: 0, status: 'running', label: '生成中', progress: 10, failure: '', adoptable: false, adopted: false, imageUrl: null }
+      { key: 'a', jobId: 'j', outputIndex: 0, status: 'succeeded', label: '已出好', progress: null, failure: '', adoptable: false, adopted: true, imageUrl: null, quality: null },
+      { key: 'b', jobId: 'j', outputIndex: 0, status: 'running', label: '生成中', progress: 10, failure: '', adoptable: false, adopted: false, imageUrl: null, quality: null }
     ])).toBe('已出好 1/2')
     expect(candidateHeadline([
-      { key: 'a', jobId: 'j', outputIndex: 0, status: 'cancelled', label: '已取消', progress: null, failure: '', adoptable: false, adopted: false, imageUrl: null }
+      { key: 'a', jobId: 'j', outputIndex: 0, status: 'cancelled', label: '已取消', progress: null, failure: '', adoptable: false, adopted: false, imageUrl: null, quality: null }
     ])).toBe('已出好 0/1 · 已取消 1')
   })
 })
@@ -172,6 +190,7 @@ describe('画布：候选卡与节点状态', () => {
     jobs?: NodeJob[]
     batches?: CandidateBatch[]
     selectedId?: string
+    gachaReveal?: boolean
   } = {}) => renderToStaticMarkup(createElement(CanvasView, {
     records: options.records ?? [record(NODE, '镜头一')],
     selectedId: options.selectedId ?? '',
@@ -179,6 +198,8 @@ describe('画布：候选卡与节点状态', () => {
     assets: [], assetsReady: true, showReferencePreviews: true,
     zoom: 1, pan: { x: 0, y: 0 }, onZoom: () => {}, onPan: () => {}, onSelect: () => {},
     jobs: options.jobs,
+    gachaReveal: options.gachaReveal,
+    onRevealCandidates: () => {},
     candidates: options.batches
       ? candidateBatchViews(options.batches, options.jobs, options.records ?? [record(NODE, '镜头一')])
       : undefined
@@ -227,12 +248,79 @@ describe('画布：候选卡与节点状态', () => {
   })
 
   it('原节点不在画布上时整批不画（与 Desktop 的 ghost 一样，不另找地方摆）', () => {
-    const jobs = [job({ jobId: JOB_B, state: 'Succeeded', targetNodeId: OTHER, attachmentState: 'none' })]
+    const jobs = [job({ jobId: JOB_B, state: 'Succeeded', targetNodeId: NODE, attachmentState: 'none' })]
     const markup = canvas({
       records: [record(NODE, '镜头一')],
       jobs,
       batches: [batch([JOB_B], { nodeId: OTHER })]
     })
     expect(markup).not.toContain('df-candidate-card')
+  })
+})
+
+/**
+ * 开奖模式下的候选区：先卡背、不露图；整批终态后才出现「开奖」；
+ * 失败/取消如实显示；全部失败不给成功入口。
+ */
+describe('画布：开奖模式的候选区', () => {
+  const canvas = (options: {
+    jobs: NodeJob[]
+    batches: CandidateBatch[]
+  }) => renderToStaticMarkup(createElement(CanvasView, {
+    records: [record(NODE, '镜头一')],
+    selectedId: '',
+    activeChapter: 'all',
+    assets: [], assetsReady: true, showReferencePreviews: true,
+    zoom: 1, pan: { x: 0, y: 0 }, onZoom: () => {}, onPan: () => {}, onSelect: () => {},
+    jobs: options.jobs,
+    gachaReveal: true,
+    onRevealCandidates: () => {},
+    candidates: candidateBatchViews(options.batches, options.jobs, [record(NODE, '镜头一')])
+  }))
+
+  it('已出好的图只显示卡背与「待开奖」，候选区不提前露出图片', () => {
+    const jobs = [job({ jobId: JOB_B, state: 'Succeeded', targetNodeId: NODE, attachmentState: 'none' })]
+    const markup = canvas({ jobs, batches: [batch([JOB_B])] })
+    expect(markup).toContain('is-facedown')
+    expect(markup).toContain('待开奖')
+    expect(markup).toContain('开奖后可挑')
+    expect(markup).toContain('>开奖<')
+    expect(markup).not.toContain(`/api/web/jobs/${JOB_B}/outputs/0`)
+    // 开奖模式下采用只能走揭晓层，候选卡上不再逐张给「用这一张」。
+    expect(markup).not.toContain('用这一张')
+  })
+
+  it('还有任务在跑时不出现「开奖」，只提示等待全部结束', () => {
+    const jobs = [
+      job({ jobId: JOB_A, state: 'Running', targetNodeId: NODE, progressPercent: 35 }),
+      job({ jobId: JOB_B, state: 'Succeeded', targetNodeId: NODE, attachmentState: 'none' })
+    ]
+    const markup = canvas({ jobs, batches: [batch([JOB_A, JOB_B])] })
+    expect(markup).not.toContain('>开奖<')
+    expect(markup).toContain('等待全部结束')
+    expect(markup).toContain('35%')
+  })
+
+  it('部分失败：成功的照常可开奖，失败的那格不盖卡背且写出原因', () => {
+    const jobs = [
+      job({ jobId: JOB_A, state: 'Succeeded', targetNodeId: NODE, attachmentState: 'none' }),
+      job({ jobId: JOB_B, state: 'Failed', targetNodeId: NODE, errorMessage: '模型不可用' })
+    ]
+    const markup = canvas({ jobs, batches: [batch([JOB_A, JOB_B])] })
+    expect(markup).toContain('>开奖<')
+    expect(markup).toContain('模型不可用')
+    expect(markup.match(/is-facedown/g) ?? []).toHaveLength(1)
+  })
+
+  it('全部失败：显示错误与现有操作，不出现开奖入口', () => {
+    const jobs = [
+      job({ jobId: JOB_A, state: 'Failed', targetNodeId: NODE, errorMessage: '模型不可用' }),
+      job({ jobId: JOB_B, state: 'Cancelled', targetNodeId: NODE })
+    ]
+    const markup = canvas({ jobs, batches: [batch([JOB_A, JOB_B])] })
+    expect(markup).toContain('全部失败，没有可开奖的图')
+    expect(markup).not.toContain('>开奖<')
+    expect(markup).toContain('丢弃这一批')
+    expect(markup.match(/is-facedown/g) ?? []).toHaveLength(0)
   })
 })

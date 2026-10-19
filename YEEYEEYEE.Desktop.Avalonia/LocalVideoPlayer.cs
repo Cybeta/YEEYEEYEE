@@ -274,8 +274,27 @@ internal sealed class LocalVideoPlayer : ContentControl, IDisposable
                         + "else if(window.chrome?.webview)window.chrome.webview.postMessage(message);"
                         + "else if(window.webkit?.messageHandlers?.postAvWebViewMessage)window.webkit.messageHandlers.postAvWebViewMessage.postMessage(message);", 
                     StringComparison.Ordinal);
+            VideoThumbnailService.Shared.ReleaseIdleHost();
             session = new MediaSession(path, html);
             webView = new NativeWebView();
+            // 与截图宿主 / ComfyUI 共用同一个 WebView2 环境：同一进程里混用默认环境与显式环境时，
+            // Avalonia 12.1 的适配层会在这一个控件初始化时以「oldValue 具有此属性的错误类型」把进程带走。
+            webView.EnvironmentRequested += async (_, args) =>
+            {
+                if (!OperatingSystem.IsWindows()) return;
+                using var deferral = args.GetDeferral();
+                try
+                {
+                    if (args is not global::Avalonia.Platform.WindowsWebView2EnvironmentRequestedEventArgs windows)
+                        throw new NotSupportedException("WebView2 required");
+                    windows.ExplicitEnvironment = await SharedWebView2Environment.GetAsync(windows);
+                }
+                catch (Exception error) when (error is NotSupportedException or InvalidOperationException
+                    or System.Runtime.InteropServices.COMException)
+                {
+                    // 环境建不起来时保持默认路径，让播放层按「预览失败」如实反馈，不把异常抛到调度器上。
+                }
+            };
             webView.NavigationStarted += OnNavigationStarted;
             webView.NewWindowRequested += OnNewWindowRequested;
             webView.WebMessageReceived += OnWebMessageReceived;

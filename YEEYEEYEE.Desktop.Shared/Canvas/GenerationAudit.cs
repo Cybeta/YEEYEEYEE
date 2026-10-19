@@ -317,9 +317,9 @@ public static class GenerationAudit
                 node.AssetRequirements?.For(content.Entity.Kind) == AssetNeed.Required);
             if (required.Any(content => !frameAttachment.SourceFingerprints.TryGetValue(
                     $"{content.Entity.Id:N}/{content.Variant.Id:N}", out var recorded) ||
-                recorded != ReferenceStaleness.FingerprintOf(content)))
+                !ReferenceStaleness.Matches(recorded, content, locatePath)))
                 errors.Add("采用首帧无法证明必要参考覆盖，请按当前引用重新生成并采用首帧；确认资产需求不能补记生成依据。");
-            if (ReferenceStaleness.OfAttachment(canvas, node, frameAttachment).Count > 0)
+            if (ReferenceStaleness.OfAttachment(canvas, node, frameAttachment, locatePath: locatePath).Count > 0)
                 errors.Add("采用首帧的资产依据已过期，请按当前引用重新生成并采用首帧。");
         }
 
@@ -381,7 +381,18 @@ public static class GenerationAudit
         {
             VideoAssetIssues = storyboards.SelectMany(node =>
             {
-                var check = CheckVideoAssets(canvas, node, a => exists(a.Reference) ? a.Reference : null);
+                // 这里要给出**本机文件路径**：视频前置检查要按真实路径核对图片字节，
+                // 直接把 asset:// 引用当路径传进去会让内容哈希一律读不到、误报依据过期。
+                var check = CheckVideoAssets(canvas, node, a =>
+                {
+                    if (!exists(a.Reference)) return null;
+                    try { return AssetStore.Resolve(a.Reference) ?? a.Reference; }
+                    catch (Exception error) when (error is InvalidOperationException or IOException
+                        or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+                    {
+                        return a.Reference;
+                    }
+                });
                 return check.Errors.Concat(check.Warning.Length > 0 ? new[] { check.Warning } : Array.Empty<string>())
                     .Select(reason => new GenerationAuditItem(GenerationStage.StoryboardVideo, node.Id, node.Title,
                         "视频资产前置检查", reason, Actionable: false));
@@ -402,7 +413,8 @@ public static class GenerationAudit
         var items = new List<GenerationAuditItem>();
         foreach (var node in scope)
         {
-            var stale = ReferenceStaleness.Of(canvas, node);
+            // 自检是用户主动触发的明确检查点：这里核对图片字节，才能发现同路径换图。
+            var stale = ReferenceStaleness.Of(canvas, node, verifyContent: true);
             if (stale.Count == 0) continue;
             items.Add(new GenerationAuditItem(
                 StageOf(node.Category),

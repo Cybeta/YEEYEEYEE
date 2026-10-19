@@ -1654,6 +1654,8 @@ public partial class CanvasSurface : UserControl
         // 判定的口径是**指纹比对**（出图时把当时那版设定的指纹记在产物上，现在再算一遍比对），
         // 不是「改设定时去通知下游」：通知那条路要覆盖所有能改设定的入口，漏一个就永远不报，
         // 而静默不报正是这个功能要解决的问题。详见 ReferenceStaleness。
+        // 卡片会跟着生成进度高频重画，这里只比指纹的结构部分；图片字节哈希留给出图提交、
+        // 视频前置检查和自检这些明确检查点，别在渲染路径里同步读图。
         var stale = state is null ? Array.Empty<StaleReference>() : ReferenceStaleness.Of(state, node);
         if (stale.Count > 0)
         {

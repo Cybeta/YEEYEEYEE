@@ -29,23 +29,11 @@ internal static class WebSkillJobApi
         var execution = app.Services.GetRequiredService<SingleMachineExecutionService>();
         var attachments = app.Services.GetRequiredService<WebJobAttachmentService>();
         var hub = app.Services.GetRequiredService<CanvasEventHub>();
+        var qualityStore = app.Services.GetRequiredService<WebJobQualityStore>();
         var assetDirectory = Path.GetFullPath(
             LegacyConfig.Text(app.Configuration, "AssetDirectory")
             ?? Path.Combine(AppContext.BaseDirectory, "assets"));
 
-        static string? ResolveAsset(string? reference, string directory)
-        {
-            if (string.IsNullOrWhiteSpace(reference)) return null;
-            var fileName = reference.StartsWith("asset://", StringComparison.Ordinal)
-                ? Path.GetFileName(reference["asset://".Length..])
-                : null;
-            if (string.IsNullOrWhiteSpace(fileName)) return null;
-            var root = Path.GetFullPath(directory);
-            var path = Path.GetFullPath(Path.Combine(root, fileName));
-            if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                return null;
-            return File.Exists(path) ? path : null;
-        }
         SessionContext Session(HttpContext context)
         {
             var user = WebAccessGuard.CurrentUser(context);
@@ -71,7 +59,9 @@ internal static class WebSkillJobApi
                 result.ErrorCode, result.ErrorMessage, result.ExternalTaskId, result.Outputs, result.Attempt,
                 result.RetryOfJobId, result.RootJobId, result.Tool, canRetry,
                 targetNodeId = job.Inputs.TryGetValue("targetNodeId", out var target) ? target.GetString() : null,
-                attachmentState = attachments.State(job) };
+                attachmentState = attachments.State(job),
+                // 判档结果与具体任务绑定；界面按 outputIndex 认，不按数组顺序猜。
+                quality = qualityStore.Get(job.JobId) };
         }
         bool InputsEqual(IReadOnlyDictionary<string, JsonElement> left, IReadOnlyDictionary<string, JsonElement> right) =>
             left.Count == right.Count && right.All(pair => left.TryGetValue(pair.Key, out var value) && value.GetRawText() == pair.Value.GetRawText());
@@ -99,7 +89,9 @@ internal static class WebSkillJobApi
                     inputs = new[] { "prompt" }, outputs = new[] { e.Workflow.Kind }, parameters = WebChatSkillParameters.Describe(e.Id) }));
             // 附件可选类型也由服务端声明：前端 accept、预览方式与提示都照它渲染，
             // 不两边各写一份（写散了就会出现「能选不能传」或「能传不能看」）。
-            return Results.Json(new { skills = skills.ToArray(), attachments = WebChatAttachments.Describe(), attachmentAccept = WebChatAttachments.AcceptAttribute() });
+            var quality = WebImageQuality.Availability(WebSettingsApi.LoadModels());
+            return Results.Json(new { skills = skills.ToArray(), attachments = WebChatAttachments.Describe(), attachmentAccept = WebChatAttachments.AcceptAttribute(),
+                quality = new { available = quality.Ok, message = quality.Message } });
         });
         async Task<IResult> Invoke(string skillId, HttpContext context, JsonElement body)
         {
@@ -114,7 +106,7 @@ internal static class WebSkillJobApi
             // 不必再回来改这段列表（漏改一处就是「声明了但一调用就 400」）。
             var declared = WebChatSkillParameters.Declare(skillId);
             var declaredNames = declared.Select(spec => spec.Name).ToArray();
-            var baseFields = workflow is not null ? new[] { "prompt", "idempotencyKey", "targetNodeId" } : isVideo
+            var baseFields = workflow is not null ? new[] { "prompt", "idempotencyKey", "targetNodeId", "candidateBatch" } : isVideo
                 ? new[] { "prompt", "negativePrompt", "model", "seconds", "width", "height", "videoFrames", "seed", "idempotencyKey", "targetNodeId", "chatSessionId", "referenceAttachmentIds" }
                 : new[] { "prompt", "aspectRatio", "idempotencyKey", "targetNodeId", "chatSessionId", "referenceAttachmentIds", "candidateBatch" };
             var allowedFields = baseFields.Concat(declaredNames)
@@ -218,8 +210,8 @@ internal static class WebSkillJobApi
                 inputs["targetNodeId"] = targetNode.Clone();
             }
             // 候选批次（节点出图）：产物留在任务里等用户采用，后台不替它自动回挂。
-            // 这是**显式**开关，不是「只要有 targetNodeId 就当候选」：回挂方式按入口分，
-            // 不改变其它调用方（视频、工作流、重试）现在拿到的行为。
+            // 这是**显式**开关，不是「只要有 targetNodeId 就当候选」：回挂方式按入口分。
+            // 图片 API、内置 ComfyUI 与已安装工作流都支持候选批次；视频与重试维持原行为。
             if (body.TryGetProperty("candidateBatch", out var candidate))
             {
                 if (candidate.ValueKind != JsonValueKind.True) return Error(400, "INVALID_REQUEST", "candidateBatch 只能是 true");
@@ -287,8 +279,26 @@ internal static class WebSkillJobApi
                 return Results.Json(View(existing, session));
             }
             var invocation = new Invocation { Tool = skillId, Capability = workflow?.Capability ?? (isVideo ? Capability.TextToVideo : Capability.TextToImage), Channel = isVideo ? "video" : skillId == WebImageGeneration.SkillId ? "image-api" : "comfyui", Inputs = inputs };
-            // StartAsync 在提交后返回；失败任务仍保留，避免被误报为成功。
-            var result = await execution.StartAsync(session, invocation, key.GetString()!);
+            // **提交后立即返回任务快照，不在这里等内容跑完**。
+            //
+            // SingleMachineExecutionService.StartAsync 在锁内先登记 Job、再 Task.Run，返回的是「整次执行完成」
+            // 的 Task。若在这里 await，HTTP 响应要等图/视频生成完才回来：候选卡上的槽位拿不到 jobId，
+            // 生成期间只剩「排队中」，既看不到真实进度，整批也会被拖成串行提交。
+            // 所以这里只取刚登记的那份快照；执行继续在后台跑，状态由 GET /api/web/jobs 轮询。
+            var executionTask = execution.StartAsync(session, invocation, key.GetString()!);
+            var submitted = execution.GetJobs(session.UserId).FirstOrDefault(candidate =>
+                candidate.InvocationId == invocation.InvocationId ||
+                string.Equals(candidate.IdempotencyKey, key.GetString(), StringComparison.Ordinal));
+            if (submitted is not null)
+            {
+                // 后台任务已经有人等它的状态，这里不再 await；异常由任务自身记录到 Job，观察掉即可。
+                _ = executionTask.ContinueWith(task => _ = task.Exception,
+                    CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                execution.TryGet(submitted.JobId, out var snapshot);
+                return Results.Json(View(snapshot ?? submitted, session));
+            }
+            // 理论上不会走到这里（StartAsync 同步登记 job）；留一条兜底，保持原来的完成语义。
+            var result = await executionTask;
             execution.TryGet(result.JobId, out var job);
             return Results.Json(View(job!, session));
         }
@@ -437,5 +447,23 @@ internal static class WebSkillJobApi
             { return Error(409, "GENERATION_ASSETS_INVALID", ex.Message); }
         });
         return Invoke;
+    }
+
+    /// <summary>
+    /// 把任务产物里的 <c>asset://文件名</c> 解析成资产目录下的真实路径。
+    /// **只认这个前缀**：客户端传不进任意路径，服务端也不会把任务产物以外的文件交出去。
+    /// </summary>
+    internal static string? ResolveAsset(string? reference, string directory)
+    {
+        if (string.IsNullOrWhiteSpace(reference)) return null;
+        var fileName = reference.StartsWith("asset://", StringComparison.Ordinal)
+            ? Path.GetFileName(reference["asset://".Length..])
+            : null;
+        if (string.IsNullOrWhiteSpace(fileName)) return null;
+        var root = Path.GetFullPath(directory);
+        var path = Path.GetFullPath(Path.Combine(root, fileName));
+        if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            return null;
+        return File.Exists(path) ? path : null;
     }
 }

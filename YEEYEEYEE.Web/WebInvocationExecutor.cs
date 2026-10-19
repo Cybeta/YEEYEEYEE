@@ -9,6 +9,12 @@ namespace YEEYEEYEE.Web;
 internal sealed class WebInvocationExecutor : IInvocationExecutor
 {
     private const string VideoTool = "web.text-to-video";
+    /// <summary>
+    /// 图片 API 的同一条上游一次只跑一个请求。实测这家接口按密钥串行：候选批次并发提交时，
+    /// 后一张连接会一直挂着直到客户端 5 分钟超时，整批只剩一张成功。上游本来就串行，
+    /// 在这里排队不会让总耗时更差，却能让第二张真正开始并完成。
+    /// </summary>
+    private static readonly SemaphoreSlim ImageApiGate = new(1, 1);
     private readonly IInvocationExecutor imageExecutor;
     private readonly IVideoProvider videoProvider;
     private readonly ComfyUiExecutor comfyUiExecutor;
@@ -62,25 +68,36 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
             config.ImageMaxReferenceImages = WebImageGeneration.ReferenceCapacity(config);
             if (references.Length > config.ImageMaxReferenceImages)
                 throw new InvalidOperationException("当前图片模型不支持所需参考图，请选择支持参考图的模型");
-            using var imageHttp = CreateMediaHttp(config.ImageProxyUrl, TimeSpan.FromMinutes(5));
-            var image = await new OpenAiCompatibleImageProvider(config, imageHttp).GenerateAsync(new ImageGenerationRequest
+            await ImageApiGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                Prompt = ReadString(invocation.Inputs, "prompt"), Width = size.Width, Height = size.Height,
-                // 反向提示词由 provider 拼进 prompt；这是声明里放开 negativePrompt 的落地处，
-                // 不传下去就等于声明了却没人用（静默丢参数）。
-                NegativePrompt = ReadString(invocation.Inputs, "negativePrompt"),
-                ReferenceImages = references
-            }, cancellationToken).ConfigureAwait(false);
-            if (image.Status != ImageGenerationStatus.Succeeded)
-            {
-                var error = string.IsNullOrWhiteSpace(image.Error) ? "图片 API 未返回可用产物" : image.Error;
-                foreach (var secret in new[] { storedImageKey, config.ImageApiKey, config.ApiKey })
-                    if (!string.IsNullOrEmpty(secret)) error = error.Replace(secret, "[已隐藏密钥]", StringComparison.Ordinal);
-                throw new InvalidOperationException(error + $" Web显式代理={DiagnosticProxy(config.ImageProxyUrl)}");
+                // 串行闸门让一张一张来；单张本身仍可能很慢（实测 235s，偶尔超过 5 分钟）。
+                // 5 分钟会把「慢但最终成功」的请求误判成失败，整批又只剩一张，所以默认放宽到 10 分钟。
+                using var imageHttp = CreateMediaHttp(config.ImageProxyUrl,
+                    configuration.GetValue("ImageHttpTimeout", TimeSpan.FromMinutes(10)));
+                var image = await new OpenAiCompatibleImageProvider(config, imageHttp).GenerateAsync(new ImageGenerationRequest
+                {
+                    Prompt = ReadString(invocation.Inputs, "prompt"), Width = size.Width, Height = size.Height,
+                    // 反向提示词由 provider 拼进 prompt；这是声明里放开 negativePrompt 的落地处，
+                    // 不传下去就等于声明了却没人用（静默丢参数）。
+                    NegativePrompt = ReadString(invocation.Inputs, "negativePrompt"),
+                    ReferenceImages = references
+                }, cancellationToken).ConfigureAwait(false);
+                if (image.Status != ImageGenerationStatus.Succeeded)
+                {
+                    var error = string.IsNullOrWhiteSpace(image.Error) ? "图片 API 未返回可用产物" : image.Error;
+                    foreach (var secret in new[] { storedImageKey, config.ImageApiKey, config.ApiKey })
+                        if (!string.IsNullOrEmpty(secret)) error = error.Replace(secret, "[已隐藏密钥]", StringComparison.Ordinal);
+                    throw new InvalidOperationException(error + $" Web显式代理={DiagnosticProxy(config.ImageProxyUrl)}");
+                }
+                if (!File.Exists(image.FilePath))
+                    throw new InvalidOperationException("图片 API 声称成功，但输出文件不存在");
+                return new ExecutionOutput { Outputs = [new AssetRef { Role = "image", Ref = AssetStore.ToReference(image.FilePath) }] };
             }
-            if (!File.Exists(image.FilePath))
-                throw new InvalidOperationException("图片 API 声称成功，但输出文件不存在");
-            return new ExecutionOutput { Outputs = [new AssetRef { Role = "image", Ref = AssetStore.ToReference(image.FilePath) }] };
+            finally
+            {
+                ImageApiGate.Release();
+            }
         }
         if (!string.Equals(invocation.Tool, VideoTool, StringComparison.Ordinal))
             return await imageExecutor.ExecuteAsync(session, invocation, job, cancellationToken).ConfigureAwait(false);
@@ -184,7 +201,15 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
             handler.Proxy = new WebProxy(proxyUrl.Trim());
             handler.UseProxy = true;
         }
-        return new HttpClient(handler) { Timeout = timeout };
+        return new HttpClient(handler)
+        {
+            Timeout = timeout,
+            // 显式用 HTTP/1.1：部分 OpenAI 兼容网关在 ALPN 协商到 h2 后对 POST /images/generations
+            // 不返回响应（请求会一直挂到超时）；同一地址用 1.1 正常。这里只影响媒体 API，
+            // 协议降级由 RequestVersionOrLower 保证，服务器不支持 1.1 时仍会回退。
+            DefaultRequestVersion = HttpVersion.Version11,
+            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
+        };
     }
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> inputs, string name) =>

@@ -1,5 +1,6 @@
 import { recordAttachments, type AttachmentSummary } from '../assets'
 import { jobOutputUrl } from './assetImages'
+import type { JobQuality } from './imageQuality'
 import { jobFailureReason, jobOutputAttachmentId, isJobActive, jobStateLabel, type NodeJob } from './nodeMedia'
 import type { ViewRecord } from './records'
 
@@ -55,6 +56,11 @@ export type CandidateSlotView = {
   adopted: boolean
   /** 看图地址。**不是节点附件**，所以走任务产物那条接口。 */
   imageUrl: string | null
+  /**
+   * 这一格的判档结果：服务端按「任务 + 产物下标」给，**没有就是没判过**。
+   * 关掉判档开关时界面不拿它出来显示（见 imageQuality 的卡面函数）。
+   */
+  quality: JobQuality | null
 }
 
 export type CandidateBatchView = {
@@ -100,12 +106,12 @@ export function candidateSlotView(
   if (slot.submitError.length > 0)
     return {
       key: slot.key, jobId: '', outputIndex: CANDIDATE_OUTPUT_INDEX, status: 'failed', label: '提交失败',
-      progress: null, failure: slot.submitError, adoptable: false, adopted: false, imageUrl: null
+      progress: null, failure: slot.submitError, adoptable: false, adopted: false, imageUrl: null, quality: null
     }
   if (!slot.jobId)
     return {
       key: slot.key, jobId: '', outputIndex: CANDIDATE_OUTPUT_INDEX, status: 'waiting', label: '排队中',
-      progress: null, failure: '', adoptable: false, adopted: false, imageUrl: null
+      progress: null, failure: '', adoptable: false, adopted: false, imageUrl: null, quality: null
     }
 
   const jobId = slot.jobId
@@ -130,7 +136,9 @@ export function candidateSlotView(
     failure,
     adoptable: status === 'succeeded' && !adopted,
     adopted,
-    imageUrl: status === 'succeeded' ? jobOutputUrl(jobId, CANDIDATE_OUTPUT_INDEX) : null
+    imageUrl: status === 'succeeded' ? jobOutputUrl(jobId, CANDIDATE_OUTPUT_INDEX) : null,
+    // 按 outputIndex 认，不按 quality 数组的顺序认：一条结果只属于它自己的任务与下标。
+    quality: job?.quality?.find(item => item.outputIndex === CANDIDATE_OUTPUT_INDEX) ?? null
   }
 }
 

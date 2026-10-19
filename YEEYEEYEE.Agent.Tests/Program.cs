@@ -173,6 +173,7 @@ var tests = new (string Name, Action Run)[]
     ("ComfyUI 体检：服务器上没有那个类型时只能说「判断不了」，不能说成「是我们转换丢的」", ComfyUiAuditSaysWhenTheSourceTypeIsNotOnTheServer),
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；新增引用要过期，没记录的旧数据与锁定版本兼容", ReferenceStalenessDetectsUpdatedSettings),
+    ("引用过期：图片按字节识别同路径替换，旧指纹无内容基线时不误报", ReferenceStalenessDetectsReplacedImageContent),
     ("AI 建实体：内容同时落到核心设定与默认变体，引用卡不再空白", AgentEntityContentReachesVariantAndCard),
     ("ID 校验：空 ID 与重复 ID 逐项报告", IdentityValidatorEmptyAndDuplicateIds),
     ("ID 校验：悬空边端点、父节点、工作树锚点与布局可选引用", IdentityValidatorDanglingReferences),
@@ -14006,6 +14007,98 @@ static void ReferenceStalenessDetectsUpdatedSettings()
 	workflowNode5.Attachments[0].SourceFingerprints = ReferenceStaleness.Snapshot(workflowCanvasState, workflowNode5);
 	Expect(!ReferenceStaleness.LacksBaseline(workflowNode5), "记过依据之后就不该再提示「缺依据」");
 	Expect(ReferenceStaleness.Of(workflowCanvasState, workflowNode5).Count == 0, "刚记下的依据与现状一致，不该报过期");
+}
+
+/// <summary>
+/// 钉住图片内容参与过期判定：同一路径、同大小、同修改时间被另一份图覆盖也要认出来；
+/// 内容没变只改时间不算变化；文件缺失/读取失败如实报出且不抛异常。
+/// 同时钉住旧项目兼容：旧指纹没有内容基线，结构没变时不能误判成「图片变了」，也不改写已有依据。
+/// </summary>
+static void ReferenceStalenessDetectsReplacedImageContent()
+{
+	var directory = NewTempDirectory("ref-content");
+	var previous = Environment.GetEnvironmentVariable("YEEYEEYEE_ASSET_DIR");
+	try
+	{
+		var assets = Path.Combine(directory, "assets");
+		Directory.CreateDirectory(assets);
+		Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", assets);
+
+		var image = Path.Combine(assets, "hero.png");
+		var original = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+		var replacement = new byte[] { 9, 9, 9, 9, 9, 9, 9, 9 };
+		var stamp = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+		File.WriteAllBytes(image, original);
+		File.SetLastWriteTimeUtc(image, stamp);
+
+		var canvas = new WorkflowCanvasState();
+		var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "林晚" };
+		var variant = entity.CreateVariant("默认", "短发，藏青风衣");
+		variant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://hero.png" });
+		canvas.Entities.Add(entity);
+		var shot = new WorkflowNode { Title = "分镜 1", Category = NodeCategory.Storyboard };
+		var reference = new NodeReference { EntityId = entity.Id, VariantId = variant.Id };
+		shot.References.Add(reference);
+		canvas.Nodes.Add(shot);
+		var product = new WorkflowAttachment
+		{
+			Kind = AttachmentKind.Image,
+			Reference = "asset://shot.png",
+			SourceFingerprints = ReferenceStaleness.Snapshot(canvas, shot)
+		};
+		shot.Attachments.Add(product);
+		var key = ReferenceStaleness.KeyOf(reference);
+		Expect(product.SourceFingerprints[key].StartsWith("v2", StringComparison.Ordinal), "新快照要带内容基线标记");
+		Expect(ReferenceStaleness.Of(canvas, shot, verifyContent: true).Count == 0, "内容没变时不该报过期");
+		Expect(ReferenceStaleness.SnapshotMatches(canvas, shot, product.SourceFingerprints), "提交时与现在的快照一致要判为没变");
+
+		// 同路径、同大小、同修改时间，只换字节。
+		File.WriteAllBytes(image, replacement);
+		File.SetLastWriteTimeUtc(image, stamp);
+		var info = new FileInfo(image);
+		Expect(info.Length == replacement.Length && info.LastWriteTimeUtc == stamp, "用例要先真的做到同大小同修改时间");
+		Expect(ReferenceStaleness.Of(canvas, shot, verifyContent: true).Count == 1,
+			"同路径同大小同修改时间也要能认出内容被替换");
+		Expect(!ReferenceStaleness.SnapshotMatches(canvas, shot, product.SourceFingerprints),
+			"提交后复核也要按字节识别同路径替换");
+		Expect(ReferenceStaleness.Of(canvas, shot).Count == 0,
+			"画布卡片是高频路径，只比结构不读字节；内容替换交给明确检查点");
+
+		// 内容恢复，只把修改时间改掉：不是内容变化。
+		File.WriteAllBytes(image, original);
+		File.SetLastWriteTimeUtc(image, stamp.AddDays(3));
+		Expect(ReferenceStaleness.Of(canvas, shot, verifyContent: true).Count == 0,
+			"内容相同、只改文件时间，不该判成图片内容变化");
+
+		// 文件缺失：不抛异常，按依据失效报出来。
+		File.Delete(image);
+		Expect(ReferenceStaleness.Of(canvas, shot, verifyContent: true).Count == 1,
+			"参考图缺失要让依据过期，读取失败不能把异常抛给界面");
+		Expect(ReferenceStaleness.Of(canvas, shot).Count == 0, "文件缺失不影响结构比对的判定");
+
+		// 旧项目：记录的是 v2 之前的指纹（没有内容基线）。
+		File.WriteAllBytes(image, original);
+		File.SetLastWriteTimeUtc(image, stamp);
+		var content = canvas.ResolveReferenceContent(reference) ?? throw new InvalidOperationException("引用应解析得出来");
+		var legacy = ReferenceStaleness.FingerprintOf(content);
+		Expect(!legacy.StartsWith("v2", StringComparison.Ordinal), "旧格式指纹不带内容基线标记");
+		product.SourceFingerprints[key] = legacy;
+		File.WriteAllBytes(image, replacement);
+		File.SetLastWriteTimeUtc(image, stamp);
+		Expect(ReferenceStaleness.Of(canvas, shot, verifyContent: true).Count == 0,
+			"旧指纹没有内容基线：结构没变时不能把升级本身当成「图片变了」");
+		Expect(ReferenceStaleness.SnapshotMatches(canvas, shot, product.SourceFingerprints),
+			"旧快照复核也只比结构，不能把 v2 升级本身判成资产变化");
+		Expect(product.SourceFingerprints[key] == legacy, "判定过期必须是只读的，不改写旧依据");
+		variant.Description = "短发，藏青风衣（加了围巾）";
+		Expect(ReferenceStaleness.Of(canvas, shot, verifyContent: true).Count == 1,
+			"旧指纹仍要能识别描述等结构变化");
+	}
+	finally
+	{
+		Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", previous);
+		Directory.Delete(directory, recursive: true);
+	}
 }
 
 /// <summary>

@@ -78,6 +78,18 @@ if (args.Contains("--candidate-batch-only"))
     return;
 }
 
+if (args.Contains("--image-quality-only"))
+{
+    ImageQualityRegression.Run();
+    return;
+}
+
+if (args.Contains("--node-defaults-only"))
+{
+    NodeDefaultsRegression.Run();
+    return;
+}
+
 if (args.Contains("--node-target-only"))
 {
     NodeAgentTargetRegression.Run();

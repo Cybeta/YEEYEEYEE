@@ -4674,9 +4674,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                 var errors = GenerationAudit.CheckImageSubmission(currentCanvas.Canvas, node, LocateAttachment,
                     batch.Request!.ReferenceImages, ResolveReferenceCap(batch.Source).Cap,
                     batch.Source?.PoolItem?.SupportsReference != false);
-                var current = ReferenceStaleness.Snapshot(currentCanvas.Canvas, node);
-                if (current.Count != batch.SourceFingerprints.Count || current.Any(pair =>
-                    !batch.SourceFingerprints.TryGetValue(pair.Key, out var previous) || previous != pair.Value))
+                if (!ReferenceStaleness.SnapshotMatches(currentCanvas.Canvas, node, batch.SourceFingerprints, LocateAttachment))
                     throw new InvalidOperationException("资产依据在提交后发生变化，请重新发起首帧生成。");
                 if (errors.Count > 0) throw new InvalidOperationException(string.Join("；", errors));
             }
@@ -5426,8 +5424,12 @@ public partial class MainWindow : Window, IAgentSessionHost
             AgentDialogUi.Layout(player, AgentDialogUi.Footer(close)), 820, 520);
         close.Click += (_, _) => dialog.Close();
         dialog.Closed += (_, _) => player.Dispose();
-        dialog.ShowDialog(this);
-        player.StartFromUserAction();
+        // 等窗口真正打开后再创建 WebView2：ShowDialog 返回时原生窗口尚未就绪，
+        // 立刻初始化会拿到还没落位的宿主句柄，Avalonia 的 WebView2 适配层会以
+        // 「oldValue 具有此属性的错误类型」终止整个进程（真机大窗播放必现）。
+        dialog.Opened += (_, _) => player.StartFromUserAction();
+        // 大窗不是必须阻塞主窗口：用非模态 Show，避开 WebView2 在模态宿主里的初始化缺陷。
+        dialog.Show(this);
     }
 
     /// <summary>出完图给一眼能看到的结果：不然「生成成功」只体现在状态栏和文件里。</summary>

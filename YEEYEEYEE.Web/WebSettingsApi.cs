@@ -112,8 +112,17 @@ internal static class WebSettingsApi
         app.MapGet("/api/web/settings/skills", (HttpContext context) =>
         {
             if (WebAccessGuard.CurrentUser(context)?.Role != UserRole.Admin) return Error(403, "MODEL_ADMIN_REQUIRED", "技能管理需要管理员权限");
-            var library = SkillLibrary.Load();
-            return Results.Json(new { skills = library.Skills.Select(s => new { s.Id, s.Name, s.Enabled, s.Description }), errors = library.Errors });
+            try
+            {
+                var library = SkillLibrary.Load();
+                return Results.Json(new { skills = library.Skills.Select(s => new { s.Id, s.Name, s.Enabled, s.Description }), errors = library.Errors });
+            }
+            catch (InvalidOperationException ex)
+            {
+                // 未配置项目/技能目录时如实说明，而不是把整个设置页打成 500——
+                // 工作流清单与已安装工作流不依赖技能目录，仍应能显示与管理。
+                return Results.Json(new { skills = System.Array.Empty<object>(), errors = new[] { "技能目录不可用：" + ex.Message } });
+            }
         });
         app.MapPost("/api/web/settings/skills/{id}", (HttpContext context, string id, SkillMutation input) =>
         {

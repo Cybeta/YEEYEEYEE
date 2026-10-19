@@ -84,6 +84,14 @@ internal static class WebProjectApi
         if (string.IsNullOrWhiteSpace(parent) && configured.IsProject)
             parent = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(configured.CanvasPath!))!);
         parent = string.IsNullOrWhiteSpace(parent) ? null : Path.GetFullPath(parent);
+        // 容器/新卷首次启动时父目录可能还不存在：配置了可写父目录就由服务建出来，
+        // 否则第一个项目会以「项目存放位置不存在」失败。不可写时只记日志，创建入口照常禁用。
+        if (parent is not null)
+        {
+            try { Directory.CreateDirectory(parent); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            { app.Logger.LogWarning("项目父目录不可用：{Reason}", ex.Message); }
+        }
         void Register(string root)
         {
             try { Describe(OpenProject(root)); }

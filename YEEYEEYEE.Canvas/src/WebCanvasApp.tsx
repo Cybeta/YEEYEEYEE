@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { errorMessage, request, SESSION_LOST_EVENT } from './api'
+import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { apiCode, errorMessage, request, SESSION_LOST_EVENT } from './api'
 import { mapAssets, recordReferences, resolveReference, type Asset } from './assets'
 import { ALL_CHAPTERS_ID, chapterIdOf } from './ChapterView'
 import { CANVAS_VERSION } from './Protocol/VersionedMessages'
@@ -8,7 +8,32 @@ import { canEdit, gateOf, parseAuthState, roleLabel, type AuthState } from './Se
 import { AgentPanel, type NodeAgentRequest, type WebJob, type WebSkill } from './shell/AgentPanel'
 import { candidateBatchViews, type CandidateBatch } from './shell/candidateBatch'
 import { jobOutputUrl } from './shell/assetImages'
+import { GachaReveal } from './shell/GachaReveal'
+import {
+  EMPTY_GACHA_SESSION,
+  gachaBatchProgress,
+  gachaSessionReducer,
+  readGachaPreference,
+  writeGachaPreference,
+  type GachaCard
+} from './shell/gachaRules'
 import type { AgentCanvasPreview } from './shell/agentPreview'
+import {
+  qualityFailureNote,
+  qualityHasUnavailable,
+  qualityStartDecision,
+  readQualityPreference,
+  writeQualityPreference,
+  type BatchQualityRun,
+  type JobQuality
+} from './shell/imageQuality'
+import {
+  imageSkills,
+  isWorkflowImageSkill,
+  readImageSkillPreference,
+  selectImageSkill,
+  writeImageSkillPreference
+} from './shell/imageSource'
 import { DEFAULT_VIDEO_PARAMS, buildInvocationBody, videoBackendOf, videoEffectiveSeconds, videoSeconds, videoSize, videoSizeOptions, type VideoBackend, type VideoParams } from './shell/videoParams'
 import { ChapterTree } from './shell/ChapterTree'
 import { InspectorPanel } from './shell/InspectorPanel'
@@ -77,10 +102,43 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
    * 页面重载之后就没了（产物文件仍在资源目录里，不会因为这个被删）。
    */
   const [candidateBatches, setCandidateBatches] = useState<CandidateBatch[]>([])
+  /**
+   * 「抽卡揭晓动画」：浏览器偏好。默认关，关着时保持原来的候选卡与逐张采用行为。
+   * 打开之后候选区只露卡背，整批落终态后由用户点「开奖」进入全屏揭晓。
+   */
+  const [gachaReveal, setGachaReveal] = useState(() => readGachaPreference())
+  /**
+   * 「生成后质量判档」：浏览器偏好，**默认关**。开着时整批出完会额外调用一次读图模型，
+   * 因此对应两件事必须一起成立：用户明确打开，且服务端确实有一个开了图片输入的模型。
+   */
+  const [judgeQuality, setJudgeQuality] = useState(() => readQualityPreference())
+  /** 服务端报告的判档能力（来自 `/api/web/skills`）；null = 还没读到。 */
+  const [qualityAvailability, setQualityAvailability] = useState<{ available: boolean; message: string } | null>(null)
+  /** 每批判档的界面状态；结果本身以任务列表里的 quality 为准。 */
+  const [qualityRuns, setQualityRuns] = useState<Record<string, BatchQualityRun>>({})
+  /** 已经开始过判档的批次：页面重渲染不会让它再发一次付费请求。 */
+  const qualityStarted = useRef(new Set<string>())
+  /** 正在进行的判档请求：关掉开关 / 换批时中止，旧回包不再写界面。 */
+  const qualityAbort = useRef(new Map<string, AbortController>())
+  const candidateBatchesRef = useRef(candidateBatches)
+  candidateBatchesRef.current = candidateBatches
+  /**
+   * 揭晓层的会话（打开哪一批、选中第几张、是否在提交、错误、以及用于作废旧回包的 run）。
+   * 批次本身在 `candidateBatches` 里；关闭揭晓只清这份会话，候选原样保留。
+   */
+  const [gacha, dispatchGacha] = useReducer(gachaSessionReducer, EMPTY_GACHA_SESSION)
+  const gachaRef = useRef(gacha)
+  gachaRef.current = gacha
+  /** 采用请求的进程内闸门：同一刻连点也不会发第二次。 */
+  const adoptInFlight = useRef(false)
+  /** 揭晓里「用这一张」的同步闸门：React 还没重渲染时的第二次点击也挡得住。 */
+  const gachaSubmitRef = useRef(false)
   /** 右键菜单里选的张数：一次提交几张，就在原节点旁摆几个候选位。 */
   const [imageCount, setImageCount] = useState(1)
   /** 右键菜单里选的图片比例（只对声明了比例的技能有用，默认给它的第一个）。 */
   const [imageRatio, setImageRatio] = useState('')
+  /** 右键菜单里选的出图方式（图片 API / 本机 ComfyUI / 已装工作流）；存当前浏览器偏好。 */
+  const [imageSkillId, setImageSkillId] = useState(() => readImageSkillPreference())
   /**
    * 节点出视频的参数（时长/边长），默认取 videoParams 里那份。
    * 与图片那两行同一个道理：不给用户一个界面的参数，就等于替他默默选了一个。
@@ -223,6 +281,79 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
     [candidateBatches, jobs, records]
   )
 
+  /**
+   * 这一批已经不在候选里（被换掉、被丢弃、或采用后整批收起）时，揭晓层必须跟着退场。
+   * `invalidate` 会换 run：还在路上的采用回包回来也不会再往界面上写。
+   */
+  useEffect(() => {
+    if (!gacha.open) return
+    if (candidateBatches.some(batch => batch.batchId === gacha.batchId)) return
+    dispatchGacha({ type: 'invalidate' })
+  }, [candidateBatches, gacha.open, gacha.batchId])
+
+  /**
+   * 批次已经不在候选里（采用后收起、丢弃、换批）时，顺手收掉它的判档闸门与在途请求。
+   * 结果即使回来也不会写进新批次——这里只是不留无主的闸门与网络请求。
+   */
+  useEffect(() => {
+    const alive = new Set(candidateBatches.map(batch => batch.batchId))
+    for (const id of Array.from(qualityStarted.current)) if (!alive.has(id)) qualityStarted.current.delete(id)
+    for (const [id, controller] of Array.from(qualityAbort.current)) {
+      if (alive.has(id)) continue
+      controller.abort()
+      qualityAbort.current.delete(id)
+    }
+    setQualityRuns(current => {
+      const next = Object.fromEntries(Object.entries(current).filter(([id]) => alive.has(id)))
+      return Object.keys(next).length === Object.keys(current).length ? current : next
+    })
+  }, [candidateBatches])
+
+  /**
+   * 整批落终态后自动判一次——但**只在开关开着**时。
+   *
+   * `qualityStarted` 是同步闸门：轮询每次都会换一份 `candidateViews`，没有它就会在每次重渲染时
+   * 重复发付费请求。失败 / 不可用 / 跳过之后也留在闸门里，**只能由用户点重试**再来一次。
+   */
+  useEffect(() => {
+    if (!judgeQuality) return
+    for (const view of candidateViews) {
+      const progress = gachaBatchProgress(view.slots)
+      const jobIds = view.slots
+        .filter(slot => slot.status === 'succeeded' && slot.jobId.length > 0)
+        .map(slot => slot.jobId)
+      const decision = qualityStartDecision({
+        enabled: judgeQuality,
+        terminal: progress.terminal,
+        succeeded: progress.succeeded,
+        revealable: progress.revealable,
+        started: qualityStarted.current.has(view.batchId),
+        qualities: view.slots.filter(slot => slot.status === 'succeeded').map(slot => slot.quality),
+        availability: qualityAvailability
+      })
+      if (decision === 'start' && jobIds.length > 0) {
+        void startQualityBatch(view.batchId, jobIds)
+        continue
+      }
+      if (decision === 'unavailable') {
+        // 没有可读图的模型：不发起请求，直接把配置问题摆出来，并允许跳过。
+        qualityStarted.current.add(view.batchId)
+        setQualityRuns(current => current[view.batchId]
+          ? current
+          : {
+              ...current,
+              [view.batchId]: {
+                state: 'unavailable',
+                message: qualityAvailability?.message || '没有可用的读图模型。'
+              }
+            })
+        continue
+      }
+      // 已经全部判过：记下闸门，避免轮询每次都重算这一批。
+      if (decision === 'graded') qualityStarted.current.add(view.batchId)
+    }
+  }, [candidateViews, judgeQuality, qualityAvailability])
+
   // 变更推送：锁变了立刻刷新锁列表；画布被改了就把「已同步」改成「有新版」。
   // 推送只说「变了」，所以这里不自动重载画布——把整页视角与选中项一起抽走，比晚看到几秒更烦人。
   const events = useServerEvents({
@@ -342,10 +473,19 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
       setNotice({ kind: 'error', message: `资产加载失败：${errorMessage(error)}` })
     }
     try {
-      const catalog = await request<{ skills: WebSkill[] }>('/api/web/skills')
+      const catalog = await request<{
+        skills: WebSkill[]
+        quality?: { available?: unknown; message?: unknown }
+      }>('/api/web/skills')
       if (run !== generation.current) return
       if (!Array.isArray(catalog.skills)) throw new Error('响应格式不正确')
       setSkills(catalog.skills)
+      setQualityAvailability(catalog.quality && typeof catalog.quality.available === 'boolean'
+        ? {
+            available: catalog.quality.available,
+            message: typeof catalog.quality.message === 'string' ? catalog.quality.message : ''
+          }
+        : null)
     } catch (error) {
       if (run === generation.current) setNotice({ kind: 'error', message: `技能加载失败：${errorMessage(error)}` })
     }
@@ -821,7 +961,7 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
       return
     }
     if (item.action === 'runImage') {
-      const imageSkill = skills.find(skill => skill.capability === 'TextToImage')
+      const imageSkill = selectedImageSkill
       if (!imageSkill || taskBusy || !suggestion.prompt.trim() || !editable) {
         setNotice({ kind: 'error', message: '没有可调用的文生图技能，或已有任务正在提交。' })
         return
@@ -899,6 +1039,18 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
     // 撤的只是**卡片**——旧批的产物文件不删、任务也不取消；重开一批时那几张已出好的图仍在任务里，
     // 只是不再有采用入口（这一点在下面那句提示里说清楚）。
     const replaced = candidateBatches.some(batch => batch.nodeId === nodeId)
+    // 同一节点换新批：正在看的那批已经不存在了，揭晓层与它那次 run 一起作废。
+    if (gachaRef.current.open && gachaRef.current.nodeId === nodeId) closeGacha()
+    // 旧批的判档（在途或已完成）都不再属于界面：中止请求，结果即使回来也不会写进新批。
+    const replacedIds = candidateBatches.filter(batch => batch.nodeId === nodeId).map(batch => batch.batchId)
+    for (const id of replacedIds) {
+      qualityAbort.current.get(id)?.abort()
+      qualityAbort.current.delete(id)
+      qualityStarted.current.delete(id)
+    }
+    if (replacedIds.length > 0)
+      setQualityRuns(current => Object.fromEntries(
+        Object.entries(current).filter(([id]) => !replacedIds.includes(id))))
     setCandidateBatches(current => [
       ...current.filter(batch => batch.nodeId !== nodeId),
       { batchId, nodeId, startedAt: Date.now(), slots }
@@ -918,11 +1070,13 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
         }))
       }
       try {
+        // 工作流技能不认比例，别把 aspectRatio 发过去被白名单挡回来；候选批次标记三家后端都收。
+        const workflow = isWorkflowImageSkill(imageSkill)
         const body = {
           ...buildInvocationBody(imageSkill.id, prompt, DEFAULT_VIDEO_PARAMS, crypto.randomUUID()),
           targetNodeId: nodeId,
           candidateBatch: true,
-          ...(aspectRatio.length > 0 ? { aspectRatio } : {})
+          ...(!workflow && aspectRatio.length > 0 ? { aspectRatio } : {})
         }
         const job = await request<WebJob>(`/api/web/skills/${encodeURIComponent(imageSkill.id)}/invoke`,
           { method: 'POST', body: JSON.stringify(body) })
@@ -941,26 +1095,239 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
    * 客户端只说「哪个任务的第几件产物」——目标节点与产物文件都由服务端从任务自己那份输入里取，
    * 归属、权限、租约、节点锁定、目录与图片类型逐层校验，写入走受保护的追加（见 /adopt 那条路由）。
    * 幂等由确定性附件 ID 保证：重复点、或别人先挂上了，都不会多出一件。
+   *
+   * 返回结果而不是只写提示条：开奖层要在失败时留住选中与候选、把服务端原话显示在脚下；
+   * 成功时由调用方决定是「只摘掉这一格」（原有候选流程）还是「收起整批」（开奖的单选语义）。
    */
-  async function adoptCandidate(nodeId: string, jobId: string, outputIndex: number) {
-    if (!auth?.user || taskBusy) return
+  type AdoptOutcome = { ok: boolean; message: string }
+  async function adoptCandidate(
+    nodeId: string,
+    jobId: string,
+    outputIndex: number,
+    options?: { collapseBatchId?: string }
+  ): Promise<AdoptOutcome> {
+    if (!auth?.user) return { ok: false, message: '登录已失效，请重新登录后再采用。' }
+    // 同一刻连点两次时，第二次既不发请求，也不改动界面。服务端虽然幂等，但界面不该闪两次。
+    if (adoptInFlight.current || taskBusy) return { ok: false, message: '正在提交这一张，请稍候。' }
+    adoptInFlight.current = true
     setTaskBusy(true)
     try {
       const result = await request<{ alreadyAttached?: boolean }>(
         `/api/web/jobs/${encodeURIComponent(jobId)}/outputs/${outputIndex}/adopt`, { method: 'POST' })
-      // 这一格已经从「等着采用」变成「节点上的产物」：把它从候选里摘掉（整批空了就撤掉这一批）。
-      setCandidateBatches(current => current
-        .map(batch => ({ ...batch, slots: batch.slots.filter(slot => slot.jobId !== jobId) }))
-        .filter(batch => batch.slots.length > 0))
+      // 这一格已经从「等着采用」变成「节点上的产物」。
+      // 开奖模式是单选语义：采用成功后收起整批候选（只撤卡片，产物文件一个不删）。
+      if (options?.collapseBatchId) {
+        const collapsed = options.collapseBatchId
+        qualityAbort.current.get(collapsed)?.abort()
+        qualityAbort.current.delete(collapsed)
+        qualityStarted.current.delete(collapsed)
+        setQualityRuns(current => Object.fromEntries(
+          Object.entries(current).filter(([id]) => id !== collapsed)))
+      }
+      setCandidateBatches(current => options?.collapseBatchId
+        ? current.filter(batch => batch.batchId !== options.collapseBatchId)
+        : current
+          .map(batch => ({ ...batch, slots: batch.slots.filter(slot => slot.jobId !== jobId) }))
+          .filter(batch => batch.slots.length > 0))
       await loadScene({ select: nodeId })
-      setNotice({
-        kind: 'success',
-        message: result?.alreadyAttached ? '这一张已经在节点上了（重复采用不会重复添加）。' : '已采用：图片已追加到原节点。'
-      })
+      const message = result?.alreadyAttached ? '这一张已经在节点上了（重复采用不会重复添加）。' : '已采用：图片已追加到原节点。'
+      setNotice({ kind: 'success', message })
+      return { ok: true, message }
     } catch (error) {
       // 目标已删除 / 锁定 / 权限失效等都在这里如实说清楚，产物仍留在任务里。
-      setNotice({ kind: 'error', message: `采用失败：${errorMessage(error)}` })
-    } finally { setTaskBusy(false) }
+      const message = `采用失败：${errorMessage(error)}`
+      setNotice({ kind: 'error', message })
+      return { ok: false, message }
+    } finally {
+      adoptInFlight.current = false
+      setTaskBusy(false)
+    }
+  }
+
+  /** 开关写进当前浏览器偏好；关掉时正在看的揭晓层也一并退场。 */
+  function toggleGachaReveal(next: boolean) {
+    setGachaReveal(next)
+    writeGachaPreference(next)
+    if (!next) closeGacha()
+  }
+
+  /**
+   * 判档开关。关掉时**中止在途请求**，之后不再发起；已经存下的结果可以再打开时看到。
+   */
+  function toggleJudgeQuality(next: boolean) {
+    setJudgeQuality(next)
+    writeQualityPreference(next)
+    if (next) return
+    for (const [batchId, controller] of qualityAbort.current) {
+      controller.abort()
+      // 这次没判完的批次允许下次打开时重新开始；已经成功/失败/跳过的保持原样。
+      qualityStarted.current.delete(batchId)
+    }
+    qualityAbort.current.clear()
+    setQualityRuns(current => Object.fromEntries(
+      Object.entries(current).filter(([, run]) => run.state !== 'running')))
+  }
+
+  /**
+   * 判一批。服务端只收任务 ID，产物路径与模型调用都在服务端；
+   * 页面重渲染不会重复调用（qualityStarted 是同步闸门，服务端也会跳过已判过的）。
+   */
+  async function startQualityBatch(batchId: string, jobIds: string[], force = false) {
+    if (!judgeQuality && !force) return
+    if (jobIds.length === 0) return
+    if (qualityStarted.current.has(batchId) && !force) return
+    if (!force && qualityAvailability && !qualityAvailability.available) {
+      qualityStarted.current.add(batchId)
+      setQualityRuns(current => ({
+        ...current,
+        [batchId]: { state: 'unavailable', message: qualityAvailability.message || '没有可用的读图模型。' }
+      }))
+      return
+    }
+    qualityStarted.current.add(batchId)
+    qualityAbort.current.get(batchId)?.abort()
+    const controller = new AbortController()
+    qualityAbort.current.set(batchId, controller)
+    setQualityRuns(current => ({
+      ...current,
+      [batchId]: { state: 'running', message: '正在判档…（会额外调用一次模型，可跳过）' }
+    }))
+    try {
+      const result = await request<{ results: JobQuality[]; modelMessage?: string }>(
+        '/api/web/image-quality/grade',
+        { method: 'POST', body: JSON.stringify({ jobIds, retry: force }), signal: controller.signal })
+      if (controller.signal.aborted) return
+      // 批次已经被换掉/丢弃：结果只留在服务端，绝不写进新批次的界面状态。
+      if (!candidateBatchesRef.current.some(batch => batch.batchId === batchId)) return
+      if (qualityHasUnavailable(result.results)) {
+        setQualityRuns(current => ({
+          ...current,
+          [batchId]: {
+            state: 'unavailable',
+            message: result.modelMessage || '没有可用的读图模型：请在 Web 设置中选择一个开启「支持图片输入」的模型，或跳过判档。'
+          }
+        }))
+      } else if (result.results.some(item => item.status === 'failed')) {
+        setQualityRuns(current => ({
+          ...current,
+          [batchId]: { state: 'failed', message: qualityFailureNote(result.results) }
+        }))
+      } else {
+        setQualityRuns(current => ({ ...current, [batchId]: { state: 'done', message: '' } }))
+      }
+      void refreshJobs()
+    } catch (error) {
+      if (controller.signal.aborted) return
+      if (!candidateBatchesRef.current.some(batch => batch.batchId === batchId)) return
+      setQualityRuns(current => ({
+        ...current,
+        [batchId]: {
+          state: 'failed',
+          message: apiCode(error) === 'QUALITY_STORE_FAILED'
+            ? '判档结果暂时无法保存；图不受影响，可以跳过判档继续查看与采用。'
+            : `判档请求没有完成：${errorMessage(error)}`
+        }
+      }))
+    } finally {
+      qualityAbort.current.delete(batchId)
+    }
+  }
+
+  /** 用户明确跳过判档：只改判档状态，不碰任务、产物、查看与采用。 */
+  async function skipQualityBatch(batchId: string, jobIds: string[]) {
+    if (jobIds.length === 0) return
+    qualityStarted.current.add(batchId)
+    qualityAbort.current.get(batchId)?.abort()
+    qualityAbort.current.delete(batchId)
+    try {
+      await request('/api/web/image-quality/skip', { method: 'POST', body: JSON.stringify({ jobIds }) })
+      if (candidateBatchesRef.current.some(batch => batch.batchId === batchId))
+        setQualityRuns(current => ({ ...current, [batchId]: { state: 'skipped', message: '' } }))
+      void refreshJobs()
+    } catch (error) {
+      // 跳过状态没保存也不挡看图与采用；界面照样按「这次跳过」处理，并如实说没存上。
+      if (candidateBatchesRef.current.some(batch => batch.batchId === batchId))
+        setQualityRuns(current => ({ ...current, [batchId]: { state: 'skipped', message: '' } }))
+      setNotice({ kind: 'info', message: `跳过状态没有保存（${errorMessage(error)}）；图仍可直接查看与采用。` })
+    }
+  }
+
+  /** 只有用户点「重试判档」才会重来一次；页面重渲染不会自动重试。 */
+  function retryQualityBatch(batchId: string, jobIds: string[]) {
+    qualityStarted.current.delete(batchId)
+    void startQualityBatch(batchId, jobIds, true)
+  }
+
+  /**
+   * 揭晓页头顶那句判档状态。
+   *
+   * 它在**打开时**算一次并随会话快照固定：判档还没结束也允许直接开奖，
+   * 但之后到达的结果不会再补进这一层（更不会重播动画或重开弹层）。
+   */
+  function qualityNoteForBatch(batchId: string): string {
+    if (!judgeQuality) return ''
+    const run = qualityRuns[batchId]
+    if (!run) {
+      return qualityAvailability && !qualityAvailability.available
+        ? '判档不可用：这次开奖按未判档展示。'
+        : ''
+    }
+    if (run.state === 'running') return '判档尚未结束：现在开奖先按未判档展示，档位结果不会再补进这一层。'
+    if (run.state === 'unavailable') return '判档不可用：这次开奖按未判档展示。'
+    if (run.state === 'failed') return '判档失败：这次开奖按未判档展示。'
+    if (run.state === 'skipped') return '已跳过判档：这次开奖按未判档展示。'
+    return ''
+  }
+
+  /** 主动「开奖」：只在整批落终态、且至少有一张成功图时打开。 */
+  function openGacha(batchId: string) {
+    const view = candidateViews.find(batch => batch.batchId === batchId)
+    if (!view) return
+    const progress = gachaBatchProgress(view.slots)
+    if (!progress.canReveal) {
+      setNotice({
+        kind: 'error',
+        message: progress.allFailed
+          ? '这一批全部失败，没有可开奖的图。'
+          : progress.terminal ? '这一批没有待揭晓的图。' : '这一批还没全部结束，等出完再开奖。'
+      })
+      return
+    }
+    const owner = records.find(record => record.recordId === view.nodeId)
+    // 快照：动画期间任务轮询继续跑，但不能把已经摆好的牌换掉；
+    // 判档说明也一起钉住，之后到达的结果不会改写这一层。
+    dispatchGacha({
+      type: 'open',
+      batchId,
+      nodeId: view.nodeId,
+      nodeTitle: owner ? recordTitle(owner) : '原节点',
+      slots: view.slots,
+      qualityNote: qualityNoteForBatch(batchId),
+      run: gachaRef.current.run + 1
+    })
+  }
+
+  /** 关闭揭晓层：本批候选原样保留，可以再次点「开奖」继续看。 */
+  function closeGacha() {
+    dispatchGacha({ type: 'close' })
+  }
+
+  /**
+   * 开奖里采用一张。成功就收起这一批；失败保留候选与选中，把服务端原话显示在脚下。
+   * 回包按 run 落到 reducer：期间关闭/换批/另开一次的那些旧回包会被直接丢弃。
+   */
+  async function adoptGachaCard(card: GachaCard) {
+    const current = gachaRef.current
+    if (!current.open || current.adopting || gachaSubmitRef.current) return
+    gachaSubmitRef.current = true
+    const run = current.run + 1
+    dispatchGacha({ type: 'beginAdopt', key: card.key, run })
+    const outcome = await adoptCandidate(current.nodeId, card.jobId, card.outputIndex, {
+      collapseBatchId: current.batchId
+    })
+    if (outcome.ok) dispatchGacha({ type: 'adoptSucceeded', run })
+    else dispatchGacha({ type: 'adoptFailed', run, message: outcome.message })
+    gachaSubmitRef.current = false
   }
 
   /**
@@ -971,25 +1338,52 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
    * 候选任务在服务端那条路上本来就不自动回挂，而卡片只活在这次会话的内存里。
    */
   function discardCandidates(batchId: string) {
+    if (gachaRef.current.open && gachaRef.current.batchId === batchId) closeGacha()
+    qualityAbort.current.get(batchId)?.abort()
+    qualityAbort.current.delete(batchId)
+    qualityStarted.current.delete(batchId)
+    setQualityRuns(current => Object.fromEntries(Object.entries(current).filter(([id]) => id !== batchId)))
     setCandidateBatches(current => current.filter(batch => batch.batchId !== batchId))
     setNotice({ kind: 'info', message: '已撤掉这排候选卡：后台任务照旧，产物文件也没有删除。' })
   }
 
+  const availableImageSkills = imageSkills(skills)
+  const selectedImageSkill = selectImageSkill(skills, imageSkillId)
+
   /**
-   * 右键菜单里那两行「出图选项」：张数（一次提交几张 = 几个候选位），
+   * 切换出图方式：记成这台浏览器的偏好；新技能不支持当前比例时退回它声明的第一个，
+   * 免得菜单里一个比例都不高亮、实际发出去的又是另一个。
+   */
+  function chooseImageSkill(id: string) {
+    setImageSkillId(id)
+    writeImageSkillPreference(id)
+    const ratios = skills.find(skill => skill.id === id)?.aspectRatios ?? []
+    if (ratios.length > 0 && !ratios.includes(imageRatio)) setImageRatio(ratios[0])
+  }
+
+  /**
+   * 右键菜单里那两行「出图选项」：张数（一次提交几张 = 几个候选位）、
+   * 出图方式（图片 API / 本机 ComfyUI / 已装工作流，对齐桌面「选接口…」），
    * 以及比例——**只有技能自己声明了可选比例时**才摆（图片 API 会声明，本机工作流不会）。
    * 没有可跑的出图条目就不摆，免得菜单上多一行用不上的东西。
    */
   const imageMenuOptions = (() => {
-    const imageSkill = skills.find(skill => skill.capability === 'TextToImage')
-    if (!imageSkill || !editable) return null
+    if (!selectedImageSkill || !editable) return null
     if (!nodeMenu?.plan.suggestions.some(suggestion => suggestion.kind === 'Image' && suggestion.canRun)) return null
     return {
       count: imageCount,
       onCount: setImageCount,
-      ratios: imageSkill.aspectRatios ?? [],
+      skills: availableImageSkills.map(skill => ({ id: skill.id, name: skill.name })),
+      skillId: selectedImageSkill.id,
+      onSkill: chooseImageSkill,
+      ratios: selectedImageSkill.aspectRatios ?? [],
       ratio: imageRatio,
-      onRatio: setImageRatio
+      onRatio: setImageRatio,
+      gachaReveal,
+      onGachaReveal: toggleGachaReveal,
+      judgeQuality,
+      onJudgeQuality: toggleJudgeQuality,
+      qualityAvailability
     }
   })()
 
@@ -1309,6 +1703,12 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
           layoutPlan={layoutPlan}
           jobs={jobs}
           candidates={candidateViews}
+          gachaReveal={gachaReveal}
+          showQuality={judgeQuality}
+          qualityRuns={qualityRuns}
+          onSkipQuality={(batchId, jobIds) => void skipQualityBatch(batchId, jobIds)}
+          onRetryQuality={retryQualityBatch}
+          onRevealCandidates={openGacha}
           onAdoptCandidate={(nodeId, jobId, outputIndex) => void adoptCandidate(nodeId, jobId, outputIndex)}
           onDiscardCandidates={discardCandidates}
           onOpenCandidate={(jobId, outputIndex, name) => setCandidateFocus({ jobId, outputIndex, name })}
@@ -1394,10 +1794,19 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
             : dockMode === 'settings'
               ? <SettingsPanel canManage={role === 'Admin'} onSkillsChanged={async () => {
                 const run = generation.current
-                const catalog = await request<{ skills: WebSkill[] }>('/api/web/skills')
+                const catalog = await request<{
+                  skills: WebSkill[]
+                  quality?: { available?: unknown; message?: unknown }
+                }>('/api/web/skills')
                 if (run !== generation.current) return
                 if (!Array.isArray(catalog.skills)) throw new Error('技能目录响应格式不正确')
                 setSkills(catalog.skills)
+                setQualityAvailability(catalog.quality && typeof catalog.quality.available === 'boolean'
+                  ? {
+                      available: catalog.quality.available,
+                      message: typeof catalog.quality.message === 'string' ? catalog.quality.message : ''
+                    }
+                  : null)
               }} />
               : null}
               <div hidden={dockMode !== 'agent'} style={{ height: '100%' }}><AgentPanel
@@ -1428,7 +1837,7 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
         x={nodeMenu.x}
         y={nodeMenu.y}
         items={buildNodeMenu(nodeMenu.plan, {
-          imageSkillId: skills.find(skill => skill.capability === 'TextToImage')?.id ?? null,
+          imageSkillId: selectedImageSkill?.id ?? null,
           videoSkillId: skills.find(skill => skill.capability === 'TextToVideo')?.id ?? null,
           canRunAgent: editable
         })}
@@ -1436,6 +1845,20 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
         videoOptions={videoMenuOptions}
         onPick={(item) => void runNodeMenuItem(item)}
         onClose={() => setNodeMenu(null)}
+      />
+    )}
+    {gacha.open && (
+      <GachaReveal
+        nodeTitle={gacha.nodeTitle}
+        slots={gacha.slots}
+        selection={gacha.selection}
+        adopting={gacha.adopting}
+        error={gacha.error}
+        showQuality={judgeQuality}
+        qualityNote={gacha.qualityNote}
+        onSelect={(index) => dispatchGacha({ type: 'select', index })}
+        onAdopt={(card) => void adoptGachaCard(card)}
+        onClose={closeGacha}
       />
     )}
     {candidateFocus && (
@@ -1473,9 +1896,21 @@ function NodeContextMenu({ x, y, items, imageOptions, videoOptions, onPick, onCl
   imageOptions: {
     count: number
     onCount: (count: number) => void
+    /** 可选的出图方式（图片 API / 本机 ComfyUI / 已装工作流）；只有一种时不摆下拉。 */
+    skills: { id: string; name: string }[]
+    skillId: string
+    onSkill: (id: string) => void
     ratios: string[]
     ratio: string
     onRatio: (ratio: string) => void
+    /** 「抽卡揭晓动画」：浏览器偏好，只影响这台浏览器上的出图流程。 */
+    gachaReveal: boolean
+    onGachaReveal: (enabled: boolean) => void
+    /** 「生成后质量判档」：浏览器偏好，默认关；会额外调用读图模型。 */
+    judgeQuality: boolean
+    onJudgeQuality: (enabled: boolean) => void
+    /** 服务端报告的判档能力；null = 还没读到。 */
+    qualityAvailability: { available: boolean; message: string } | null
   } | null
   /**
    * 出视频选项（时长 / 后端支持时的边长）。null = 这个节点没有可跑的出视频条目。
@@ -1528,6 +1963,21 @@ function NodeContextMenu({ x, y, items, imageOptions, videoOptions, onPick, onCl
 
   return (
     <div ref={menuRef} className="df-menu" style={{ left: pos.left, top: pos.top, maxHeight: pos.maxHeight ?? undefined, overflowY: pos.maxHeight ? 'auto' : undefined }} onPointerDown={(event) => event.stopPropagation()}>
+      {imageOptions && imageOptions.skills.length > 1 && (
+        <div className="df-menu-row">
+          <span className="df-menu-row-label">出图方式</span>
+          <select
+            className="df-select df-menu-select"
+            value={imageOptions.skillId}
+            title="选择图片 API、本机 ComfyUI 或已安装的工作流"
+            onChange={(event) => imageOptions.onSkill(event.target.value)}
+          >
+            {imageOptions.skills.map(skill => (
+              <option key={skill.id} value={skill.id}>{skill.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
       {imageOptions && (
         <div className="df-menu-row">
           <span className="df-menu-row-label">张数</span>
@@ -1554,6 +2004,38 @@ function NodeContextMenu({ x, y, items, imageOptions, videoOptions, onPick, onCl
             >{ratio}</button>
           ))}
         </div>
+      )}
+      {imageOptions && (
+        <div className="df-menu-row">
+          <label className="df-menu-check" title="打开后候选区先显示卡背，整批结束后由你点「开奖」">
+            <input
+              type="checkbox"
+              checked={imageOptions.gachaReveal}
+              onChange={(event) => imageOptions.onGachaReveal(event.target.checked)}
+            />
+            抽卡揭晓动画
+          </label>
+        </div>
+      )}
+      {imageOptions && (
+        <>
+          <div className="df-menu-row">
+            <label className="df-menu-check" title="整批出完后调用读图模型，按提示词与负面词给每张图打分并换算档位">
+              <input
+                type="checkbox"
+                checked={imageOptions.judgeQuality}
+                onChange={(event) => imageOptions.onJudgeQuality(event.target.checked)}
+              />
+              生成后质量判档
+            </label>
+          </div>
+          <div className="df-menu-note">
+            开启后会额外调用模型，可能增加费用与等待；判档失败不影响看图与采用。
+          </div>
+          {imageOptions.judgeQuality && imageOptions.qualityAvailability && !imageOptions.qualityAvailability.available && (
+            <div className="df-menu-note">{imageOptions.qualityAvailability.message || '没有可用的读图模型。'}</div>
+          )}
+        </>
       )}
       {videoOptions && (
         <div className="df-menu-row">

@@ -100,8 +100,8 @@ internal static class WebGenerationReferences
         WebProjectApi.InCanvas(mode, () =>
         {
             var target = WebProjectApi.Store(mode)!.GenerationTarget(nodeId.GetGuid());
-            var current = ReferenceStaleness.Snapshot(target.Canvas, target.Node);
-            if (current.Count != recorded.Count || current.Any(p => !recorded.TryGetValue(p.Key, out var value) || p.Value != value))
+            // 用同一套兼容比较：旧格式记录只比结构，不把升级本身当成资产变化。
+            if (!ReferenceStaleness.SnapshotMatches(target.Canvas, target.Node, recorded, Locate))
                 throw new InvalidDataException("资产依据在提交后发生变化，请重新发起生成");
             return true;
         });
