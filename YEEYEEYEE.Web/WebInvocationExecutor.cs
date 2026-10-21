@@ -67,7 +67,9 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
                 ? images.Deserialize<string[]>() ?? [] : Array.Empty<string>();
             config.ImageMaxReferenceImages = WebImageGeneration.ReferenceCapacity(config);
             if (references.Length > config.ImageMaxReferenceImages)
-                throw new InvalidOperationException("当前图片模型不支持所需参考图，请选择支持参考图的模型");
+                throw new InvalidOperationException(
+                    $"请求包含 {references.Length} 张参考图，当前图片模型容量为 {config.ImageMaxReferenceImages} 张，"
+                    + "禁止静默裁剪；请减少必需资产或提高参考图容量。");
             await ImageApiGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {

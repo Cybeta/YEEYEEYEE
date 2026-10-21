@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { errorMessage, request, canvasUrl } from '../api'
-import { mapAssets, type Asset } from '../assets'
+import { mapAssets, normalizePurpose, PURPOSE_LABELS, PURPOSE_OPTIONS, type Asset } from '../assets'
 
 export function EntityManager({ canEdit, onChanged }: { canEdit: boolean; onChanged: () => Promise<void> }) {
   const [entities, setEntities] = useState<Asset[]>([])
@@ -87,6 +87,19 @@ export function EntityManager({ canEdit, onChanged }: { canEdit: boolean; onChan
       </>}
       {variant.attachments?.map(media => <div className="df-section" key={media.id}>
         <a href={canvasUrl(`/api/web/entities/${entityId}/variants/${variantId}/media/${media.id}`)} target="_blank" rel="noreferrer">{media.name || '未命名媒体'} · {media.kind}</a>
+        {media.kind === 'Image' && <div className="df-field is-boxed">
+          <span className="df-label">参考图用途</span>
+          <select
+            className="df-input"
+            aria-label={`${media.name || '参考图'}的用途`}
+            value={normalizePurpose(media.purpose)}
+            disabled={busy || !canEdit}
+            onChange={event => void save('setMediaPurpose', { attachmentId: media.id, purpose: event.target.value })}
+          >
+            {PURPOSE_OPTIONS.map(option => <option key={option} value={option}>{PURPOSE_LABELS[option]}</option>)}
+          </select>
+          <span className="df-dim" style={{ fontSize: 10 }}>角色基准成套给：转面图锁五官与服装结构，全身锚点锁体型比例，表情表锁脸；生成时以节点引用上选定的那张为准。</span>
+        </div>}
         {canEdit && <div className="df-grid-2">
           <button className="df-mini-button" disabled={busy || !name.trim()} onClick={() => void save('renameMedia', { attachmentId: media.id })}>用下方名称重命名</button>
           <button className="df-mini-button" disabled={busy} onClick={() => void save('removeMedia', { attachmentId: media.id })}>移除媒体附件</button>

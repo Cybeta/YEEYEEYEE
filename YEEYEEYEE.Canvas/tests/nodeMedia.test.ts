@@ -474,6 +474,34 @@ describe('读 /api/web/jobs 里的 outputs', () => {
   })
 })
 
+describe('读 /api/web/jobs 里的生成记录', () => {
+  it('保留角色、参考图、模型与提示词，能确认这一张用了什么', () => {
+    const parsed = parseJobs({ jobs: [{ jobId: 'j', state: 'Succeeded',
+      generation: {
+        prompt: '林夏在窗边拾起黄铜钥匙',
+        model: 'gpt-image-2(池6)',
+        referenceImageCount: 1,
+        characterReferences: [{
+          entityId: 'e1', name: '林夏', kind: 'Character', variantId: 'v1', attachmentId: 'a2',
+          purpose: 'Expression', purposeLabel: '表情表', path: 'C:/assets/lin-expression.png', description: '短发、米色风衣'
+        }]
+      }
+    }] })
+    expect(parsed.jobs[0].generation).toMatchObject({
+      prompt: '林夏在窗边拾起黄铜钥匙', model: 'gpt-image-2(池6)', referenceImageCount: 1
+    })
+    expect(parsed.jobs[0].generation?.characterReferences?.[0]).toMatchObject({
+      name: '林夏', attachmentId: 'a2', purposeLabel: '表情表'
+    })
+  })
+
+  it('读不懂的生成记录当作没有，不让整条任务失效', () => {
+    expect(parseJobs({ jobs: [{ jobId: 'j', state: 'Running', generation: 'nonsense' }] }).jobs[0].generation).toBeUndefined()
+    expect(parseJobs({ jobs: [{ jobId: 'j', state: 'Running', generation: { characterReferences: ['bad'] } }] })
+      .jobs[0].generation?.characterReferences).toEqual([])
+  })
+})
+
 /**
  * 时间轴的实际输出。
  *

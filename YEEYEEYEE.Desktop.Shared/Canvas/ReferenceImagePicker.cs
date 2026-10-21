@@ -65,6 +65,10 @@ public static class ReferenceCapResolver
 /// </summary>
 public sealed record ReferenceCandidate(string Key, string Label, string Path)
 {
+    /// <summary>这张图在实体里的附件 ID 与用途；旧引用没选图时为空。</summary>
+    public Guid? AttachmentId { get; init; }
+    public ReferencePurpose Purpose { get; init; } = ReferencePurpose.General;
+
     /// <summary>
     /// 引用的稳定标识（实体 + 变体）。手动指定按它点名，而不是按下标——
     /// 下标会随「引用的先后」「某个变体带了几张图」变，点在错的图上不会有任何报错。
@@ -81,7 +85,14 @@ public sealed record ReferenceCandidate(string Key, string Label, string Path)
 /// <see cref="Path"/> 为 null 表示这条引用还没有可用的设定图——**槽位仍然占位**，
 /// 这样后面的引用不会被推前，ref:N 也就不会因为「某个变体没图 / 带了几张图」而错位。
 /// </summary>
-public sealed record ReferenceSlot(string Key, string Label, string? Path);
+public sealed record ReferenceSlot(string Key, string Label, string? Path)
+{
+    /// <summary>实际使用的附件 ID；旧行为（没选图）时为第一张可用图片的 ID。</summary>
+    public Guid? AttachmentId { get; init; }
+    public ReferencePurpose Purpose { get; init; } = ReferencePurpose.General;
+    /// <summary>选了图但用不了的原因（附件不存在 / 不是图片 / 文件不可读）。空串表示没有这个问题。</summary>
+    public string Problem { get; init; } = string.Empty;
+}
 
 /// <summary>把「这一镜引用了哪些设定」翻成「该喂哪几张图」。</summary>
 public static class ReferenceImagePicker
@@ -143,9 +154,7 @@ public static class ReferenceImagePicker
         ArgumentNullException.ThrowIfNull(canvas);
         ArgumentNullException.ThrowIfNull(node);
         ArgumentNullException.ThrowIfNull(locatePath);
-        return Rank(canvas, node, locatePath)
-            .Select(item => new ReferenceCandidate(item.Key, item.Label, item.Path))
-            .ToList();
+        return Rank(canvas, node, locatePath).ToList();
     }
 
     /// <summary>
@@ -174,32 +183,65 @@ public static class ReferenceImagePicker
             var rank = Array.IndexOf(KindOrder, content.Entity.Kind);
             if (rank < 0) rank = KindOrder.Length;
 
-            // 变体带多张图时只取**第一张**：一个「角色三视图」否则会一口吃掉三个名额。
-            var path = content.Attachments
-                .Where(attachment => attachment.Kind == AttachmentKind.Image)
-                .Select(locatePath)
-                .FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(candidate));
+            ReferenceSlot slot;
+            if (reference.AttachmentId is { } chosen)
+            {
+                // 明确选定的参考图：只认这一张。它不在这一版内容里、不是图片、或文件读不到时
+                // 如实报 Problem，**绝不**偷偷换成另一张——那会让人以为用在生成里的就是自己选的那张。
+                var attachment = content.Attachments.FirstOrDefault(item => item.Id == chosen);
+                if (attachment is null)
+                    slot = new ReferenceSlot(ReferenceCandidate.KeyOf(reference), content.Label, null)
+                    {
+                        AttachmentId = chosen, Problem = "所选参考图已不在当前设定版本中"
+                    };
+                else if (attachment.Kind != AttachmentKind.Image)
+                    slot = new ReferenceSlot(ReferenceCandidate.KeyOf(reference), content.Label, null)
+                    {
+                        AttachmentId = chosen, Purpose = attachment.Purpose, Problem = "所选参考图不是图片"
+                    };
+                else
+                {
+                    var path = locatePath(attachment);
+                    slot = new ReferenceSlot(ReferenceCandidate.KeyOf(reference), content.Label,
+                        string.IsNullOrWhiteSpace(path) ? null : path)
+                    {
+                        AttachmentId = chosen, Purpose = attachment.Purpose,
+                        Problem = string.IsNullOrWhiteSpace(path) ? "所选参考图文件不可读" : string.Empty
+                    };
+                }
+            }
+            else
+            {
+                // 没选图时沿用旧行为：变体带多张图只取**第一张**（一个「角色三视图」否则会一口吃掉三个名额）。
+                var first = content.Attachments.FirstOrDefault(attachment => attachment.Kind == AttachmentKind.Image);
+                var path = first is null ? null : locatePath(first);
+                slot = new ReferenceSlot(ReferenceCandidate.KeyOf(reference), content.Label,
+                    string.IsNullOrWhiteSpace(path) ? null : path)
+                {
+                    AttachmentId = first?.Id, Purpose = first?.Purpose ?? ReferencePurpose.General
+                };
+            }
 
-            slots.Add(new RankedSlot(rank, ReferenceCandidate.KeyOf(reference), content.Label, path));
+            slots.Add(new RankedSlot(rank, slot));
         }
         // OrderBy 是稳定排序：同类的槽位保持引用顺序。
-        return slots.OrderBy(item => item.Rank)
-            .Select(item => new ReferenceSlot(item.Key, item.Label, item.Path))
-            .ToList();
+        return slots.OrderBy(item => item.Rank).Select(item => item.Slot).ToList();
     }
 
     /// <summary>把引用翻成「排好序的候选」（只保留有图的那几张）：给界面与出图装配用。</summary>
-    private static List<RankedCandidate> Rank(
+    private static List<ReferenceCandidate> Rank(
         WorkflowCanvasState canvas,
         WorkflowNode node,
         Func<WorkflowAttachment, string?> locatePath) =>
         ResolveSlots(canvas, node, locatePath)
             .Where(slot => !string.IsNullOrWhiteSpace(slot.Path))
-            .Select(slot => new RankedCandidate(slot.Key, slot.Label, slot.Path!))
+            .Select(slot => new ReferenceCandidate(slot.Key, slot.Label, slot.Path!)
+            {
+                AttachmentId = slot.AttachmentId, Purpose = slot.Purpose
+            })
             .ToList();
 
-    private sealed record RankedSlot(int Rank, string Key, string Label, string? Path);
-    private sealed record RankedCandidate(string Key, string Label, string Path);
+    private sealed record RankedSlot(int Rank, ReferenceSlot Slot);
 
     private static string Describe(
         int limit, string capSource, IReadOnlyList<string> kept, IReadOnlyList<string> dropped, bool handPicked)

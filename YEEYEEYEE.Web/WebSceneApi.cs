@@ -334,6 +334,35 @@ internal static class WebSceneApi
                 hub.CanvasChanged(after.Revision, recordId, WebAccessGuard.ActorName(request.HttpContext), "record");
             return result;
         });
+        // 给一条已有引用选定本次要喂的参考图。与挂引用同一档（记录级、要 canvas.edit 与修订 CAS）。
+        // attachmentId 传 null 表示恢复「取第一张可用图片」的旧行为。
+        app.MapPut("/api/web/records/{recordId}/reference-selection", async (string recordId, HttpRequest request) =>
+        {
+            if (!WebAccessGuard.Permissions(request.HttpContext).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+            if (projectStore is null)
+                return Error(409, "CANVAS_REQUIRES_PROJECT", "参考图选择要的是项目画布；当前配置的是独立 Web 场景");
+            if (!Guid.TryParse(recordId, out var nodeId))
+                return Error(400, "INVALID_REQUEST", "这个 recordId 不是一个画布节点");
+
+            JsonElement input;
+            try { input = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body, cancellationToken: request.HttpContext.RequestAborted); }
+            catch (JsonException) { return Error(400, "INVALID_REQUEST", "请求 JSON 无效"); }
+            if (input.ValueKind != JsonValueKind.Object ||
+                !input.TryGetProperty("baseRevision", out var rev) || !rev.TryGetInt64(out var baseRevision) ||
+                !input.TryGetProperty("entityId", out var entity) || !Guid.TryParse(entity.GetString(), out var entityId) ||
+                !input.TryGetProperty("variantId", out var variant) || !Guid.TryParse(variant.GetString(), out var variantId) ||
+                !TryOptionalGuid(input, "versionId", out var versionId) ||
+                !TryOptionalGuid(input, "attachmentId", out var attachmentId))
+                return Error(400, "INVALID_REQUEST", "需要 baseRevision、entityId、variantId（GUID），可选的 versionId / attachmentId（GUID）");
+
+            var before = CommitToken();
+            var result = projectStore.SelectReferenceImage(baseRevision, nodeId, entityId, variantId, versionId, attachmentId);
+            var after = CommitToken();
+            if (after.Serial > before.Serial)
+                hub.CanvasChanged(after.Revision, recordId, WebAccessGuard.ActorName(request.HttpContext), "record");
+            return result;
+        });
 
         // 只读：节点右键菜单的「协助计划」（建议由共享的 NodeAssistPlanner 算，桌面端右键用的是同一份）。
         // 它是投影不是写入，所以**不取锁、不查 canvas.edit**——「这个节点能做什么」看一眼就知道，
@@ -357,6 +386,27 @@ internal static class WebSceneApi
                 projectStore is not null
                     ? projectStore.AttachmentFile(recordId, attachmentId)
                     : Error(409, "CANVAS_REQUIRES_PROJECT", "产物图要的是项目画布；当前配置的是独立 Web 场景"));
+
+        // 删除节点上的一件产物附件。与「改标题内容」「移动位置」同一档：记录级写入，
+        // 要 canvas.edit、要修订 CAS，不动画布结构。文件是否移入回收站由服务端判断——
+        // 同一份资产还被别的附件引用时只摘这一条引用。
+        app.MapDelete("/api/web/records/{recordId:guid}/attachments/{attachmentId:guid}",
+            (Guid recordId, Guid attachmentId, long? baseRevision, HttpRequest request) =>
+            {
+                if (!WebAccessGuard.Permissions(request.HttpContext).Contains("canvas.edit"))
+                    return Error(403, "CANVAS_EDIT_FORBIDDEN", "缺少 canvas.edit 权限");
+                if (projectStore is null)
+                    return Error(409, "CANVAS_REQUIRES_PROJECT", "删除产物附件要的是项目画布；当前配置的是独立 Web 场景");
+                if (baseRevision is not { } revision)
+                    return Error(400, "INVALID_REQUEST", "缺少 baseRevision（你手上那份的修订号）");
+
+                var before = CommitToken();
+                var result = projectStore.RemoveAttachment(revision, recordId, attachmentId);
+                var after = CommitToken();
+                if (after.Serial > before.Serial)
+                    hub.CanvasChanged(after.Revision, recordId.ToString(), WebAccessGuard.ActorName(request.HttpContext), "record");
+                return result;
+            });
 
         app.MapPost("/api/web/entities/manage", (HttpContext context, JsonElement input) =>
         {

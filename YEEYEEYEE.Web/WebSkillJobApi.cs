@@ -59,9 +59,31 @@ internal static class WebSkillJobApi
                 result.ErrorCode, result.ErrorMessage, result.ExternalTaskId, result.Outputs, result.Attempt,
                 result.RetryOfJobId, result.RootJobId, result.Tool, canRetry,
                 targetNodeId = job.Inputs.TryGetValue("targetNodeId", out var target) ? target.GetString() : null,
+                // 生成记录：提示词、模型、实际使用的角色与参考图。只投影复现需要的那几项，
+                // 参考图仍以文件路径 + 用途 + 内容哈希留在任务输入里，不把图片本体回传。
+                generation = GenerationRecord(job),
                 attachmentState = attachments.State(job),
                 // 判档结果与具体任务绑定；界面按 outputIndex 认，不按数组顺序猜。
                 quality = qualityStore.Get(job.JobId) };
+        }
+        static object? GenerationRecord(Job job)
+        {
+            string? Text(string name) => job.Inputs.TryGetValue(name, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString() : null;
+            object? List(string name)
+            {
+                if (!job.Inputs.TryGetValue(name, out var value) || value.ValueKind != JsonValueKind.Array) return null;
+                try { return value.Deserialize<List<ReferenceSelectionRecord>>(); }
+                catch (JsonException) { return null; }
+            }
+            var prompt = Text("prompt");
+            var model = Text("model");
+            var characters = List("characterReferences");
+            var selections = List("referenceSelections");
+            var images = job.Inputs.TryGetValue("referenceImages", out var raw) &&
+                raw.ValueKind == JsonValueKind.Array ? raw.GetArrayLength() : 0;
+            if (prompt is null && model is null && characters is null && selections is null) return null;
+            return new { prompt, model, characterReferences = characters, referenceSelections = selections, referenceImageCount = images };
         }
         bool InputsEqual(IReadOnlyDictionary<string, JsonElement> left, IReadOnlyDictionary<string, JsonElement> right) =>
             left.Count == right.Count && right.All(pair => left.TryGetValue(pair.Key, out var value) && value.GetRawText() == pair.Value.GetRawText());
@@ -133,6 +155,13 @@ internal static class WebSkillJobApi
                 new[] { "negativePrompt", "videoFrames", "seed" }.Any(field => body.TryGetProperty(field, out _)))
                 return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前视频执行器仅支持 prompt、model、seconds、width、height 与参考图，拒绝忽略额外参数");
             var inputs = new Dictionary<string, JsonElement> { ["prompt"] = prompt.Clone(), ["webCanvasPath"] = JsonSerializer.SerializeToElement(WebProjectApi.Scope) };
+            // 图片 API 的模型名由服务端配置决定，执行时才读；这里先落进任务输入，生成记录才能回答
+            // 「这一张是用哪个模型出的」。视频的模型本来就从请求体收（见下面 isVideo 的分支）。
+            if (skillId == WebImageGeneration.SkillId)
+            {
+                var imageModel = WebSettingsApi.LoadModels().ImageModel;
+                if (!string.IsNullOrWhiteSpace(imageModel)) inputs["model"] = JsonSerializer.SerializeToElement(imageModel);
+            }
             if (!isVideo && workflow is null)
             {
                 var ratio = body.TryGetProperty("aspectRatio", out var aspect) && aspect.ValueKind == JsonValueKind.String ? aspect.GetString() : null;
@@ -148,12 +177,15 @@ internal static class WebSkillJobApi
             }
             if (body.TryGetProperty("referenceAttachmentIds", out var references))
             {
-                if (references.ValueKind != JsonValueKind.Array || references.GetArrayLength() is < 1 or > 8 || !body.TryGetProperty("chatSessionId", out var chatSession) || chatSession.ValueKind != JsonValueKind.String)
-                    return Error(400, "REFERENCE_INVALID", "参考图须来自当前会话，最多8张");
+                if (references.ValueKind != JsonValueKind.Array || references.GetArrayLength() is < 1 or > 9 || !body.TryGetProperty("chatSessionId", out var chatSession) || chatSession.ValueKind != JsonValueKind.String)
+                    return Error(400, "REFERENCE_INVALID", "参考图须来自当前会话，最多9张");
                 if (isVideo && !string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase) && references.GetArrayLength() > 1)
                     return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前视频接口仅支持一张首帧参考图，不能静默忽略多图");
-                if (skillId == WebImageGeneration.SkillId && references.GetArrayLength() > WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels()))
-                    return Error(400, "IMAGE_REFERENCE_UNSUPPORTED", "当前图片模型不支持所需参考图，请在 Web 设置中选择支持参考图的模型");
+                var imageCapacity = WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels());
+                if (skillId == WebImageGeneration.SkillId && references.GetArrayLength() > imageCapacity)
+                    return Error(400, "IMAGE_REFERENCE_UNSUPPORTED",
+                        $"请求包含 {references.GetArrayLength()} 张参考图，当前图片模型容量为 {imageCapacity} 张，"
+                        + "禁止静默裁剪；请减少必需资产或在 Web 设置中提高参考图容量。");
                 if (skillId == SkillId && references.GetArrayLength() > 1) return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前图片工作流仅支持一张底图，不能静默忽略多图");
                 var files = new List<WebChatStore.Attachment>();
                 foreach (var reference in references.EnumerateArray())
@@ -188,6 +220,11 @@ internal static class WebSkillJobApi
                         var extra = inputs.TryGetValue("referenceImages", out var supplied) ? supplied.Deserialize<string[]>()! : Array.Empty<string>();
                         var paths = WebGenerationReferences.Resolve(snapshot, capacity, extra);
                         WebGenerationReferences.RecordEvidence(inputs, paths, snapshot);
+                        // 有实体引用时，把「第几张参考图是谁」写进本次提交的提示词：
+                        // 序号与上面 paths 里实体槽位的顺序一致，聊天附带的额外图排在它们之后。
+                        var guided = WebGenerationReferences.WithReferenceGuide(snapshot.Canvas, snapshot.Node, prompt.GetString()!, extra.Length);
+                        if (!string.Equals(guided, prompt.GetString(), StringComparison.Ordinal))
+                            inputs["prompt"] = JsonSerializer.SerializeToElement(guided);
                     }
                     if (isVideo)
                     {

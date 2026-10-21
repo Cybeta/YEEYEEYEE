@@ -15,6 +15,8 @@ YEEYEEYEE.Canvas/dist/
 
 # ── 本机运行时数据（含 DPAPI 密文密钥、最近项目、日志）──
 **/ai-config.json
+# Web 运行期配置与数据库（含 web-ai-config.json 密钥，不入库）
+/runtime/
 recent-projects.json
 startup-media.txt
 agent-diagnostics.log

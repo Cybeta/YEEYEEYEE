@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { errorMessage, request } from '../api'
-import { parseReferenceOption, recordAttachments, recordReferences, referenceOptions, type Asset, type AttachmentSummary } from '../assets'
+import { parseReferenceOption, recordAttachments, recordReferences, referenceOptions, PURPOSE_LABELS, type Asset, type AttachmentSummary } from '../assets'
 import { attachmentFileUrl, withRetry } from './assetImages'
 import { FilmPanel } from './FilmPanel'
 import { chapterIdOf } from '../ChapterView'
@@ -66,8 +66,18 @@ export type InspectorProps = {
    * 不给就不显示那个选择框——与「断开连线」「改类别」同一条规矩：没权限的入口不摆出来。
    */
   onAddReference?: (entityId: string, variantId: string | null) => void
+  /**
+   * 选定某条引用本次要喂的参考图（`attachmentId` 为 null 表示恢复第一张可用图片）。
+   * 与挂引用同一条记录级写入；不给就不显示这个入口。
+   */
+  onSelectReferenceImage?: (entityId: string, variantId: string, versionId: string | null, attachmentId: string | null) => void
   revision?: number
   onRegisterAttachment?: (attachmentId: string, entityId: string, variantId: string) => void
+  /**
+   * 从节点删除一件产物附件（记录级写入）。文件是否移入回收站由服务端判断：
+   * 同一份资产还被别的附件引用时只摘引用。不给就不显示删除按钮。
+   */
+  onDeleteAttachment?: (attachmentId: string, name: string) => void
   /**
    * 画布上点了某条引用徽标：把对应引用的详情展开。
    * `token` 里带着它属于哪个节点（换节点时不能拿旧 token 去开新节点上的同名引用）
@@ -304,6 +314,11 @@ export function InspectorPanel(props: InspectorProps) {
                   key={detail.key}
                   detail={detail}
                   entityId={reference.entityId}
+                  selectedAttachmentId={reference.attachmentId ?? null}
+                  onSelect={props.onSelectReferenceImage && reference.variantId
+                    ? (attachmentId) => props.onSelectReferenceImage!(
+                      reference.entityId, reference.variantId!, reference.variantVersionId ?? null, attachmentId)
+                    : undefined}
                   expanded={openReference === detail.key}
                   onToggle={() => setOpenReference((current) => current === detail.key ? '' : detail.key)}
                 />
@@ -360,6 +375,16 @@ export function InspectorPanel(props: InspectorProps) {
                     {/* 「回挂中」只在任务**已经跑完**、产物正在写进节点时才是真的：
                         运行中的任务写它，会让人以为图马上就有了。 */}
                     {!isJobActive(job.state) && job.attachmentState === 'pending' && <span className="df-dim" style={{ fontSize: 10 }}>产物正在回挂到这个节点…</span>}
+                    {job.generation && (
+                      <span className="df-dim" style={{ fontSize: 10, lineHeight: 1.6 }}>
+                        生成记录：
+                        {job.generation.characterReferences?.length
+                          ? `角色 ${job.generation.characterReferences.map(item => `${item.name}${item.purposeLabel ? `（${item.purposeLabel}）` : ''}`).join('、')}`
+                          : '未选角色'}
+                        {' · '}参考图 {job.generation.referenceImageCount ?? 0} 张
+                        {job.generation.model ? ` · 模型 ${job.generation.model}` : ''}
+                      </span>
+                    )}
                     {reason && <span role="alert" className="df-notice is-error">{reason}</span>}
                   </div>
                 )
@@ -422,6 +447,18 @@ export function InspectorPanel(props: InspectorProps) {
                         : <AttachmentMedia recordId={selected.recordId} attachment={attachment} />}
                       <div className="df-attachment-meta">
                         <a className="df-attachment-name" href={attachmentFileUrl(selected.recordId, attachment.id)} download={attachment.name}>下载 {attachment.name}</a>
+                        {props.onDeleteAttachment && <button
+                          type="button"
+                          className="df-mini-button"
+                          disabled={saving || dirty || !editable}
+                          title={dirty
+                            ? '节点有未保存的草稿，先应用或撤销修改'
+                            : '从节点删除这条附件；文件若仍被其他附件引用则保留'}
+                          onClick={() => {
+                            if (window.confirm(`从节点删除「${attachment.name}」？不会重新生成；文件会移入回收站，若仍被其他附件引用则保留。`))
+                              props.onDeleteAttachment!(attachment.id, attachment.name)
+                          }}
+                        >删除附件</button>}
                         <span className="df-dim" style={{ fontSize: 10 }}>{attachment.source || '来源未记'}</span>
                         {active && <span className="df-dim" style={{ fontSize: 10 }}>当前主预览{attachment.kind === 'Image' ? ' · 点主预览看大图' : ''}</span>}
                         {attachment.kind === 'Image' && props.onRegisterAttachment && <select aria-label={`登记 ${attachment.name} 到实体变体`} className="df-input" value="" disabled={saving || dirty || !editable || !targets.some(t => t.bound)} onChange={event => {
@@ -464,9 +501,11 @@ export function InspectorPanel(props: InspectorProps) {
  * 媒体状态按 `media.id` 分开存：换一条媒体看到的是它自己的状态，不会被上一条的失败挡住；
  * 这一行换了引用（`key` 变）时 React 会重建它，失败状态自然清空。
  */
-function ReferenceRow({ detail, entityId, expanded, onToggle }: {
+function ReferenceRow({ detail, entityId, selectedAttachmentId, onSelect, expanded, onToggle }: {
   detail: ReferenceDetail
   entityId: string
+  selectedAttachmentId: string | null
+  onSelect?: (attachmentId: string | null) => void
   expanded: boolean
   onToggle: () => void
 }) {
@@ -547,7 +586,7 @@ function ReferenceRow({ detail, entityId, expanded, onToggle }: {
                   className={`df-mini-button${item.id === picked?.id ? ' is-active' : ''}`}
                   aria-pressed={item.id === picked?.id}
                   onClick={() => setPickedId(item.id)}
-                >{item.name || item.kind}</button>
+                >{item.name || item.kind}{item.kind === 'Image' && item.purpose ? ` · ${PURPOSE_LABELS[item.purpose] ?? item.purpose}` : ''}</button>
               ))}
             </span>
           )}
@@ -557,7 +596,29 @@ function ReferenceRow({ detail, entityId, expanded, onToggle }: {
             </span>
           )}
           {mediaView}
-          <span className="df-dim" style={{ fontSize: 10 }}>网页端只读引用详情；要改引用请到桌面端进引用画布。</span>
+          {onSelect && detail.media.some((item) => item.kind === 'Image') && (
+            <div className="df-section" style={{ gap: 6 }}>
+              <span className="df-label">本次生成使用的参考图</span>
+              <span className="df-dim" style={{ fontSize: 10 }}>
+                只喂这一张；不同角色的参考图各自绑定，不会混用。不选则沿用第一张可用图片。
+              </span>
+              <div className="df-row df-wrap" style={{ gap: 4 }}>
+                {detail.media.filter((item) => item.kind === 'Image').map((item) => (
+                  <button
+                    key={`use:${item.id}`}
+                    type="button"
+                    className={`df-mini-button${selectedAttachmentId === item.id ? ' is-active' : ''}`}
+                    aria-pressed={selectedAttachmentId === item.id}
+                    onClick={() => onSelect(item.id)}
+                  >{selectedAttachmentId === item.id ? '已选 · ' : '用这张 · '}{item.name || item.kind}{item.purpose ? `（${PURPOSE_LABELS[item.purpose] ?? item.purpose}）` : ''}</button>
+                ))}
+                {selectedAttachmentId && (
+                  <button type="button" className="df-mini-button" onClick={() => onSelect(null)}>恢复第一张</button>
+                )}
+              </div>
+            </div>
+          )}
+          <span className="df-dim" style={{ fontSize: 10 }}>引用资料只读；选参考图会写进这条引用，生成时按它取图。</span>
         </div>
       )}
       {viewer && (

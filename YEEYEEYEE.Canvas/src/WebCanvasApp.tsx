@@ -1593,6 +1593,34 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
     }
   }
 
+  /**
+   * 选定一条引用本次要喂的参考图（记录级写入，与挂引用同一档）。
+   *
+   * 选中的附件必须属于这条引用的实体 / 变体，服务端会拦；这里不做乐观更新，
+   * 写入成功后重取画布，让徽标、检查器与下一次生成看到同一张图。
+   */
+  async function selectReferenceImage(entityId: string, variantId: string, versionId: string | null, attachmentId: string | null) {
+    const target = selected
+    if (!scene || !target) return
+    if (!editable) {
+      setNotice({ kind: 'error', message: '你的账号是只读，改不了画布。' })
+      return
+    }
+    setSaving(true)
+    try {
+      await request(`/api/web/records/${encodeURIComponent(target.recordId)}/reference-selection`, {
+        method: 'PUT',
+        body: JSON.stringify({ baseRevision: scene.revision, entityId, variantId, versionId, attachmentId })
+      })
+      await loadScene({ select: target.recordId })
+      setNotice({ kind: 'success', message: attachmentId ? '已选定这次生成使用的参考图。' : '已恢复使用第一张可用参考图。' })
+    } catch (error) {
+      setNotice({ kind: 'error', message: `选择参考图失败：${errorMessage(error)}` })
+    } finally {
+      setSaving(false)
+    }
+  }
+
   async function registerAttachment(attachmentId: string, entityId: string, variantId: string) {
     if (!scene || !selected || !editable || saving || dirty) return
     const nodeId = selected.recordId
@@ -1604,6 +1632,27 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
       await loadScene({ select: nodeId })
       setNotice({ kind: 'success', message: result.registered ? `图片已登记并提交 v${result.version}，历史版本已保留。` : '图片已经登记，未重复提交版本。' })
     } catch (error) { setNotice({ kind: 'error', message: `登记失败：${errorMessage(error)}` }) }
+    finally { setSaving(false) }
+  }
+
+  /**
+   * 删除节点上的一件产物附件。**只摘引用，不重新生成**；文件是否真的移入回收站由服务端判断——
+   * 同一份资产还被别的附件引用时只摘这一条，避免把别人正在用的图搬走。
+   */
+  async function deleteNodeAttachment(attachmentId: string, name: string) {
+    if (!scene || !selected || !editable || saving || dirty) return
+    const nodeId = selected.recordId
+    setSaving(true)
+    try {
+      const result = await request<{ revision: number; recycled: boolean }>(`/api/web/records/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(attachmentId)}?baseRevision=${scene.revision}`, { method: 'DELETE' })
+      await loadScene({ select: nodeId })
+      setNotice({
+        kind: 'success',
+        message: result.recycled
+          ? `已删除「${name}」，文件已移入回收站。`
+          : `已删除「${name}」；文件未移动（仍被其他附件引用或已不在资产目录）。`
+      })
+    } catch (error) { setNotice({ kind: 'error', message: `删除附件失败：${errorMessage(error)}` }) }
     finally { setSaving(false) }
   }
 
@@ -1778,6 +1827,7 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
                 jobs={jobs}
                 jobsError={jobsError}
                 onRegisterAttachment={editable ? (attachmentId, entityId, variantId) => void registerAttachment(attachmentId, entityId, variantId) : undefined}
+                onDeleteAttachment={editable ? (attachmentId, name) => void deleteNodeAttachment(attachmentId, name) : undefined}
                 onTitle={setTitle}
                 onContent={setContent}
                 onApply={() => void save()}
@@ -1789,6 +1839,9 @@ export function WebCanvasApp({ onSwitchBlocked }: { onSwitchBlocked?: (blocked: 
                 onCategory={editable ? (recordType) => void changeCategory(recordType) : undefined}
                 // 挂设定同样是记录级：能编辑就给。挂完要重新取画布——引用是服务端算出来的那份投影。
                 onAddReference={editable ? (entityId, variantId) => void addReference(entityId, variantId) : undefined}
+                onSelectReferenceImage={editable
+                  ? (entityId, variantId, versionId, attachmentId) => void selectReferenceImage(entityId, variantId, versionId, attachmentId)
+                  : undefined}
               />
             )
             : dockMode === 'settings'

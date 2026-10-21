@@ -265,15 +265,18 @@ public static class GenerationAudit
         var slots = ReferenceImagePicker.ResolveSlots(canvas, node, locatePath);
         foreach (var slot in slots)
         {
+            if (slot.Problem.Length > 0)
+                errors.Add($"引用「{slot.Label}」的参考图选择不可用：{slot.Problem}，请重新选择或补齐图片。");
             if (string.IsNullOrWhiteSpace(slot.Path))
-                errors.Add($"必要引用「{slot.Label}」无可用图片，请补齐所引用版本的图片。");
+                errors.Add($"必要引用「{slot.Label}」无可用参考图，不能退化为纯提示词生成；请补齐所引用版本的图片。");
             if (onlyKeys is not null && !onlyKeys.Contains(slot.Key))
                 errors.Add($"必要引用「{slot.Label}」被取消勾选，禁止过滤必要参考。");
         }
         if (slots.Count > 0 && !supportsReferences)
             errors.Add("当前来源不支持必要参考图，禁止降级为无参考生成。");
         if (referenceCap is { } cap && slots.Count > Math.Max(0, cap))
-            errors.Add($"必要参考共 {slots.Count} 张，超过当前上限 {cap}，禁止裁剪；请更换来源或调整上限。");
+            errors.Add($"提示词需要 {slots.Count} 张参考图，当前模型容量为 {Math.Max(0, cap)} 张，禁止裁剪；"
+                + "请减少必需资产或提高参考图容量。");
         foreach (var status in CanvasNodeVersions.Of(canvas, node).Statuses.Where(s => s.Warn))
             errors.Add($"引用待确认：{status.Describe()}，请先处理版本决策。");
         return errors;
@@ -289,7 +292,7 @@ public static class GenerationAudit
         foreach (var slot in ReferenceImagePicker.ResolveSlots(canvas, node, locatePath))
             if (slot.Path is { } path && !paths.Contains(path, StringComparer.Ordinal))
                 errors.Add($"必要参考「{slot.Label}」未包含在请求中，禁止过滤或降级。");
-        if (paths.Count > cap) errors.Add("请求参考数量超过上限，禁止裁剪。");
+        if (paths.Count > cap) errors.Add($"请求包含 {paths.Count} 张参考图，超过当前容量 {cap} 张，禁止裁剪。");
         if (paths.Any(path => string.IsNullOrWhiteSpace(path))) errors.Add("请求参考路径为空。");
         return errors;
     }

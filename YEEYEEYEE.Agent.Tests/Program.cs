@@ -22,6 +22,7 @@ var tests = new (string Name, Action Run)[]
     ("资产依赖：必要参考过滤、容量、失败隔离与请求快照", AssetDependencyRegression),
     ("资产需求：Agent确认、省略保留、旧数据与预览兼容", AssetRequirementsRegression),
     ("资产提交：缺文件和超容量不发送HTTP请求", ImageReferencesFailBeforeHttp),
+    ("图生图请求：中文模型名不转义、文本字段在图片前、参考图按真实类型提交", ImageProviderKeepsChineseModelAndMultipartContract),
     ("图片诊断：提交异常阶段、底层原因与密钥脱敏", ImageSubmissionFailureDiagnostics),
     ("图片诊断：下载异常阶段与签名URL脱敏", ImageDownloadFailureDiagnostics),
     ("图片诊断：提交及下载超时携带阶段", ImageTimeoutDiagnostics),
@@ -160,6 +161,7 @@ var tests = new (string Name, Action Run)[]
     ("参考图装配：顺序固定 角色→道具→场景、变体只取第一张、超上限要说出丢了谁", ReferenceImagePlanOrdersCapsAndSaysWhatItDropped),
     ("参考图上限：设置 / 池子 / 工作流三处取小，「0」与「没声明」不能混，note 要说对是谁定的", ReferenceCapResolverPicksTheTightestLimit),
     ("参考图手动指定：按实体+变体点名、先筛再裁、一张不勾要说成「你没勾」", ReferenceImagePlanHonoursHandPickedKeys),
+    ("角色参考图选择：按用途选中的那张进请求，缺图明确阻断，换角色不残留上一角色素材", CharacterReferenceSelectionIsHonoured),
     ("ComfyUI 绑定：每个底图入口按顺序各收一张参考图，给不满不拿同一张凑数", BinderFillsEveryImageSlotInOrder),
     ("ComfyUI 绑定：首尾帧、高级控制素材和批量输出写入真实槽位，缺值保留模板", BinderWritesExplicitFramesControlsAndBatch),
     ("ComfyUI 绑定：合集型工作流（几组各自带输出）要按组填，不能把图平铺到前几个入口", BinderFillsImageGroupsInsteadOfFlattening),
@@ -2601,6 +2603,58 @@ static void ImageReferencesFailBeforeHttp()
     Expect(multi.ReferenceCapacity.MaxImages == 3 && multi.Capabilities.Contains(GenerationCapability.MultiReferenceImage), "已识别多参考工作流必须按实际容量声明能力");
     var textOnly = new ComfyUiImageProvider(null!, config, new SessionContext(), new ComfyUiWorkflowSlots());
     Expect(textOnly.ReferenceCapacity.MaxImages == 0 && !textOnly.Capabilities.Contains(GenerationCapability.ImageToImage), "无参考入口不能声明图生图能力");
+}
+
+/// <summary>
+/// 钉住图生图请求的三处现场兼容：中文模型名不转成 \uXXXX（有的网关按字面量路由，会回 404）、
+/// 文本字段排在图片前面（边收边解析的网关先看到图片会断连）、图片按真实 MIME 提交。
+/// </summary>
+static void ImageProviderKeepsChineseModelAndMultipartContract()
+{
+    var root = Path.Combine(Path.GetTempPath(), "yeeeyee-image-request-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var previousAssets = Environment.GetEnvironmentVariable("YEEYEEYEE_ASSET_DIR");
+    Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", root);
+    try
+    {
+        var first = Path.Combine(root, "first.png");
+        var second = Path.Combine(root, "second.png");
+        File.WriteAllBytes(first, new byte[] { 1, 2, 3 });
+        File.WriteAllBytes(second, new byte[] { 4, 5, 6 });
+
+        HttpRequestMessage? captured = null;
+        string? body = null;
+        using var client = new HttpClient(new StubHttpHandler(request =>
+        {
+            captured = request;
+            body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            return JsonResponse("{\"created\":1,\"data\":[{\"b64_json\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==\"}]}");
+        }));
+        var provider = new OpenAiCompatibleImageProvider(new AiProviderConfig
+        {
+            ImageEndpoint = "https://example.invalid/v1", ImageModel = "gpt-image-2(池6)",
+            ImageApiKey = "sk-test", ImageMaxReferenceImages = 2
+        }, client);
+        var result = provider.GenerateAsync(new ImageGenerationRequest
+        {
+            Prompt = "同一角色，另一镜", Width = 1024, Height = 1024,
+            ReferenceImages = new[] { first, second }
+        }).GetAwaiter().GetResult();
+
+        Expect(result.Status == ImageGenerationStatus.Succeeded && captured is not null, "多参考图请求应成功发出：" + result.Error);
+        Expect(captured!.RequestUri!.AbsolutePath.EndsWith("/images/edits"), "有参考图必须走 edits，实际：" + captured.RequestUri);
+        Expect(captured.Content!.Headers.ContentType!.MediaType == "multipart/form-data", "参考图请求必须是 multipart");
+        Expect(body is not null && body.Contains("gpt-image-2(池6)"), "中文模型名必须原样出现在请求体");
+        Expect(body!.IndexOf("\\u6C60", StringComparison.Ordinal) < 0, "模型名不得被转义成 \\uXXXX（部分网关会当成未知模型）");
+        Expect(body.IndexOf("name=\"model\"", StringComparison.Ordinal) < body.IndexOf("name=\"image", StringComparison.Ordinal),
+            "文本字段必须排在图片前面");
+        Expect(body.Contains("Content-Type: image/png"), "参考图必须按真实图片类型提交，不能是 octet-stream");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", previousAssets);
+        try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+    }
 }
 
 static void OneClickUnknownPreflight()
@@ -11340,6 +11394,66 @@ static void ReferenceImagePlanHonoursHandPickedKeys()
 	ReferenceImagePlan none = ReferenceImagePicker.Plan(canvas, board, 3, locate, string.Empty, Array.Empty<string>());
 	Expect(!none.UsesReferences && none.Note.Contains("一张参考图都没勾"),
 		"一张不勾要说清是你没勾，实际：" + none.Note);
+}
+
+/// <summary>
+/// 钉住角色一致性最关键的一段：引用上明确选中的参考图必须原样进请求；
+/// 选了但不可用时明确阻断（不静默退回第一张或纯提示词）；换角色后只带新角色的图。
+/// </summary>
+static void CharacterReferenceSelectionIsHonoured()
+{
+	WorkflowCanvasState canvas = new WorkflowCanvasState();
+	WorkflowEntity lin = new WorkflowEntity { Kind = EntityKind.Character, Name = "林夏" };
+	WorkflowEntityVariant linVariant = lin.CreateVariant("默认", "短发、米色风衣、左眉细疤");
+	WorkflowAttachment linTurnaround = new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "lin-turnaround", Name = "转面图", Purpose = ReferencePurpose.Turnaround };
+	WorkflowAttachment linExpression = new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "lin-expression", Name = "表情表", Purpose = ReferencePurpose.Expression };
+	linVariant.Attachments.Add(linTurnaround);
+	linVariant.Attachments.Add(linExpression);
+
+	WorkflowEntity chen = new WorkflowEntity { Kind = EntityKind.Character, Name = "沈砚" };
+	WorkflowEntityVariant chenVariant = chen.CreateVariant("默认", "长发、藏青外套");
+	WorkflowAttachment chenTurnaround = new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "chen-turnaround", Name = "转面图", Purpose = ReferencePurpose.Turnaround };
+	chenVariant.Attachments.Add(chenTurnaround);
+
+	canvas.Entities.Add(lin);
+	canvas.Entities.Add(chen);
+	Func<WorkflowAttachment, string?> locate = attachment => "C:/assets/" + attachment.Reference + ".png";
+
+	WorkflowNode shot = new WorkflowNode { Title = "分镜 1", Category = NodeCategory.Storyboard };
+	shot.AssetRequirements = new ShotAssetRequirements { Character = AssetNeed.Required, Scene = AssetNeed.None, Prop = AssetNeed.None };
+	NodeReference reference = new NodeReference { EntityId = lin.Id, VariantId = linVariant.Id, AttachmentId = linExpression.Id };
+	shot.References.Add(reference);
+
+	// 1. 选中的表情表必须进请求，而不是排在前面的转面图。
+	ReferenceImagePlan plan = ReferenceImagePicker.Plan(canvas, shot, 3, locate);
+	Expect(plan.Paths.Count == 1 && plan.Paths[0].EndsWith("lin-expression.png"),
+		"要按选中的那张喂参考图，实际：" + string.Join("、", plan.Paths));
+	IReadOnlyList<ReferenceSlot> slots = ReferenceImagePicker.ResolveSlots(canvas, shot, locate);
+	Expect(slots.Single().AttachmentId == linExpression.Id && slots.Single().Purpose == ReferencePurpose.Expression,
+		"槽位要保留附件 ID 与用途，生成记录才能复现");
+	Expect(GenerationAudit.CheckImageAssets(canvas, shot, locate, 3).Count == 0, "选中的图可用时不应阻断");
+
+	// 2. 选的图不在这一版内容里（例如版本回滚 / 素材被移除）：明确阻断，不偷偷换图。
+	Guid missing = Guid.NewGuid();
+	reference.AttachmentId = missing;
+	IReadOnlyList<string> broken = GenerationAudit.CheckImageAssets(canvas, shot, locate, 3);
+	Expect(broken.Any(item => item.Contains("参考图选择不可用")), "选中的图失效要说明原因，实际：" + string.Join("；", broken));
+	Expect(broken.Any(item => item.Contains("不能退化为纯提示词生成")), "缺参考图时不能静默降级，实际：" + string.Join("；", broken));
+	Expect(ReferenceImagePicker.Plan(canvas, shot, 3, locate).UsesReferences == false, "不可用时不得退回第一张图冒充");
+
+	// 3. 换角色：同一条引用改挂沈砚，只带沈砚的图，不能残留林夏的素材。
+	reference.EntityId = chen.Id;
+	reference.VariantId = chenVariant.Id;
+	reference.AttachmentId = chenTurnaround.Id;
+	plan = ReferenceImagePicker.Plan(canvas, shot, 3, locate);
+	Expect(plan.Paths.Count == 1 && plan.Paths[0].EndsWith("chen-turnaround.png"),
+		"换角色后只能带新角色的参考图，实际：" + string.Join("、", plan.Paths));
+	Expect(plan.Paths.All(path => !path.Contains("lin-")), "不得残留上一角色的参考图");
+
+	// 4. 不选图的老引用保持原行为（第一张可用图片），通用流程不被破坏。
+	reference.AttachmentId = null;
+	plan = ReferenceImagePicker.Plan(canvas, shot, 3, locate);
+	Expect(plan.Paths.Count == 1 && plan.Paths[0].EndsWith("chen-turnaround.png"), "没选图时仍取第一张，实际：" + string.Join("、", plan.Paths));
 }
 
 /// <summary>

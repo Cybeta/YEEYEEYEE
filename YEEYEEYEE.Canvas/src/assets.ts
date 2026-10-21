@@ -3,7 +3,12 @@ import type { OperationRecord } from './Protocol/VersionedMessages'
 export type Version = { id: string; number?: number; label?: string; note?: string; description?: string; attachments?: AttachmentSummary[] }
 export type Variant = { id: string; name?: string; description?: string; currentVersion?: number; hasUncommittedChanges?: boolean; attachments?: AttachmentSummary[]; versions?: Version[] }
 export type Asset = { id: string; name: string; core?: string; aliases?: string; kind?: string; variants?: Variant[] }
-export type Reference = { entityId: string; name?: string; kind?: string; variantId?: string; variantVersionId?: string | null; variantLabel?: string; unresolved?: boolean; versions?: Version[] }
+export type Reference = {
+  entityId: string; name?: string; kind?: string; variantId?: string; variantVersionId?: string | null
+  /** 这条引用本次实际使用的参考图（实体附件 ID）。为空表示沿用第一张可用图片。 */
+  attachmentId?: string | null
+  variantLabel?: string; unresolved?: boolean; versions?: Version[]
+}
 
 function hasId(value: unknown): value is { id: string; [key: string]: unknown } {
   return !!value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { id?: unknown }).id === 'string' && !!(value as { id: string }).id.trim()
@@ -28,12 +33,30 @@ function normalizeKind(value: unknown): string {
   }
 }
 
+/** 参考图用途：服务端枚举是数字，界面上要显示中文用途。 */
+export function normalizePurpose(value: unknown): string {
+  if (typeof value === 'string' && value.trim()) return value
+  switch (value) {
+    case 1: return 'Turnaround'
+    case 2: return 'Anchor'
+    case 3: return 'Expression'
+    default: return 'General'
+  }
+}
+
+export const PURPOSE_LABELS: Record<string, string> = {
+  General: '通用参考', Turnaround: '角色转面图', Anchor: '正面全身锚点', Expression: '表情表'
+}
+
+export const PURPOSE_OPTIONS = ['General', 'Turnaround', 'Anchor', 'Expression']
+
 /** 服务端投影的附件元数据（`id` 是身份，路径不在里面：取字节按 ID 走接口）。 */
 function mapAttachments(value: unknown): AttachmentSummary[] {
   return Array.isArray(value)
     ? value.filter(hasId).map((entry) => ({
       id: entry.id, name: typeof entry.name === 'string' ? entry.name : '',
-      kind: normalizeKind(entry.kind), source: typeof entry.source === 'string' ? entry.source : ''
+      kind: normalizeKind(entry.kind), source: typeof entry.source === 'string' ? entry.source : '',
+      purpose: normalizePurpose(entry.purpose)
     }))
     : []
 }
@@ -71,7 +94,7 @@ export function recordReferences(item: OperationRecord): Reference[] {
 }
 
 /** 节点出过的一个产物（图 / 视频 / 音频）。**里面没有路径**：取字节要按 ID 走接口。 */
-export type AttachmentSummary = { id: string; kind: string; name: string; source: string; addedAt?: string }
+export type AttachmentSummary = { id: string; kind: string; name: string; source: string; addedAt?: string; purpose?: string }
 
 /**
  * 读节点的 `record.attachments`（服务端投影的产物元数据）。

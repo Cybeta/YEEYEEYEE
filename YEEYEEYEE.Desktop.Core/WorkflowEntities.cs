@@ -128,6 +128,13 @@ public sealed class NodeReference
     public float X { get; set; } = -1;
     public float Y { get; set; } = -1;
     public Guid? VariantVersionId { get; set; }
+
+    /// <summary>
+    /// 这条引用**这一次**实际要喂的那张参考图（必须是该实体 / 变体下的图片附件）。
+    /// 为空表示沿用旧行为：取这一版内容里的第一张可用图片。
+    /// 明确选了却找不到或不是图片时，生成会被阻断，不会静默退回别的图。
+    /// </summary>
+    public Guid? AttachmentId { get; set; }
 }
 
 public sealed class EntityVariantVersion

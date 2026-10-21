@@ -285,7 +285,12 @@ internal sealed class ProjectCanvasSceneStore
             string.Join("\n", nodes.Select(n => $"{n.Id} | {n.Category} | {n.Title} | {n.Content} | assetRequirements={JsonSerializer.Serialize(n.AssetRequirements)} | references={JsonSerializer.Serialize(n.References)}")),
             string.Join("\n", library.Select(e => $"{e.Id} | {e.Kind} | {e.Name} | variants=" + string.Join(",", e.Variants.Select(v => $"{v.Id}:v{v.CurrentVersion}:imageAvailable={v.Attachments.Any(a => a.Kind == AttachmentKind.Image && WebGenerationReferences.Locate(a) is not null)}")))),
             "", "", JsonSerializer.Serialize(canvas.WorkTree), TargetIdentity(canvas, selected));
-        return (current.Revision, $"当前章节ID：{chapterId ?? "全部"}；基准修订：{current.Revision}\n" + context.Describe(24000, includeDesktopSkills: false) + "\nWeb能力边界：生成技能使用Web聊天提供的invoke_skill协议与服务端预授权；模型不能声称调用了桌面技能或任务已完成。write_file不支持。审批模式只预览，用户提交后才写盘。实体修改受项目资源权威校验约束。");
+        return (current.Revision, $"当前章节ID：{chapterId ?? "全部"}；基准修订：{current.Revision}\n" + context.Describe(24000, includeDesktopSkills: false)
+            + "\nWeb引用强制要求：创建或修改分镜节点时，actions 必须同时给出 assetRequirements 与 entityTargets。"
+            + "assetRequirements 中每一类为 required 的资产（角色/场景/道具），entityTargets 必须至少包含一个同类型的资源视觉内容实体；"
+            + "名称或 ID 只能取上方「资源视觉内容」清单里的现有项，不要新建场景/道具画布节点来代替引用。"
+            + "信息不足时把该类设为 unknown 并输出 ask，不能留空或凭标题猜测。"
+            + "\nWeb能力边界：生成技能使用Web聊天提供的invoke_skill协议与服务端预授权；模型不能声称调用了桌面技能或任务已完成。write_file不支持。审批模式只预览，用户提交后才写盘。实体修改受项目资源权威校验约束。");
     }
 
     /// <summary>
@@ -365,6 +370,28 @@ internal sealed class ProjectCanvasSceneStore
         try { CheckProjectAuthority(next); }
         catch (InvalidDataException) { errors.Add("动作违反项目资源库权威约束"); }
         var comparison = CanvasPreviewBuilder.Compare(current.State.Canvas, canvas);
+        // Web 端硬校验：本次新增/修改的分镜，凡 assetRequirements 标为 required 的类别，
+        // 必须真的挂了同类型引用。只靠提示词约束模型并不可靠；这里把「漏挂」挡在预览/提交之前，
+        // 让 Agent 拿到明确错误后重出动作，而不是等到出图时才被 GenerationAudit 拦下。
+        var touchedShots = comparison.AddedNodes
+            .Concat(canvas.Nodes.Where(node => comparison.UpdatedNodeIds.Contains(node.Id)))
+            .Where(node => node.Category == NodeCategory.Storyboard)
+            .Distinct()
+            .ToList();
+        foreach (var shot in touchedShots)
+        {
+            var kinds = shot.References
+                .Select(reference => canvas.FindEntity(reference.EntityId)?.Kind)
+                .Where(kind => kind is not null)
+                .Select(kind => kind!.Value)
+                .ToHashSet();
+            foreach (var kind in Enum.GetValues<EntityKind>())
+            {
+                if (shot.AssetRequirements is not { } requirements || requirements.For(kind) != AssetNeed.Required || kinds.Contains(kind)) continue;
+                errors.Add($"分镜「{shot.Title}」的{WorkflowEntity.KindName(kind)}资产需求为 required，"
+                    + "但动作没有挂上对应引用；请在 entityTargets 中补上资源库实体，或改为 unknown 并 ask。");
+            }
+        }
         static List<object> Nodes(WorkflowCanvasState state, IEnumerable<Guid> ids)
         {
             var selected = ids.Select(id => id.ToString()).ToHashSet();
@@ -539,6 +566,44 @@ internal sealed class ProjectCanvasSceneStore
                 return (canvas, null);
             },
             (next, bytes) => new { revision = Revision(bytes), record = ProjectRecord(next.Canvas, nodeId.ToString()) });
+    }
+
+    /// <summary>
+    /// 给一条已有的引用选定**这一次实际要喂的参考图**（必须是该实体 / 变体 / 版本下的图片附件）。
+    ///
+    /// 为什么绑在引用上而不是生成请求里：引用才是「这个角色在这一镜里」的稳定身份，
+    /// 把图选在引用上，重新生成、换镜头、别人打开同一张画布时用的都还是同一张；
+    /// 只写在一次请求里的话，下一个人重出就会悄悄换脸。传 null 表示恢复旧行为（取第一张可用图片）。
+    /// 选中的附件必须真的属于这条引用解析出来的内容，否则就成「挂着角色 A、喂角色 B 的图」。
+    /// </summary>
+    public IResult SelectReferenceImage(long baseRevision, Guid nodeId, Guid entityId, Guid variantId,
+        Guid? versionId, Guid? attachmentId)
+    {
+        return Write(baseRevision, current =>
+            {
+                var canvas = current.Canvas;
+                var node = canvas.Nodes.SingleOrDefault(item => item.Id == nodeId);
+                if (node is null) return (null, Error(404, "RECORD_NOT_FOUND", "该记录不是可编辑节点"));
+                if (node.IsLocked) return (null, Error(409, "NODE_LOCKED", "节点已锁定"));
+                var reference = node.References.FirstOrDefault(item => item.EntityId == entityId &&
+                    item.VariantId == variantId && item.VariantVersionId == versionId);
+                if (reference is null)
+                    return (null, Error(404, "REFERENCE_NOT_FOUND", "这个节点没有这条引用，请先挂上设定"));
+                if (attachmentId is { } chosen)
+                {
+                    var content = canvas.ResolveReferenceContent(reference);
+                    if (content is null)
+                        return (null, Error(409, "REFERENCE_BROKEN", "引用已失效，无法选择参考图"));
+                    var attachment = content.Attachments.FirstOrDefault(item => item.Id == chosen);
+                    if (attachment is null)
+                        return (null, Error(404, "ASSET_ATTACHMENT_NOT_FOUND", "所选参考图不属于这条引用的设定"));
+                    if (attachment.Kind != AttachmentKind.Image)
+                        return (null, Error(400, "REFERENCE_NOT_IMAGE", "所选附件不是图片，不能作为参考图"));
+                }
+                reference.AttachmentId = attachmentId;
+                return (canvas, null);
+            },
+            (next, bytes) => new { revision = Revision(bytes), selected = attachmentId?.ToString(), record = ProjectRecord(next.Canvas, nodeId.ToString()) });
     }
 
     /// <summary>
@@ -1010,6 +1075,46 @@ internal sealed class ProjectCanvasSceneStore
             node.ExecutionStatus = NodeExecutionStatus.Completed;
             return (current.Canvas, null);
         }, (_, bytes) => new { attached = true, alreadyAttached = false, attachmentId, revision = Revision(bytes) });
+    }
+
+    /// <summary>
+    /// 从节点上删除一件产物附件。
+    ///
+    /// 与「采用产物」相反：那条只追加，这条只摘引用。文件不是无条件删除——同一份资产可能还被
+    /// 别的节点或同节点的其它附件引用（例如同一张图被多次登记），这时只摘这一条引用；
+    /// 确认没人再用之后才移入资产目录下的 <c>_recycle</c>，与桌面端的删除语义保持一致。
+    /// 移不动文件不算失败：引用已经摘掉就如实返回 <c>recycled=false</c>，由界面说明文件未移动。
+    /// </summary>
+    public IResult RemoveAttachment(long baseRevision, Guid nodeId, Guid attachmentId)
+    {
+        string? reference = null;
+        var shouldRecycle = false;
+        var recycled = false;
+        return Write(baseRevision, current =>
+        {
+            var node = current.Canvas.Nodes.FirstOrDefault(n => n.Id == nodeId);
+            if (node is null) return (null, Error(404, "RECORD_NOT_FOUND", "节点不存在"));
+            if (node.IsLocked) return (null, Error(409, "NODE_LOCKED", "节点已锁定"));
+            var index = node.Attachments.FindIndex(a => a.Id == attachmentId);
+            if (index < 0) return (null, Error(404, "ATTACHMENT_NOT_FOUND", "这条附件不在节点上"));
+            reference = node.Attachments[index].Reference;
+            node.Attachments.RemoveAt(index);
+            // 摘掉之后再看整张画布：还有人引用同一份文件就只摘引用，不搬文件。
+            var shared = current.Canvas.Nodes.Any(other => other.Attachments.Any(a =>
+                string.Equals(a.Reference, reference, StringComparison.Ordinal)));
+            shouldRecycle = !shared && !string.IsNullOrWhiteSpace(reference);
+            return (current.Canvas, null);
+        }, (next, bytes) => new { revision = Revision(bytes), nodeId, attachmentId, removed = true, recycled },
+        // 文件只在画布**确认落盘之后**才搬：保存失败时引用还在，文件不能先走。
+        // 与读字节同一条边界：只允许资产目录或本项目目录内的文件，别让一条被构造出来的引用
+        // 把机器上任意路径的文件搬进回收站。
+        () =>
+        {
+            if (!shouldRecycle) return;
+            var file = AssetStore.Resolve(reference);
+            if (file is not null && InsideAllowedRoots(file))
+                recycled = AssetRecycle.Move(file) is not null;
+        });
     }
 
     public async Task<IResult> Update(string recordId, HttpRequest request)

@@ -1,7 +1,9 @@
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Unicode;
 using YEEYEEYEE.Core;
 using YEEYEEYEE.Host;
 
@@ -406,6 +408,11 @@ public sealed class UnconfiguredImageProvider : IImageProvider
 /// </summary>
 public sealed class OpenAiCompatibleImageProvider : IImageProvider
 {
+    /// <summary>
+    /// 请求体里的中文模型名按原样发送，不转成 \uXXXX。部分第三方网关按原始字面量匹配模型名，
+    /// 转义后的写法会被判成未知模型（表现为 404），而 JSON 语义上两者其实一样。
+    /// </summary>
+    private static readonly JsonSerializerOptions PayloadJson = new() { Encoder = JavaScriptEncoder.Create(UnicodeRanges.All) };
     private readonly HttpClient http;
     private readonly AiProviderConfig config;
 
@@ -451,7 +458,8 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
             return Failed("参考图不存在或路径为空，禁止过滤参考后降级生成。");
         var references = request.ReferenceImages.ToList();
         if (references.Count > 0 && (config.ImageMaxReferenceImages <= 0 || references.Count > config.ImageMaxReferenceImages))
-            return Failed("参考图数量超过接口声明容量，禁止裁剪生成。");
+            return Failed($"请求包含 {references.Count} 张参考图，超过接口声明的容量 {Math.Max(0, config.ImageMaxReferenceImages)} 张，禁止裁剪生成；"
+                + "请减少必需资产或提高参考图容量。");
         var useReference = references.Count > 0;
         // 每次请求的模型名优先于设置里的默认模型：池子技能靠它把「生图池1 / 生图池2」区分开。
         var model = string.IsNullOrWhiteSpace(request.Model) ? config.ImageModel : request.Model;
@@ -492,6 +500,10 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
         try
         {
             using var message = new HttpRequestMessage(new HttpMethod(method), url);
+            // 部分第三方图像站点（如 anyaiapi）的网关会拒绝没有 User-Agent 的请求并回 404。
+            // 这不是鉴权问题，带上一个可识别的 UA 才能拿到真实响应。
+            message.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (compatible; YEEYEEYEE/1.0)");
+            message.Headers.TryAddWithoutValidation("Accept", "application/json");
             ApplyAuth(message, apiKey, authStyle);
 
             if (useReference)
@@ -500,17 +512,26 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
                 // 多张参考图按 image[] 重复提交；实际能吃几张由所用模型决定。
                 var form = new MultipartFormDataContent();
                 var field = references.Count > 1 ? "image[]" : "image";
-                foreach (var referencePath in references)
-                {
-                    var imageBytes = await File.ReadAllBytesAsync(referencePath, cancellationToken);
-                    var file = new ByteArrayContent(imageBytes);
-                    file.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-                    form.Add(file, field, Path.GetFileName(referencePath));
-                }
+                // 文本字段放前面、图片放后面：有的网关边收边解析，先看到 image 再看到 model
+                // 会直接断开连接（表现为「复制请求体时连接被重置」）。
                 form.Add(new StringContent(model), "model");
                 form.Add(new StringContent(ComposePrompt(request.Prompt, request.NegativePrompt)), "prompt");
                 form.Add(new StringContent(request.SizeText), "size");
                 form.Add(new StringContent("1"), "n");
+                foreach (var referencePath in references)
+                {
+                    var imageBytes = await File.ReadAllBytesAsync(referencePath, cancellationToken);
+                    var file = new ByteArrayContent(imageBytes);
+                    // 按扩展名给出真实图片类型：application/octet-stream 会被部分网关按未知文件拒收。
+                    file.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(
+                        Path.GetExtension(referencePath).ToLowerInvariant() switch
+                        {
+                            ".jpg" or ".jpeg" => "image/jpeg",
+                            ".webp" => "image/webp",
+                            _ => "image/png"
+                        });
+                    form.Add(file, field, Path.GetFileName(referencePath));
+                }
                 message.Content = form;
             }
             else
@@ -522,7 +543,10 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
                     size = request.SizeText,
                     n = 1
                 };
-                message.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                // 明确用 application/json（不带 charset）：有的网关按 Content-Type 精确匹配，
+                // 带 charset 会被当成不支持的媒体类型。
+                message.Content = new ByteArrayContent(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload, PayloadJson)));
+                message.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
             }
 
             stage = "提交请求";

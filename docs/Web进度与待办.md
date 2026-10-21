@@ -12,7 +12,7 @@
 | 聊天动作 | readonly / approval / auto；画布动作预览、租约及修订检查后提交、满足修订条件时撤销；支持受限技能调用 | `WebChatApi.cs`、`AgentActions.cs` |
 | 聊天技能参数与引用 | 技能声明字符串/数字/布尔/枚举/数组/对象六类参数，前端按声明渲染编辑器、服务端按声明校验（`SKILL_PARAM_UNKNOWN`/`SKILL_PARAM_TYPE`/`SKILL_PARAM_INVALID`/`SKILL_PARAM_REQUIRED`/`SKILL_INPUT_UNSUPPORTED`），参数落到执行层输入；人物/场景/道具/项目节点实体引用按 ID 解析并回填类型、显示名与版本，随消息保存回显 | `WebChatSkillParameters.cs`、`WebChatApi.cs`、`WebSkillJobApi.cs`、`ProjectCanvasSceneStore.cs`、`chatSkillParams.ts`、`ChatPanel.tsx` |
 | 资源管理 | 实体、变体、版本编辑/提交/回退，媒体添加/改名/移除；删除前检查跨画布与历史引用 | `WebEntityApi.cs`、`EntityManager.tsx` |
-| 生成与成片 | 技能任务、任务状态和结果附件回写；选择至少两个镜头按序无损拼接，列出和下载成片版本 | `WebSkillJobApi.cs`、`WebJobAttachmentService.cs`、`FilmPanel.tsx` |
+| 生成与成片 | 技能任务、任务状态和结果附件回写；选择至少两个镜头按序无损拼接，列出和下载成片版本；节点产物附件可删除，文件移入资产目录 `_recycle`（仍被其它附件引用时只摘这一条引用） | `WebSkillJobApi.cs`、`WebJobAttachmentService.cs`、`FilmPanel.tsx`、`WebSceneApi.cs`、`ProjectCanvasSceneStore.cs` |
 | 质量判档（可选） | 默认关；整批成功后先做本地坏图筛查，再由读图模型按提示词与负面词打分，档位/裂纹按 Desktop 规则展示；结果按任务与产物下标保存，失败或超时不影响看图与采用 | `WebImageQuality.cs`、`WebImageProbe.cs`、`shell/imageQuality.ts`、`GachaReveal.tsx` |
 | 管理设置 | 管理员模型增删改、选用、清密钥和请求测试；媒体配置、技能及工作流管理 | `WebSettingsApi.cs`、`ModelSettings.tsx`、`SkillSettings.tsx` |
 
@@ -388,6 +388,13 @@
 - 稳定性：修复后 `--chat-only` 1/1、完整 runner 3/3 通过（每次都会经过 mixed 的 readonly/approval/auto）。修复前 2 次完整运行中失败 1 次；3 次通过不能证明所有机器上彻底消除时序波动，但已把窗口从“完成回调全程”缩小到“状态落库到释放键之间的极短尾部”，与既有审批分支使用同一条件。若回调因拿不到键而跳过，新的等待会以 `skill did not settle` 失败，不会静默放过。
 - 影响范围：仅 `YEEYEEYEE.Web.Tests/ChatRegression.cs` 变化；产品源码与 Web 发行包未变，包 SHA-256 仍为 `92B78C53A3C916E2A9348DFE3508073823E08A93263DC55DE23FA7296B6D8AC7`，无需重建，并已随 `v0.1.5.5` Release 上传。
 
+### 2026-10-21 Agent 创建分镜必须挂引用
+
+- 提示词：`ProjectCanvasSceneStore.AgentContextSnapshot` 在 Web 聊天上下文末尾追加「Web引用强制要求」——分镜动作必须同时给出 `assetRequirements` 与 `entityTargets`；`required` 的每一类至少绑定一个同类型资源视觉内容实体，名称/ID 只能取上下文里的现有项，信息不足要设 `unknown` 并 `ask`。
+- 硬校验：`ProjectCanvasSceneStore.PreviewActions` 在对比出本次新增/修改的分镜后逐类检查；`required` 却拿不到同类型引用时直接写进预检错误，审批与自动提交都过不去，Agent 会收到具体分镜名与资产类型的提示。
+- 真实链路（demo 项目、真实模型）：创建 S09 输出 `assetRequirements{character:required,scene:required,prop:required}` 与 `entityTargets[CC,DP,AI 办公室夜景,折叠便签]`，预检无错误；故意不挂引用创建 S10 时返回三条「分镜「S10 校验镜」的X资产需求为 required，但动作没有挂上对应引用」；显式三项 none 且无引用创建 S11 时预检无错误；只改 S07 提示词、需求保持 character/scene required + prop none 时预检也无错误。全程只是预览，画布修订保持 `178369959253851`、节点仍为 12 个，测试会话已删除。
+- 回归用例 `YEEYEEYEE.Web.Tests/AgentReferenceRegression.cs`（`--agent-reference-only`）覆盖「required 漏挂被拒 / 显式 none 不误报 / 已有引用视为满足」。首次执行失败，原因是用例自身的环境准备缺两步：`ProjectContext.Create` 不建 `project` 子目录（Web 创建项目时由 API 补建），且被引用的角色没有放进画布快照，`PreviewActions` 直接以「画布只读或有未解决校验问题」拒绝。补上目录与 `canvas.Entities` 后通过：`Agent reference passed: required without reference rejected, none and existing references accepted.`
+
 ### 未覆盖与限制
 
 - `dataFormat` 是发行清单声明的整数，不是对 SQLite 架构的自动探测；清单缺失或人为改写时，脚本会拒绝自动回滚，这是有意保守。
@@ -518,6 +525,7 @@ Web 控制台回归包含认证权限、画布保存和锁、项目与多画布�
 
 ## 未完成与后续
 
+- [ ] 项目宣传：规划并完成 YEEYEEYEE 项目的对外宣传内容与发布。
 - [x] Web 官方导出已用真实 ComfyUI 0.37.0 / 官方前端 1.52.7 验收：隔离 `*.localhost` 安全上下文加载官方前端、导出 API、真实生成并下载。仍需：正式隔离域名/通配 DNS/TLS 终止、不同前端版本与更广自定义节点/模型组合；生产必须 HTTPS（非 localhost 的 HTTP 会因无 `crypto.subtle` 明确失败）。
 - [x] 聊天技能的任意声明参数、人物/场景/道具/项目节点实体引用与更多附件类型已接通声明、前端编辑、提交、后端校验、执行层读取与错误码返回，并有前后端回归；本批已完成**真实浏览器验收**（隔离实例 + 可控模型 fixture：六类参数中字符串/数字/枚举/数组在浏览器上编辑提交并核对到执行层与 provider 请求、四类实体引用选择/回显/无效引用明确拒绝、六种附件上传/回显/预览或降级/下载/权限边界、刷新与切换画布后信息正确、失败重试）。仍未覆盖：布尔与对象参数没有内置技能声明（无界面控件）、真实 ComfyUI 与真实视频服务（任务在 provider 处失败，只验证到执行层输入）、以及真实模型据此改变出图条件的验收。
 - [x] Web 开奖第一阶段已接入：浏览器偏好、卡背候选区、整批终态后主动开奖、React/CSS 揭晓动画、跳过/关闭重开、桌面与手机/横屏/减少动态效果、现有采用接口与成功收起/失败保留、批次替换与旧回包隔离。前端类型检查与 41 项直接受影响用例通过；浏览器（真实构建 + mock 接口）在桌面、竖屏与横屏走通开奖、跳过、选中与采用收起。仍未实现：质量判档、裂纹卡自动重出、批次持久化、未采用文件回收；真实 ComfyUI 出图与真实采用回写因本机 8188 无服务而未验证（2026-10-18 后补环境即可按同一路径复验）。

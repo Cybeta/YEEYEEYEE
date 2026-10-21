@@ -73,6 +73,10 @@ Web 端适合浏览器访问和多人协作，提供：
 
 Web 端的真实模型、浏览器视口和 mock 交互证据在 [Web 进度与待办](docs/Web进度与待办.md) 中分开记录。
 
+### 示例项目
+
+[`demo-projects/claude-covers-deepseek`](demo-projects/claude-covers-deepseek) 是 Web 端演示项目，来自《Claude 代班 DeepSeek》2 分钟剧本：9 个节点（Start + S01–S08）、CC/DP 角色库和配套参考图。把 `YEEYEEYEE__WebProjectsDirectory` 指向 `demo-projects` 后即可在项目列表里打开。
+
 ## ComfyUI
 
 桌面设置页粘贴 ComfyUI 首页地址并测试连接：

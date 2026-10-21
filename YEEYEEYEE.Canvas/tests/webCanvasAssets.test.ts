@@ -99,9 +99,26 @@ describe('WebCanvas assets from project entities.json', () => {
     // 每个历史版本自己的媒体也要读得出来（锁定版本的引用就是照它取字节的），
     // 且数字种类要归一成 Image / Video——否则界面上会一律显示「不能预览」。
     expect(mapped.variants?.[0].versions?.[0].attachments).toEqual([
-      { id: 'h1', name: '历史图', kind: 'Image', source: '' },
-      { id: 'h2', name: '历史视频', kind: 'Video', source: '' }
+      { id: 'h1', name: '历史图', kind: 'Image', source: '', purpose: 'General' },
+      { id: 'h2', name: '历史视频', kind: 'Video', source: '', purpose: 'General' }
     ])
+  })
+
+  it('keeps character reference purpose and the reference-level image selection', () => {
+    const withPurpose = mapAssets({ entities: [{ id: 'e', name: '林夏', kind: 'Character', variants: [{
+      id: 'v', name: '默认', attachments: [
+        { id: 'turnaround', name: '转面图', kind: 0, purpose: 1 },
+        { id: 'expression', name: '表情表', kind: 0, purpose: 3 }
+      ]
+    }] }] }).entities[0]
+    expect(withPurpose.variants?.[0].attachments).toEqual([
+      { id: 'turnaround', name: '转面图', kind: 'Image', source: '', purpose: 'Turnaround' },
+      { id: 'expression', name: '表情表', kind: 'Image', source: '', purpose: 'Expression' }
+    ])
+    // 节点引用上的 attachmentId 是稳定身份：换角色 / 换镜头后仍按它取图。
+    expect(recordReferences({ recordId: 'node', recordType: 'Shot', record: { references: [
+      { entityId: 'e', variantId: 'v', attachmentId: 'expression' }
+    ] } })[0].attachmentId).toBe('expression')
   })
 
   it('treats a missing attachments field as none (most nodes have no products)', () => {

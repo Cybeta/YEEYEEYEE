@@ -416,7 +416,7 @@ internal static class WebSettingsApi
                     var root = ModelRoot();
                     string Read(string key) => root[key]?.GetValue<string>() ?? "";
                     return Results.Json(new { revision = ModelRevision(), imageEndpoint = Read("ImageEndpoint"),
-                        imageModel = Read("ImageModel"), imageProxyUrl = Read("ImageProxyUrl"), videoProxyUrl = Read("VideoProxyUrl"), imageMaxReferenceImages = root["ImageMaxReferenceImages"]?.GetValue<int>() ?? 1,
+                        imageModel = Read("ImageModel"), imageProxyUrl = Read("ImageProxyUrl"), videoProxyUrl = Read("VideoProxyUrl"), imageMaxReferenceImages = root["ImageMaxReferenceImages"]?.GetValue<int>() ?? 9,
                         comfyUiBaseUrl = Read("ComfyUiBaseUrl"),
                         comfyUiCheckpoint = Read("ComfyUiCheckpoint"), videoEndpoint = Read("VideoEndpoint"),
                         videoModel = Read("VideoModel"), videoDefaultSeconds = root["VideoDefaultSeconds"]?.GetValue<int>() ?? 0,

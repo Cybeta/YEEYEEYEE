@@ -4,6 +4,14 @@ using YEEYEEYEE.Desktop;
 
 namespace YEEYEEYEE.Web;
 
+/// <summary>
+/// 一次生成实际采用的参考图记录。字段名直接落进任务输入（JSON），供复现与排查：
+/// 哪个实体 / 变体、哪张附件、用途、文件路径，以及作为辅助约束的外观描述。
+/// </summary>
+internal sealed record ReferenceSelectionRecord(
+    string entityId, string name, string kind, string variantId, string versionId,
+    string attachmentId, string purpose, string purposeLabel, string path, string description);
+
 internal static class WebGenerationReferences
 {
     internal static string? Locate(WorkflowAttachment attachment)
@@ -64,8 +72,55 @@ internal static class WebGenerationReferences
         var paths = ReferenceImagePicker.ResolveSlots(target.Canvas, target.Node, Locate).Select(s => s.Path).Where(p => p is not null).Cast<string>().Concat(extra).ToArray();
         errors = GenerationAudit.CheckImageSubmission(target.Canvas, target.Node, Locate, paths, capacity);
         if (errors.Count > 0 || paths.Length > capacity)
-            throw new InvalidDataException(errors.Count > 0 ? string.Join("；", errors) : "参考图片数量超过模型容量，不能裁剪");
+            throw new InvalidDataException(errors.Count > 0 ? string.Join("；", errors)
+                : $"请求包含 {paths.Length} 张参考图，超过模型容量 {capacity} 张，不能裁剪；请减少必需资产或提高参考图容量。");
         return paths;
+    }
+
+    /// <summary>
+    /// 有实体引用时，把「第几张参考图是谁、只许用来控制什么」写进提示词。
+    /// 序号与 <see cref="ReferenceImagePicker.ResolveSlots"/> 的顺序一致（角色 → 道具 → 场景），
+    /// 也就是模型实际收到的图片顺序；不在这里另算一份，否则迟早会和装配结果错位。
+    /// 提示词里已经手写过 Reference image 1 时原样保留，不重复追加。
+    /// </summary>
+    internal static string WithReferenceGuide(WorkflowCanvasState canvas, WorkflowNode node, string prompt, int trailingCount)
+    {
+        if (prompt.Contains("Reference image 1:", StringComparison.OrdinalIgnoreCase)) return prompt;
+        var guide = ReferenceGuide(canvas, node, trailingCount);
+        return guide.Length == 0 ? prompt : prompt.TrimEnd() + "\n\n" + guide;
+    }
+
+    private static string ReferenceGuide(WorkflowCanvasState canvas, WorkflowNode node, int trailingCount)
+    {
+        if (node.References.Count == 0) return string.Empty;
+
+        var slots = ReferenceImagePicker.ResolveSlots(canvas, node, Locate)
+            .Where(slot => !string.IsNullOrWhiteSpace(slot.Path)).ToList();
+        if (slots.Count == 0) return string.Empty;
+
+        var contents = canvas.ResolveReferencePairs(node)
+            .Where(pair => pair.Content is not null)
+            .GroupBy(pair => ReferenceCandidate.KeyOf(pair.Reference), StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().Content!, StringComparer.Ordinal);
+
+        var lines = new List<string>();
+        for (var index = 0; index < slots.Count; index++)
+        {
+            contents.TryGetValue(slots[index].Key, out var content);
+            var name = string.IsNullOrWhiteSpace(content?.Entity.Name) ? slots[index].Label : content.Entity.Name;
+            var usage = content?.Entity.Kind switch
+            {
+                EntityKind.Character => $"character reference for {name}; use it only for face, hair, body proportions, clothing and accessories",
+                EntityKind.Scene => $"scene reference for {name}; use it only for environment layout, lighting, props and color atmosphere",
+                EntityKind.Prop => $"prop reference for {name}; use it only for its shape, material, color and details",
+                _ => $"reference for {name}"
+            };
+            lines.Add($"Reference image {index + 1}: {usage}.");
+        }
+        lines.Add("Do not swap these roles: never use a scene reference to redesign a character.");
+        if (trailingCount > 0)
+            lines.Add($"{trailingCount} additional reference image(s) follow; treat them only as supporting material.");
+        return string.Join("\n", lines);
     }
 
     internal static void RecordEvidence(Dictionary<string, JsonElement> inputs, string[] paths,
@@ -74,8 +129,32 @@ internal static class WebGenerationReferences
         inputs["referenceImages"] = JsonSerializer.SerializeToElement(paths);
         inputs["referenceImageHashes"] = JsonSerializer.SerializeToElement(paths.Distinct(StringComparer.Ordinal)
             .ToDictionary(p => p, p => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(p))), StringComparer.Ordinal));
-        if (target is { } snapshot)
-            inputs["sourceFingerprints"] = JsonSerializer.SerializeToElement(ReferenceStaleness.Snapshot(snapshot.Canvas, snapshot.Node));
+        if (target is not { } snapshot) return;
+        inputs["sourceFingerprints"] = JsonSerializer.SerializeToElement(ReferenceStaleness.Snapshot(snapshot.Canvas, snapshot.Node));
+        // 生成记录：这次用了哪个角色、哪张参考图（及其用途）、外观描述与模型，出了问题能按记录复现。
+        // 角色的外观描述只作为**辅助约束**记录，不改写用户提示词，避免提示词与参考图互相打架。
+        var selections = ReferenceImagePicker.ResolveSlots(snapshot.Canvas, snapshot.Node, Locate);
+        var pairs = snapshot.Canvas.ResolveReferencePairs(snapshot.Node)
+            .GroupBy(pair => ReferenceCandidate.KeyOf(pair.Reference), StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().Content, StringComparer.Ordinal);
+        var records = selections.Select(slot =>
+        {
+            pairs.TryGetValue(slot.Key, out var content);
+            return new ReferenceSelectionRecord(
+                content?.Entity.Id.ToString() ?? string.Empty,
+                content?.Entity.Name ?? slot.Label,
+                content?.Entity.Kind.ToString() ?? string.Empty,
+                content?.Variant.Id.ToString() ?? string.Empty,
+                content?.Version?.Id.ToString() ?? string.Empty,
+                slot.AttachmentId?.ToString() ?? string.Empty,
+                slot.Purpose.ToString(),
+                ReferencePurposes.Name(slot.Purpose),
+                slot.Path ?? string.Empty,
+                content?.Description?.Trim() ?? string.Empty);
+        }).ToList();
+        inputs["referenceSelections"] = JsonSerializer.SerializeToElement(records);
+        inputs["characterReferences"] = JsonSerializer.SerializeToElement(
+            records.Where(record => record.kind == nameof(EntityKind.Character)).ToList());
     }
 
     internal static Dictionary<string, string> Fingerprints(IReadOnlyDictionary<string, JsonElement> inputs) =>

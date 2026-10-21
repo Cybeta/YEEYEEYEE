@@ -66,6 +66,24 @@ if (args.Contains("--attachment-registration-only"))
     return;
 }
 
+if (args.Contains("--attachment-removal-only"))
+{
+    AttachmentRemovalRegression.Run();
+    return;
+}
+
+if (args.Contains("--agent-reference-only"))
+{
+    AgentReferenceRegression.Run();
+    return;
+}
+
+if (args.Contains("--character-reference-only"))
+{
+    CharacterReferenceRegression.Run();
+    return;
+}
+
 if (args.Contains("--job-attach-only"))
 {
     JobAttachRegression.Run();

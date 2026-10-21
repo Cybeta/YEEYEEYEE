@@ -42,6 +42,50 @@ export type NodeJob = {
    * 没有结果等于没判过，不能拿默认档补上。
    */
   quality?: JobQuality[]
+  /** 生成记录：提示词、模型、实际使用的角色与参考图（用于复现与排查）。 */
+  generation?: JobGeneration
+}
+
+export type JobGenerationReference = {
+  entityId: string
+  name: string
+  kind: string
+  variantId: string
+  attachmentId: string
+  purposeLabel: string
+  path: string
+  description: string
+}
+
+export type JobGeneration = {
+  prompt?: string
+  model?: string
+  characterReferences?: JobGenerationReference[]
+  referenceSelections?: JobGenerationReference[]
+  referenceImageCount?: number
+}
+
+function parseGeneration(value: unknown): JobGeneration | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const row = value as Record<string, unknown>
+  const references = (input: unknown): JobGenerationReference[] | undefined => {
+    if (!Array.isArray(input)) return undefined
+    return input.flatMap((entry): JobGenerationReference[] => {
+      if (!entry || typeof entry !== 'object') return []
+      const item = entry as Record<string, unknown>
+      const text = (name: string) => typeof item[name] === 'string' ? item[name] as string : ''
+      if (!text('entityId') && !text('name')) return []
+      return [{ entityId: text('entityId'), name: text('name'), kind: text('kind'), variantId: text('variantId'),
+        attachmentId: text('attachmentId'), purposeLabel: text('purposeLabel'), path: text('path'), description: text('description') }]
+    })
+  }
+  return {
+    prompt: typeof row.prompt === 'string' ? row.prompt : undefined,
+    model: typeof row.model === 'string' ? row.model : undefined,
+    characterReferences: references(row.characterReferences),
+    referenceSelections: references(row.referenceSelections),
+    referenceImageCount: typeof row.referenceImageCount === 'number' ? row.referenceImageCount : undefined
+  }
 }
 
 /** 任务到这一步不会再变，界面该停了。取消算终态，但它**不是失败**。 */
@@ -353,7 +397,8 @@ export function parseJobs(raw: unknown): { jobs: NodeJob[]; invalidCount: number
       errorMessage: typeof row.errorMessage === 'string' ? row.errorMessage : undefined,
       attachmentState: typeof row.attachmentState === 'string' ? row.attachmentState : undefined,
       outputs: parseOutputs(row.outputs),
-      quality: parseQualities(row.quality)
+      quality: parseQualities(row.quality),
+      generation: parseGeneration(row.generation)
     })
   }
   return { jobs, invalidCount: list.length - jobs.length }

@@ -14,6 +14,37 @@ public enum NodeCategory
 public enum NodeExecutionStatus { Draft, WaitingForUser, Generating, Completed, Failed, NeedsReview }
 public enum AttachmentKind { Image, Video, Audio, Other }
 
+/// <summary>
+/// 角色参考图的用途。成套的「角色基准」见 <c>PromptBaseline</c>：
+/// 转面图锁五官与服装结构，正面全身锚点锁体型与比例，表情表锁脸（肩部以上六格）。
+/// 三者分工不同，不能互相替代——从全身图裁一块脸既不是表情表，也裁不出真正的五官细节。
+/// 旧数据没有这个字段，落到 <see cref="General"/>，行为与以前「取第一张图」一致。
+/// </summary>
+public enum ReferencePurpose { General, Turnaround, Anchor, Expression }
+
+public static class ReferencePurposes
+{
+    public static string Name(ReferencePurpose purpose) => purpose switch
+    {
+        ReferencePurpose.Turnaround => "角色转面图",
+        ReferencePurpose.Anchor => "正面全身锚点",
+        ReferencePurpose.Expression => "表情表",
+        _ => "通用参考"
+    };
+
+    public static bool TryParse(string? value, out ReferencePurpose purpose)
+    {
+        purpose = ReferencePurpose.General;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        if (int.TryParse(value, out var number) && Enum.IsDefined(typeof(ReferencePurpose), number))
+        {
+            purpose = (ReferencePurpose)number;
+            return true;
+        }
+        return Enum.TryParse(value, ignoreCase: true, out purpose) && Enum.IsDefined(purpose);
+    }
+}
+
 // 缺字段的旧项目保持 Unknown，不从引用数量或提示词推断需求。
 public enum AssetNeed { Unknown, None, Required }
 public sealed class ShotAssetRequirements
@@ -40,6 +71,12 @@ public sealed class WorkflowAttachment
     public string Name { get; set; } = string.Empty;
     public string Source { get; set; } = string.Empty;
     public DateTimeOffset AddedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// 这张图在角色一致性里的用途。旧项目没有这个字段，默认「通用参考」，
+    /// 选择参考图时仍然可用，不会因为升级而变成不可用素材。
+    /// </summary>
+    public ReferencePurpose Purpose { get; set; } = ReferencePurpose.General;
 
     /// <summary>
     /// 生成这张图（或这段视频）时**实际发出去的提示词**。留着它，下次打开预览就是上次那一份，

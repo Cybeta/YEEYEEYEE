@@ -169,10 +169,11 @@ public sealed class AiProviderConfig
     public bool AutoRedrawCrackedCards { get; set; } = true;
 
     /// <summary>
-    /// 图像接口一次最多能同时使用几张参考图。1 表示只支持单张底图，0 表示不限制。
-    /// 这是接口（模型）的能力，不是画布的限制；ComfyUI 链路的上限由工作流模板声明，不使用该值。
+    /// 图像接口一次最多能同时使用几张参考图。默认 9；0 表示不带参考图。
+    /// 这是接口（模型）的能力声明，不是画布的限制；节点与 Agent 只提交资产需求为必需的参考，
+    /// 数量超过该值会明确报错而不是裁剪。ComfyUI 链路的上限由工作流模板声明，不使用该值。
     /// </summary>
-    public int ImageMaxReferenceImages { get; set; } = 1;
+    public int ImageMaxReferenceImages { get; set; } = 9;
 
     /// <summary>用户是否已在接入引导里做过选择（含显式选择本地模拟）。未做过时启动会弹出接入引导。</summary>
     public bool ProviderChoiceMade { get; set; }

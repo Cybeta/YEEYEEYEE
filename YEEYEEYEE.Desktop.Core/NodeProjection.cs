@@ -125,6 +125,7 @@ public static class NodeProjection
                     kind = "Unknown",
                     variantId = reference.VariantId == Guid.Empty ? null : reference.VariantId.ToString(),
                     variantVersionId = reference.VariantVersionId?.ToString(),
+                    attachmentId = reference.AttachmentId?.ToString(),
                     thumbnailRef = string.Empty,
                     variantLabel = "引用目标缺失",
                     unresolved = true,
@@ -132,8 +133,11 @@ public static class NodeProjection
                 });
                 continue;
             }
-            // 哪一张图当预览由 EntityAssets.PreviewImage 说了算：网页端取缩略图那条接口问的是同一个方法。
-            var thumbRef = EntityAssets.PreviewImage(content)?.Reference;
+            // 选了具体参考图时，徽标就显示那一张（用户选的就是生成会用的那张）；
+            // 没选时仍由 EntityAssets.PreviewImage 定第一张图片附件。
+            var thumbRef = (reference.AttachmentId is { } selected
+                ? content.Attachments.FirstOrDefault(item => item.Id == selected && item.Kind == AttachmentKind.Image)
+                : null)?.Reference ?? EntityAssets.PreviewImage(content)?.Reference;
             result.Add(new
             {
                 entityId = content.Entity.Id.ToString(),
@@ -141,6 +145,7 @@ public static class NodeProjection
                 kind = content.Entity.Kind.ToString(),
                 variantId = reference.VariantId.ToString(),
                 variantVersionId = reference.VariantVersionId?.ToString(),
+                attachmentId = reference.AttachmentId?.ToString(),
                 thumbnailRef = thumbRef ?? string.Empty,
                 variantLabel = content.Label,
                 versions = content.Variant.Versions

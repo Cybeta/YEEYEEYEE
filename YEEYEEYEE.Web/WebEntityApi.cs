@@ -8,7 +8,8 @@ internal static class WebEntityApi
     private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
     public sealed record Mutation(long BaseRevision, string Operation, Guid EntityId, Guid? VariantId = null,
         Guid? VersionId = null, string? Description = null, string? Core = null, string? Aliases = null,
-        string? Note = null, Guid? AttachmentId = null, string? Name = null, string? MediaType = null, string? Data = null);
+        string? Note = null, Guid? AttachmentId = null, string? Name = null, string? MediaType = null, string? Data = null,
+        string? Purpose = null);
     private static IResult Error(int status, string code, string message) => Results.Json(new { code, message }, statusCode: status);
     private static IEnumerable<NodeReference> References(WorkflowEntity entity) => entity.Variants.SelectMany(v =>
         v.References.Concat(v.Versions.SelectMany(version => version.References)));
@@ -111,16 +112,28 @@ internal static class WebEntityApi
                             ["image/webp"] = AttachmentKind.Image, ["video/mp4"] = AttachmentKind.Video, ["audio/mpeg"] = AttachmentKind.Audio, ["audio/wav"] = AttachmentKind.Audio };
                         if (input.MediaType is null || !kinds.TryGetValue(input.MediaType, out var kind) || string.IsNullOrWhiteSpace(input.Name) ||
                             input.Data is null || input.Data.Length > 12000000) return Error(400, "MEDIA_INVALID", "请选择不超过 8 MB 的 PNG/JPEG/WebP/MP4/MP3/WAV 文件");
+                        if (input.Purpose is not null && !ReferencePurposes.TryParse(input.Purpose, out _))
+                            return Error(400, "MEDIA_INVALID", "参考图用途无效");
                         byte[] media;
                         try { media = Convert.FromBase64String(input.Data); } catch (FormatException) { return Error(400, "MEDIA_INVALID", "媒体编码无效"); }
                         if (media.Length == 0 || media.Length > 8 * 1024 * 1024 || !ValidMedia(media, input.MediaType))
                             return Error(400, "MEDIA_INVALID", "媒体文件大小或真实格式与声明不符");
-                        variant!.Attachments.Add(new WorkflowAttachment { Name = input.Name.Trim(), Kind = kind, Source = "Web 上传", Reference = "data:" + input.MediaType + ";base64," + input.Data }); break;
+                        variant!.Attachments.Add(new WorkflowAttachment { Name = input.Name.Trim(), Kind = kind, Source = "Web 上传",
+                            Reference = "data:" + input.MediaType + ";base64," + input.Data,
+                            Purpose = ReferencePurposes.TryParse(input.Purpose, out var addPurpose) ? addPurpose : ReferencePurpose.General }); break;
                     case "renameMedia":
                     case "removeMedia":
+                    case "setMediaPurpose":
                         var attachment = variant!.Attachments.FirstOrDefault(a => a.Id == input.AttachmentId);
                         if (attachment is null) return Error(404, "ASSET_ATTACHMENT_NOT_FOUND", "媒体附件不存在");
                         if (input.Operation == "removeMedia") variant.Attachments.Remove(attachment);
+                        else if (input.Operation == "setMediaPurpose")
+                        {
+                            if (attachment.Kind != AttachmentKind.Image) return Error(400, "MEDIA_INVALID", "只有图片附件可以设置参考图用途");
+                            if (!ReferencePurposes.TryParse(input.Purpose, out var mediaPurpose))
+                                return Error(400, "MEDIA_INVALID", "参考图用途无效");
+                            attachment.Purpose = mediaPurpose;
+                        }
                         else if (!string.IsNullOrWhiteSpace(input.Name)) attachment.Name = input.Name.Trim();
                         else return Error(400, "MEDIA_INVALID", "媒体名称不能为空");
                         break;
