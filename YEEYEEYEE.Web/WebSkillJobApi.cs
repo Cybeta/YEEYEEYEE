@@ -13,7 +13,26 @@ internal static class WebSkillJobApi
 {
     private const string SkillId = "comfyui.text-to-image";
     private const string VideoSkillId = "web.text-to-video";
+    private const string SpeechSkillId = WebSpeechGeneration.SkillId;
     private static IResult Error(int status, string code, string message) => Results.Json(new { code, message }, statusCode: status);
+
+    /// <summary>
+    /// 参考附件允许的类型与落盘扩展名。**不认识就拒**，不猜扩展名——猜错会让解码器把它当坏文件，
+    /// 而用户只会看到一句“素材损坏”。
+    /// </summary>
+    private static string? ExtensionOf(string type) => type.ToLowerInvariant() switch
+    {
+        "image/png" => ".png",
+        "image/jpeg" => ".jpg",
+        "image/webp" => ".webp",
+        "audio/wav" or "audio/x-wav" or "audio/wave" => ".wav",
+        "audio/mpeg" => ".mp3",
+        "audio/mp4" or "audio/x-m4a" or "audio/m4a" => ".m4a",
+        "video/mp4" => ".mp4",
+        "video/webm" => ".webm",
+        "video/quicktime" => ".mov",
+        _ => null
+    };
 
     /// <summary>
     /// 读实体引用用的选项：**大小写不敏感**。
@@ -45,10 +64,13 @@ internal static class WebSkillJobApi
         bool VideoApproved() => string.Equals(LegacyConfig.Text(app.Configuration, "WebVideoApprovalMode"), "preapproved-local-video", StringComparison.Ordinal)
             && WebInvocationExecutor.VideoLinkReady(app.Configuration);
         WebWorkflowCatalog.Entry? Workflow(string id) => WebWorkflowCatalog.Load(ComfyUiConversion.BaseUrl(app.Configuration)).FirstOrDefault(e => e.Id == id);
-        bool Known(string id) => id is SkillId or VideoSkillId or WebImageGeneration.SkillId || WebWorkflowCatalog.IsWorkflow(id);
+        bool Known(string id) => id is SkillId or VideoSkillId or SpeechSkillId or WebImageGeneration.SkillId || WebWorkflowCatalog.IsWorkflow(id);
         bool InvokeAllowed(SessionContext session) => session.ServerClaims.Contains("skill.invoke");
         bool SkillAllowed(SessionContext session, string skillId) => InvokeAllowed(session)
-            && (skillId == WebImageGeneration.SkillId ? WebImageGeneration.IsConfigured(WebSettingsApi.LoadModels()) : skillId == SkillId ? ImageApproved() : skillId == VideoSkillId ? VideoApproved()
+            && (skillId == WebImageGeneration.SkillId ? WebImageGeneration.IsConfigured(WebSettingsApi.LoadModels())
+                : skillId == SkillId ? ImageApproved()
+                : skillId == VideoSkillId ? VideoApproved()
+                : skillId == SpeechSkillId ? WebSpeechGeneration.IsConfigured(WebSettingsApi.LoadModels())
                 : app.Configuration["WebWorkflowApprovalMode"] == "preapproved-local-workflows" && Workflow(skillId) is not null);
         IResult Denied() => Error(403, "SKILL_NOT_APPROVED", "技能未获服务端预授权或缺少 skill.invoke 权限");
         object View(Job job, SessionContext session)
@@ -105,6 +127,7 @@ internal static class WebSkillJobApi
             // 不说的话，前端只能按 ComfyUI 的体去发，接口站那条路必然被自己的服务端挡回来。
             if (SkillAllowed(session, VideoSkillId)) skills.Add(new { id = VideoSkillId, name = "Web 文生视频", capability = "TextToVideo", approval = "preapproved-local-video", parameters = WebChatSkillParameters.Describe(VideoSkillId),
                 videoBackend = string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase) ? "comfyui" : "http" });
+            if (SkillAllowed(session, SpeechSkillId)) skills.Add(new { id = SpeechSkillId, name = "Web 配音", capability = "TextToSpeech", approval = "configured-web-speech", parameters = WebChatSkillParameters.Describe(SpeechSkillId) });
             if (InvokeAllowed(session) && app.Configuration["WebWorkflowApprovalMode"] == "preapproved-local-workflows")
                 skills.AddRange(WebWorkflowCatalog.Load(ComfyUiConversion.BaseUrl(app.Configuration)).Select(e => (object)new {
                     id = e.Id, name = e.Workflow.Title, capability = e.Capability.ToString(), approval = "preapproved-local-workflows",
@@ -120,16 +143,31 @@ internal static class WebSkillJobApi
             var session = Session(context);
             if (session.UserId == Guid.Empty) return Error(403, "LOGIN_REQUIRED", "技能任务需要账号登录");
             var workflow = WebWorkflowCatalog.IsWorkflow(skillId) ? Workflow(skillId) : null;
-            if (skillId != SkillId && skillId != WebImageGeneration.SkillId && skillId != VideoSkillId && workflow is null) return Error(404, "SKILL_NOT_FOUND", "技能不存在");
+            if (skillId != SkillId && skillId != WebImageGeneration.SkillId && skillId != VideoSkillId && skillId != SpeechSkillId && workflow is null) return Error(404, "SKILL_NOT_FOUND", "技能不存在");
             if (!SkillAllowed(session, skillId)) return Denied();
             if (body.ValueKind != JsonValueKind.Object) return Error(400, "INVALID_REQUEST", "请求必须是 JSON 对象");
             var isVideo = skillId == VideoSkillId;
+            var isSpeech = skillId == SpeechSkillId;
+            var comfyUiVideo = string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase);
+            // 视频参考素材的容量（图 / 音频 / 视频三路）：null 表示这次还没算（ComfyUI 或没带素材）。
+            VideoReferenceCapacity? videoLimits = null;
+            // 容量按模型自报的能力算（提交时会对 /v1/models 校正）；这里只读缓存/默认值，不发请求。
+            VideoReferenceCapacity VideoLimits()
+            {
+                var config = WebSettingsApi.LoadModels();
+                if (string.IsNullOrWhiteSpace(config.EffectiveVideoEndpoint))
+                    config.VideoEndpoint = LegacyConfig.Text(app.Configuration, "VideoEndpoint") ?? string.Empty;
+                if (body.TryGetProperty("model", out var requested) && requested.ValueKind == JsonValueKind.String)
+                    config.VideoModel = requested.GetString()!;
+                return new HttpVideoProvider(config).ReferenceLimits;
+            }
             // 白名单＝手写字段 ∪ **技能自己声明的参数名**：加一个声明就多收一个参数，
             // 不必再回来改这段列表（漏改一处就是「声明了但一调用就 400」）。
             var declared = WebChatSkillParameters.Declare(skillId);
             var declaredNames = declared.Select(spec => spec.Name).ToArray();
             var baseFields = workflow is not null ? new[] { "prompt", "idempotencyKey", "targetNodeId", "candidateBatch" } : isVideo
                 ? new[] { "prompt", "negativePrompt", "model", "seconds", "width", "height", "videoFrames", "seed", "idempotencyKey", "targetNodeId", "chatSessionId", "referenceAttachmentIds" }
+                : isSpeech ? new[] { "text", "targetNodeId", "entityId", "variantId", "idempotencyKey" }
                 : new[] { "prompt", "aspectRatio", "idempotencyKey", "targetNodeId", "chatSessionId", "referenceAttachmentIds", "candidateBatch" };
             var allowedFields = baseFields.Concat(declaredNames)
                 // 实体引用只对有实体库的技能有意义；工作流绑定不了它，收下就是静默丢弃。
@@ -141,9 +179,20 @@ internal static class WebSkillJobApi
                 (body.TryGetProperty("height", out var height) && (height.ValueKind != JsonValueKind.Number || !height.TryGetInt32(out var heightValue) || heightValue is < 64 or > 2048)) ||
                 (body.TryGetProperty("videoFrames", out var frames) && (frames.ValueKind != JsonValueKind.Number || !frames.TryGetInt32(out var frameValue) || frameValue is < 1 or > 4096)) ||
                 (body.TryGetProperty("seed", out var seed) && (seed.ValueKind != JsonValueKind.Number || !seed.TryGetInt64(out _))));
-            if (body.ValueKind != JsonValueKind.Object || !body.TryGetProperty("prompt", out var prompt) || prompt.ValueKind != JsonValueKind.String ||
+            JsonElement prompt = default, key = default, speechText = default;
+            if (isSpeech)
+            {
+                if (!body.TryGetProperty("text", out speechText) || speechText.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(speechText.GetString()) || speechText.GetString()!.Length > 2000 ||
+                    !body.TryGetProperty("idempotencyKey", out key) || key.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(key.GetString()) || key.GetString()!.Length > 128 ||
+                    !body.TryGetProperty("targetNodeId", out _) ||
+                    body.EnumerateObject().Any(p => !allowedFields.Contains(p.Name, StringComparer.Ordinal)))
+                    return Error(400, "INVALID_REQUEST", "配音仅接受 text、targetNodeId、entityId、variantId 与 idempotencyKey，且必须指定目标分镜");
+            }
+            else if (body.ValueKind != JsonValueKind.Object || !body.TryGetProperty("prompt", out prompt) || prompt.ValueKind != JsonValueKind.String ||
                 string.IsNullOrWhiteSpace(prompt.GetString()) || prompt.GetString()!.Length > 4000 ||
-                !body.TryGetProperty("idempotencyKey", out var key) || key.ValueKind != JsonValueKind.String ||
+                !body.TryGetProperty("idempotencyKey", out key) || key.ValueKind != JsonValueKind.String ||
                 string.IsNullOrWhiteSpace(key.GetString()) || key.GetString()!.Length > 128 ||
                 (body.TryGetProperty("model", out var model) && (model.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(model.GetString()) || model.GetString()!.Length > 256)) ||
                 (body.TryGetProperty("seconds", out var seconds) && (seconds.ValueKind != JsonValueKind.Number || !seconds.TryGetInt32(out var secondsValue) || secondsValue is < 1 or > 600)) ||
@@ -154,7 +203,9 @@ internal static class WebSkillJobApi
             if (isVideo && !string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase) &&
                 new[] { "negativePrompt", "videoFrames", "seed" }.Any(field => body.TryGetProperty(field, out _)))
                 return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前视频执行器仅支持 prompt、model、seconds、width、height 与参考图，拒绝忽略额外参数");
-            var inputs = new Dictionary<string, JsonElement> { ["prompt"] = prompt.Clone(), ["webCanvasPath"] = JsonSerializer.SerializeToElement(WebProjectApi.Scope) };
+            var inputs = new Dictionary<string, JsonElement> {
+                [isSpeech ? "text" : "prompt"] = isSpeech ? speechText.Clone() : prompt.Clone(),
+                ["webCanvasPath"] = JsonSerializer.SerializeToElement(WebProjectApi.Scope) };
             // 图片 API 的模型名由服务端配置决定，执行时才读；这里先落进任务输入，生成记录才能回答
             // 「这一张是用哪个模型出的」。视频的模型本来就从请求体收（见下面 isVideo 的分支）。
             if (skillId == WebImageGeneration.SkillId)
@@ -162,7 +213,7 @@ internal static class WebSkillJobApi
                 var imageModel = WebSettingsApi.LoadModels().ImageModel;
                 if (!string.IsNullOrWhiteSpace(imageModel)) inputs["model"] = JsonSerializer.SerializeToElement(imageModel);
             }
-            if (!isVideo && workflow is null)
+            if (!isVideo && !isSpeech && workflow is null)
             {
                 var ratio = body.TryGetProperty("aspectRatio", out var aspect) && aspect.ValueKind == JsonValueKind.String ? aspect.GetString() : null;
                 var size = WebImageGeneration.Size(ratio);
@@ -177,31 +228,69 @@ internal static class WebSkillJobApi
             }
             if (body.TryGetProperty("referenceAttachmentIds", out var references))
             {
-                if (references.ValueKind != JsonValueKind.Array || references.GetArrayLength() is < 1 or > 9 || !body.TryGetProperty("chatSessionId", out var chatSession) || chatSession.ValueKind != JsonValueKind.String)
-                    return Error(400, "REFERENCE_INVALID", "参考图须来自当前会话，最多9张");
-                if (isVideo && !string.Equals(app.Configuration["WebVideoBackend"], "ComfyUI", StringComparison.OrdinalIgnoreCase) && references.GetArrayLength() > 1)
-                    return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前视频接口仅支持一张首帧参考图，不能静默忽略多图");
-                var imageCapacity = WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels());
-                if (skillId == WebImageGeneration.SkillId && references.GetArrayLength() > imageCapacity)
-                    return Error(400, "IMAGE_REFERENCE_UNSUPPORTED",
-                        $"请求包含 {references.GetArrayLength()} 张参考图，当前图片模型容量为 {imageCapacity} 张，"
-                        + "禁止静默裁剪；请减少必需资产或在 Web 设置中提高参考图容量。");
-                if (skillId == SkillId && references.GetArrayLength() > 1) return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前图片工作流仅支持一张底图，不能静默忽略多图");
+                var maxReferences = isVideo ? 20 : 9;
+                if (references.ValueKind != JsonValueKind.Array || references.GetArrayLength() < 1 ||
+                    references.GetArrayLength() > maxReferences ||
+                    !body.TryGetProperty("chatSessionId", out var chatSession) || chatSession.ValueKind != JsonValueKind.String)
+                    return Error(400, "REFERENCE_INVALID", isVideo ? "参考素材须来自当前会话，最多 20 个" : "参考图须来自当前会话，最多 9 张");
                 var files = new List<WebChatStore.Attachment>();
                 foreach (var reference in references.EnumerateArray())
                 {
-                    if (reference.ValueKind != JsonValueKind.String || WebChatApi.Attachment(context, chatSession.GetString()!, reference.GetString()!) is not { } file || !file.Type.StartsWith("image/"))
-                        return Error(400, "REFERENCE_INVALID", "参考图不存在或不是当前会话图片");
+                    if (reference.ValueKind != JsonValueKind.String ||
+                        WebChatApi.Attachment(context, chatSession.GetString()!, reference.GetString()!) is not { } file ||
+                        ExtensionOf(file.Type) is null)
+                        return Error(400, "REFERENCE_INVALID", "参考素材不存在或类型不支持");
                     files.Add(file);
                 }
-                var referenceDirectory = Path.Combine(assetDirectory, "web-references"); Directory.CreateDirectory(referenceDirectory);
-                var paths = new List<string>();
-                foreach (var file in files)
+                var attachments = files
+                    .GroupBy(file => file.Type.Split('/')[0].ToLowerInvariant())
+                    .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+                var imageAttachments = attachments.GetValueOrDefault("image") ?? new List<WebChatStore.Attachment>();
+                var audioAttachments = attachments.GetValueOrDefault("audio") ?? new List<WebChatStore.Attachment>();
+                var videoAttachments = attachments.GetValueOrDefault("video") ?? new List<WebChatStore.Attachment>();
+
+                if (isVideo && !comfyUiVideo)
                 {
-                    var filePath = Path.Combine(referenceDirectory, file.Id + (file.Type == "image/png" ? ".png" : ".jpg"));
-                    await File.WriteAllBytesAsync(filePath, file.Data, context.RequestAborted); paths.Add(filePath);
+                    // 三路各自的容量按模型自报的能力算；超了就拒绝，不静默裁剪。
+                    videoLimits = VideoLimits();
+                    if (imageAttachments.Count > videoLimits.MaxImages)
+                        return Error(400, "VIDEO_REFERENCE_UNSUPPORTED", videoLimits.MaxImages == 0
+                            ? "当前视频模型不收参考图，请去掉参考图再提交"
+                            : $"请求包含 {imageAttachments.Count} 张参考图，当前视频模型容量为 {videoLimits.MaxImages} 张，禁止静默裁剪；请减少引用。");
+                    if (audioAttachments.Count > videoLimits.MaxAudios)
+                        return Error(400, "VIDEO_REFERENCE_UNSUPPORTED", videoLimits.MaxAudios == 0
+                            ? "当前视频模型不收参考音频，请去掉音频再提交"
+                            : $"请求包含 {audioAttachments.Count} 段参考音频，当前视频模型容量为 {videoLimits.MaxAudios} 段，禁止静默裁剪；请减少。");
+                    if (videoAttachments.Count > videoLimits.MaxVideos)
+                        return Error(400, "VIDEO_REFERENCE_UNSUPPORTED", videoLimits.MaxVideos == 0
+                            ? "当前视频模型不收参考视频，请去掉视频再提交"
+                            : $"请求包含 {videoAttachments.Count} 段参考视频，当前视频模型容量为 {videoLimits.MaxVideos} 段，禁止静默裁剪；请减少。");
                 }
-                inputs["referenceImages"] = JsonSerializer.SerializeToElement(paths);
+                else if (!isVideo && (audioAttachments.Count > 0 || videoAttachments.Count > 0))
+                    return Error(400, "REFERENCE_INVALID", "这条技能只接受参考图");
+
+                var imageCapacity = WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels());
+                if (skillId == WebImageGeneration.SkillId && imageAttachments.Count > imageCapacity)
+                    return Error(400, "IMAGE_REFERENCE_UNSUPPORTED",
+                        $"请求包含 {imageAttachments.Count} 张参考图，当前图片模型容量为 {imageCapacity} 张，"
+                        + "禁止静默裁剪；请减少必需资产或在 Web 设置中提高参考图容量。");
+                if (skillId == SkillId && imageAttachments.Count > 1) return Error(400, "SKILL_INPUT_UNSUPPORTED", "当前图片工作流仅支持一张底图，不能静默忽略多图");
+
+                var referenceDirectory = Path.Combine(assetDirectory, "web-references"); Directory.CreateDirectory(referenceDirectory);
+                async Task<string[]> SaveAsync(List<WebChatStore.Attachment> group)
+                {
+                    var saved = new List<string>();
+                    foreach (var file in group)
+                    {
+                        var filePath = Path.Combine(referenceDirectory, file.Id + ExtensionOf(file.Type)!);
+                        await File.WriteAllBytesAsync(filePath, file.Data, context.RequestAborted);
+                        saved.Add(filePath);
+                    }
+                    return saved.ToArray();
+                }
+                if (imageAttachments.Count > 0) inputs["referenceImages"] = JsonSerializer.SerializeToElement(await SaveAsync(imageAttachments));
+                if (audioAttachments.Count > 0) inputs["referenceAudios"] = JsonSerializer.SerializeToElement(await SaveAsync(audioAttachments));
+                if (videoAttachments.Count > 0) inputs["referenceVideos"] = JsonSerializer.SerializeToElement(await SaveAsync(videoAttachments));
             }
             else if (body.TryGetProperty("chatSessionId", out _)) return Error(400, "REFERENCE_INVALID", "会话参数须与参考图一起提供");
             if (body.TryGetProperty("targetNodeId", out var targetNode))
@@ -214,7 +303,7 @@ internal static class WebSkillJobApi
                     var store = WebProjectApi.Store(mode)!;
                     var snapshot = store.GenerationTarget(targetNode.GetGuid());
                     inputs["targetBaseRevision"] = JsonSerializer.SerializeToElement(snapshot.Revision);
-                    if (!isVideo && (workflow is null || workflow.Capability == Capability.TextToImage))
+                    if (!isVideo && !isSpeech && (workflow is null || workflow.Capability == Capability.TextToImage))
                     {
                         var capacity = skillId == WebImageGeneration.SkillId ? WebImageGeneration.ReferenceCapacity(WebSettingsApi.LoadModels()) : skillId == SkillId ? 1 : 0;
                         var extra = inputs.TryGetValue("referenceImages", out var supplied) ? supplied.Deserialize<string[]>()! : Array.Empty<string>();
@@ -229,10 +318,60 @@ internal static class WebSkillJobApi
                     if (isVideo)
                     {
                         var extra = inputs.TryGetValue("referenceImages", out var supplied) ? supplied.Deserialize<string[]>()! : Array.Empty<string>();
-                        var paths = WebGenerationReferences.ResolveVideoTarget(snapshot, extra);
-                        WebGenerationReferences.RecordEvidence(inputs, paths, snapshot);
+                        var audioPaths = inputs.TryGetValue("referenceAudios", out var suppliedAudios) ? suppliedAudios.Deserialize<string[]>()! : Array.Empty<string>();
+                        var videoPaths = inputs.TryGetValue("referenceVideos", out var suppliedVideos) ? suppliedVideos.Deserialize<string[]>()! : Array.Empty<string>();
+                        // 时长明显大于台词内容量时，模型会自行加词把时间填满（实测会改写台词），提前挡住。
+                        var requestedSeconds = inputs.TryGetValue("seconds", out var secondsValue) && secondsValue.TryGetInt32(out var parsedSeconds)
+                            ? parsedSeconds : 0;
+                        if (GenerationAudit.CheckDialogueDensity(snapshot.Node, requestedSeconds) is { } density)
+                            return Error(409, "VIDEO_CONTENT_DENSITY", density);
+                        // 接口站按模型容量装配「首帧 + 实体引用」；ComfyUI 那条视频工作流只收一张首帧，
+                        // 给了多张要在执行前就说清（0 = 不装配实体引用）。
+                        var capacity = comfyUiVideo ? 0 : (videoLimits ?? VideoLimits()).MaxImages;
+                        var paths = WebGenerationReferences.ResolveVideoTarget(snapshot, extra, capacity);
+                        WebGenerationReferences.RecordEvidence(inputs, paths, snapshot, audioPaths, videoPaths);
+                        // 编号说明按**实际提交顺序**生成：图片先首帧再实体，音频/视频按附件顺序。
+                        var guided = WebGenerationReferences.WithVideoReferenceGuide(
+                            snapshot.Canvas, snapshot.Node, prompt.GetString()!, paths, audioPaths, videoPaths);
+                        // 台词必须在提示词里原样出现，否则出来的是无声镜头，后面声音闸门必然卡住。
+                        if (WebGenerationReferences.MissingDialogue(snapshot.Node, guided) is { } missing)
+                            return Error(409, "VIDEO_DIALOGUE_MISSING",
+                                $"分镜台词没有写进视频提示词：{missing}。模型只会照提示词说话；"
+                                + "请把台词原样写进提示词，或清空该镜台词改用配音。");
+                        if (!string.Equals(guided, prompt.GetString(), StringComparison.Ordinal))
+                            inputs["prompt"] = JsonSerializer.SerializeToElement(guided);
                     }
-                    if (!inputs.ContainsKey("sourceFingerprints"))
+                    if (isSpeech)
+                    {
+                        if (snapshot.Node.Category != NodeCategory.Storyboard)
+                            return Error(409, "VOICE_TARGET_INVALID", "配音目标必须是分镜节点");
+                        var voiceErrors = VoiceCasting.Check(snapshot.Canvas, snapshot.Node);
+                        if (voiceErrors.Count > 0) return Error(409, "VOICE_CAST_INVALID", string.Join("；", voiceErrors));
+                        var text = speechText.GetString()!.Trim();
+                        var speaker = VoiceCasting.Parse(VoiceCasting.DialogueOf(snapshot.Node))
+                            .FirstOrDefault(line => string.Equals(line.Text, text, StringComparison.Ordinal))?.Speaker;
+                        var cast = speaker is null ? null : VoiceCasting.Cast(snapshot.Canvas, snapshot.Node)
+                            .FirstOrDefault(entry => VoiceCasting.Matches(entry.Entity, speaker));
+                        var entityId = body.TryGetProperty("entityId", out var rawEntity) && rawEntity.TryGetGuid(out var parsedEntity)
+                            ? parsedEntity : cast?.Entity.Id;
+                        if (entityId is null) return Error(409, "VOICE_CAST_REQUIRED", "这条台词没有匹配到角色，请指定 entityId 或先补台词与角色引用");
+                        var entity = snapshot.Canvas.Entities.FirstOrDefault(item => item.Id == entityId)
+                            ?? throw new InvalidDataException("配音角色不在当前画布的资源库里");
+                        var variant = body.TryGetProperty("variantId", out var rawVariant) && rawVariant.TryGetGuid(out var parsedVariant)
+                            ? entity.Variants.FirstOrDefault(item => item.Id == parsedVariant) : entity.Variants.FirstOrDefault();
+                        if (variant?.Voice is not { IsComplete: true } voice)
+                            return Error(409, "VOICE_PROFILE_INCOMPLETE", $"「{entity.Name}」的声音档案不完整（需要 voiceId 与 model），请先补齐");
+                        inputs["voiceId"] = JsonSerializer.SerializeToElement(voice.VoiceId);
+                        inputs["voiceModel"] = JsonSerializer.SerializeToElement(voice.Model);
+                        inputs["voiceProvider"] = JsonSerializer.SerializeToElement(voice.Provider);
+                        inputs["voiceSpeed"] = JsonSerializer.SerializeToElement(voice.Speed);
+                        inputs["voiceKey"] = JsonSerializer.SerializeToElement(voice.Key);
+                        inputs["voiceEntityId"] = JsonSerializer.SerializeToElement(entity.Id);
+                        inputs["voiceVariantId"] = JsonSerializer.SerializeToElement(variant.Id);
+                        inputs["voiceSpeaker"] = JsonSerializer.SerializeToElement(
+                            string.IsNullOrWhiteSpace(speaker) ? entity.Name : speaker);
+                    }
+                    if (!isSpeech && !inputs.ContainsKey("sourceFingerprints"))
                     {
                         var paths = WebGenerationReferences.ResolveVideoTarget(snapshot, []);
                         if (paths.Length > 0)
@@ -315,7 +454,7 @@ internal static class WebSkillJobApi
                     return Error(409, "IDEMPOTENCY_CONFLICT", "幂等键已用于其他调用");
                 return Results.Json(View(existing, session));
             }
-            var invocation = new Invocation { Tool = skillId, Capability = workflow?.Capability ?? (isVideo ? Capability.TextToVideo : Capability.TextToImage), Channel = isVideo ? "video" : skillId == WebImageGeneration.SkillId ? "image-api" : "comfyui", Inputs = inputs };
+            var invocation = new Invocation { Tool = skillId, Capability = workflow?.Capability ?? (isSpeech ? Capability.TextToSpeech : isVideo ? Capability.TextToVideo : Capability.TextToImage), Channel = isVideo ? "video" : isSpeech ? "speech" : skillId == WebImageGeneration.SkillId ? "image-api" : "comfyui", Inputs = inputs };
             // **提交后立即返回任务快照，不在这里等内容跑完**。
             //
             // SingleMachineExecutionService.StartAsync 在锁内先登记 Job、再 Task.Run，返回的是「整次执行完成」

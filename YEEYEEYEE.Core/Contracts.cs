@@ -6,7 +6,7 @@ public enum ClientType { Desktop = 1, Web = 2 }
 public enum SkillLocation { Local = 1, Cloud = 2, Hybrid = 3 }
 public enum SkillScope { Private = 1, Team = 2, Public = 3 }
 public enum SkillType { Atomic = 1, Composite = 2, Template = 3 }
-public enum Capability { Unknown = 0, TextToImage = 100, TextToVideo = 101, ImageToVideo = 102, ImageToImage = 103, TextToText = 200, TextToNovel = 201, NovelToChapter = 202, ImageUpscale = 300, FileRead = 900, FileWrite = 901 }
+public enum Capability { Unknown = 0, TextToImage = 100, TextToVideo = 101, ImageToVideo = 102, ImageToImage = 103, TextToSpeech = 104, TextToText = 200, TextToNovel = 201, NovelToChapter = 202, ImageUpscale = 300, FileRead = 900, FileWrite = 901 }
 public enum OperationSource { UserManual = 1, AiAssistant = 2, SkillExecution = 3 }
 public enum MemberRole { None = 0, Member = 1, TeamAdmin = 2, RoomOwner = 3 }
 public enum JobState { Queued = 1, Running = 2, Cancelling = 3, Succeeded = 4, Failed = 5, Cancelled = 6 }

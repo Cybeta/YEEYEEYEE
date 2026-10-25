@@ -38,7 +38,8 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
 
     public async Task<ExecutionOutput> ExecuteAsync(SessionContext session, Invocation invocation, Job job, CancellationToken cancellationToken)
     {
-        WebGenerationReferences.ValidateEvidence(invocation.Inputs);
+        // 配音不依赖参考图证据：输入只有台词与角色声音档案，按图那套指纹校验会误判为「缺少提交依据」。
+        if (invocation.Tool != WebSpeechGeneration.SkillId) WebGenerationReferences.ValidateEvidence(invocation.Inputs);
         if (WebWorkflowCatalog.IsWorkflow(invocation.Tool))
         {
             if (!session.ServerClaims.Contains("skill.invoke") || configuration["WebWorkflowApprovalMode"] != "preapproved-local-workflows")
@@ -52,6 +53,27 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
             var output = await new ComfyUiExecutor(http, call => WebWorkflowCatalog.Bind(entry, call))
                 .ExecuteAsync(session, invocation, job, cancellationToken).ConfigureAwait(false);
             return output with { ExternalTaskId = WebComfyUiTasks.Bind(entry.Site.BaseUrl, output.ExternalTaskId!) };
+        }
+        if (invocation.Tool == WebSpeechGeneration.SkillId)
+        {
+            if (!session.ServerClaims.Contains("skill.invoke")) throw new InvalidOperationException("缺少 skill.invoke 权限");
+            var speechConfig = WebSettingsApi.LoadModels();
+            if (!WebSpeechGeneration.IsConfigured(speechConfig)) throw new InvalidOperationException("Web 语音接口未配置（复用图片站点的地址与密钥）");
+            speechConfig.ImageApiKey = SecretProtector.Unprotect(speechConfig.ImageApiKey)
+                ?? throw new InvalidOperationException("Web 语音密钥无法解密，请在原账户和设备上检查配置；未提交配音请求");
+            var voice = new VoiceProfile
+            {
+                VoiceId = ReadString(invocation.Inputs, "voiceId"),
+                Model = ReadString(invocation.Inputs, "voiceModel"),
+                Speed = invocation.Inputs.TryGetValue("voiceSpeed", out var speed) && speed.TryGetDouble(out var value) ? value : 1
+            };
+            if (!voice.IsComplete) throw new InvalidOperationException("声音档案不完整（需要 voiceId 与 model）");
+            var file = Path.Combine(AssetStore.EnsureDirectory(), $"speech-{Guid.NewGuid():N}.mp3");
+            using var speechHttp = CreateMediaHttp(speechConfig.ImageProxyUrl, configuration.GetValue("SpeechHttpTimeout", TimeSpan.FromMinutes(5)));
+            var speech = await WebSpeechGeneration.GenerateAsync(speechConfig, ReadString(invocation.Inputs, "text"), voice, file, speechHttp, cancellationToken)
+                .ConfigureAwait(false);
+            if (!speech.Ok) throw new InvalidOperationException(speech.Error ?? "语音接口未返回可用产物");
+            return new ExecutionOutput { Outputs = [new AssetRef { Role = "audio", Ref = AssetStore.ToReference(file) }] };
         }
         if (invocation.Tool == WebImageGeneration.SkillId)
         {
@@ -140,7 +162,12 @@ internal sealed class WebInvocationExecutor : IInvocationExecutor
             Width = ReadInt(invocation.Inputs, "width"),
             Height = ReadInt(invocation.Inputs, "height"),
             ReferenceImages = invocation.Inputs.TryGetValue("referenceImages", out var videoImages)
-                ? videoImages.Deserialize<string[]>() ?? [] : Array.Empty<string>()
+                ? videoImages.Deserialize<string[]>() ?? [] : Array.Empty<string>(),
+            // 角色参考音 / 动作参考视频：与图片同一条纪律——收到了就要交给执行方，不能在这里吞掉。
+            ReferenceAudios = invocation.Inputs.TryGetValue("referenceAudios", out var videoAudios)
+                ? videoAudios.Deserialize<string[]>() ?? [] : Array.Empty<string>(),
+            ReferenceVideos = invocation.Inputs.TryGetValue("referenceVideos", out var videoSources)
+                ? videoSources.Deserialize<string[]>() ?? [] : Array.Empty<string>()
         }, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != VideoGenerationStatus.Succeeded || string.IsNullOrWhiteSpace(result.FilePath))

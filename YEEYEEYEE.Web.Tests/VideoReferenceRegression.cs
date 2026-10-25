@@ -40,14 +40,24 @@ internal static class VideoReferenceRegression
             var store = Activator.CreateInstance(storeType, path, Path.Combine(project.RootPath, "project", "entities.json"))!;
             var references = assembly.GetType("YEEYEEYEE.Web.WebGenerationReferences")!;
             var resolve = references.GetMethod("ResolveVideo", BindingFlags.NonPublic | BindingFlags.Static)!;
-            var paths = (string[])resolve.Invoke(null, new object[] { store, node.Id, Array.Empty<string>() })!;
+            var paths = (string[])resolve.Invoke(null, new object[] { store, node.Id, Array.Empty<string>(), 0 })!;
             Assert(paths.SequenceEqual(new[] { frame }), "local asset reference resolves to adopted frame");
-            try { resolve.Invoke(null, new object[] { store, node.Id, new[] { frame, frame } }); throw new Exception("multiple references accepted"); }
+            var second = Path.Combine(assets, "frame2.png");
+            File.WriteAllBytes(second, new byte[] { 137, 80, 78, 71, 13, 10, 26, 10, 2 });
+            try { resolve.Invoke(null, new object[] { store, node.Id, new[] { frame, second }, 1 }); throw new Exception("multiple references accepted"); }
             catch (TargetInvocationException error) when (error.InnerException is InvalidDataException) { }
+            var multi = (string[])resolve.Invoke(null, new object[] { store, node.Id, new[] { frame, second }, 2 })!;
+            Assert(multi.SequenceEqual(new[] { frame, second }), "capacity > 1 keeps every reference (no silent trimming)");
+            // 参考音频 / 参考视频：只验“能不能一路传到执行方”，内容由桩 provider 吞掉。
+            var voice = Path.Combine(assets, "voice.wav");
+            File.WriteAllBytes(voice, new byte[] { 82, 73, 70, 70, 36, 0, 0, 0, 87, 65, 86, 69 });
+            var motion = Path.Combine(assets, "motion.mp4");
+            File.WriteAllBytes(motion, new byte[] { 0, 0, 0, 24, 102, 116, 121, 112, 105, 115, 111, 109 });
             var provider = new RecordingProvider();
             var executorType = assembly.GetType("YEEYEEYEE.Web.WebInvocationExecutor")!;
-            using var http = new HttpClient();
-            var executor = (IInvocationExecutor)Activator.CreateInstance(executorType, new object?[] { null, provider, null, false, http, new ConfigurationBuilder().Build() })!;
+            // 构造参数：图片执行器 / 视频 provider / ComfyUI 执行器 / ComfyUI 视频后端 /
+            // 工作流转换（这条链用不到，传 null）/ 配置。
+            var executor = (IInvocationExecutor)Activator.CreateInstance(executorType, new object?[] { null, provider, null, false, null, new ConfigurationBuilder().Build() })!;
             var invocation = new Invocation { Tool = "web.text-to-video", Inputs = new Dictionary<string, JsonElement>
             {
                 ["prompt"] = JsonSerializer.SerializeToElement("move"), ["seconds"] = JsonSerializer.SerializeToElement(15),
@@ -55,10 +65,12 @@ internal static class VideoReferenceRegression
                 ["referenceImages"] = JsonSerializer.SerializeToElement(paths)
             } };
             var record = references.GetMethod("RecordEvidence", BindingFlags.NonPublic | BindingFlags.Static)!;
-            record.Invoke(null, new object?[] { invocation.Inputs, paths, null });
+            record.Invoke(null, new object?[] { invocation.Inputs, paths, null, new[] { voice }, new[] { motion } });
             try { await executor.ExecuteAsync(new SessionContext(), invocation, new Job(Guid.NewGuid(), Guid.NewGuid(), "offline"), CancellationToken.None); }
             catch (InvalidOperationException error) when (error.Message == "offline verification") { }
             Assert(provider.Request is { Seconds: 15, Width: 1280, Height: 720 } request && request.ReferenceImages.SequenceEqual(new[] { frame }), "executor forwards duration, size and local frame without HTTP");
+            Assert(provider.Request!.ReferenceAudios.SequenceEqual(new[] { voice }) && provider.Request.ReferenceVideos.SequenceEqual(new[] { motion }),
+                "executor forwards reference audio and video without dropping them");
             var entity = new WorkflowEntity { Name = "reference", Kind = EntityKind.Character, ManagedByProject = false };
             var variant = new WorkflowEntityVariant();
             variant.Attachments.Add(new WorkflowAttachment { Reference = "asset://frame.png" });
@@ -69,10 +81,56 @@ internal static class VideoReferenceRegression
             var target = storeType.GetMethod("GenerationTarget", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(store, new object[] { node.Id })!;
             var imagePaths = (string[])references.GetMethod("Resolve", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { target, 1, Array.Empty<string>() })!;
             Assert(imagePaths.SequenceEqual(provider.Request!.ReferenceImages), "necessary image reference equals actual transmitted reference");
-            record.Invoke(null, new object?[] { invocation.Inputs, imagePaths, target });
+
+            // 视频容量 > 1 时：首帧在前，实体引用跟在后面；同一张图（既是首帧又是角色设定图）只带一次。
+            // 采用首帧要带上「照着这些引用做的」依据，快照必须用与审计同一个 locate（否则会把结构读成变了）。
+            var locatePath = (Func<WorkflowAttachment, string?>)references
+                .GetMethod("Locate", BindingFlags.NonPublic | BindingFlags.Static)!
+                .CreateDelegate(typeof(Func<WorkflowAttachment, string?>));
+            node.Attachments[0].SourceFingerprints = ReferenceStaleness.Snapshot(canvas, node, locatePath);
+            File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(new RecentCanvasState { Canvas = canvas, FormatVersion = CanvasFormat.Current }));
+            var videoPaths = (string[])resolve.Invoke(null, new object[] { store, node.Id, Array.Empty<string>(), 2 })!;
+            Assert(videoPaths.SequenceEqual(new[] { frame }), "video assembly dedupes an image that is both frame and entity reference");
+            var backdrop = new WorkflowEntity { Name = "backdrop", Kind = EntityKind.Prop, ManagedByProject = false };
+            var backdropVariant = new WorkflowEntityVariant();
+            backdropVariant.Attachments.Add(new WorkflowAttachment { Reference = "asset://frame2.png" });
+            backdrop.Variants.Add(backdropVariant); canvas.Entities.Add(backdrop);
+            node.References.Add(new NodeReference { EntityId = backdrop.Id, VariantId = backdropVariant.Id });
+            node.AssetRequirements!.Prop = AssetNeed.Required;
+            node.Attachments[0].SourceFingerprints = ReferenceStaleness.Snapshot(canvas, node, locatePath);
+            File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(new RecentCanvasState { Canvas = canvas, FormatVersion = CanvasFormat.Current }));
+            var withEntity = (string[])resolve.Invoke(null, new object[] { store, node.Id, Array.Empty<string>(), 2 })!;
+            Assert(withEntity.SequenceEqual(new[] { frame, second }), "video capacity > 1 assembles adopted frame then entity reference");
+            // 还原画布，别影响后面按「当前画布」核对提交依据的断言。
+            node.References.RemoveAll(reference => reference.EntityId == backdrop.Id);
+            canvas.Entities.Remove(backdrop);
+            node.AssetRequirements!.Prop = AssetNeed.None;
+            node.Attachments[0].SourceFingerprints.Clear();
+            File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(new RecentCanvasState { Canvas = canvas, FormatVersion = CanvasFormat.Current }));
+            // 视频提示词的编号说明：图片/音频/视频各自从 1 编，并按当前台词把音频归属到唯一说话人。
+            node.Parameters["dialogue"] = "CC：好像也没那么难。";
+            var guide = (string)references.GetMethod("WithVideoReferenceGuide", BindingFlags.NonPublic | BindingFlags.Static)!
+                .Invoke(null, new object?[] { canvas, node, "CC 轻声说：“好像也没那么难。”", new[] { frame, second }, new[] { voice }, new[] { motion } })!;
+            Assert(guide.Contains("Reference image 1: the adopted first frame"), "video guide numbers the first frame");
+            Assert(guide.Contains("Reference image 2: supporting reference"), "video guide numbers non-entity images");
+            Assert(guide.Contains("Reference audio 1: voice timbre reference for CC"), "video guide attributes the audio to the only speaker");
+            Assert(guide.Contains("Reference video 1: motion and camera reference"), "video guide numbers video references");
+            Assert(guide.Contains("Do not swap these roles"), "video guide states the role mapping");
+            Assert(guide.Contains("Speak the quoted dialogue exactly as written"), "video guide pins the dialogue to a verbatim reading");
+            var missingDialogue = references.GetMethod("MissingDialogue", BindingFlags.NonPublic | BindingFlags.Static)!;
+            Assert(missingDialogue.Invoke(null, new object?[] { node, "CC 轻声说：“好像也没那么难。”" }) is null,
+                "dialogue present in the prompt passes the check");
+            var missing = (string?)missingDialogue.Invoke(null, new object?[] { node, "镜头缓慢推近，她抬眼看屏幕。" });
+            Assert(missing is not null && missing.Contains("CC：好像也没那么难"), "dialogue missing from the prompt is reported");
+            // 同一句台词：4 秒合理；15 秒远大于内容量（约 2.2 秒），要报「内容密度不足」。
+            Assert(GenerationAudit.CheckDialogueDensity(node, 4) is null, "4s shot with a short line passes the density check");
+            var density = GenerationAudit.CheckDialogueDensity(node, 15);
+            Assert(density is not null && density.Contains("内容密度不足"), "15s shot with a 2s line is rejected as too sparse");
+            node.Parameters.Remove("dialogue");
+            record.Invoke(null, new object?[] { invocation.Inputs, imagePaths, target, null, null });
             var imageExecutor = new RecordingImageExecutor();
             var imageInvocation = new Invocation { Tool = "comfyui.text-to-image", Inputs = invocation.Inputs };
-            var imageForwarder = (IInvocationExecutor)Activator.CreateInstance(executorType, new object?[] { imageExecutor, provider, null, false, http, new ConfigurationBuilder().Build() })!;
+            var imageForwarder = (IInvocationExecutor)Activator.CreateInstance(executorType, new object?[] { imageExecutor, provider, null, false, null, new ConfigurationBuilder().Build() })!;
             await imageForwarder.ExecuteAsync(new SessionContext(), imageInvocation, new Job(Guid.NewGuid(), Guid.NewGuid(), "offline"), CancellationToken.None);
             Assert(imageExecutor.Paths.SequenceEqual(imagePaths), "image executor receives necessary reference paths");
             var inputs = (Dictionary<string, JsonElement>)invocation.Inputs;
@@ -160,6 +218,7 @@ internal static class VideoReferenceRegression
         public bool IsConfigured => true;
         public string Name => "offline";
         public ReferenceCapacity ReferenceCapacity => new(1, "offline");
+        public VideoReferenceCapacity ReferenceLimits => new(1, 0, 0, "offline");
         public IReadOnlySet<GenerationCapability> Capabilities => new HashSet<GenerationCapability> { GenerationCapability.TextToVideo, GenerationCapability.ImageToVideo };
         public Task<VideoGenerationResult> GenerateAsync(VideoGenerationRequest request, CancellationToken cancellationToken = default)
         {

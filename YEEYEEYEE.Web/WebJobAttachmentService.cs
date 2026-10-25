@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using YEEYEEYEE.Core;
+using YEEYEEYEE.Desktop;
 using YEEYEEYEE.Host;
 using YEEYEEYEE.Web.Auth;
 
@@ -80,6 +81,19 @@ internal sealed class WebJobAttachmentService(SingleMachineExecutionService exec
                             return DescribeFailure(result);
                         if (store.LastCommit.Serial > serial)
                             hub.CanvasChanged(store.LastCommit.Revision, job.Inputs["targetNodeId"].GetString(), user.DisplayName, "job-output");
+                        // 配音乐成就是一次可信的声音证据：音色来自角色档案，文本就是提交的那句。
+                        // 模型自带音频没有这条，必须另行检测后写入证据，否则成片闸门不放行。
+                        if (string.Equals(job.Tool, WebSpeechGeneration.SkillId, StringComparison.Ordinal) &&
+                            job.Inputs.TryGetValue("voiceSpeaker", out var speaker) &&
+                            job.Inputs.TryGetValue("voiceKey", out var voiceKey))
+                        {
+                            var nodeId = job.Inputs["targetNodeId"].GetGuid();
+                            VoiceEvidenceStore.Replace(mode.CanvasPath!, nodeId, new[]
+                            {
+                                new VoiceEvidenceStore.Entry(nodeId, speaker.GetString()!, VoiceAudioSource.Tts,
+                                    voiceKey.GetString()!, true, 1, "本项目配音技能生成", DateTimeOffset.UtcNow)
+                            });
+                        }
                         return "attached";
                     });
                 }

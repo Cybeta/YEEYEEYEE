@@ -924,6 +924,76 @@ internal sealed class ProjectCanvasSceneStore
         Func<RecentCanvasState, (WorkflowCanvasState? Canvas, IResult? Result)> mutate,
         Func<RecentCanvasState, byte[], object> respond) => Write(0, mutate, respond, null, requireBaseRevision: false);
 
+    /// <summary>
+    /// 成片前的声音闸门：逐镜把「有台词的角色」对应到声音证据，再交给
+    /// <see cref="VoiceConsistency"/> 统一判定。缺证据、转写不符、声纹过低、跨镜换音色都会返回原因。
+    /// </summary>
+    public IReadOnlyList<string> VoiceAudit(IReadOnlyList<Guid> shotIds)
+    {
+        var current = Load();
+        var evidence = VoiceEvidenceStore.Load(path);
+        var takes = new List<(string Shot, VoiceTakeEvidence Evidence)>();
+        var errors = new List<string>();
+        foreach (var id in shotIds.Distinct())
+        {
+            var node = current.State.Canvas.Nodes.FirstOrDefault(item => item.Id == id && item.Category == NodeCategory.Storyboard);
+            if (node is null) continue;
+            foreach (var speaker in VoiceCasting.Parse(VoiceCasting.DialogueOf(node))
+                .Select(line => line.Speaker)
+                .Where(speaker => speaker.Length > 0 && !VoiceCasting.IsNarrator(speaker))
+                .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var entry = evidence.LastOrDefault(item => item.NodeId == id &&
+                    string.Equals(item.Speaker, speaker, StringComparison.OrdinalIgnoreCase));
+                if (entry is null)
+                {
+                    errors.Add($"「{node.Title}」的「{speaker}」还没有配音或音频检测记录，不能进成片。");
+                    continue;
+                }
+                takes.Add((node.Title, new VoiceTakeEvidence(entry.Speaker, entry.Source, entry.VoiceKey,
+                    entry.TranscriptMatches, entry.SpeakerSimilarity, entry.Note)));
+            }
+        }
+        errors.AddRange(VoiceConsistency.Check(takes));
+        return errors;
+    }
+
+    public IResult VoiceEvidenceOf(Guid nodeId)
+    {
+        try
+        {
+            return Results.Json(new
+            {
+                nodeId,
+                entries = VoiceEvidenceStore.Load(path).Where(entry => entry.NodeId == nodeId).Select(entry => new
+                {
+                    entry.Speaker, source = entry.Source.ToString(), entry.VoiceKey, entry.TranscriptMatches,
+                    entry.SpeakerSimilarity, entry.Note, entry.RecordedAt
+                })
+            });
+        }
+        catch (InvalidDataException ex) { return Error(503, "VOICE_EVIDENCE_UNREADABLE", ex.Message); }
+    }
+
+    public IResult SaveVoiceEvidence(Guid nodeId, IReadOnlyList<VoiceEvidenceStore.Entry> entries)
+    {
+        try
+        {
+            var current = Load();
+            var node = current.State.Canvas.Nodes.FirstOrDefault(item => item.Id == nodeId);
+            if (node is null) return Error(404, "RECORD_NOT_FOUND", "节点不存在");
+            if (entries.Any(entry => string.IsNullOrWhiteSpace(entry.Speaker) || entry.Speaker.Length > 40 ||
+                entry.VoiceKey.Length > 256 || entry.Note.Length > 500 ||
+                entry.SpeakerSimilarity is < 0 or > 1))
+                return Error(400, "VOICE_EVIDENCE_INVALID", "说话人或数值无效（相似度需在 0–1 之间）");
+            var stamped = entries.Select(entry => entry with { NodeId = nodeId, RecordedAt = DateTimeOffset.UtcNow }).ToList();
+            VoiceEvidenceStore.Replace(path, nodeId, stamped);
+            return Results.Json(new { saved = stamped.Count });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or JsonException)
+        { return Error(503, "VOICE_EVIDENCE_UNREADABLE", "声音证据无法写入"); }
+    }
+
     public IResult FilmPlan(Guid nodeId)
     {
         try

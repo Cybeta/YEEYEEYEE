@@ -9,7 +9,7 @@
 
 YEEYEEYEE 是一个面向 AI 创作的项目工作区：把 **企划、章节、分镜、角色、场景、道具、图片、视频和成片** 放在同一个项目里。你可以在 Windows 桌面端使用完整工作区，也可以部署 Web 服务，在浏览器中与其他用户协作管理画布和素材。
 
-当前源码版本为 **0.1.5.6**；可下载版本和发行状态以 [GitHub Releases](https://github.com/Cybeta/YEEYEEYEE/releases) 为准。
+当前源码版本为 **0.1.5.7**；可下载版本和发行状态以 [GitHub Releases](https://github.com/Cybeta/YEEYEEYEE/releases) 为准。
 
 ## 你可以用它做什么
 

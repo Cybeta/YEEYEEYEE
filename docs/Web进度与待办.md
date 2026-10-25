@@ -394,6 +394,18 @@
 - 硬校验：`ProjectCanvasSceneStore.PreviewActions` 在对比出本次新增/修改的分镜后逐类检查；`required` 却拿不到同类型引用时直接写进预检错误，审批与自动提交都过不去，Agent 会收到具体分镜名与资产类型的提示。
 - 真实链路（demo 项目、真实模型）：创建 S09 输出 `assetRequirements{character:required,scene:required,prop:required}` 与 `entityTargets[CC,DP,AI 办公室夜景,折叠便签]`，预检无错误；故意不挂引用创建 S10 时返回三条「分镜「S10 校验镜」的X资产需求为 required，但动作没有挂上对应引用」；显式三项 none 且无引用创建 S11 时预检无错误；只改 S07 提示词、需求保持 character/scene required + prop none 时预检也无错误。全程只是预览，画布修订保持 `178369959253851`、节点仍为 12 个，测试会话已删除。
 - 回归用例 `YEEYEEYEE.Web.Tests/AgentReferenceRegression.cs`（`--agent-reference-only`）覆盖「required 漏挂被拒 / 显式 none 不误报 / 已有引用视为满足」。首次执行失败，原因是用例自身的环境准备缺两步：`ProjectContext.Create` 不建 `project` 子目录（Web 创建项目时由 API 补建），且被引用的角色没有放进画布快照，`PreviewActions` 直接以「画布只读或有未解决校验问题」拒绝。补上目录与 `canvas.Entities` 后通过：`Agent reference passed: required without reference rejected, none and existing references accepted.`
+- 提交后跑了完整 Web 回归（`YEEYEEYEE.Web.Tests` 无参数入口）：退出码 0，35 条 `passed`，覆盖转换、附件 HTTP、实体、聊天/协议/模型技能、成片拼接、并发推送、结构/连线/位置/类别等；本轮没有出现失败用例。
+
+### 2026-10-21 角色声音档案与成片声音闸门
+
+- 数据：`WorkflowEntityVariant` / `EntityVariantVersion` 新增 `Voice`（`VoiceProfile`：provider、voiceId、model、speed、pitch、seed、note）。声音随变体版本快照、回滚与指纹一起走；`voiceId` 或 `model` 变化会被视为「未提交改动」和「跨镜换音色」。
+- 台词：先放在分镜节点 `Parameters["dialogue"]`，约定每行 `角色：台词`，支持全角/半角冒号与 `CC（内心）：…` 这类备注；没有冒号按旁白处理。
+- 校验：`VoiceCasting.Check` 在配音前检查——台词里的角色必须挂在角色引用上、声音档案必须完整（voiceId+model）、同一角色跨镜 `VoiceKey` 必须一致。
+- 配音技能：`web.text-to-speech`，复用媒体配置的图片站点与密钥，请求 OpenAI 兼容的 `POST /audio/speech`（model/voice/input/speed）；成功后音频回挂到目标分镜。端点不可用时明确失败，不降级为静默生成。
+- 声音证据：`<画布>.voice.json` 记录每镜每位说话人的来源、音色键、转写是否一致、声纹相似度。配音技能成功即写入 `source=tts, similarity=1`；模型自带音频必须由检测方通过 `POST /api/web/records/{nodeId}/voice-evidence` 写入结果。
+- 成片闸门：`POST /api/web/records/{nodeId}/film` 先跑 `ProjectCanvasSceneStore.VoiceAudit`，缺证据、转写不符、相似度低于 0.75、跨镜音色不一致都会返回 409 `VOICE_INCONSISTENT`，不允许直接拼接。阈值只有 `VoiceConsistency.MinimumSimilarity` 一处。
+- 回归：`--voice-cast-only` 覆盖台词解析、缺引用、缺档案、跨镜漂移、静音镜头，以及音频证据的转写/声纹/音色漂移/缺失判定，已通过。
+- 未做：Web 界面的音色编辑与证据录入、真实 TTS 供应商联调、模型自带音频的自动转写与声纹测量（目前要求外部测量后写入证据）。
 
 ### 未覆盖与限制
 
@@ -534,3 +546,14 @@ Web 控制台回归包含认证权限、画布保存和锁、项目与多画布�
 - [x] 已使用现有真实配置在独立隔离 Web 完成真实模型 HTTP 与浏览器验收；原 5099 服务未更改模型配置。
 - [x] ComfyUI 环境阻塞已用本轮提供的真实地址解除：0.37.0、5986 种节点、114 个 checkpoint，真实生成与下载通过（见「2026-10-18 真实 ComfyUI 端到端验收」）。原画布附件回写未在本轮验收（按任务使用无目标节点的技能调用，未写回正式项目）；本地 8188 与 ZEALMAN 面板地址不在本轮范围。
 - [x] 断线恢复与 presence 活跃时间边界已单独验收（隔离实例 + 两个账号 + 真实浏览器，见上文「断线恢复与 presence 边界专项验收批次」）：恢复靠**重连后补取快照**（不是逐条重放），重连后画布与服务端最终状态一致；presence 的断开、TTL 过期与重新上线边界、同账号多标签聚合、掉线不释放仍有效的节点租约均有回归或实测。仍未覆盖：异常断网条件（对端静默消失、TCP 不发 FIN）未单独构造；自动化浏览器在长连接被重置后网络栈会挂住，因此「断网后即时推送跟随」只能沿用此前真实 Edge/Chromium 的结论；人工音画听感仍未单独验收（音视频时间戳连续性此前已通过）。**逐条重放历史事件不是现有设计，也不在待办内。**
+
+## 2026-10-25 视频多参考与声音一致性收口
+
+- [x] 视频参考素材扩到三类：参考图（按模型自报容量，最多 9 张）、`reference_audio`、`reference_video`；Web 入口按 MIME 分三组，超容量直接报错、不裁剪。
+- [x] 提示词编号由服务端按真实提交顺序生成（首帧 → 角色 → 道具 → 场景 → 聊天图，再音频、视频），音频归属只在「唯一说话人」时写 `for CC`，末尾追加角色分工与「逐字念台词」约束。
+- [x] 两道视频闸门：`409 VIDEO_DIALOGUE_MISSING`（台词必须原样写进提示词）、`409 VIDEO_CONTENT_DENSITY`（台词量与时长不匹配时拒绝）。
+- [x] 声音一致性：台词格式 `角色：台词`、VoiceProfile 与 VoiceKey、配音技能产物自动写证据；成片前 `VOICE_INCONSISTENT` 逐镜检查。
+- [x] 真实 HTTP 端到端（2026-10-25）：起真实 Web 进程走 HTTP 完成注册 → 建会话 → 上传图片与音频 → 调 `web.text-to-video`；缺台词被 409 拒绝，带台词任务 `41ad559b…` 成功（接口站任务 `evt-KLMKVYRSAJED`）。自动回挂由后台每秒扫描完成，未在当次运行内等到，等待逻辑已修。
+- [x] 示例项目八镜（S01–S08）全部产出 1366×768 横屏视频并回挂到各自节点；S03/S04/S06/S08 用 MiniMax-H3（不收 `size`，只能出横屏）。
+- [ ] 成片拼接未通过：`ProductVideoAssembly` 报「第 4 段的 vide 轨编码参数和第 1 段不一致」。八段分辨率、H.264 Baseline 3.2 与 SPS 头一致，差异在 sample entry 更细的编码元数据；仓库不含编码器，需要外部重编码归一化后再拼。
+- [ ] 前端聊天面板仍只列图片候选，音频/视频附件还不能在界面上选。

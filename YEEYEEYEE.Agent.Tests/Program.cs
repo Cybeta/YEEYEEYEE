@@ -333,7 +333,7 @@ var tests = new (string Name, Action Run)[]
     ("出视频：按「提交 → 轮询 → 下载」跑通并把文件落到资产目录", VideoProviderSubmitsPollsAndDownloads),
     ("出视频：AnyAIAPI官方协议、参考图、路径与不重复提交", VideoProviderUsesOfficialProtocol),
     ("出视频：无效charset回退、合法编码、失败阶段与安全诊断", VideoProviderHandlesInvalidCharset),
-    ("出视频：一次只收一张图（首帧），多出来的参考图要如实说出来而不是静默丢", VideoProviderSaysWhatItCouldNotUse),
+    ("出视频：参考素材容量按 /v1/models 动态取，多图/音频/视频分字段上传，超容量报错不裁剪", VideoProviderSaysWhatItCouldNotUse),
     ("出视频：任务失败带出接口原因，返回体不认识就把原文报出来（不产空文件）", VideoProviderReportsFailureAndUnknownShape),
     ("出视频：单次状态查询挂住不判死，失败也带回接口站任务号", VideoProviderPollTimeoutDoesNotFailTheTask),
     ("出视频：密钥绝不外送到别的域（预签名 CDN 只收字节）", VideoProviderNeverSendsKeyToForeignHost),
@@ -2696,7 +2696,7 @@ static void VideoAssetPreflightReferences()
     shot.References.Add(reference);
     string? Locate(WorkflowAttachment a) => a.Reference == "missing" ? null : a.Reference;
     StoryboardVideoPreflight Check(string? frame = null) => GenerationAudit.CheckVideoAssets(canvas, shot, Locate, frame);
-    Expect(Check().Errors.Any(e => e.Contains("无可用图片")) && !Check().CanSubmit(true), "必要引用缺图必须阻断，确认不能覆盖硬错误");
+    Expect(Check().Errors.Any(e => e.Contains("无可用参考图")) && !Check().CanSubmit(true), "必要引用缺图必须阻断，确认不能覆盖硬错误");
     variant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "prop" });
     Expect(Check().Errors.Any(e => e.Contains("采用首帧")), "设定图不能冒充首帧，候选结果未采用也不能提交");
     shot.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "frame" });
@@ -2723,7 +2723,7 @@ static void VideoAssetPreflightReferences()
     reference.VariantVersionId = Guid.NewGuid();
     Expect(Check().Errors.Any(e => e.Contains("缺失指定版本")), "不得回退到有图的当前变体");
     reference.VariantVersionId = variant.Versions[0].Id;
-    Expect(Check().Errors.Any(e => e.Contains("无可用图片")), "指定版本没有图，当前变体有图也阻断");
+    Expect(Check().Errors.Any(e => e.Contains("无可用参考图")), "指定版本没有图，当前变体有图也阻断");
     reference.VariantVersionId = null;
     variant.Attachments[0].Reference = "missing";
     Expect(!Check().CanSubmit(), "图片文件丢失必须阻断");
@@ -15190,17 +15190,19 @@ static void VideoProviderUsesOfficialProtocol()
 }
 
 /// <summary>
-/// 视频接口只收一张图（首帧），多带的参考图必须如实说出来。
+/// 参考素材的容量：非官方协议只收一张图；官方协议按 /v1/models 自报的数量收，
+/// 图 / 音频 / 视频各按自己的字段重复上传。**超容量一律报错，不裁剪**。
 /// </summary>
 static void VideoProviderSaysWhatItCouldNotUse()
 {
-	// 视频接口的提交体只有一个 image 字段，所以一次只收一张（首帧）。而一镜可能引用了
-	// 角色 / 道具 / 场景好几张——**用不完的必须说出来**，不许静默丢（与出图那条路同一条规矩）。
-	// 不说的话，用户会以为设定带上了、只是模型没画好，然后一直找模型的问题。
+	// 容量不是写死的：官方协议读模型自报的 max_reference_images / max_audio_references，
+	// 并且一次能把多张图、音频、视频一起带上。超了要明确报错——悄悄少带几张，
+	// 用户只会以为「模型没画好」，然后一直找模型的问题。
 	using var stores = new IsolatedStores();
 	var previousInterval = HttpVideoProvider.PollInterval;
 	HttpVideoProvider.PollInterval = TimeSpan.Zero;
 	var frames = new List<string>();
+	var audio = Path.Combine(Path.GetTempPath(), "vref-" + Guid.NewGuid().ToString("N") + ".wav");
 	try
 	{
 		for (var index = 0; index < 3; index++)
@@ -15209,7 +15211,9 @@ static void VideoProviderSaysWhatItCouldNotUse()
 			File.WriteAllBytes(path, new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A });
 			frames.Add(path);
 		}
+		File.WriteAllBytes(audio, new byte[] { 0x52, 0x49, 0x46, 0x46 });
 
+		// ① 非官方协议：只在 multipart 里收一张 image，多给就**报错**（不裁剪、也不发请求）。
 		var bodies = new List<string>();
 		var handler = new StubHttpHandler(request =>
 		{
@@ -15226,38 +15230,114 @@ static void VideoProviderSaysWhatItCouldNotUse()
 			VideoModel = "veo-3"
 		};
 		var provider = new HttpVideoProvider(config, new HttpClient(handler));
-		Expect(provider.ReferenceCapacity.MaxImages == 1, "视频接口一次只收一张图（首帧）");
+		Expect(provider.ReferenceCapacity.MaxImages == 1, "非官方协议的视频接口只在 multipart 里收一张图");
+		Expect(provider.ReferenceLimits.MaxAudios == 0 && provider.ReferenceLimits.MaxVideos == 0,
+			"非官方协议不收参考音频 / 视频");
 
-		var result = provider.GenerateAsync(new VideoGenerationRequest
+		var rejected = provider.GenerateAsync(new VideoGenerationRequest
 		{
 			Prompt = "雨夜码头",
 			Seconds = 5,
 			ReferenceImages = frames
 		}).GetAwaiter().GetResult();
+		Expect(rejected.Status == VideoGenerationStatus.Failed, "超过容量应直接失败，不能悄悄只用第一张");
+		Expect(rejected.Error.Contains("最多收 1 张") && rejected.Error.Contains("不会被裁剪"),
+			"要说清容量与「不裁剪」，实际：" + rejected.Error);
+		Expect(bodies.Count == 0, "超容量要在提交前拦住，不能把请求发出去");
 
-		Expect(result.Status == VideoGenerationStatus.Succeeded, "这条用例只关心说明，链路本身要跑通：" + result.Error);
-		Expect(result.ReferenceNote.Contains("忽略其余 2 张"), "多出来的两张要说出来，实际：" + result.ReferenceNote);
-		Expect(result.ReferenceNote.Contains("设定图在这条路上带不上"), "还要说清是为什么，实际：" + result.ReferenceNote);
-
-		// 提交体里只该有一张图：只带首帧，另外两张连字节都不该发出去。
-		var body = bodies.Count > 0 ? bodies[0] : string.Empty;
-		Expect(body.Contains(Path.GetFileName(frames[0])), "首帧要带上");
-		Expect(!body.Contains(Path.GetFileName(frames[1])) && !body.Contains(Path.GetFileName(frames[2])),
-			"接口只收一张，多出来的两张不该发出去");
-
-		// 只有一张时不该冒出这句话。
 		var single = provider.GenerateAsync(new VideoGenerationRequest
 		{
 			Prompt = "雨夜码头",
 			Seconds = 5,
 			ReferenceImages = new[] { frames[0] }
 		}).GetAwaiter().GetResult();
-		Expect(single.ReferenceNote.Length == 0, "没多带图就不该有这句说明，实际：" + single.ReferenceNote);
+		Expect(single.Status == VideoGenerationStatus.Succeeded, "一张图仍应跑通：" + single.Error);
+
+		// ② 官方协议：容量按 /v1/models 自报的值，多图 / 音频各按自己的字段重复上传。
+		var submitted = new List<string>();
+		var official = new StubHttpHandler(request =>
+		{
+			if (request.RequestUri!.AbsolutePath.EndsWith("/models", StringComparison.Ordinal))
+				return JsonResponse("""{"data":[{"id":"wan-pro","max_reference_images":3,"max_audio_references":1,"max_video_references":1}]}""");
+			if (request.Method == HttpMethod.Post)
+				submitted.Add(request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? string.Empty);
+			return request.Method == HttpMethod.Post
+				? JsonResponse("""{"id":"vid-10","status":"completed","url":"https://video.anyaiapi.top/v1/videos/vid-10/content"}""")
+				: BytesResponse(Mp4Bytes());
+		});
+		var officialProvider = new HttpVideoProvider(
+			new AiProviderConfig { VideoEndpoint = "https://video.anyaiapi.top/v1", VideoModel = "wan-pro", VideoApiKey = "sk-official" },
+			new HttpClient(official));
+
+		var multi = officialProvider.GenerateAsync(new VideoGenerationRequest
+		{
+			Prompt = "三张设定图 + 一段配音",
+			Seconds = 4,
+			ReferenceImages = frames,
+			ReferenceAudios = new[] { audio }
+		}).GetAwaiter().GetResult();
+		Expect(multi.Status == VideoGenerationStatus.Succeeded, "多文件提交应跑通：" + multi.Error);
+		Expect(officialProvider.ReferenceLimits.MaxImages == 3 && officialProvider.ReferenceLimits.MaxAudios == 1
+			&& officialProvider.ReferenceLimits.MaxVideos == 1,
+			"容量要按 /models 自报的值，实际：" + officialProvider.ReferenceLimits.Description);
+
+		var body = submitted.Count > 0 ? submitted[0] : string.Empty;
+		Expect(body.Split("name=\"input_reference\"").Length - 1 == 3, "三张图要各一个 input_reference part");
+		Expect(body.Split("name=\"reference_audio\"").Length - 1 == 1, "音频要走 reference_audio");
+		Expect(body.Contains(Path.GetFileName(frames[2])), "第三张图也要带上，不能只发第一张");
+		Expect(body.Contains("name=\"reference_mode\""), "官方协议要带 reference_mode");
+
+		// 超过 /models 自报的容量：报错，不裁剪。
+		var tooMany = officialProvider.GenerateAsync(new VideoGenerationRequest
+		{
+			Prompt = "四张图",
+			Seconds = 4,
+			ReferenceImages = frames.Concat(new[] { frames[0] }).ToList()
+		}).GetAwaiter().GetResult();
+		Expect(tooMany.Status == VideoGenerationStatus.Failed && tooMany.Error.Contains("最多收 3 张"),
+			"超过模型自报的容量要报错，实际：" + tooMany.Error);
+		Expect(submitted.Count == 1, "超容量不得再发一次提交");
+
+		// ③ 有的池子不收 size / reference_mode（MiniMax-H3 实测）：
+		//    400「unpriced」时去掉这两项再提交一次，并把「画幅没按你选的来」写进结果说明。
+		var attempts = new List<string>();
+		var unpriced = new StubHttpHandler(request =>
+		{
+			if (request.Method == HttpMethod.Post)
+			{
+				var text = request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? string.Empty;
+				attempts.Add(text);
+				if (text.Contains("name=\"size\""))
+					return new HttpResponseMessage(HttpStatusCode.BadRequest)
+					{
+						Content = new StringContent("""{"detail":"unsupported or unpriced parameters for this model"}""")
+					};
+				return JsonResponse("""{"id":"vid-11","status":"completed","url":"https://video.anyaiapi.top/v1/videos/vid-11/content"}""");
+			}
+			return BytesResponse(Mp4Bytes());
+		});
+		var degradedProvider = new HttpVideoProvider(
+			new AiProviderConfig { VideoEndpoint = "https://video.anyaiapi.top/v1", VideoModel = "minimax", VideoApiKey = "sk-official" },
+			new HttpClient(unpriced));
+		var degraded = degradedProvider.GenerateAsync(new VideoGenerationRequest
+		{
+			Prompt = "降级",
+			Seconds = 4,
+			Width = 720,
+			Height = 1280,
+			ReferenceImages = new[] { frames[0] }
+		}).GetAwaiter().GetResult();
+		Expect(degraded.Status == VideoGenerationStatus.Succeeded, "unpriced 应降级重试成功：" + degraded.Error);
+		Expect(attempts.Count == 2, "降级只重试一次，实际 " + attempts.Count + " 次");
+		Expect(degraded.Note.Contains("不收") && degraded.Note.Contains("720x1280"),
+			"要说清降级了什么，实际：" + degraded.Note);
 	}
 	finally
 	{
 		HttpVideoProvider.PollInterval = previousInterval;
+		try { File.Delete(audio); } catch (IOException) { }
 		foreach (var path in frames) { try { File.Delete(path); } catch (IOException) { } }
+
 	}
 }
 
@@ -18703,8 +18783,9 @@ sealed class RecordingVideoProvider : IVideoProvider
         GenerationCapability.ImageToVideo
     };
 
-    /// <summary>桩不限制张数（真实那条路目前只收一张，见 HttpVideoProvider）。</summary>
+    /// <summary>桩不限制张数（真实那条路按模型自报的能力算，见 HttpVideoProvider）。</summary>
     public ReferenceCapacity ReferenceCapacity => new(0, "测试桩不限制参考图。");
+    public VideoReferenceCapacity ReferenceLimits => new(0, 0, 0, "测试桩不限制参考素材。");
 
     /// <summary>最近一次请求；没有调用过时为 null。</summary>
     public VideoGenerationRequest? LastRequest { get; private set; }

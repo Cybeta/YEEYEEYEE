@@ -19,6 +19,7 @@ internal static class WebCanvasApi
     private static EditLeaseStore? leases => WebProjectApi.Current is { } mode ? WebProjectApi.Leases(mode) : null;
     public sealed record RegisterAttachmentRequest(long BaseRevision, Guid EntityId, Guid VariantId);
     public sealed record FilmRequest(long BaseRevision, Guid[] ShotIds);
+    public sealed record VoiceEvidenceInput(VoiceEvidenceStore.Entry[]? Entries);
     public sealed record HistoryRequest(long BaseRevision);
     public sealed record WorkTreeRequest(long BaseRevision, string Direction, string BaselineHash, bool Confirmed);
     public sealed record ChapterSplitRequest(long BaseRevision, Guid SourceId);
@@ -52,6 +53,20 @@ internal static class WebCanvasApi
         });
         app.MapGet("/api/web/records/{nodeId:guid}/film", (Guid nodeId) =>
             store?.FilmPlan(nodeId) ?? Error(409, "CANVAS_REQUIRES_PROJECT", "成片需要项目画布"));
+        // 声音证据：模型自带音频没有可锁的音色参数，只能把「转写对不对、声纹像不像」存成证据；
+        // 成片前逐镜核对，缺证据或跨镜不一致就不许拼。
+        app.MapGet("/api/web/records/{nodeId:guid}/voice-evidence", (Guid nodeId) =>
+            store?.VoiceEvidenceOf(nodeId) ?? Error(409, "CANVAS_REQUIRES_PROJECT", "声音证据需要项目画布"));
+        app.MapPost("/api/web/records/{nodeId:guid}/voice-evidence", (HttpContext context, Guid nodeId, VoiceEvidenceInput input) =>
+        {
+            var user = WebAccessGuard.CurrentUser(context);
+            if (user is null || !WebAccessGuard.Permissions(context).Contains("canvas.edit"))
+                return Error(403, "CANVAS_EDIT_FORBIDDEN", "记录声音证据需要登录及画布编辑权限");
+            if (store is null) return Error(409, "CANVAS_REQUIRES_PROJECT", "声音证据需要项目画布");
+            if (input.Entries is null || input.Entries.Length is < 1 or > 20)
+                return Error(400, "VOICE_EVIDENCE_INVALID", "每次提交 1–20 条声音证据");
+            return store.SaveVoiceEvidence(nodeId, input.Entries);
+        });
         app.MapPost("/api/web/records/{nodeId:guid}/film", (HttpContext context, Guid nodeId, FilmRequest input) =>
         {
             var user = WebAccessGuard.CurrentUser(context);
@@ -59,6 +74,8 @@ internal static class WebCanvasApi
                 return Error(403, "CANVAS_EDIT_FORBIDDEN", "成片需要登录及画布编辑权限");
             if (store is null) return Error(409, "CANVAS_REQUIRES_PROJECT", "成片需要项目画布");
             if (input.ShotIds is null || input.ShotIds.Length > 500) return Error(400, "FILM_SELECTION_INVALID", "镜头选择无效");
+            var voiceErrors = store.VoiceAudit(input.ShotIds);
+            if (voiceErrors.Count > 0) return Error(409, "VOICE_INCONSISTENT", string.Join("；", voiceErrors));
             return leases!.WithTreeTransaction<IResult>(user, () =>
             {
                 var before = store.LastCommit;

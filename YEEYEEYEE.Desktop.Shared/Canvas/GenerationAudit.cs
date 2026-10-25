@@ -236,6 +236,35 @@ public static class GenerationAudit
 {
     public const string SingleImageVideoNote = "当前单图视频接口只使用首帧：角色、道具、场景资产应先用于生成并采用分镜首帧，再让这一镜动起来；不能把设定图当作分镜首帧。";
 
+    /// <summary>中文口播的保守估算：每秒约 4.5 字（慢、带气声）。判「时长够不够说完」用。</summary>
+    public const double SpeechCharsPerSecond = 4.5;
+
+    /// <summary>
+    /// 时长与内容密度的匹配检查：台词只有两三秒、却要十五秒镜头时，模型会用**自行加词**把时间填满
+    /// （实测：把「好像也没那么难」改成「好像没这么难」并插入别的词）。
+    /// 只按台词估内容量；没有台词的分镜不判——纯动作镜头的内容量无法从文本估。
+    /// </summary>
+    public static string? CheckDialogueDensity(WorkflowNode? node, int seconds)
+    {
+        if (node is null || seconds <= 0) return null;
+        var lines = VoiceCasting.Parse(VoiceCasting.DialogueOf(node))
+            .Where(line => line.Text.Length > 0).ToList();
+        if (lines.Count == 0) return null;
+        var characters = lines.Sum(line => line.Text.Count(character =>
+            !char.IsPunctuation(character) && !char.IsWhiteSpace(character)));
+        if (characters == 0) return null;
+        // 每句另给 0.6 秒起落，避免把「一句两秒」估成没有呼吸。
+        var speech = characters / SpeechCharsPerSecond + 0.6 * lines.Count;
+        if (seconds >= Math.Ceiling(speech * 2.5) && seconds - speech >= 4)
+            return $"这一镜台词约 {speech:0.#} 秒，请求时长 {seconds} 秒，内容密度不足："
+                + "模型会用自行加词、拉长停顿来填满，实测会改写台词。"
+                + $"请把时长改到约 {Math.Max(1, (int)Math.Ceiling(speech * 1.5))} 秒以内，或补足动作与台词。";
+        if (seconds < speech)
+            return $"台词约需 {speech:0.#} 秒，请求时长 {seconds} 秒不够说完，模型会压缩或丢句。"
+                + "请加长时长或删减台词。";
+        return null;
+    }
+
     /// <summary>首帧和视频共享的资产校验。需求未知不可用临时确认绕过。</summary>
     public static IReadOnlyList<string> CheckImageAssets(
         WorkflowCanvasState canvas, WorkflowNode node, Func<WorkflowAttachment, string?> locatePath,

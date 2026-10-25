@@ -508,8 +508,7 @@ public sealed class OpenAiCompatibleImageProvider : IImageProvider
 
             if (useReference)
             {
-                // 图生图走标准 /images/edits：multipart 形式提交底图与提示词。
-                // 多张参考图按 image[] 重复提交；实际能吃几张由所用模型决定。
+                // 图生图走标准 /images/edits：multipart 形式提交底图与提示词。实际能吃几张由所用模型决定。
                 var form = new MultipartFormDataContent();
                 var field = references.Count > 1 ? "image[]" : "image";
                 // 文本字段放前面、图片放后面：有的网关边收边解析，先看到 image 再看到 model

@@ -49,3 +49,9 @@ TODO.local.md
 *.design/
 # 联调/冒烟产生的测试图
 anyai-test-*.jpg
+
+# ── 示例项目：大体积素材与运行期锁不入库，项目结构照常入库 ──
+/demo-projects/*/assets/
+/demo-projects/*/*.lock
+/demo-projects/*/canvases/*.lock
+/demo-projects/*/canvases/*.edits.json

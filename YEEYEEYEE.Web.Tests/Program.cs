@@ -78,6 +78,68 @@ if (args.Contains("--agent-reference-only"))
     return;
 }
 
+if (args.Contains("--voice-cast-only"))
+{
+    VoiceCastRegression.Run();
+    return;
+}
+
+if (args.Contains("--video-probe-only"))
+{
+    try { await VideoProbe.Run(); }
+    catch (Exception error) { Console.WriteLine("PROBE FAILED: " + error); }
+    return;
+}
+
+if (args.Contains("--voice-calibration-only"))
+{
+    try { VoiceCalibration.Run(); }
+    catch (Exception error) { Console.WriteLine("VOICE CALIBRATION FAILED: " + error); }
+    return;
+}
+
+if (args.Contains("--import-output-only"))
+{
+    try { VideoProbe.ImportOutput(); }
+    catch (Exception error) { Console.WriteLine("IMPORT FAILED: " + error); }
+    return;
+}
+
+if (args.Contains("--shot-only"))
+{
+    try { await VideoProbe.RunShot(); }
+    catch (Exception error) { Console.WriteLine("SHOT FAILED: " + error); }
+    return;
+}
+
+if (args.Contains("--dialogue-only"))
+{
+    try { VideoProbe.WriteDialogues(); }
+    catch (Exception error) { Console.WriteLine("DIALOGUE FAILED: " + error); }
+    return;
+}
+
+if (args.Contains("--remove-attachment-only"))
+{
+    try { VideoProbe.RemoveAttachments(); }
+    catch (Exception error) { Console.WriteLine("REMOVE FAILED: " + error); }
+    return;
+}
+
+if (args.Contains("--assemble-only"))
+{
+    try { VideoProbe.Assemble(); }
+    catch (Exception error) { Console.WriteLine("ASSEMBLE FAILED: " + error); }
+    return;
+}
+
+if (args.Contains("--web-video-e2e-only"))
+{
+    try { await WebVideoE2E.Run(); }
+    catch (Exception error) { Console.WriteLine("E2E FAILED: " + error); }
+    return;
+}
+
 if (args.Contains("--character-reference-only"))
 {
     CharacterReferenceRegression.Run();

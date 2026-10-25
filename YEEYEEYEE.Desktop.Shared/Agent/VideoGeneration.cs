@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -42,6 +43,18 @@ public sealed class VideoGenerationRequest
 
     /// <summary>参考帧的本机绝对路径列表（图生视频用；文生视频为空）。</summary>
     public IReadOnlyList<string> ReferenceImages { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// 参考音频的本机绝对路径列表。接口站走 multipart 的 <c>reference_audio</c>；
+    /// ComfyUI 那一支走 <see cref="SourceAudios"/>（槽位不同，别混用）。
+    /// </summary>
+    public IReadOnlyList<string> ReferenceAudios { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// 参考视频的本机绝对路径列表。接口站走 multipart 的 <c>reference_video</c>；
+    /// ComfyUI 那一支走 <see cref="SourceVideos"/>。
+    /// </summary>
+    public IReadOnlyList<string> ReferenceVideos { get; init; } = Array.Empty<string>();
 
     /// <summary>显式首帧和尾帧；为空时兼容使用 ReferenceImages 的前两项。</summary>
     public string FirstFrame { get; init; } = string.Empty;
@@ -135,6 +148,27 @@ public sealed class VideoGenerationResult
     public string Note { get; init; } = string.Empty;
 }
 
+/// <summary>
+/// 视频链路一次能收下多少份参考素材：图 / 音频 / 视频各几份，单文件多大。
+///
+/// 与出图侧的 <see cref="ReferenceCapacity"/> 分开：那边只有图，这边三路素材各有各的上限，
+/// 而且数量是**按模型自报的能力**来的（`GET /v1/models` 的 max_reference_images 等），
+/// 不是写死的常量——同一家接口换一个模型，容量就可能变。
+///
+/// 三路数量里的 0 表示**这一路不收**（不是「不限」）。单文件上限来自接口文档。
+/// </summary>
+public sealed record VideoReferenceCapacity(
+    int MaxImages,
+    int MaxAudios,
+    int MaxVideos,
+    string Description,
+    long MaxImageBytes = 30L * 1024 * 1024,
+    long MaxAudioBytes = 15L * 1024 * 1024,
+    long MaxVideoBytes = 50L * 1024 * 1024)
+{
+    public static string SizeText(long bytes) => $"{bytes / 1024.0 / 1024.0:0.0}MB";
+}
+
 public interface IVideoProvider
 {
     bool IsConfigured { get; }
@@ -143,10 +177,15 @@ public interface IVideoProvider
 
     /// <summary>
     /// 这条链路一次能用几张参考图。与出图侧的 <see cref="IImageProvider.ReferenceCapacity"/> 对称。
-    /// 现在恒为 1（图生视频的首帧）——**不是**猜的：我们这家接口的提交体只有一个 <c>image</c> 字段。
-    /// 将来哪家接口支持多图，改这里一处即可，调用方不必跟着动。
+    /// 接口站那条路会按模型自报的能力给（见 <see cref="ReferenceLimits"/>）；ComfyUI 那条路按工作流的入口数给。
     /// </summary>
     ReferenceCapacity ReferenceCapacity { get; }
+
+    /// <summary>
+    /// 图 / 音频 / 视频三路参考素材各自的容量。**超了要明确报错，不裁剪**：
+    /// 少带的那几张用户看不出来，只会以为「模型没画好」。
+    /// </summary>
+    VideoReferenceCapacity ReferenceLimits { get; }
 
     /// <summary>当前 Provider 能真实执行的生产能力，用于提交前筛选。</summary>
     IReadOnlySet<GenerationCapability> Capabilities { get; }
@@ -169,6 +208,7 @@ public sealed class UnconfiguredVideoProvider : IVideoProvider
     public string ConfigurationDetail => detail;
 
     public ReferenceCapacity ReferenceCapacity => new(0, "还没配出视频链路，无从判断能收几张参考图。");
+    public VideoReferenceCapacity ReferenceLimits => new(0, 0, 0, "还没配出视频链路，无从判断能收几份参考素材。");
     public IReadOnlySet<GenerationCapability> Capabilities => EmptyCapabilities;
     private static readonly IReadOnlySet<GenerationCapability> EmptyCapabilities =
         new HashSet<GenerationCapability>();
@@ -445,6 +485,19 @@ public sealed class ComfyUiVideoProvider : IVideoProvider
                     // 混成一句话会让人以为这类工作流驱动不了，其实它要的是源视频（见 IsSourceDriven）。
                     ? "这份工作流没有底图入口：它吃的是**一段片子**（源视频入口），首帧不会生效。"
                     : "这份工作流没有底图入口，只能文生视频——首帧不会生效。");
+
+    /// <summary>
+    /// 工作流只按「入口数量」收图；音频 / 视频走的是 <see cref="SourceVideos"/> / <see cref="SourceAudios"/>
+    /// 那两路（写到它自己的节点上），不在这个容量里算。
+    /// </summary>
+    public VideoReferenceCapacity ReferenceLimits
+    {
+        get
+        {
+            var capacity = ReferenceCapacity;
+            return new VideoReferenceCapacity(capacity.MaxImages, 0, 0, capacity.Description);
+        }
+    }
 
     private static ComfyUiWorkflowSlots? ReadSlots(SiteWorkflowChoice choice)
     {
@@ -976,8 +1029,14 @@ public sealed class HttpVideoProvider : IVideoProvider
     /// <summary>单次查询连续超时几次就判死。有界地重试，不无限耗下去。</summary>
     private const int TimeoutRetries = 3;
 
-    /// <summary>整个「提交 + 轮询 + 下载」的总时限。超了就如实报超时，不无限等下去。</summary>
-    private static readonly TimeSpan CompletionTimeout = TimeSpan.FromMinutes(20);
+    /// <summary>
+    /// 整个「提交 + 轮询 + 下载」的总时限。超了就如实报超时，不无限等下去。
+    /// 长镜头（15 秒以上）可能比默认 20 分钟更久，可用环境变量 <c>YEEYEEYEE_VIDEO_WAIT_MINUTES</c> 临时放宽；
+    /// 不设或填非法值时仍是 20 分钟——默认行为不变。
+    /// </summary>
+    private static readonly TimeSpan CompletionTimeout = TimeSpan.FromMinutes(
+        double.TryParse(Environment.GetEnvironmentVariable("YEEYEEYEE_VIDEO_WAIT_MINUTES"), out var minutes) && minutes > 0
+            ? minutes : 20);
 
     /// <summary>轮询遇到「服务端忙」时最多重试几次（每次退避等待，见 <see cref="RetryDelay"/>）。</summary>
     private const int TransientRetries = 3;
@@ -1001,10 +1060,49 @@ public sealed class HttpVideoProvider : IVideoProvider
     };
 
     /// <summary>
-    /// 一次只收一张图。**不是保守，是接口就这样**：提交时只有一个 <c>image</c> 字段（见 SubmitAsync）。
-    /// 所以一镜引用的角色 / 道具 / 场景在这条路上带不上——那就得说出来，不能装作带上了。
+    /// 三路参考素材的容量。数量按模型自报的能力取（<c>GET /v1/models</c> 的
+    /// <c>max_reference_images / max_audio_references / max_video_references</c>）；
+    /// 还没查过时退回这一家的默认值：**官方协议**（AnyAIAPI 或显式 /videos）按文档 10 图 / 5 音 / 5 视频，
+    /// 其他家只在 multipart 里收一张 <c>image</c>。
+    ///
+    /// 属性本身不联网（界面会同步读它），真正的刷新发生在提交前，见 <see cref="ResolveReferenceLimitsAsync"/>。
     /// </summary>
-    public ReferenceCapacity ReferenceCapacity => new(1, "视频接口一次只收一张图（图生视频的首帧）。");
+    public VideoReferenceCapacity ReferenceLimits =>
+        LimitsCache.TryGetValue(CacheKey(EffectiveBaseUrl, EffectiveModel), out var cached)
+            ? cached
+            : DefaultLimits(EffectiveBaseUrl);
+
+    public ReferenceCapacity ReferenceCapacity
+    {
+        get
+        {
+            var limits = ReferenceLimits;
+            return new ReferenceCapacity(limits.MaxImages, limits.Description);
+        }
+    }
+
+    /// <summary>同一家地址 + 同一个模型的能力是稳定的，按下发过一次就记住，不必每次提交都去问。</summary>
+    private static readonly ConcurrentDictionary<string, VideoReferenceCapacity> LimitsCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static string CacheKey(string baseUrl, string model) => $"{baseUrl}|{model}";
+
+    private string EffectiveBaseUrl => (config.EffectiveVideoEndpoint ?? string.Empty).Trim().TrimEnd('/');
+
+    private string EffectiveModel => (config.VideoModel ?? string.Empty).Trim();
+
+    private static bool IsAnyAiHost(string baseUrl) =>
+        Uri.TryCreate(baseUrl, UriKind.Absolute, out var endpoint)
+        && (endpoint.Host.Equals("anyaiapi.top", StringComparison.OrdinalIgnoreCase)
+            || endpoint.Host.EndsWith(".anyaiapi.top", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>没查到能力矩阵时的默认值。两类协议收的东西不一样，默认值也不能混。</summary>
+    private static VideoReferenceCapacity DefaultLimits(string baseUrl) => IsAnyAiHost(baseUrl)
+        ? new VideoReferenceCapacity(10, 5, 5,
+            "接口站按文档：参考图 10 张、参考音频 5 段、参考视频 5 段；"
+            + "单图 ≤30MB、单音频 ≤15MB、单视频 ≤50MB，音频与视频参考总时长各 ≤15 秒。")
+        : new VideoReferenceCapacity(1, 0, 0,
+            "其他家视频接口只在 multipart 里收一张图（image），不收参考音频 / 视频。");
 
     public async Task<VideoGenerationResult> GenerateAsync(VideoGenerationRequest request, CancellationToken cancellationToken = default)
     {
@@ -1028,24 +1126,35 @@ public sealed class HttpVideoProvider : IVideoProvider
         var references = request.ReferenceImages
             .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
             .ToList();
-        // 用不完的参考图要**说出来**，不静默丢弃（与出图那条路同一条规矩）。视频这条路上
-        // 「用不完」是常态：接口只收一张，而一镜可能引用了角色 / 道具 / 场景几张。
-        var capacity = ReferenceCapacity;
-        var referenceNote = capacity.IsLimited && references.Count > capacity.MaxImages
-            ? $"视频接口一次只收 {capacity.MaxImages} 张图：已用第 1 张（首帧），"
-              + $"忽略其余 {references.Count - capacity.MaxImages} 张——设定图在这条路上带不上。"
-            : string.Empty;
+        var referenceAudios = request.ReferenceAudios
+            .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
+            .ToList();
+        var referenceVideos = request.ReferenceVideos
+            .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
+            .ToList();
 
         // 执行方那条任务号：拿到就一路带着走（成功写进结果，失败写进报错），
         // 这样我们这边哪怕超时了，也还有「是哪一条」这个抓手（见 VideoGenerationResult.ExternalTaskId）。
         var taskId = string.Empty;
+        // 提交时被迫降级了什么（例如模型不收 size），如实带回结果里。
+        var note = string.Empty;
         try
         {
             using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             budget.CancelAfter(CompletionTimeout);
             var token = budget.Token;
 
-            var probe = await SubmitAsync(baseUrl, submitPath, apiKey, model, request, seconds, references, officialProtocol, token);
+            // 容量按模型自报的能力算；只有真要用到多份素材时才去问一次 /models，
+            // 单图与纯文生视频不值得为它多打一趟网络。
+            var limits = await ResolveReferenceLimitsAsync(baseUrl, apiKey, model,
+                references.Count > 1 || referenceAudios.Count > 0 || referenceVideos.Count > 0, token).ConfigureAwait(false);
+            var overCapacity = ValidateReferences(limits, references, referenceAudios, referenceVideos);
+            if (overCapacity.Length > 0) return Failed(overCapacity, request, model);
+
+            var submission = await SubmitAsync(baseUrl, submitPath, apiKey, model, request, seconds,
+                references, referenceAudios, referenceVideos, officialProtocol, token);
+            var probe = submission.Probe;
+            if (submission.Note.Length > 0) note = submission.Note;
             if (probe.TaskId.Length > 0) taskId = probe.TaskId;
             if (probe.Error.Length > 0) return Failed(probe.Error, request, model, taskId);
 
@@ -1079,7 +1188,7 @@ public sealed class HttpVideoProvider : IVideoProvider
                 FilePath = path,
                 Provider = Name,
                 Model = model,
-                ReferenceNote = referenceNote,
+                Note = note,
                 ExternalTaskId = taskId
             };
         }
@@ -1097,25 +1206,144 @@ public sealed class HttpVideoProvider : IVideoProvider
     }
 
     /// <summary>
-    /// 提交任务。带参考图时走 multipart，否则走 JSON；按所选协议写入字段。
+    /// 把容量刷新成模型自报的值。<paramref name="needsLookup"/> 为 false 时**不联网**：
+    /// 单图与纯文生视频用缓存或默认值就够了。
+    /// 查不到（网络、非 200、模型不在清单里、字段缺失）就退回默认值——读能力失败不该挡住出片，
+    /// 真超了服务端自己会拒，这里只是把话提前说清楚。
     /// </summary>
-    private async Task<VideoProbe> SubmitAsync(
+    private async Task<VideoReferenceCapacity> ResolveReferenceLimitsAsync(
+        string baseUrl, string apiKey, string model, bool needsLookup, CancellationToken token)
+    {
+        var key = CacheKey(baseUrl, model);
+        if (LimitsCache.TryGetValue(key, out var cached)) return cached;
+        var fallback = DefaultLimits(baseUrl);
+        if (!needsLookup || !IsAnyAiHost(baseUrl) || apiKey.Length == 0) return fallback;
+
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            timeout.CancelAfter(PollRequestTimeout);
+            using var message = new HttpRequestMessage(HttpMethod.Get,
+                $"{baseUrl}{OpenAiCompatibleImageProvider.AvoidDuplicatedPrefix(baseUrl, "/models")}");
+            OpenAiCompatibleImageProvider.ApplyAuth(message, apiKey, "bearer");
+            using var response = await http.SendAsync(message, timeout.Token).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return fallback;
+            var body = await ReadResponseTextAsync(response.Content, timeout.Token).ConfigureAwait(false);
+            var limits = ParseReferenceLimits(body, model);
+            if (limits is null) return fallback;
+            LimitsCache[key] = limits;
+            return limits;
+        }
+        catch (Exception error) when (error is HttpRequestException or JsonException
+            || (error is OperationCanceledException && !token.IsCancellationRequested))
+        {
+            return fallback;
+        }
+    }
+
+    /// <summary>
+    /// 从 <c>GET /v1/models</c> 的清单里找这个模型自报的能力。
+    /// 找不到（模型名对不上）就返回 null，由调用方退回默认值——**不拿别家模型的数字冒充**。
+    /// </summary>
+    private static VideoReferenceCapacity? ParseReferenceLimits(string body, string model)
+    {
+        using var document = JsonDocument.Parse(body);
+        if (!document.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+            return null;
+        foreach (var item in data.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            if (!item.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String
+                || !string.Equals(id.GetString(), model, StringComparison.OrdinalIgnoreCase)) continue;
+            var images = ReadCount(item, "max_reference_images");
+            var audios = ReadCount(item, "max_audio_references");
+            var videos = ReadCount(item, "max_video_references");
+            if (item.TryGetProperty("audio_reference_enabled", out var enabled)
+                && enabled.ValueKind == JsonValueKind.False) audios = 0;
+            return new VideoReferenceCapacity(images, audios, videos,
+                $"接口模型「{model}」自报：参考图 {images} 张、参考音频 {audios} 段、参考视频 {videos} 段；"
+                + "单图 ≤30MB、单音频 ≤15MB、单视频 ≤50MB，音频与视频参考总时长各 ≤15 秒。");
+        }
+        return null;
+    }
+
+    private static int ReadCount(JsonElement item, string name) =>
+        item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out var count)
+            ? Math.Max(count, 0)
+            : 0;
+
+    /// <summary>
+    /// 超容量一律**报错、不裁剪**：悄悄少带几张，用户只会以为模型没画好，而实际设定根本没进去。
+    /// </summary>
+    private static string ValidateReferences(
+        VideoReferenceCapacity limits,
+        IReadOnlyList<string> images, IReadOnlyList<string> audios, IReadOnlyList<string> videos)
+    {
+        if (images.Count > limits.MaxImages)
+            return limits.MaxImages == 0
+                ? $"这条视频接口不收参考图，这次给了 {images.Count} 张：请先去掉引用再提交。"
+                : $"视频接口最多收 {limits.MaxImages} 张参考图，这次给了 {images.Count} 张。"
+                  + "超出容量的部分不会被裁剪，请先删减引用。";
+        if (audios.Count > limits.MaxAudios)
+            return limits.MaxAudios == 0
+                ? $"这条视频接口不收参考音频，这次给了 {audios.Count} 段：请先去掉音频引用再提交。"
+                : $"视频接口最多收 {limits.MaxAudios} 段参考音频，这次给了 {audios.Count} 段。"
+                  + "超出容量的部分不会被裁剪，请先删减。";
+        if (videos.Count > limits.MaxVideos)
+            return limits.MaxVideos == 0
+                ? $"这条视频接口不收参考视频，这次给了 {videos.Count} 段：请先去掉视频引用再提交。"
+                : $"视频接口最多收 {limits.MaxVideos} 段参考视频，这次给了 {videos.Count} 段。"
+                  + "超出容量的部分不会被裁剪，请先删减。";
+        return Oversized(images, limits.MaxImageBytes, "参考图")
+            ?? Oversized(audios, limits.MaxAudioBytes, "参考音频")
+            ?? Oversized(videos, limits.MaxVideoBytes, "参考视频")
+            ?? string.Empty;
+    }
+
+    private static string? Oversized(IReadOnlyList<string> paths, long limit, string label)
+    {
+        foreach (var path in paths)
+        {
+            long size;
+            try { size = new FileInfo(path).Length; }
+            catch (IOException) { continue; }
+            if (size > limit)
+                return $"{label}「{Path.GetFileName(path)}」{VideoReferenceCapacity.SizeText(size)}，"
+                    + $"超过接口单文件上限 {VideoReferenceCapacity.SizeText(limit)}：{path}";
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 提交任务。带任何一路参考素材时走 multipart，否则走 JSON；按所选协议写入字段。
+    ///
+    /// 官方协议下**每张图一个 <c>input_reference</c> part**（同名重复，不是数组），
+    /// 音频 / 视频各走 <c>reference_audio</c> / <c>reference_video</c>。
+    /// 这份多文件的表单已实测被服务商放行（此前宝塔 WAF 会拦多文件，是网关侧的问题）。
+    ///
+    /// 返回值带上「这次被迫降级了什么」：有的池子不收 size / reference_mode，
+    /// 那句说明要一路走到结果里，不能在这里悄悄吞掉。
+    /// </summary>
+    private async Task<(VideoProbe Probe, string Note)> SubmitAsync(
         string baseUrl, string submitPath, string apiKey, string model,
-        VideoGenerationRequest request, int seconds, IReadOnlyList<string> references, bool officialProtocol, CancellationToken token)
+        VideoGenerationRequest request, int seconds,
+        IReadOnlyList<string> references, IReadOnlyList<string> audios, IReadOnlyList<string> videos,
+        bool officialProtocol, CancellationToken token)
     {
         var url = $"{baseUrl}{OpenAiCompatibleImageProvider.AvoidDuplicatedPrefix(baseUrl, submitPath)}";
         var resolution = ResolutionOf(request);
         var secondsField = officialProtocol ? "seconds" : "duration";
         var sizeField = officialProtocol ? "size" : "resolution";
 
-        async Task<HttpResponseMessage> PostAsync(bool durationAsText)
+        async Task<HttpResponseMessage> PostAsync(bool durationAsText, bool includeOptional)
         {
             using var message = new HttpRequestMessage(HttpMethod.Post, url);
             OpenAiCompatibleImageProvider.ApplyAuth(message, apiKey, "bearer");
 
             string DurationText() => durationAsText ? $"{seconds}s" : seconds.ToString();
 
-            if (references.Count > 0)
+            if (references.Count + audios.Count + videos.Count > 0)
             {
                 var fields = new List<(string Name, string Value)>
                 {
@@ -1123,49 +1351,75 @@ public sealed class HttpVideoProvider : IVideoProvider
                     ("prompt", request.Prompt)
                 };
                 if (seconds > 0) fields.Add((secondsField, DurationText()));
-                if (resolution.Length > 0) fields.Add((sizeField, resolution));
-                if (officialProtocol) fields.Add(("reference_mode", "asset"));
-                var frame = await File.ReadAllBytesAsync(references[0], token).ConfigureAwait(false);
-                message.Content = MultipartBody(
-                    fields,
-                    officialProtocol ? "input_reference" : "image",
-                    Path.GetFileName(references[0]),
-                    frame);
+                if (resolution.Length > 0 && includeOptional) fields.Add((sizeField, resolution));
+                if (officialProtocol && includeOptional) fields.Add(("reference_mode", "asset"));
+
+                var files = new List<(string Name, string FileName, byte[] Body)>();
+                foreach (var path in references)
+                    files.Add((officialProtocol ? "input_reference" : "image", Path.GetFileName(path),
+                        await File.ReadAllBytesAsync(path, token).ConfigureAwait(false)));
+                foreach (var path in audios)
+                    files.Add(("reference_audio", Path.GetFileName(path),
+                        await File.ReadAllBytesAsync(path, token).ConfigureAwait(false)));
+                foreach (var path in videos)
+                    files.Add(("reference_video", Path.GetFileName(path),
+                        await File.ReadAllBytesAsync(path, token).ConfigureAwait(false)));
+
+                message.Content = MultipartBody(fields, files);
             }
             else
             {
                 var payload = new Dictionary<string, object> { ["model"] = model, ["prompt"] = request.Prompt };
                 if (seconds > 0) payload[secondsField] = durationAsText ? $"{seconds}s" : seconds;
-                if (resolution.Length > 0) payload[sizeField] = resolution;
+                if (resolution.Length > 0 && includeOptional) payload[sizeField] = resolution;
                 message.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
             }
 
             return await http.SendAsync(message, token).ConfigureAwait(false);
         }
 
-        var response = await PostAsync(durationAsText: false).ConfigureAwait(false);
+        var response = await PostAsync(durationAsText: false, includeOptional: true).ConfigureAwait(false);
         var body = await ReadResponseTextAsync(response.Content, token).ConfigureAwait(false);
         // 少数部署把 duration 当字符串收（文档里写的是「可重试 15s 形式」）：
         // 只在 400 且带上了时长时重试一次，别的 400 直接如实报出来——重试改不了模型名写错这类问题。
         if (!officialProtocol && response.StatusCode == HttpStatusCode.BadRequest && seconds > 0)
         {
             response.Dispose();
-            response = await PostAsync(durationAsText: true).ConfigureAwait(false);
+            response = await PostAsync(durationAsText: true, includeOptional: true).ConfigureAwait(false);
             body = await ReadResponseTextAsync(response.Content, token).ConfigureAwait(false);
+        }
+
+        // 各池子认的可选参数不一样：实测 MiniMax-H3 带上 size（720x1280）与 reference_mode 会回
+        // 400「unsupported or unpriced parameters」，去掉两项就正常出片（服务端自己定 768x432）。
+        // 所以这一类 400 只重试一次「不带可选参数」的提交，并把「画幅没按你选的来」写进结果说明——
+        // 不说的话，用户会以为 9:16 生效了。
+        var note = string.Empty;
+        var sentOptional = officialProtocol || resolution.Length > 0;
+        if (response.StatusCode == HttpStatusCode.BadRequest && sentOptional && IsUnpricedParameters(body))
+        {
+            response.Dispose();
+            response = await PostAsync(durationAsText: false, includeOptional: false).ConfigureAwait(false);
+            body = await ReadResponseTextAsync(response.Content, token).ConfigureAwait(false);
+            note = $"模型「{model}」不收{(resolution.Length > 0 ? $" size={resolution} /" : string.Empty)} reference_mode："
+                + "本次已去掉这两项提交，画幅与参考模式按服务端默认。";
         }
 
         using (response)
         {
             if (!response.IsSuccessStatusCode)
-                return VideoProbe.Fail($"视频接口提交返回 {(int)response.StatusCode}：{ExtractMessage(body)}"
+                return (VideoProbe.Fail($"视频接口提交返回 {(int)response.StatusCode}：{ExtractMessage(body)}"
                     + ((int)response.StatusCode == 400
                         ? $"（检查 {secondsField}、模型 id 与请求格式）"
-                        : string.Empty));
+                        : string.Empty)), note);
 
-            return ParseProbe(body, baseUrl,
-                OpenAiCompatibleImageProvider.AvoidDuplicatedPrefix(baseUrl, CollectionPathOf(submitPath)), submitting: true);
+            return (ParseProbe(body, baseUrl,
+                OpenAiCompatibleImageProvider.AvoidDuplicatedPrefix(baseUrl, CollectionPathOf(submitPath)), submitting: true), note);
         }
     }
+
+    /// <summary>服务端说「这个模型没有这几个参数的价格」——只认这一种，别的 400 不猜。</summary>
+    private static bool IsUnpricedParameters(string body) =>
+        body.Contains("unpriced", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// 轮询一次任务状态：还没好就是 Pending，好了带上下载地址，坏了带上原因。
@@ -1348,7 +1602,8 @@ public sealed class HttpVideoProvider : IVideoProvider
     /// （头序跟着设置顺序走、值一律不加引号、还会补一个 filename*），所以这里直接写字节。
     /// </summary>
     private static HttpContent MultipartBody(
-        IReadOnlyList<(string Name, string Value)> fields, string fileField, string fileName, byte[] file)
+        IReadOnlyList<(string Name, string Value)> fields,
+        IReadOnlyList<(string Name, string FileName, byte[] Body)> files)
     {
         var boundary = Guid.NewGuid().ToString("N");
         using var buffer = new MemoryStream();
@@ -1372,7 +1627,7 @@ public sealed class HttpVideoProvider : IVideoProvider
         }
 
         foreach (var (name, value) in fields) WritePart(name, null, Encoding.UTF8.GetBytes(value));
-        WritePart(fileField, fileName, file);
+        foreach (var (name, fileName, body) in files) WritePart(name, fileName, body);
         Write($"--{boundary}--\r\n");
 
         var content = new ByteArrayContent(buffer.ToArray());

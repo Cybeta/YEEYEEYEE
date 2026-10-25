@@ -145,10 +145,52 @@ public sealed class EntityVariantVersion
     public Guid? SupersedesVersionId { get; set; }
     public string Description { get; set; } = string.Empty;
     public SceneLayout? Layout { get; set; }
+    public VoiceProfile? Voice { get; set; }
     public List<WorkflowAttachment> Attachments { get; set; } = new();
     public List<NodeReference> References { get; set; } = new();
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public string Label => $"v{Number}";
+}
+
+/// <summary>
+/// 角色的**声音档案**：跨镜头配音时必须逐字不变的那几个字段。
+///
+/// 为什么不放在节点上：声音属于角色（更准确地说属于角色的这个变体），
+/// 跟外观一样要能版本化。哪一镜换了音色，责任在实体而不在镜头，查起来才有一条线。
+/// 空档案（全部字段为空）表示「还没定音色」，句子里出现该角色时要阻断配音，而不是临时挑一个。
+/// </summary>
+public sealed class VoiceProfile
+{
+    /// <summary>服务商标识（例如 anyaiapi / openai）；只用于记录，执行时以服务端配置为准。</summary>
+    public string Provider { get; set; } = string.Empty;
+    /// <summary>音色 ID（供应商侧的 voice 名或克隆音色 ID）。</summary>
+    public string VoiceId { get; set; } = string.Empty;
+    /// <summary>配音模型名（例如 tts-1）。</summary>
+    public string Model { get; set; } = string.Empty;
+    /// <summary>语速倍率，1 为原速。</summary>
+    public double Speed { get; set; } = 1;
+    /// <summary>音高偏移（半音），仅支持该参数的供应商使用。</summary>
+    public double? Pitch { get; set; }
+    /// <summary>固定种子；供应商支持时用来复现同一条音色表现。</summary>
+    public long? Seed { get; set; }
+    /// <summary>人工备注：为什么选这个音色、参考样本在哪。</summary>
+    public string Note { get; set; } = string.Empty;
+
+    [JsonIgnore] public bool IsEmpty =>
+        string.IsNullOrWhiteSpace(VoiceId) && string.IsNullOrWhiteSpace(Model) && string.IsNullOrWhiteSpace(Provider);
+
+    /// <summary>跨镜一致性比对键：这四个字段任意一个变了就是换了声音。</summary>
+    public string Key => string.Join("|",
+        (Provider ?? string.Empty).Trim().ToLowerInvariant(),
+        (Model ?? string.Empty).Trim().ToLowerInvariant(),
+        (VoiceId ?? string.Empty).Trim(),
+        Speed.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>配音前的最小完备条件：没有音色 ID 或模型，就不允许提交。</summary>
+    [JsonIgnore] public bool IsComplete => !string.IsNullOrWhiteSpace(VoiceId) && !string.IsNullOrWhiteSpace(Model);
+
+    public string Describe() => IsEmpty ? "未设置"
+        : $"{VoiceId} · {Model}" + (Math.Abs(Speed - 1) > 0.001 ? $" · {Speed:0.##}x" : string.Empty);
 }
 
 public sealed class WorkflowEntityVariant
@@ -157,12 +199,13 @@ public sealed class WorkflowEntityVariant
     public string Name { get; set; } = "默认";
     public string Description { get; set; } = string.Empty;
     public SceneLayout? Layout { get; set; }
+    public VoiceProfile? Voice { get; set; }
     public List<WorkflowAttachment> Attachments { get; set; } = new();
     public List<NodeReference> References { get; set; } = new();
     public int CurrentVersion { get; set; } = 1;
     public List<EntityVariantVersion> Versions { get; set; } = new();
     public string CommittedFingerprint { get; set; } = string.Empty;
-    public string Fingerprint() => string.Join("|", Description.Trim(), Layout?.ToPromptText() ?? string.Empty, string.Join(",", Attachments.Select(item => item.Reference)), string.Join(",", References.Select(ReferenceKey)));
+    public string Fingerprint() => string.Join("|", Description.Trim(), Layout?.ToPromptText() ?? string.Empty, Voice?.Key ?? string.Empty, string.Join(",", Attachments.Select(item => item.Reference)), string.Join(",", References.Select(ReferenceKey)));
     public bool HasUncommittedChanges => !string.Equals(Fingerprint(), CommittedFingerprint, StringComparison.Ordinal);
     public string CurrentVersionLabel => $"v{CurrentVersion}";
     public EntityVariantVersion Commit(string note)
@@ -170,24 +213,24 @@ public sealed class WorkflowEntityVariant
         var version = new EntityVariantVersion
         {
             Number = CurrentVersion + 1, Note = note.Trim(), SupersedesVersionId = Versions.OrderByDescending(item => item.Number).FirstOrDefault()?.Id,
-            Description = Description, Layout = Clone(Layout), Attachments = Clone(Attachments), References = Clone(References)
+            Description = Description, Layout = Clone(Layout), Voice = Clone(Voice), Attachments = Clone(Attachments), References = Clone(References)
         };
         CurrentVersion = version.Number; Versions.Add(version); CommittedFingerprint = Fingerprint(); return version;
     }
     public EntityVariantVersion EnsureInitialVersion()
     {
         if (Versions.Count > 0) return Versions[0];
-        var version = new EntityVariantVersion { Number = CurrentVersion, Note = "初始版本", Description = Description, Layout = Clone(Layout), Attachments = Clone(Attachments), References = Clone(References) };
+        var version = new EntityVariantVersion { Number = CurrentVersion, Note = "初始版本", Description = Description, Layout = Clone(Layout), Voice = Clone(Voice), Attachments = Clone(Attachments), References = Clone(References) };
         Versions.Add(version); CommittedFingerprint = Fingerprint(); return version;
     }
     public EntityVariantVersion? FindVersion(Guid versionId) => Versions.FirstOrDefault(version => version.Id == versionId);
     public WorkflowEntityVariant CloneAsVariant(string name) => new()
     {
-        Name = name, Description = Description, Layout = Clone(Layout), Attachments = Clone(Attachments), References = Clone(References),
+        Name = name, Description = Description, Layout = Clone(Layout), Voice = Clone(Voice), Attachments = Clone(Attachments), References = Clone(References),
         CurrentVersion = CurrentVersion, CommittedFingerprint = CommittedFingerprint, Versions = Clone(Versions)
     };
     public void RollbackTo(EntityVariantVersion version)
-    { Description = version.Description; Layout = Clone(version.Layout); Attachments = Clone(version.Attachments); References = Clone(version.References); }
+    { Description = version.Description; Layout = Clone(version.Layout); Voice = Clone(version.Voice); Attachments = Clone(version.Attachments); References = Clone(version.References); }
     public string ToPromptText() => string.Join("\n", new[] { Description.Trim(), Layout is { IsEmpty: false } layout ? layout.ToPromptText() : string.Empty }.Where(value => !string.IsNullOrWhiteSpace(value)));
     private static string ReferenceKey(NodeReference reference) => $"{reference.EntityId:N}/{reference.VariantId:N}/{reference.VariantVersionId?.ToString("N") ?? "latest"}";
     private static T? Clone<T>(T? value) where T : class => value is null ? null : JsonSerializer.Deserialize<T>(JsonSerializer.Serialize(value));
