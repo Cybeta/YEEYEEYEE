@@ -34,7 +34,12 @@ public sealed record AgentContext(
     /// 同名时它会挑错人。清单里那一行仍在（宿主保证目标在清单里），这一段是给模型**指路**用的：
     /// 动作的 target 直接用这里的 id。空串表示这次不是针对某个节点的请求（两者都不占位）。
     /// </summary>
-    string TargetIdentity = "")
+    string TargetIdentity = "",
+    /// <summary>
+    /// 当前项目根目录：用来读这个项目的技能补充（<c>skill-notes.json</c>）。
+    /// 空串表示没有项目上下文，此时不读任何项目级补充。
+    /// </summary>
+    string ProjectRoot = "")
 {
     public bool IsEmpty =>
         string.IsNullOrWhiteSpace(NodeTitle) && string.IsNullOrWhiteSpace(NodeContent)
@@ -84,7 +89,32 @@ public sealed record AgentContext(
             + "（不支持的模型请把负面词改写成正向描述）");
         if (!string.IsNullOrWhiteSpace(PendingSummary))
             lines.Add($"- **Agent 最近一批改动（已经显示在画布上，尚未保存到画布文件）**：\n{PendingSummary}\n这些改动已经作为当前最新版本提供给你；后续创建节点时可以用它们的标题作为 parentTarget、source 或 target，不要重复创建同名节点。");
-        if (includeDesktopSkills) lines.Add("- **可调用的生成技能清单**（本程序提供的生成流程，与工作树里的「角色能力」是两回事）：\n" + BuiltInSkills.DescribeForAgent());
+        if (includeDesktopSkills)
+        {
+            // 项目级补充跟着项目走：同一个技能在 A 项目要冷调、在 B 项目要口语，不能互相污染。
+            var notes = ProjectSkillNotes.Load(ProjectRoot).Notes
+                .Where(note => note.Note.Length > 0)
+                .ToDictionary(note => note.SkillId, note => note, StringComparer.OrdinalIgnoreCase);
+            lines.Add("- **可调用的生成技能清单**（本程序提供的生成流程，与工作树里的「角色能力」是两回事）：\n"
+                + BuiltInSkills.DescribeForAgent(null, notes));
+            lines.Add("- **可运行的生成技能**（本机已配置的接口池子与 ComfyUI 工作流；id 必须原样照抄才能用）：\n"
+                + RunnableSkills.Describe(SiteCatalog.Load().Sites)
+                + "\n  要推荐「用哪个技能跑哪个节点」时，输出 suggest 块。它只显示成一张邀请卡，"
+                + "用户点确认才会进入真正的生成流程（还要看提示词、参考图和单价），不会自己执行、也不会自己花钱：\n"
+                + "  ```json\n"
+                + "  {\"suggest\":{\"skill\":\"上面清单里的技能 id\",\"target\":\"节点 id（推荐）或标题\",\"reason\":\"为什么适合这一镜\"}}\n"
+                + "  ```\n"
+                + "  skill 必须来自那份清单，不要自编；不要声称已经生成或已提交。不知道该用哪个时用 ask 问，不要猜。");
+            lines.Add("- 已经把提示词写好了、要直接跑时，在 actions 里给一条 run_skill。它同样只是一张确认卡，"
+                + "用户点确认前不会花钱：\n"
+                + "  {\"kind\":\"run_skill\",\"skill\":\"上面清单里的技能 id\",\"target\":\"节点 id（推荐）或标题\","
+                + "\"content\":\"完整提示词\",\"negativePrompt\":\"可选的反向提示词\",\"reason\":\"为什么现在跑它\"}\n"
+                + "  run_skill 只用于图片技能；视频要先确认首帧与台词，请用 suggest 让用户从生成窗口确认。");
+            lines.Add("- 发现某个内置技能在这个项目里该补一条要求时，输出 patch_skill。它只是建议，"
+                + "用户点「应用」才会写入，版本号 +1，旧措辞留档：\n"
+                + "  {\"patch_skill\":{\"skill\":\"上面技能清单里的 id\",\"note\":\"要追加的一条要求\",\"reason\":\"为什么这个项目需要它\"}}\n"
+                + "  只追加、不替换原文；一次只提一条，措辞要能直接当规则执行（不要写「尽量」「适当」这类模糊词）。");
+        }
         lines.Add("- 调用**生成技能**时先说明：正在调用技能：技能名称。节点操作必须使用 actions；章节拆解按上面四步执行（默认先工作树条目再节点；用户明确要求生成节点时，节点批次必须在同一次回复里给出），节点批次内部按 章节→剧情→分镜→成品 的顺序输出（**角色/场景/道具不建节点，只写进资源视觉内容并在节点上用 entityTargets 引用**），每个节点写入 nodeCategory、完整 content、parentTarget、workTreeTarget，用到角色/场景/道具时写 entityTargets，并用 create_edge 建立关系；图片和视频必须说明参考图、画幅、时长与当前模型能力。");
 
         var head = string.Join("\n", lines);

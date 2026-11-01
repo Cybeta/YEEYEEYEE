@@ -118,6 +118,10 @@ var tests = new (string Name, Action Run)[]
     ("协议块：内容里的裸引号仍能解析（真实样本）", BrokenQuotesSampleStillParses),
     ("协议块：格式损坏时不泄漏 JSON", BrokenProtocolIsHiddenFromDisplay),
     ("反问：未闭合 fenced JSON 不泄漏且流式隐藏", IncompleteAskProtocolIsHidden),
+    ("技能建议：suggest 单独成块、与 actions 共存、缺 skill 仍算坏协议", AgentSuggestProtocol),
+    ("运行技能：run_skill 读出技能 id、提示词与反向词（skillId 也认）", AgentRunSkillActionParsed),
+    ("技能补充：patch_skill 解析，项目级版本递增且旧措辞留档", AgentSkillPatchProtocol),
+    ("可运行技能：合成 id 精确反查、跨站点同名不串、清单有上限", RunnableSkillIdsRoundTrip),
     ("ID 校验：合法画布零问题", IdentityValidatorCleanCanvas),
     ("画布标签：编号不与已有画布撞名（标题即文件名）", CanvasTabRulesAreCollisionProof),
     ("画布标签：改名查重挡住空名、超长与重名", CanvasTabRenameGuardsNames),
@@ -18350,6 +18354,142 @@ static void MediaProbeClassifiesSamplesWithoutHanging()
     }
 
     Directory.Delete(directory, recursive: true);
+}
+
+static void AgentSuggestProtocol()
+{
+    var reply = AgentActionParser.Parse(
+        "用这个技能跑这一镜。\n```json\n{\"suggest\":{\"skill\":\"site:foo/pool:flux|2K\",\"target\":\"镜头一\",\"reason\":\"支持参考图\"}}\n```");
+    Expect(reply.Suggest is not null && reply.Suggest.Skill == "site:foo/pool:flux|2K"
+        && reply.Suggest.Target == "镜头一" && reply.Suggest.Reason == "支持参考图",
+        "suggest 应解析出技能 / 节点 / 理由");
+    Expect(!reply.Text.Contains("suggest", StringComparison.Ordinal) && !reply.Text.Contains("site:foo", StringComparison.Ordinal),
+        "suggest 块不能进对话区");
+
+    var alone = AgentActionParser.Parse("{\"suggest\":{\"skill\":\"x\"}}");
+    Expect(alone.Suggest is not null && alone.Suggest.Skill == "x" && !alone.ProtocolBroken,
+        "只有 suggest 也算有效回复");
+
+    var withActions = AgentActionParser.Parse(
+        "{\"actions\":[{\"kind\":\"create_node\",\"title\":\"A\"}],\"suggest\":{\"skill\":\"x\",\"target\":\"A\"}}");
+    Expect(withActions.Actions.Count == 1 && withActions.Suggest is not null, "suggest 与 actions 可以共存");
+
+    var missingSkill = AgentActionParser.Parse("{\"suggest\":{\"target\":\"A\"}}");
+    Expect(missingSkill.Suggest is null && missingSkill.ProtocolBroken,
+        "suggest 没有 skill 应当判成坏协议，而不是静默通过");
+}
+
+static void AgentRunSkillActionParsed()
+{
+    var reply = AgentActionParser.Parse(
+        "{\"actions\":[{\"kind\":\"run_skill\",\"skill\":\"site:alpha/pool:flux-1|2K\",\"target\":\"镜头一\","
+        + "\"content\":\"雨夜霓虹\",\"negativePrompt\":\"低质\",\"reason\":\"这一镜需要夜景\"}]}");
+    var action = reply.Actions.Single();
+    Expect(action.Kind == "run_skill" && action.Skill == "site:alpha/pool:flux-1|2K" && !reply.ProtocolBroken,
+        "run_skill 应读出技能 id 且不判坏协议");
+    Expect(action.Content == "雨夜霓虹" && action.NegativePrompt == "低质" && action.Target == "镜头一",
+        "提示词 / 反向词 / 目标节点都要带出来");
+
+    var fallback = AgentActionParser.Parse(
+        "{\"actions\":[{\"kind\":\"run_skill\",\"skillId\":\"site:beta/pool:x|1K\",\"content\":\"p\"}]}");
+    Expect(fallback.Actions.Single().Skill == "site:beta/pool:x|1K", "skillId 写法也要认");
+}
+
+static void AgentSkillPatchProtocol()
+{
+    var reply = AgentActionParser.Parse(
+        "{\"patch_skill\":{\"skill\":\"storyboard-generation\",\"note\":\"本项目统一冷色调，光源方向逐字复用\",\"reason\":\"成片偏冷\"}}");
+    Expect(reply.Patch is not null && reply.Patch.Skill == "storyboard-generation"
+        && reply.Patch.Note.Contains("冷色调", StringComparison.Ordinal) && reply.Patch.Reason == "成片偏冷",
+        "patch_skill 应解析出技能 / 补充 / 理由");
+    Expect(!reply.Text.Contains("patch_skill", StringComparison.Ordinal), "patch_skill 块不进对话区");
+
+    var missingNote = AgentActionParser.Parse("{\"patch_skill\":{\"skill\":\"x\"}}");
+    Expect(missingNote.Patch is null && missingNote.ProtocolBroken, "缺少 note 应当判坏协议");
+
+    var root = Path.Combine(Path.GetTempPath(), "df-skill-notes-" + Guid.NewGuid().ToString("N")[..8]);
+    try
+    {
+        Expect(ProjectSkillNotes.TryApply(root, "storyboard-generation", "第一条", out var first, out var error) && first == 1,
+            "首次写入应为 v1：" + error);
+        Expect(ProjectSkillNotes.TryApply(root, "storyboard-generation", "第二条", out var second, out _) && second == 2,
+            "再次写入应为 v2");
+        var (notes, errors) = ProjectSkillNotes.Load(root);
+        Expect(errors.Count == 0 && notes.Count == 1 && notes[0].Note == "第二条" && notes[0].Version == 2,
+            "重载后应是最新版本");
+        Expect(notes[0].History.Count == 1 && notes[0].History[0].Note == "第一条" && notes[0].History[0].Version == 1,
+            "旧措辞要留在历史里");
+        Expect(!ProjectSkillNotes.TryApply(root, "storyboard-generation", "   ", out _, out var emptyError) && emptyError.Length > 0,
+            "空白补充不能写入");
+    }
+    finally
+    {
+        try { Directory.Delete(root, recursive: true); } catch (IOException) { }
+    }
+}
+
+static void RunnableSkillIdsRoundTrip()
+{
+    SitePool Pool(string model, string tier, string kind = "image") => new()
+    {
+        Model = model,
+        Tier = tier,
+        Kind = kind,
+        Price = "3 积分",
+        UnitPrice = 3
+    };
+    SiteWorkflow Flow(string key, string title, string kind, bool recommended = false) => new()
+    {
+        Key = key,
+        Title = title,
+        Folder = kind == "video" ? "G视频" : "T图像",
+        Kind = kind,
+        Recommended = recommended
+    };
+    var first = new SiteProfile
+    {
+        Id = "alpha",
+        DisplayName = "甲站",
+        Pools = { Pool("flux-1", "2K"), Pool("veo-3", "5s", "video") },
+        Workflows = { Flow("T/shot.json", "镜头流", "image", recommended: true), Flow("G/move.json", "运镜流", "video") }
+    };
+    var second = new SiteProfile
+    {
+        Id = "beta",
+        DisplayName = "乙站",
+        Pools = { Pool("flux-1", "2K") }
+    };
+    var sites = new[] { first, second };
+
+    Expect(RunnableSkills.List(sites).Count == 5, "三条池子加两份工作流应各占一条");
+    var alpha = RunnableSkills.Resolve(sites, RunnableSkills.PoolId(first, first.Pools[0]));
+    var beta = RunnableSkills.Resolve(sites, RunnableSkills.PoolId(second, second.Pools[0]));
+    Expect(alpha?.Choice.Pool?.Site.Id == "alpha" && beta?.Choice.Pool?.Site.Id == "beta",
+        "不同站点的同名池子必须各自解析到自己的站点");
+    Expect(RunnableSkills.Resolve(sites, "site:missing/pool:flux-1|2K") is null,
+        "认不出的 id 明确失败，不能退回同名项");
+    var workflow = RunnableSkills.Resolve(sites, RunnableSkills.WorkflowId(first, first.Workflows[0]));
+    Expect(workflow?.Choice.IsWorkflow == true && workflow.Choice.WorkflowItem?.Title == "镜头流",
+        "工作流 id 应能反查到那一份");
+
+    var describe = RunnableSkills.Describe(sites);
+    Expect(describe.Contains("site:alpha/pool:flux-1|2K", StringComparison.Ordinal)
+        && describe.Contains("镜头流", StringComparison.Ordinal)
+        && describe.Contains("运镜流", StringComparison.Ordinal),
+        "清单要同时给出可照抄的 id 和看得懂的名字；没有推荐项的工作流也要露出来");
+    Expect(!describe.Contains("另有", StringComparison.Ordinal), "全部都在上限内时不该出现省略提示");
+
+    // 一台没有任何推荐项、且工作流很多的服务器：每种用途最多列前几份，其余如实报数。
+    var crowded = new SiteProfile { Id = "gamma", DisplayName = "丙站" };
+    for (var index = 0; index < 5; index++) crowded.Workflows.Add(Flow($"T/w{index}.json", $"图流{index}", "image"));
+    crowded.Workflows.Add(Flow("A/voice.json", "配音流", "audio"));
+    var capped = RunnableSkills.Describe(new[] { crowded });
+    Expect(capped.Split('\n').Count(line => line.StartsWith("- site:gamma/workflow:", StringComparison.Ordinal)) == RunnableSkills.FallbackPerKind,
+        "没有推荐项时每种用途最多列前 3 份");
+    Expect(capped.Contains("另有 2 份 ComfyUI 工作流", StringComparison.Ordinal), "没列出的要如实报数");
+    Expect(!capped.Contains("配音流", StringComparison.Ordinal), "音频工作流今天没有执行链路，不该出现在清单里");
+    Expect(RunnableSkills.List(new[] { crowded }).All(skill => !skill.Id.Contains("voice", StringComparison.Ordinal)),
+        "音频工作流也不该能被 id 反查到");
 }
 
 static class Sample

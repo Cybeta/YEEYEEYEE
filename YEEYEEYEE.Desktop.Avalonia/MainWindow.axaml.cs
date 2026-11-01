@@ -2631,28 +2631,43 @@ public partial class MainWindow : Window, IAgentSessionHost
         if (choice is null) return;
         RememberPool(choice.Pool);
         RememberWorkflow(choice.Workflow);
+        await RunChoiceAsync(node, choice);
+    }
+
+    /// <summary>
+    /// 用**已经选定**的技能跑一个节点：节点菜单与 Agent 邀请卡共用这一段。
+    ///
+    /// 两条路唯一的区别是「谁选了技能」；之后的 ComfyUI 切换、视频 / 图像分流、提示词与单价确认
+    /// 必须完全一样——否则 Agent 那条路就成了绕过确认的后门。
+    /// 返回 null 表示已进入流程；否则是给用户看的失败原因。
+    /// </summary>
+    private async Task<string?> RunChoiceAsync(WorkflowNode node, ImageSourceChoice choice)
+    {
+        if (currentCanvas is null) return "当前没有打开的画布。";
+        if (canEdit is false || node.IsLocked) return "项目只读或节点已锁定，不能出图。";
+        if (BlockedByOtherEditor(node.Id)) return "这个节点正由别人编辑，请等对方保存后再运行。";
 
         // 选中某台 ComfyUI 的工作流时，先把**那台**设为当前用的那一台：
         // 设置里的地址是站点文件的投影，不跟着走的话请求会打到另一台服务器上去。
         if (choice.Workflow is { } comfy && !ComfyUiSiteActivation.Activate(comfy.Site, out var activationError))
         {
             StatusText.Text = activationError;
-            return;
+            return activationError;
         }
 
         if (choice.IsVideo)
         {
-            // 视频池子只能走视频那条路：**绝不能**落进下面的出图逻辑——
-            // 那会拿一张静图冒充视频（与「图生图被偷偷改成文生图」同一类的事）。
+            // 视频池子只能走视频那条路：**绝不能**落进出图逻辑——那会拿一张静图冒充视频。
             var videoPlan = NodeAssistPlanner.BuildPlan(currentCanvas.Canvas, node, videoAvailable: true);
             var videoSuggestion = videoPlan.Suggestions.FirstOrDefault(item => item.Kind == NodeAssistKind.Video);
             if (videoSuggestion is null)
             {
-                StatusText.Text = "这个节点没有可用的出视频建议：它既没有内容，也没有可参考的上游设定。";
-                return;
+                const string missing = "这个节点没有可用的出视频建议：它既没有内容，也没有可参考的上游设定。";
+                StatusText.Text = missing;
+                return missing;
             }
             await ShowVideoPromptDialogAsync(node, videoSuggestion, choice);
-            return;
+            return null;
         }
 
         var plan = NodeAssistPlanner.BuildPlan(currentCanvas.Canvas, node);
@@ -2660,14 +2675,16 @@ public partial class MainWindow : Window, IAgentSessionHost
             ?? plan.Suggestions.FirstOrDefault();
         if (suggestion is null)
         {
-            StatusText.Text = "这个节点没有可用的出图建议：它既没有内容，也没有可参考的上游设定。";
-            return;
+            const string missing = "这个节点没有可用的出图建议：它既没有内容，也没有可参考的上游设定。";
+            StatusText.Text = missing;
+            return missing;
         }
 
         StatusText.Text = choice.IsWorkflow
             ? $"准备用「{choice.Label}」出图（ComfyUI 工作流）"
             : $"准备用「{choice.Label}」（{choice.PoolItem?.Describe()}）出图";
         await ShowPromptDialogAsync(node, suggestion, allowGenerate: true, choice);
+        return null;
     }
 
     /// <summary>
@@ -5182,6 +5199,13 @@ public partial class MainWindow : Window, IAgentSessionHost
         return ReferenceCapResolver.Resolve(declarations);
     }
 
+    /// <summary>拒绝一次出图：状态栏与返回值说同一句话，界面与调用方不会各说各的。</summary>
+    private string RejectImage(string message)
+    {
+        StatusText.Text = message;
+        return message;
+    }
+
     /// <summary>
     /// 真出图：走已经配好的图像链路（ComfyUI 或 OpenAI 兼容图像接口），成功后把文件收进项目资产目录并挂到节点上。
     /// 没配链路就说清去哪儿配，**不假装出图**；出完图立刻给一个预览窗口，不然用户只看到一句状态栏文字。
@@ -5192,37 +5216,26 @@ public partial class MainWindow : Window, IAgentSessionHost
     ///
     /// <paramref name="handPickedReferences"/> 是用户在对话框里手动勾的那几张（规格第 3 步）：
     /// 非 null 表示**只喂点过名的这几张**（空集合 = 这一次一张都不带），null 表示按默认顺序自动决定。
+    ///
+    /// 返回 null 表示**已经提交**（后续成败看批次进度），否则返回没提交的原因（同时写状态栏）。
+    /// 为什么要返回原因：「Agent 直接跑技能」那条路不能靠字符串去猜状态栏有没有变，
+    /// 那张卡必须能如实告诉用户「这条根本没发出去，所以没花钱」。
     /// </summary>
-    private async Task GenerateNodeImageAsync(
+    private async Task<string?> GenerateNodeImageAsync(
         WorkflowNode node, NodeAssistSuggestion suggestion, string prompt, string negative,
         NodeImageApproach? forcedApproach = null, ImageSourceChoice? source = null, int count = 1,
         IReadOnlyCollection<string>? handPickedReferences = null)
     {
-        if (currentCanvas is null)
-        {
-            StatusText.Text = "尚未创建画布，无法出图";
-            return;
-        }
-        if (string.IsNullOrWhiteSpace(prompt))
-        {
-            StatusText.Text = "提示词是空的，没有发出任何请求";
-            return;
-        }
-        if (!canEdit)
-        {
-            StatusText.Text = "项目只读：可以复制提示词到别处出图，但结果写不回这个项目";
-            return;
-        }
+        if (currentCanvas is null) return RejectImage("尚未创建画布，无法出图");
+        if (string.IsNullOrWhiteSpace(prompt)) return RejectImage("提示词是空的，没有发出任何请求");
+        if (!canEdit) return RejectImage("项目只读：可以复制提示词到别处出图，但结果写不回这个项目");
 
         RecheckSharedAuthority(currentCanvas.Canvas);
         var assetCap = ResolveReferenceCap(source);
         var assetErrors = GenerationAudit.CheckImageAssets(currentCanvas.Canvas, node, LocateAttachment,
             assetCap.Cap, handPickedReferences, source?.PoolItem?.SupportsReference != false);
         if (assetErrors.Count > 0)
-        {
-            StatusText.Text = "未提交首帧（没有产生费用）：" + string.Join("；", assetErrors);
-            return;
-        }
+            return RejectImage("未提交首帧（没有产生费用）：" + string.Join("；", assetErrors));
         var decision = NodeImageModePlanner.Decide(currentCanvas.Canvas, node);
         var candidates = NodeImageModePlanner.BaseCandidates(currentCanvas.Canvas, node);
         if (forcedApproach == NodeImageApproach.TextToImage)
@@ -5249,10 +5262,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                     Reason = "手动指定：图生图。"
                 };
             if (!decision.UsesBaseImage)
-            {
-                StatusText.Text = "未提交图生图：没有可用底图，禁止降级为文生图。";
-                return;
-            }
+                return RejectImage("未提交图生图：没有可用底图，禁止降级为文生图。");
         }
 
         var references = Array.Empty<string>();
@@ -5263,10 +5273,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             denoise = decision.Denoise;
         }
         else if (decision.UsesBaseImage)
-        {
-            StatusText.Text = "未提交图生图：底图文件已丢失，禁止降级为文生图。";
-            return;
-        }
+            return RejectImage("未提交图生图：底图文件已丢失，禁止降级为文生图。");
 
         // 文生图时把**引用的设定图**带上：角色 / 道具 / 场景的图是跨镜一致性的来源，
         // 不带就只能靠提示词描述——「第一集主角手里是剑、第二集变成刀」就是这么来的
@@ -5279,10 +5286,7 @@ public partial class MainWindow : Window, IAgentSessionHost
                 .Select(candidate => candidate.Path).ToArray();
             references = references.Concat(necessary).Distinct(StringComparer.Ordinal).ToArray();
             if (references.Length > assetCap.Cap)
-            {
-                StatusText.Text = "未提交首帧：底图和必要参考超过当前上限，禁止裁剪。";
-                return;
-            }
+                return RejectImage("未提交首帧：底图和必要参考超过当前上限，禁止裁剪。");
         }
         else if (!decision.UsesBaseImage && node.References.Count > 0)
         {
@@ -5312,11 +5316,8 @@ public partial class MainWindow : Window, IAgentSessionHost
         // 钱花了、要的东西也还没拿到。其余组合都成立——文生图 / 图生图决定发不发参考图，
         // 池子决定用哪个模型、哪档、打哪个接口，两者是正交的。
         if (source?.PoolItem is { SupportsReference: false } noReference && decision.UsesBaseImage)
-        {
-            StatusText.Text = $"没发出去（没有产生费用）：「{noReference.Label}」的清单里明确写着不支持参考图，"
-                + "做不了图生图。把「出图方式」改成「文生图」，或者换一个支持参考图的池子。";
-            return;
-        }
+            return RejectImage($"没发出去（没有产生费用）：「{noReference.Label}」的清单里明确写着不支持参考图，"
+                + "做不了图生图。把「出图方式」改成「文生图」，或者换一个支持参考图的池子。");
 
         // 带了什么、丢了什么，都要写在看得见的地方：悄悄丢图等于悄悄降一致性。
         if (referenceNote.Length > 0)
@@ -5354,22 +5355,15 @@ public partial class MainWindow : Window, IAgentSessionHost
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
         {
-            StatusText.Text = $"图像链路创建失败：{error.Message}";
-            return;
+            return RejectImage($"图像链路创建失败：{error.Message}");
         }
 
         var provider = providerMatch.Provider;
         if (!provider.IsConfigured)
-        {
-            StatusText.Text = $"还没配置图像模型：{providerMatch.Reason}。也可以先用「复制提示词」到别处出图";
-            return;
-        }
+            return RejectImage($"还没配置图像模型：{providerMatch.Reason}。也可以先用「复制提示词」到别处出图");
         if (!providerMatch.IsMatch)
-        {
-            StatusText.Text = $"「{providerMatch.Name}」不能执行「{suggestion.Title}」：{providerMatch.Reason}。"
-                + "请改选支持这些能力的模型、接口或 ComfyUI 工作流。";
-            return;
-        }
+            return RejectImage($"「{providerMatch.Name}」不能执行「{suggestion.Title}」：{providerMatch.Reason}。"
+                + "请改选支持这些能力的模型、接口或 ComfyUI 工作流。");
 
         // 一张也好、六张也好，**都走「节点上方那个预览窗口」这条路**：差别只在
         // 「出一张时出好就直接收进节点，不多要一次点击」。
@@ -5384,6 +5378,7 @@ public partial class MainWindow : Window, IAgentSessionHost
             intent: suggestion.Intent,
             templateId: suggestion.TemplateId,
             templateLocked: suggestion.TemplateLocked);
+        return null;
     }
 
     /// <summary>
@@ -7571,7 +7566,8 @@ public partial class MainWindow : Window, IAgentSessionHost
     {
         var selected = CanvasSurfaceControl.SelectedNode;
         if (currentCanvas?.Canvas is not { } state)
-            return new AgentContext(string.Empty, string.Empty, string.Empty, string.Empty, DescribeWorkspace(), string.Empty, string.Empty);
+            return new AgentContext(string.Empty, string.Empty, string.Empty, string.Empty, DescribeWorkspace(), string.Empty, string.Empty,
+                ProjectRoot: AppPaths.TryCurrentProject?.RootPath ?? string.Empty);
 
         var nodes = string.Join("\n", state.Nodes.Select(node =>
         {
@@ -7588,7 +7584,8 @@ public partial class MainWindow : Window, IAgentSessionHost
             library,
             DescribeWorkspace(),
             string.Empty,
-            DescribeWorkTree(state));
+            DescribeWorkTree(state),
+            ProjectRoot: AppPaths.TryCurrentProject?.RootPath ?? string.Empty);
     }
 
     /// <summary>工作文件夹清单：write_file 只能落在这个目录内，所以必须让模型知道里面已经有什么。</summary>
@@ -7782,4 +7779,90 @@ public partial class MainWindow : Window, IAgentSessionHost
         SyncProviderOutcome(outcome);
         return true;
     }
+
+    /// <summary>
+    /// 把 Agent 建议的技能 id 翻成界面要展示的事实。查不到返回 null——那说明它已经被停用或删除，
+    /// 卡片会如实说「技能已不可用」，而不是给用户看一串合成 id。
+    /// </summary>
+    public AgentSkillFacts? DescribeSkill(string skillId)
+    {
+        var skill = RunnableSkills.Resolve(SiteCatalog.Load().Sites, skillId);
+        if (skill is null) return null;
+        // 单价为 0 / 未声明时**不写「0 积分」**：那是把「不知道」说成了「免费」。
+        var cost = skill.Choice.UnitPrice is { } unit && unit > 0 ? $"{unit:0.##} 积分" : "本地工作流，不按次计费";
+        return new AgentSkillFacts(skill.Label, cost, skill.IsVideo);
+    }
+
+    /// <summary>
+    /// Agent 邀请卡上的「确认运行」：解析技能与节点，再走与节点菜单**完全相同**的生成链路。
+    ///
+    /// 这里刻意不直接提交任务：接下来弹出的窗口仍会展示提示词、参考图与实际单价，
+    /// 用户在那里再点一次生成才会花钱。模型可以参与「选哪个工具」，但不能替用户按下付款键。
+    /// </summary>
+    public async Task<string?> RunSuggestedSkillAsync(string skillId, string target)
+    {
+        if (currentCanvas is null) return "当前没有打开的画布，无法运行技能。";
+        var skill = RunnableSkills.Resolve(SiteCatalog.Load().Sites, skillId);
+        if (skill is null) return "这个技能已经不在可用清单里（可能被停用或删除）。";
+        var node = AgentActionExecutor.FindTargetNode(currentCanvas.Canvas, target);
+        if (node is null) return $"找不到目标节点「{target}」：可能已改名或删除，请让 Agent 重新建议一次。";
+        return await RunChoiceAsync(node, skill.Choice);
+    }
+
+    /// <summary>
+    /// 「运行技能」卡确认后真正发起一次图片生成。
+    ///
+    /// 与邀请卡的区别只有一个：提示词由模型给，不再打开提示词窗口。
+    /// 但**资产预检、参考图规划、能力匹配、单价**这些一个都没跳过——它们都在
+    /// <see cref="GenerateNodeImageAsync"/> 里，和节点菜单那条路是同一份代码。
+    /// </summary>
+    public async Task<string?> RunSkillActionAsync(string skillId, string target, string prompt, string negativePrompt)
+    {
+        if (currentCanvas is null) return "当前没有打开的画布，无法生成。";
+        var skill = RunnableSkills.Resolve(SiteCatalog.Load().Sites, skillId);
+        if (skill is null) return "这个技能已经不在可用清单里（可能被停用或删除）。";
+        // 视频要确认首帧与台词，不能靠一句提示词直接发车；让用户走生成窗口。
+        if (skill.IsVideo) return "视频生成要先确认首帧与台词：请用建议卡上的「确认运行…」打开生成窗口。";
+        var node = AgentActionExecutor.FindTargetNode(currentCanvas.Canvas, target);
+        if (node is null) return $"找不到目标节点「{target}」：可能已改名或删除，请让 Agent 重新建议一次。";
+        if (string.IsNullOrWhiteSpace(prompt)) return "提示词是空的，没有发出任何请求。";
+
+        var plan = NodeAssistPlanner.BuildPlan(currentCanvas.Canvas, node);
+        var suggestion = plan.Suggestions.FirstOrDefault(item => item.Kind == NodeAssistKind.Image)
+            ?? plan.Suggestions.FirstOrDefault();
+        if (suggestion is null) return "这个节点没有可用的出图建议：它既没有内容，也没有可参考的上游设定。";
+        if (skill.Choice.Workflow is { } comfy && !ComfyUiSiteActivation.Activate(comfy.Site, out var activationError))
+            return activationError;
+        return await GenerateNodeImageAsync(node, suggestion, prompt, negativePrompt, null, skill.Choice, 1, null);
+    }
+
+    /// <summary>技能补充卡片的事实：技能名、这个项目当前的补充、以及应用后的版本号。</summary>
+    public AgentSkillEditInfo? DescribeSkillEdit(string skillId)
+    {
+        var skill = FindBuiltInSkill(skillId);
+        if (skill is null) return null;
+        var current = CurrentSkillNote(skill.Id);
+        return new AgentSkillEditInfo(skill.Name, current?.Note ?? string.Empty, (current?.Version ?? 0) + 1);
+    }
+
+    /// <summary>
+    /// 用户点「应用」才写盘。写之前再核一次项目可写——只读项目里这张卡不该能落下任何文件。
+    /// </summary>
+    public AgentSkillEditResult ApplySkillPatch(string skillId, string note)
+    {
+        var skill = FindBuiltInSkill(skillId);
+        if (skill is null) return new AgentSkillEditResult(0, "找不到这个内置技能，没有写入。");
+        if (!canEdit) return new AgentSkillEditResult(0, "项目只读，技能补充不能写入。");
+        var root = AppPaths.TryCurrentProject?.RootPath ?? string.Empty;
+        return ProjectSkillNotes.TryApply(root, skill.Id, note, out var version, out var error)
+            ? new AgentSkillEditResult(version, string.Empty)
+            : new AgentSkillEditResult(0, error);
+    }
+
+    private static BuiltInSkill? FindBuiltInSkill(string skillId) =>
+        BuiltInSkills.All.FirstOrDefault(item => string.Equals(item.Id, skillId.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    private static ProjectSkillNote? CurrentSkillNote(string skillId) =>
+        ProjectSkillNotes.Load(AppPaths.TryCurrentProject?.RootPath).Notes
+            .FirstOrDefault(note => string.Equals(note.SkillId, skillId, StringComparison.OrdinalIgnoreCase));
 }

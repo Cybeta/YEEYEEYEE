@@ -13,6 +13,9 @@ public static class AppPaths
     public static string Root => projectRoot ?? throw new InvalidOperationException("尚未打开项目。");
     public static ProjectContext CurrentProject => currentProject ?? throw new InvalidOperationException("尚未打开项目。");
 
+    /// <summary>当前项目；还没打开项目时是 null（与会抛异常的 <see cref="CurrentProject"/> 分开）。</summary>
+    public static ProjectContext? TryCurrentProject => currentProject;
+
     public static void UseProject(ProjectContext project)
     {
         projectRoot = project.RootPath;

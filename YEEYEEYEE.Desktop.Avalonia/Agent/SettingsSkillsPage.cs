@@ -37,6 +37,7 @@ internal static class SettingsSkillsPage
         var builtInHost = new StackPanel { Spacing = 6 };
         var installedHost = new StackPanel { Spacing = 6 };
         var sitesHost = new StackPanel { Spacing = 6 };
+        var notesHost = new StackPanel { Spacing = 6 };
 
         // ---------- 站点与池子 ----------
 
@@ -502,6 +503,81 @@ internal static class SettingsSkillsPage
             Children = { openFolder, rescan }
         };
 
+        // ---------- 本项目的技能补充 ----------
+
+        // 这些补充由 Agent 提议、用户点「应用」后才写入，跟着项目走（见 ProjectSkillNotes）。
+        // 这一页只负责**看得见**：改写在对话里发生，历史上限就是文件里留的那几版。
+        void RefreshNotes()
+        {
+            notesHost.Children.Clear();
+            var projectRoot = AppPaths.TryCurrentProject?.RootPath ?? string.Empty;
+            if (projectRoot.Length == 0)
+            {
+                notesHost.Children.Add(Note("还没有打开项目：项目级技能补充跟着项目走，所以这里暂时没有内容。"));
+                return;
+            }
+
+            var (notes, errors) = ProjectSkillNotes.Load(projectRoot);
+            foreach (var error in errors)
+                notesHost.Children.Add(Note($"读不了技能补充：{error}", AgentNoteLevel.Warning));
+            if (notes.Count == 0)
+            {
+                notesHost.Children.Add(Note(
+                    "这个项目还没有技能补充。Agent 提议补充时会在对话里给一张卡片，你点「应用」之后才会写到这里。"));
+                return;
+            }
+
+            foreach (var note in notes.OrderBy(item => item.SkillId, StringComparer.Ordinal))
+            {
+                var name = BuiltInSkills.All
+                    .FirstOrDefault(skill => string.Equals(skill.Id, note.SkillId, StringComparison.OrdinalIgnoreCase))?.Name;
+                var info = new StackPanel { Spacing = 3 };
+                info.Children.Add(Row(
+                    string.IsNullOrWhiteSpace(name) ? note.SkillId : $"{name}（{note.SkillId}）",
+                    Chip($"v{note.Version}", "DfPrimary")));
+                info.Children.Add(new TextBlock
+                {
+                    Text = note.Note,
+                    FontSize = 10,
+                    TextWrapping = TextWrapping.Wrap,
+                    Foreground = Brush("DfInk2")
+                });
+
+                if (note.History.Count > 0)
+                {
+                    var history = new StackPanel { Spacing = 2, IsVisible = false };
+                    foreach (var revision in note.History)
+                        history.Children.Add(new TextBlock
+                        {
+                            Text = $"v{revision.Version}：{revision.Note}",
+                            FontSize = 10,
+                            TextWrapping = TextWrapping.Wrap,
+                            Foreground = Brush("DfInk3")
+                        });
+                    var toggle = Secondary($"历史 {note.History.Count} 版");
+                    toggle.FontSize = 10;
+                    toggle.HorizontalAlignment = HorizontalAlignment.Left;
+                    toggle.Click += (_, _) =>
+                    {
+                        history.IsVisible = !history.IsVisible;
+                        toggle.Content = history.IsVisible ? "收起历史" : $"历史 {note.History.Count} 版";
+                    };
+                    info.Children.Add(toggle);
+                    info.Children.Add(history);
+                }
+
+                notesHost.Children.Add(new Border
+                {
+                    Padding = new Thickness(10, 8),
+                    CornerRadius = new CornerRadius(10),
+                    BorderThickness = new Thickness(1),
+                    BorderBrush = Brush("DfLine"),
+                    Background = Brush("DfSurface2"),
+                    Child = info
+                });
+            }
+        }
+
         // ---------- 组装 ----------
 
         var root = new StackPanel { Spacing = 8, Margin = new Thickness(20) };
@@ -520,6 +596,13 @@ internal static class SettingsSkillsPage
             + "它是代码里的一张表，删掉下次启动又会回来。停用会把它从 Agent 的可调用技能清单与提示词里一并去掉。"));
         root.Children.Add(builtInHost);
 
+        root.Children.Add(Header("本项目的技能补充"));
+        root.Children.Add(Note(
+            "Agent 提议、你点「应用」之后才写进这个项目（项目根目录的 skill-notes.json）。"
+            + "它只**追加**在内置技能说明之后，不替换原文；每应用一次版本号 +1，旧措辞留在这里的历史里。"
+            + "换一个项目不会带上这些补充。"));
+        root.Children.Add(notesHost);
+
         root.Children.Add(Header("已装入的技能"));
         root.Children.Add(Note(
             "技能目录里的一步步出图 / 出视频流程。停用只改技能文件里的一个开关（配置与文件都留着）；"
@@ -532,6 +615,7 @@ internal static class SettingsSkillsPage
 
         RefreshSites();
         RefreshBuiltIn();
+        RefreshNotes();
         RefreshInstalled();
 
         return new SettingsPageSection
@@ -547,6 +631,7 @@ internal static class SettingsSkillsPage
             {
                 RefreshSites();
                 RefreshBuiltIn();
+                RefreshNotes();
                 RefreshInstalled();
             }
         };

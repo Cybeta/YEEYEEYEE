@@ -215,7 +215,10 @@ internal static class ChatRegression
                     Assert(reply.GetProperty("actions").GetArrayLength() == 0 && reply.GetProperty("skillActions").GetArrayLength() == 0 &&
                         reply.GetProperty("skillJobIds").GetArrayLength() == 0 && failed.GetProperty("jobIds").GetArrayLength() == 0,
                         "failed protocol must not invent actions or create jobs");
-                    Assert(RequestCount() == count + 1, "failed protocol does not automatically retry provider");
+                    Assert(RequestCount() == count + 2, "broken protocol automatically retried provider exactly once");
+                    lock (captured) Assert(captured.Last().GetProperty("messages").EnumerateArray().Any(m =>
+                        m.GetProperty("content").ValueKind == JsonValueKind.String && m.GetProperty("content").GetString()!.Contains("请按协议重来一次")),
+                        "automatic repair sends the protocol instruction");
                 }
                 foreach (var output in new[] { "你好", "正在调用web.text-to-image。", "示例：\n```json\n{\"prompt\":\"example\"}\n```",
                     "示例：\n```json\n[]\n```", "```json\n```\n以上仅作示例。" })

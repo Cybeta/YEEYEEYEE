@@ -85,7 +85,51 @@ public interface IAgentSessionHost
     /// 与首次启动弹的是同一个窗口，只是入口不同：面板上要能随时换一家，不必去翻设置里的每个字段。
     /// </summary>
     Task<bool> RunOnboardingAsync();
+
+    /// <summary>
+    /// 把 Agent 建议的技能 id 翻成界面要展示的事实（名字、单次花费、是不是视频）。
+    /// 找不到返回 null——那说明这个技能已经被停用或删除，卡片要如实说，而不是显示一串 id。
+    /// </summary>
+    AgentSkillFacts? DescribeSkill(string skillId);
+
+    /// <summary>
+    /// 用户确认邀请卡后，按**与节点菜单完全相同**的那条链路运行技能：
+    /// 仍然要过提示词 / 参考图 / 单价确认，这里只是把「选哪个技能」这一步替用户填好。
+    /// 返回 null 表示已进入流程；否则是给用户看的失败原因。
+    /// </summary>
+    Task<string?> RunSuggestedSkillAsync(string skillId, string target);
+
+    /// <summary>
+    /// 用户在「运行技能」卡上确认后真正发起一次图片生成（提示词由模型给，仍会照常过资产与能力预检）。
+    /// 返回 null 表示**已提交**；否则是没提交的原因（此时一定没产生费用）。
+    /// </summary>
+    Task<string?> RunSkillActionAsync(string skillId, string target, string prompt, string negativePrompt);
+
+    /// <summary>
+    /// 技能补充卡片要展示的事实：技能名、当前补充、下一版本号。找不到这个内置技能时返回 null。
+    /// </summary>
+    AgentSkillEditInfo? DescribeSkillEdit(string skillId);
+
+    /// <summary>
+    /// 用户点「应用」后写入项目级技能补充。成功时 Version 是写入后的版本号，Error 为空串。
+    /// </summary>
+    AgentSkillEditResult ApplySkillPatch(string skillId, string note);
 }
+
+/// <summary>技能补充卡片的事实来源。</summary>
+/// <param name="Label">技能名。</param>
+/// <param name="CurrentNote">这个项目当前的补充；没有时为空串。</param>
+/// <param name="NextVersion">这次应用后会写入的版本号。</param>
+public sealed record AgentSkillEditInfo(string Label, string CurrentNote, int NextVersion);
+
+/// <summary>写入结果。<paramref name="Error"/> 为空表示成功。</summary>
+public sealed record AgentSkillEditResult(int Version, string Error);
+
+/// <summary>技能卡要展示的事实：查不到这个技能时整条为 null。</summary>
+/// <param name="Label">「站点 · 池子 / 工作流」。</param>
+/// <param name="Cost">单次花费的人话（接口池子是单价，ComfyUI 工作流不按次计费）。</param>
+/// <param name="IsVideo">视频技能不能一键直达：首帧与台词要在生成窗口里确认。</param>
+public sealed record AgentSkillFacts(string Label, string Cost, bool IsVideo);
 
 /// <summary>Agent 模型选择器里的一个候选。</summary>
 /// <param name="Id">配置的 Id（切回来时用它，而不是拿显示名去认——名字可以重复）。</param>

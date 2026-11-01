@@ -21,6 +21,24 @@ internal static class WebChatApi
         @"(?:\A|\n)[ \t]*```json[^\S\r\n]*\r?\n\s*(?:\{\s*\}\s*)?(?:```\s*)?\z",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
         TimeSpan.FromMilliseconds(100));
+    /// <summary>
+    /// 模型没按协议输出时，用它把要求再讲一遍（与桌面端 AgentPanel 的这段提示保持一致）。
+    /// Web 还多提一句 invoke_skill：生成技能同样必须走结构化动作，只写正文等于没发起。
+    /// </summary>
+    private const string ProtocolRepairInstruction =
+        "（系统提示：你上一条回复里的 JSON 块无法解析，界面因此拿不到任何可执行的改动或可选的提问。）" +
+        "请按协议重来一次：如果信息不足，只输出一个 ask 块（含 question 与 options）；" +
+        "如果要调用生成技能，输出含 invoke_skill 的 actions 块；" +
+        "如果需要改动画布，输出 actions 块。字符串内容里的引号必须用中文引号或转义（\\\"），换行写成 \\n，" +
+        "不要在正文里重复问句。";
+    /// <summary>与桌面端同一份动词表：命中却说不出结构化结果，就当作「把该问的事写成了正文」。</summary>
+    private static readonly string[] ChangeVerbs =
+    {
+        "新建", "创建", "加一个", "加个", "添加", "删掉", "删除", "移除", "改一下", "改成", "修改",
+        "更新", "连到", "连接", "连一条", "写入", "生成"
+    };
+    private static bool LooksLikeChangeRequest(string text) =>
+        ChangeVerbs.Any(verb => text.Contains(verb, StringComparison.Ordinal));
     private static IResult Error(int status, string code, string message) => Results.Json(new { code, message }, statusCode: status);
     /// <summary>
     /// 转交给技能调用入口的请求体选项：与浏览器直连那条路用同一套（camelCase + 大小写不敏感）。
@@ -639,6 +657,8 @@ internal static class WebChatApi
                 var events = Channel.CreateUnbounded<(string Type, string Data)>();
                 void Publish(string type, object data) => events.Writer.TryWrite((type, JsonSerializer.Serialize(data, new JsonSerializerOptions(JsonSerializerDefaults.Web))));
                 Publish("snapshot", session);
+                // 重试时没有新的用户输入，按会话里最后一条用户消息判断「这是不是一个改动请求」。
+                var requestText = body.Text ?? session.Messages.LastOrDefault(m => m.Role == "user")?.Content ?? "";
                 async Task Generate()
                 {
                     var checkpoint = DateTime.UtcNow;
@@ -654,19 +674,41 @@ internal static class WebChatApi
                             reply.ObserveOutput(clock.Elapsed.TotalSeconds, thinking);
                             if (first) Publish("usage", UsageSnapshot());
                         }
-                        reply.Content = await provider.ChatStreamAsync(history, new AiStreamSink(
-                            text => { ObserveOutput(thinking: false); reply.Content += text; Publish("text", new { text }); SaveProgress(); },
-                            thinking => { ObserveOutput(thinking: true); reply.Thinking += thinking; Publish("thinking", new { text = thinking }); SaveProgress(); },
-                            usage => { reply.Usage = usage; Publish("usage", UsageSnapshot()); SaveProgress(); }), cancellation.Token);
-                        cancellation.Token.ThrowIfCancellationRequested();
-                        var responseLength = reply.Content.Length;
-                        var parsed = AgentActionParser.Parse(reply.Content);
-                        var emptyProtocol = parsed.Actions.Count == 0 && parsed.Ask is null ? EmptyJsonTail.Match(reply.Content) : null;
-                        var protocolFailed = parsed.ProtocolBroken || emptyProtocol?.Success == true;
-                        app.Logger.LogInformation("Web聊天协议解析：{ResponseLength} {ActionCount} {ProtocolFailed}", responseLength, parsed.Actions.Count, protocolFailed);
+                        // 与桌面端同一套补救：模型该给结构化结果却只写了正文（或 JSON 坏了）时，
+                        // 自动按协议再要一次，而不是把「没弹出选项」直接丢给用户自己重发。只补一次。
+                        AgentReply parsed;
+                        System.Text.RegularExpressions.Match? emptyProtocol;
+                        bool protocolFailed;
+                        for (var repaired = false; ; )
+                        {
+                            // 重问要重收：第一遍的正文已经推给前端了，靠 reset 让它清掉再接着收。
+                            reply.Content = "";
+                            reply.Thinking = "";
+                            reply.Content = await provider.ChatStreamAsync(history, new AiStreamSink(
+                                text => { ObserveOutput(thinking: false); reply.Content += text; Publish("text", new { text }); SaveProgress(); },
+                                thinking => { ObserveOutput(thinking: true); reply.Thinking += thinking; Publish("thinking", new { text = thinking }); SaveProgress(); },
+                                usage => { reply.Usage = usage; Publish("usage", UsageSnapshot()); SaveProgress(); }), cancellation.Token);
+                            cancellation.Token.ThrowIfCancellationRequested();
+                            var responseLength = reply.Content.Length;
+                            parsed = AgentActionParser.Parse(reply.Content);
+                            emptyProtocol = parsed.Actions.Count == 0 && parsed.Ask is null ? EmptyJsonTail.Match(reply.Content) : null;
+                            protocolFailed = parsed.ProtocolBroken || emptyProtocol?.Success == true;
+                            app.Logger.LogInformation("Web聊天协议解析：{ResponseLength} {ActionCount} {ProtocolFailed}", responseLength, parsed.Actions.Count, protocolFailed);
+                            if (repaired || !(protocolFailed || parsed.Actions.Count == 0 && parsed.Ask is null && LooksLikeChangeRequest(requestText))) break;
+                            repaired = true;
+                            app.Logger.LogInformation("Web聊天自动重问：{Reason}", protocolFailed ? "协议无效" : "改动请求缺少结构化输出");
+                            history.Add(new AiChatMessage { Role = "user", Content = ProtocolRepairInstruction });
+                            Publish("reset", new { });
+                            SaveProgress();
+                        }
                         reply.Content = emptyProtocol?.Success == true ? reply.Content[..emptyProtocol.Index].Trim() : parsed.Text; reply.Ask = parsed.Ask;
                         reply.SkillActions = parsed.Actions.Where(a => a.Kind == "invoke_skill").ToList();
-                        reply.Actions = parsed.Actions.Where(a => a.Kind != "invoke_skill").ToList();
+                        // run_skill 是桌面端专用（开生成窗口、由用户确认真实花费）。Web 没有对应的确认界面，
+                        // 让它落进画布预检只会被当成未知动作拒掉整批，所以这里直接排除。
+                        // 但不能静默丢：模型真写了就要让用户看见「这条没执行、也没花钱」。
+                        if (parsed.Actions.Any(a => a.Kind == "run_skill"))
+                            reply.Content += "\n（这条回复里的 run_skill 是桌面端指令，Web 未执行，也没有产生费用。）";
+                        reply.Actions = parsed.Actions.Where(a => a.Kind is not ("invoke_skill" or "run_skill")).ToList();
                         if (protocolFailed) { reply.State = "failed"; reply.Error = "动作协议为空或无效，未发起任务，请重试"; }
                         else
                         {

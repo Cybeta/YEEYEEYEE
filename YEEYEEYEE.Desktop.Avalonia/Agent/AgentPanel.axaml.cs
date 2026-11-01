@@ -366,6 +366,21 @@ public partial class AgentPanel : UserControl
                 AddAskCard(turn.Ask);
                 return;
             }
+            // 技能建议同样要等用户：卡片在这里就把这一轮收住，用户点确认才进生成流程。
+            if (turn.Suggest is not null)
+            {
+                AddSuggestCard(turn.Suggest);
+                return;
+            }
+            // 技能补充只是提案：写盘要用户点「应用」，所以同样在这里收住这一轮。
+            if (turn.Patch is not null)
+            {
+                if (authMode == AgentAuthMode.ReadOnly)
+                    AddSystemNote("授权模式是「只读不提议」：已忽略模型给出的技能补充建议。", warning: true);
+                else
+                    AddSkillPatchCard(turn.Patch);
+                return;
+            }
 
             if (repaired) return;
             // 既没给改动块、也没提问，但用户明显在要求改动：多半是把该问的事写成了正文。
@@ -385,7 +400,7 @@ public partial class AgentPanel : UserControl
 
     // ---------- 一轮请求 ----------
 
-    private readonly record struct TurnResult(AgentAsk? Ask, bool ProducedProposal, bool ProtocolBroken);
+    private readonly record struct TurnResult(AgentAsk? Ask, AgentSkillSuggestion? Suggest, AgentSkillPatch? Patch, bool ProducedProposal, bool ProtocolBroken);
 
     private async Task<TurnResult> RunTurnAsync(IAiChatProvider provider)
     {
@@ -417,19 +432,41 @@ public partial class AgentPanel : UserControl
                 if (!string.IsNullOrWhiteSpace(visible)) bubble.Body.Text = visible;
             }
             history.Add(new AiChatMessage { Role = "assistant", Content = parsed.Text });
-            HandleProposedActions(parsed);
-            return new TurnResult(parsed.Ask, parsed.Actions.Count > 0 || parsed.Ask is not null, parsed.ProtocolBroken);
+            // run_skill 不是画布动作：它不进预检、虚影和提交列表——花的是真钱，确认方式与「改节点」不是一回事。
+            var canvasActions = parsed.Actions.Where(action => !IsSkillRun(action)).ToList();
+            var skillRuns = parsed.Actions.Where(IsSkillRun).ToList();
+            if (canvasActions.Count > 0)
+                HandleProposedActions(new AgentReply
+                {
+                    Text = parsed.Text,
+                    Actions = canvasActions,
+                    Ask = parsed.Ask,
+                    ProtocolBroken = parsed.ProtocolBroken
+                });
+            else if (parsed.Ask is null && parsed.Suggest is null && parsed.Patch is null && skillRuns.Count == 0)
+                // 真的一无所出时才提醒「只回答了文字」；有建议卡或运行卡时不该再补这一句。
+                HandleProposedActions(parsed);
+            if (skillRuns.Count > 0)
+            {
+                if (authMode == AgentAuthMode.ReadOnly)
+                    AddSystemNote($"授权模式是「只读不提议」：已忽略模型提出的 {skillRuns.Count} 条生成请求（没有产生费用）。", warning: true);
+                else
+                    foreach (var run in skillRuns) AddSkillRunCard(run);
+            }
+            return new TurnResult(parsed.Ask, parsed.Suggest, parsed.Patch,
+                parsed.Actions.Count > 0 || parsed.Ask is not null || parsed.Suggest is not null || parsed.Patch is not null,
+                parsed.ProtocolBroken);
         }
         catch (OperationCanceledException)
         {
             // 半截回复不进历史：它不是模型的完整回答，留着会污染后续上下文。
             AddSystemNote("已停止生成。以下内容不完整，未写入对话历史。", warning: true);
-            return new TurnResult(null, true, false);
+            return new TurnResult(null, null, null, true, false);
         }
         catch (Exception error)
         {
             AddErrorMessage(error);
-            return new TurnResult(null, true, false);
+            return new TurnResult(null, null, null, true, false);
         }
         finally
         {
@@ -1112,6 +1149,382 @@ public partial class AgentPanel : UserControl
         row.Children.Add(free);
         row.Children.Add(send);
         body.Children.Add(row);
+
+        MessageList.Children.Add(card);
+        ScrollToEnd();
+    }
+
+    /// <summary>
+    /// 技能建议卡：**只提议、不执行**。点「确认运行…」后进入与节点菜单完全相同的那条生成流程，
+    /// 提示词、参考图、单价仍然要用户在窗口里过一遍，所以这张卡本身不扣任何东西。
+    /// </summary>
+    private void AddSuggestCard(AgentSkillSuggestion suggestion)
+    {
+        var body = new StackPanel { Spacing = 8 };
+        body.Children.Add(new TextBlock
+        {
+            Text = "建议运行技能",
+            FontSize = 11,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = Brush("DfInk")
+        });
+
+        // 技能名由工作台按 id 反查：显示一串合成 id 对用户没有意义，而查不到本身就说明它已经被停用或删掉。
+        var facts = host?.DescribeSkill(suggestion.Skill);
+        body.Children.Add(new SelectableTextBlock
+        {
+            Text = facts is null ? $"技能已不可用：{suggestion.Skill}" : facts.Label,
+            FontSize = 11,
+            LineHeight = 18,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = facts is null ? Brush("DfError") : Brush("DfInk2")
+        });
+        if (suggestion.Target.Length > 0)
+            body.Children.Add(new SelectableTextBlock
+            {
+                Text = "目标节点：" + suggestion.Target,
+                FontSize = 11,
+                LineHeight = 18,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brush("DfInk3")
+            });
+        if (suggestion.Reason.Length > 0)
+            body.Children.Add(new SelectableTextBlock
+            {
+                Text = suggestion.Reason,
+                FontSize = 11,
+                LineHeight = 18,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brush("DfInk2")
+            });
+
+        var card = new Border
+        {
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(11),
+            BorderThickness = new Thickness(1),
+            Background = Brush("DfPrimarySoft"),
+            BorderBrush = Brush("DfLineGlow"),
+            Child = body
+        };
+
+        var status = new TextBlock
+        {
+            FontSize = 11,
+            LineHeight = 18,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brush("DfInk3")
+        };
+        var run = new Button { Content = "确认运行…", Margin = new Thickness(0, 0, 6, 0) };
+        run.Classes.Add("primary");
+        // 技能已经不在了（停用 / 删除）：按钮留着只会让人白点一次，上面的红字已经说明原因。
+        run.IsEnabled = facts is not null;
+        var ignore = new Button { Content = "忽略" };
+        ignore.Classes.Add("miniButton");
+
+        run.Click += async (_, _) =>
+        {
+            if (host is null)
+            {
+                status.Text = "Agent 面板还没有接入工作台，无法运行技能。";
+                return;
+            }
+            // 先禁用再跑：生成窗口可能被重复点开，而每开一次都可能花一次钱。
+            card.IsEnabled = false;
+            card.Opacity = 0.6;
+            status.Text = "正在打开生成窗口…";
+            try
+            {
+                var failure = await host.RunSuggestedSkillAsync(suggestion.Skill, suggestion.Target);
+                if (failure is null)
+                {
+                    status.Text = "已打开生成窗口：提示词、参考图和单价仍要在窗口里确认后才会真正生成。";
+                }
+                else
+                {
+                    status.Foreground = Brush("DfError");
+                    status.Text = failure;
+                }
+            }
+            catch (Exception error)
+            {
+                status.Foreground = Brush("DfError");
+                status.Text = "运行技能失败：" + error.Message;
+            }
+        };
+        ignore.Click += (_, _) =>
+        {
+            card.IsEnabled = false;
+            card.Opacity = 0.6;
+            status.Text = "已忽略这条建议。";
+        };
+
+        var actions = new StackPanel { Orientation = Orientation.Horizontal };
+        actions.Children.Add(run);
+        actions.Children.Add(ignore);
+        body.Children.Add(actions);
+        body.Children.Add(status);
+
+        MessageList.Children.Add(card);
+        ScrollToEnd();
+    }
+
+    /// <summary>这条动作是不是「运行技能」。它不走画布审批，单独渲染成一张卡。</summary>
+    private static bool IsSkillRun(AgentAction action) =>
+        string.Equals(action.Kind, "run_skill", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>卡片里的提示词只做摘要：正文再长，用户也不该在对话流里读一整段。</summary>
+    private static string Excerpt(string text, int max = 180) =>
+        text.Length <= max ? text : text[..max] + "…";
+
+    /// <summary>
+    /// 「运行技能」卡：模型已经把提示词写好了，用户点确认就真的发起一次生成。
+    ///
+    /// 与邀请卡的区别只是少一次提示词窗口——资产预检、参考图规划、能力匹配与单价
+    /// 仍然在 <see cref="IAgentSessionHost.RunSkillActionAsync"/> 里照跑，一条都没跳过。
+    /// 视频不在这张卡上直达：首帧与台词必须在生成窗口里确认。
+    /// </summary>
+    private void AddSkillRunCard(AgentAction run)
+    {
+        var body = new StackPanel { Spacing = 8 };
+        body.Children.Add(new TextBlock
+        {
+            Text = "运行技能",
+            FontSize = 11,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = Brush("DfInk")
+        });
+
+        var facts = host?.DescribeSkill(run.Skill);
+        body.Children.Add(new SelectableTextBlock
+        {
+            Text = facts is null ? $"技能已不可用：{run.Skill}" : $"{facts.Label} · {facts.Cost}",
+            FontSize = 11,
+            LineHeight = 18,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = facts is null ? Brush("DfError") : Brush("DfInk2")
+        });
+        if (run.Target.Length > 0)
+            body.Children.Add(new SelectableTextBlock
+            {
+                Text = "目标节点：" + run.Target,
+                FontSize = 11,
+                LineHeight = 18,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brush("DfInk3")
+            });
+        if (run.Content.Length > 0)
+            body.Children.Add(new SelectableTextBlock
+            {
+                Text = "提示词：" + Excerpt(run.Content),
+                FontSize = 11,
+                LineHeight = 18,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brush("DfInk2")
+            });
+        if (run.Reason.Length > 0)
+            body.Children.Add(new SelectableTextBlock
+            {
+                Text = run.Reason,
+                FontSize = 11,
+                LineHeight = 18,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brush("DfInk3")
+            });
+        if (facts?.IsVideo == true)
+            body.Children.Add(new TextBlock
+            {
+                Text = "视频要先确认首帧与台词：这一条不能一键直达，请从建议卡进生成窗口。",
+                FontSize = 11,
+                LineHeight = 18,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brush("DfWarning")
+            });
+
+        var card = new Border
+        {
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(11),
+            BorderThickness = new Thickness(1),
+            Background = Brush("DfPrimarySoft"),
+            BorderBrush = Brush("DfLineGlow"),
+            Child = body
+        };
+
+        var status = new TextBlock
+        {
+            FontSize = 11,
+            LineHeight = 18,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brush("DfInk3")
+        };
+        var confirm = new Button { Content = "确认生成", Margin = new Thickness(0, 0, 6, 0) };
+        confirm.Classes.Add("primary");
+        confirm.IsEnabled = facts is not null && !facts.IsVideo;
+        var ignore = new Button { Content = "忽略" };
+        ignore.Classes.Add("miniButton");
+
+        confirm.Click += async (_, _) =>
+        {
+            if (host is null)
+            {
+                status.Text = "Agent 面板还没有接入工作台，无法生成。";
+                return;
+            }
+            // 先禁用再跑：这张卡代表的是一次真实花费，重复点击不能变成两次。
+            card.IsEnabled = false;
+            card.Opacity = 0.6;
+            status.Text = "正在提交…";
+            try
+            {
+                var failure = await host.RunSkillActionAsync(run.Skill, run.Target, run.Content, run.NegativePrompt);
+                if (failure is null)
+                {
+                    status.Text = "已提交生成；进度看画布上方的批次窗口。";
+                }
+                else
+                {
+                    status.Foreground = Brush("DfError");
+                    status.Text = failure;
+                }
+            }
+            catch (Exception error)
+            {
+                status.Foreground = Brush("DfError");
+                status.Text = "提交失败：" + error.Message;
+            }
+        };
+        ignore.Click += (_, _) =>
+        {
+            card.IsEnabled = false;
+            card.Opacity = 0.6;
+            status.Text = "已忽略这条生成请求（没有产生费用）。";
+        };
+
+        var actions = new StackPanel { Orientation = Orientation.Horizontal };
+        actions.Children.Add(confirm);
+        actions.Children.Add(ignore);
+        body.Children.Add(actions);
+        body.Children.Add(status);
+        // 自动模式只自动提交画布动作；花钱这一步刻意仍然要人点。
+        if (authMode == AgentAuthMode.AutoStage)
+            body.Children.Add(new TextBlock
+            {
+                Text = "自动模式不会自动花钱：这一条仍要你确认。",
+                FontSize = 11,
+                LineHeight = 18,
+                Foreground = Brush("DfInk3")
+            });
+
+        MessageList.Children.Add(card);
+        ScrollToEnd();
+    }
+
+    /// <summary>
+    /// 「技能补充」卡：模型提议给某个内置技能加一条**项目级**要求。
+    /// 只有用户点「应用」才写盘，版本号 +1，旧措辞留在历史里——模型不能单方面改技能说明。
+    /// </summary>
+    private void AddSkillPatchCard(AgentSkillPatch patch)
+    {
+        var facts = host?.DescribeSkillEdit(patch.Skill);
+        var body = new StackPanel { Spacing = 8 };
+        body.Children.Add(new TextBlock
+        {
+            Text = "技能补充建议",
+            FontSize = 11,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = Brush("DfInk")
+        });
+
+        body.Children.Add(new SelectableTextBlock
+        {
+            Text = facts is null ? $"技能已不可用：{patch.Skill}" : $"{facts.Label} · 应用后 v{facts.NextVersion}",
+            FontSize = 11,
+            LineHeight = 18,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = facts is null ? Brush("DfError") : Brush("DfInk2")
+        });
+        body.Children.Add(new SelectableTextBlock
+        {
+            Text = facts is { CurrentNote.Length: > 0 } ? "当前补充：" + Excerpt(facts.CurrentNote) : "当前没有项目补充。",
+            FontSize = 11,
+            LineHeight = 18,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brush("DfInk3")
+        });
+        body.Children.Add(new SelectableTextBlock
+        {
+            Text = "建议追加：" + patch.Note,
+            FontSize = 11,
+            LineHeight = 18,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brush("DfInk2")
+        });
+        if (patch.Reason.Length > 0)
+            body.Children.Add(new SelectableTextBlock
+            {
+                Text = patch.Reason,
+                FontSize = 11,
+                LineHeight = 18,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brush("DfInk3")
+            });
+
+        var card = new Border
+        {
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(11),
+            BorderThickness = new Thickness(1),
+            Background = Brush("DfPrimarySoft"),
+            BorderBrush = Brush("DfLineGlow"),
+            Child = body
+        };
+
+        var status = new TextBlock
+        {
+            FontSize = 11,
+            LineHeight = 18,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brush("DfInk3")
+        };
+        var apply = new Button { Content = "应用", Margin = new Thickness(0, 0, 6, 0) };
+        apply.Classes.Add("primary");
+        apply.IsEnabled = facts is not null;
+        var ignore = new Button { Content = "忽略" };
+        ignore.Classes.Add("miniButton");
+
+        apply.Click += (_, _) =>
+        {
+            if (host is null)
+            {
+                status.Text = "Agent 面板还没有接入工作台，无法写入。";
+                return;
+            }
+            card.IsEnabled = false;
+            card.Opacity = 0.6;
+            var result = host.ApplySkillPatch(patch.Skill, patch.Note);
+            if (result.Error.Length == 0)
+            {
+                status.Text = $"已写入 v{result.Version}；下一轮对话起生效，旧措辞留在历史里。";
+            }
+            else
+            {
+                status.Foreground = Brush("DfError");
+                status.Text = result.Error;
+            }
+        };
+        ignore.Click += (_, _) =>
+        {
+            card.IsEnabled = false;
+            card.Opacity = 0.6;
+            status.Text = "已忽略这条建议，没有写入任何内容。";
+        };
+
+        var actions = new StackPanel { Orientation = Orientation.Horizontal };
+        actions.Children.Add(apply);
+        actions.Children.Add(ignore);
+        body.Children.Add(actions);
+        body.Children.Add(status);
 
         MessageList.Children.Add(card);
         ScrollToEnd();

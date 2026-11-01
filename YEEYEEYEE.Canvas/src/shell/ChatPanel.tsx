@@ -284,6 +284,13 @@ export function ChatPanel({ userId, canChat, chapterId, nodeId, baseRevision, ca
   currentContext.current = { selected, baseRevision, canCommit }
   const session = sessions.find(s => s.id === selected)
   const streaming = session?.messages.at(-1)?.state === 'streaming'
+  // 反问卡答过就不再让点：判据是它后面已经出现了用户消息。存下来而不是只记在本次交互里，
+  // 刷新会话、重启页面后同一个问题不会被当成「还没答」再点一次。
+  const chatMessages = session?.messages ?? []
+  const answeredAsks = new Set<string>()
+  chatMessages.forEach((message, index) => {
+    if (message.ask && chatMessages.slice(index + 1).some(next => next.role === 'user')) answeredAsks.add(message.id)
+  })
   // 本条会话里已上传的图片附件（按出现顺序、按 ID 去重）：参考图参数的可选来源。
   const arrayChoices = referenceAttachmentChoices(
     (session?.messages ?? []).flatMap(message => message.attachments ?? [])
@@ -348,10 +355,11 @@ export function ChatPanel({ userId, canChat, chapterId, nodeId, baseRevision, ca
       const list = await refresh(); setSelected(list[0]?.id ?? ''); setAttachments([]); setText(''); localStorage.removeItem(selectionKey)
     } catch (e) { setNotice(errorMessage(e)) } finally { setBusy(false) }
   }
-  async function send(retry = false, nodeRequest?: NodeAgentRequest) {
-    if (inFlight.current || streaming || !canChat || (!nodeRequest && !retry && mode === 'auto' && !canCommit) || (!retry && !(nodeRequest?.prompt ?? text).trim())) return
+  async function send(retry = false, nodeRequest?: NodeAgentRequest, answer?: string) {
+    const outgoing = nodeRequest?.prompt ?? answer ?? text
+    if (inFlight.current || streaming || !canChat || (!nodeRequest && !retry && mode === 'auto' && !canCommit) || (!retry && !outgoing.trim())) return
     const sendBody = retry ? { retry: true } : {
-      text: nodeRequest?.prompt ?? text, retry: false, mode: nodeRequest ? 'approval' : mode,
+      text: outgoing, retry: false, mode: nodeRequest ? 'approval' : mode,
       chapterId: nodeRequest ? nodeRequest.chapterId : chapterId, nodeId: nodeRequest?.nodeId ?? nodeId,
       baseRevision: nodeRequest?.baseRevision ?? baseRevision, source: nodeRequest ? 'node-menu' : 'chat',
       targetNodeTitle: nodeRequest?.title, attachmentIds: nodeRequest ? [] : attachments.map(a => a.id)
@@ -380,8 +388,9 @@ export function ChatPanel({ userId, canChat, chapterId, nodeId, baseRevision, ca
             if (s.id !== id) return s
             const messages = s.messages.map((m, index) => index !== s.messages.length - 1 ? m : {
               ...m,
-              content: event.type === 'text' ? m.content + (event.data as { text: string }).text : m.content,
-              thinking: event.type === 'thinking' ? m.thinking + (event.data as { text: string }).text : m.thinking,
+              // 服务端自动重问之前会发 reset：第一遍可能已经吐出半截正文，先清掉再收第二遍。
+              content: event.type === 'reset' ? '' : event.type === 'text' ? m.content + (event.data as { text: string }).text : m.content,
+              thinking: event.type === 'reset' ? '' : event.type === 'thinking' ? m.thinking + (event.data as { text: string }).text : m.thinking,
               usage: event.type === 'usage' ? (event.data as { usage?: ChatMessage['usage'] }).usage ?? m.usage : m.usage,
               usageReport: event.type === 'usage' ? (event.data as { usageReport?: ChatMessage['usageReport'] }).usageReport ?? m.usageReport : m.usageReport,
               contextWindow: event.type === 'usage' ? (event.data as { contextWindow?: number }).contextWindow ?? m.contextWindow : m.contextWindow,
@@ -532,7 +541,7 @@ export function ChatPanel({ userId, canChat, chapterId, nodeId, baseRevision, ca
         {m.role === 'assistant' && <span className="df-dim">执行 {m.id} · {m.state}{m.actionState ? ` · ${m.actionState}` : ''}</span>}
         {m.targetNodeId && <span className="df-agent-context">来源节点：{m.targetNodeTitle || m.targetNodeId} · {m.targetNodeId} · 章节 {m.targetChapterId ?? '未归档'} · 基准修订 {m.baseRevision ?? '—'}{m.source ? ` · ${m.source}` : ''}</span>}
         {m.error && <span role="alert" className="df-notice is-error">{m.error}</span>}
-        {m.ask && <div className="df-section"><strong>{m.ask.question}</strong>{m.ask.options.map(option => <button key={option} className="df-mini-button" disabled={busy || streaming} onClick={() => setText(option)}>{option}</button>)}<span className="df-dim">也可在输入框填写回答后发送。</span></div>}
+        {m.ask && <div className="df-section" style={{ opacity: answeredAsks.has(m.id) ? 0.6 : 1 }}><strong>{m.ask.question}</strong>{m.ask.options.map(option => <button key={option} className="df-mini-button" disabled={busy || streaming || answeredAsks.has(m.id)} onClick={() => { setText(option); void send(false, undefined, option) }}>{option}</button>)}<span className="df-dim">{answeredAsks.has(m.id) ? '已回答。' : '也可在输入框填写回答后发送。'}</span></div>}
         {['preview', 'failed'].includes(m.skillState ?? '') && m.skillActions?.length === 1 && <SkillProposalEditor
           action={m.skillActions[0]}
           catalog={catalog}

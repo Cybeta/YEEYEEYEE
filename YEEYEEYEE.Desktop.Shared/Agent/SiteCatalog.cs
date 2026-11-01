@@ -1176,3 +1176,111 @@ public static class SitePoolProbe
         return int.TryParse(digits, out var seconds) ? seconds : 0;
     }
 }
+
+/// <summary>一条「Agent 可以建议运行」的生成技能：接口站的一个池子，或 ComfyUI 的一份工作流。</summary>
+public sealed record RunnableSkill(string Id, string Label, string Detail, bool IsVideo, ImageSourceChoice Choice);
+
+/// <summary>
+/// 把站点目录整理成 Agent 可引用、可反向解析的技能清单。
+///
+/// 为什么要有合成 id：模型只会照抄，不会推理。池子的「模型 + 档位」与工作流的「目录 / 文件名」
+/// 都可能重名（两台 ComfyUI 各有一份同名工作流），靠名字反查迟早把请求打到另一台服务器、
+/// 或者用另一个价位的池子。id 里带站点身份，解析时只做**精确匹配**，匹配不上就明确失败，不猜。
+/// </summary>
+public static class RunnableSkills
+{
+    /// <summary>提示词里最多列这么多条：一次塞几百份工作流会吃光上下文预算，也没人看得完。</summary>
+    public const int ContextLimit = 60;
+
+    /// <summary>
+    /// 某台服务器某种用途**没有选出推荐项**时，最多列这么多份顶上。
+    ///
+    /// 为什么需要兜底：推荐项是导入时选的，不是每台机器、每种用途都会选出来。
+    /// 只列推荐项的话，「这台 ComfyUI 一份推荐都没有」会让 Agent 完全看不到工作流，
+    /// 用户问「用哪个工作流出图」时它只能干瞪眼。
+    /// </summary>
+    public const int FallbackPerKind = 3;
+
+    public static string PoolId(SiteProfile site, SitePool pool) => $"site:{site.Id}/pool:{pool.Model}|{pool.Tier}";
+
+    public static string WorkflowId(SiteProfile site, SiteWorkflow workflow) => $"site:{site.Id}/workflow:{workflow.Key}";
+
+    /// <summary>
+    /// 全部可用技能。既用于生成提示词清单，也用于按 id 精确反查。
+    ///
+    /// 只收图片与视频工作流：音频 / 其它种类今天没有对应的执行链路，
+    /// 列出来只会让模型建议一个跑不起来的 id（而且会被标成「图像」，那是错的）。
+    /// </summary>
+    public static IReadOnlyList<RunnableSkill> List(IReadOnlyList<SiteProfile> sites)
+    {
+        var skills = new List<RunnableSkill>();
+        foreach (var site in sites)
+        {
+            foreach (var pool in site.UsablePools) skills.Add(Entry(site, pool));
+            foreach (var workflow in site.UsableWorkflows)
+                if (workflow.IsImage || workflow.IsVideo) skills.Add(Entry(site, workflow));
+        }
+        return skills;
+    }
+
+    public static RunnableSkill? Resolve(IReadOnlyList<SiteProfile> sites, string id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return null;
+        var wanted = id.Trim();
+        return List(sites).FirstOrDefault(skill => string.Equals(skill.Id, wanted, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static RunnableSkill Entry(SiteProfile site, SitePool pool) => new(
+        PoolId(site, pool),
+        $"{site.Label} · {pool.Label}",
+        pool.Describe(),
+        pool.IsVideo,
+        ImageSourceChoice.OfPool(new SitePoolChoice(site, pool)));
+
+    public static RunnableSkill Entry(SiteProfile site, SiteWorkflow workflow) => new(
+        WorkflowId(site, workflow),
+        $"{site.Label} · {workflow.Label}",
+        workflow.IsVideo ? "ComfyUI 工作流 · 视频" : "ComfyUI 工作流 · 图像",
+        workflow.IsVideo,
+        ImageSourceChoice.OfWorkflow(new SiteWorkflowChoice(site, workflow)));
+
+    /// <summary>
+    /// 给提示词用的清单：池子全列；工作流按「每台服务器 × 每种用途」各选一份推荐，
+    /// 没选出推荐项时取前 <see cref="FallbackPerKind"/> 份顶上，其余用一句「另有 N 份」带过。
+    /// 这不是限制能力——用户仍可从节点菜单选任意一份，只是不把几百个名字灌进模型上下文。
+    /// </summary>
+    public static string Describe(IReadOnlyList<SiteProfile> sites)
+    {
+        var pools = new List<RunnableSkill>();
+        var workflows = new List<RunnableSkill>();
+        var hiddenWorkflows = 0;
+        foreach (var site in sites)
+        {
+            foreach (var pool in site.UsablePools) pools.Add(Entry(site, pool));
+            foreach (var video in new[] { false, true })
+            {
+                var candidates = site.UsableWorkflows
+                    .Where(workflow => video ? workflow.IsVideo : workflow.IsImage)
+                    .ToList();
+                if (candidates.Count == 0) continue;
+                var chosen = candidates.Where(workflow => workflow.Recommended).ToList();
+                if (chosen.Count == 0) chosen = candidates.Take(FallbackPerKind).ToList();
+                foreach (var workflow in chosen) workflows.Add(Entry(site, workflow));
+                hiddenWorkflows += candidates.Count - chosen.Count;
+            }
+        }
+        if (pools.Count == 0 && workflows.Count == 0)
+            return "（本机还没有登记可用的出图 / 出视频接口或工作流；需要先生成时请让用户到设置里导入）";
+
+        var lines = new List<string>();
+        foreach (var skill in pools.Concat(workflows))
+        {
+            if (lines.Count >= ContextLimit) break;
+            lines.Add($"- {skill.Id} ← {skill.Label}｜{(skill.IsVideo ? "视频" : "图像")}｜{skill.Detail}");
+        }
+        var omitted = pools.Count + workflows.Count - lines.Count;
+        if (omitted > 0) lines.Add($"- （另有 {omitted} 条可用技能没列出，要用请让用户从节点菜单选）");
+        if (hiddenWorkflows > 0) lines.Add($"- （另有 {hiddenWorkflows} 份 ComfyUI 工作流没列出，要用请让用户从节点菜单选）");
+        return string.Join("\n", lines);
+    }
+}

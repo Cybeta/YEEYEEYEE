@@ -107,13 +107,22 @@ public static class BuiltInSkills
     /// 提示词里还写着「可调用的生成技能清单：图片生成…」，模型就会照着去调，
     /// 用户看到的将是「我明明停用了它，它还在用」。停用要么彻底，要么别说停用。
     /// </summary>
-    public static string DescribeForAgent(IReadOnlyCollection<string>? disabled = null)
+    public static string DescribeForAgent(
+        IReadOnlyCollection<string>? disabled = null,
+        IReadOnlyDictionary<string, ProjectSkillNote>? projectNotes = null)
     {
         disabled ??= AiProviderSettings.Load().DisabledBuiltInSkills;
         var lines = All
             // 手写 JSON 里给了 null 也不该炸：这里不假设配置里的名单一定存在。
             .Where(skill => disabled is null || !disabled.Contains(skill.Id))
-            .Select(skill => $"- {skill.Name}（{skill.Id}）：{skill.Description} 输出：{skill.OutputFormat}")
+            .Select(skill =>
+            {
+                var line = $"- {skill.Name}（{skill.Id}）：{skill.Description} 输出：{skill.OutputFormat}";
+                // 项目补充是**追加**不是替换：内置说明是底线，项目补充只加不减。
+                if (projectNotes is not null && projectNotes.TryGetValue(skill.Id, out var note) && note.Note.Length > 0)
+                    line += $"｜本项目补充（v{note.Version}）：{note.Note}";
+                return line;
+            })
             .ToList();
         return lines.Count == 0
             ? "（内置生成技能当前全部处于停用状态；需要时请在「设置 → 技能管理」里重新启用。）"

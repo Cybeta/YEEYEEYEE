@@ -41,6 +41,12 @@ public sealed class AgentAction
     /// <summary>连线的起点节点（id 或标题，推荐 id）。只有 create_edge / delete_edge 使用。</summary>
     public string Source { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 要运行的生成技能 id（<c>run_skill</c> 专用）。必须取自上下文「可运行的生成技能」，
+    /// 由宿主精确反查；认不出来就整条拒绝，不退回同名技能。
+    /// </summary>
+    public string Skill { get; set; } = string.Empty;
+
     /// <summary>标题（新建节点/实体时使用，修改时可选）。</summary>
     public string Title { get; set; } = string.Empty;
 
@@ -54,6 +60,9 @@ public sealed class AgentAction
     public string WorkTreeTarget { get; set; } = string.Empty;
 
     public string Content { get; set; } = string.Empty;
+
+    /// <summary>反向提示词（<c>run_skill</c> 专用）；留空表示不额外排除，由技能自己的模板决定。</summary>
+    public string NegativePrompt { get; set; } = string.Empty;
     public ShotAssetRequirements? AssetRequirements { get; set; }
 
     /// <summary>实体种类：角色 / 场景 / 道具。</summary>
@@ -158,7 +167,30 @@ public sealed class AgentEntityReference
 /// </summary>
 public sealed record AgentAsk(string Question, IReadOnlyList<string> Options);
 
-/// <summary>Agent 的一次回复：自然语言文本 + 可选的操作提议 + 可选的反问。</summary>
+/// <summary>
+/// 模型对「用哪个已经配好的生成技能跑这个节点」的建议。
+///
+/// 它**只是一张邀请卡**：不执行、不花钱。用户点确认后才进入与节点菜单完全相同的那条生成流程，
+/// 中间的提示词、参考图、单价确认一个都不少。这样模型能参与「选工具」，但花钱这一步始终在用户手上。
+/// </summary>
+/// <param name="Skill">技能 id，必须取自上下文里「可运行的生成技能」那一节，不能自己编。</param>
+/// <param name="Target">目标节点 id（推荐）或标题。</param>
+/// <param name="Reason">为什么这个技能适合这一镜。</param>
+public sealed record AgentSkillSuggestion(string Skill, string Target, string Reason);
+
+/// <summary>
+/// 模型对「这个项目的技能该怎么调整」的建议：给某个内置技能追加一条补充要求。
+///
+/// 与 <see cref="AgentSkillSuggestion"/> 一样只是**提案**：用户在卡片上点「应用」才会写进
+/// 项目的 <c>skill-notes.json</c>，并且每次写入版本号 +1，旧措辞留在历史里。
+/// 技能说明决定花多少钱、出什么图，所以它不该是模型能单方面改的东西。
+/// </summary>
+/// <param name="Skill">内置技能 id，取自「可调用的生成技能清单」。</param>
+/// <param name="Note">要追加的补充要求（不替换原文）。</param>
+/// <param name="Reason">为什么这个项目需要它。</param>
+public sealed record AgentSkillPatch(string Skill, string Note, string Reason);
+
+/// <summary>Agent 的一次回复：自然语言文本 + 可选的操作提议 + 可选的反问 + 可选的技能建议。</summary>
 public sealed class AgentReply
 {
     public string Text { get; init; } = string.Empty;
@@ -166,6 +198,12 @@ public sealed class AgentReply
 
     /// <summary>模型在等用户补充信息时给出的反问；没有就是 null。</summary>
     public AgentAsk? Ask { get; init; }
+
+    /// <summary>模型建议用哪个生成技能跑哪个节点；没有就是 null。</summary>
+    public AgentSkillSuggestion? Suggest { get; init; }
+
+    /// <summary>模型建议给某个技能追加一条项目级补充；没有就是 null。</summary>
+    public AgentSkillPatch? Patch { get; init; }
 
     /// <summary>
     /// 回复里**出现了协议标记但整块不可解析**（多半是内容里的引号没转义）。
@@ -182,8 +220,14 @@ public sealed class AgentReply
 /// </summary>
 public static class AgentActionParser
 {
+    /// <summary>
+    /// 协议块里认识的顶层键。新增键只改这一处：标记识别与 <see cref="IsProtocolBlock"/> 都从这里取，
+    /// 免得出现「块找得到、却不承认它是协议块」这种一半认一半不认的状态。
+    /// </summary>
+    private static readonly string[] ProtocolKeys = { "actions", "ask", "suggest", "patch_skill" };
+
     /// <summary>协议块的识别标记：块里至少要有其中之一。</summary>
-    private static readonly string[] Markers = { "\"actions\"", "\"ask\"" };
+    private static readonly string[] Markers = ProtocolKeys.Select(key => "\"" + key + "\"").ToArray();
 
     public static AgentReply Parse(string? reply)
     {
@@ -204,6 +248,8 @@ public static class AgentActionParser
         var json = text[start..(end + 1)];
         var parsed = new List<AgentAction>();
         AgentAsk? ask = null;
+        AgentSkillSuggestion? suggest = null;
+        AgentSkillPatch? patch = null;
         var read = false;
         // 先按原样解析；失败就修一次"内容里的裸引号"再解析——
         // 模型写中文文案时很爱直接敲英文引号，那不是它能自己发现的错，得我们兜住。
@@ -216,17 +262,19 @@ public static class AgentActionParser
                 if (root.ValueKind != JsonValueKind.Object) continue;
                 ReadActions(root, parsed);
                 ask = ReadAsk(root);
+                suggest = ReadSuggest(root);
+                patch = ReadPatch(root);
                 read = true;
                 break;
             }
             catch (JsonException) { }
         }
         if (!read) return new AgentReply { Text = HideBrokenProtocol(text, start), ProtocolBroken = true };
-        if (parsed.Count == 0 && ask is null) return new AgentReply { Text = HideBrokenProtocol(text, start), ProtocolBroken = true };
+        if (parsed.Count == 0 && ask is null && suggest is null && patch is null) return new AgentReply { Text = HideBrokenProtocol(text, start), ProtocolBroken = true };
 
         // 把协议块前后多余的空行去掉，避免对话区出现大段空白。
         var cleaned = (text[..start] + text[(end + 1)..]).Trim();
-        return new AgentReply { Text = cleaned, Actions = parsed, Ask = ask };
+        return new AgentReply { Text = cleaned, Actions = parsed, Ask = ask, Suggest = suggest, Patch = patch };
     }
 
     private static void ReadActions(JsonElement root, List<AgentAction> parsed)
@@ -243,11 +291,13 @@ public static class AgentActionParser
                 UnsupportedSkillFields = kind.Trim() == "invoke_skill" ? item.EnumerateObject().Where(p => p.Name is not ("kind" or "target" or "content" or "reason" or "aspectRatio" or "referenceAttachmentIds" or "entityTarget" or "variantTarget" or "seconds" or "width" or "height" or "parameters" or "entityReferences") || p.Name is "aspectRatio" or "entityTarget" or "variantTarget" && p.Value.ValueKind != JsonValueKind.String || p.Name is "seconds" or "width" or "height" && (p.Value.ValueKind != JsonValueKind.Number || !p.Value.TryGetInt32(out _)) || p.Name == "referenceAttachmentIds" && (p.Value.ValueKind != JsonValueKind.Array || p.Value.EnumerateArray().Any(v => v.ValueKind != JsonValueKind.String)) || p.Name == "parameters" && p.Value.ValueKind != JsonValueKind.Object || p.Name == "entityReferences" && p.Value.ValueKind != JsonValueKind.Array).Select(p => p.Name).ToArray() : Array.Empty<string>(),
                 Target = Read(item, "target"),
                 Source = Read(item, "source"),
+                Skill = First(item, "skill", "skillId"),
                 Title = Read(item, "title"),
                 NodeCategory = Read(item, "nodeCategory"),
                 ParentTarget = Read(item, "parentTarget"),
                 WorkTreeTarget = Read(item, "workTreeTarget"),
                 Content = Read(item, "content"),
+                NegativePrompt = First(item, "negativePrompt", "negative_prompt"),
                 AspectRatio = Read(item, "aspectRatio"),
                 Seconds = item.TryGetProperty("seconds", out var seconds) && seconds.ValueKind == JsonValueKind.Number && seconds.TryGetInt32(out var secondsValue) ? secondsValue : null,
                 Width = item.TryGetProperty("width", out var width) && width.ValueKind == JsonValueKind.Number && width.TryGetInt32(out var widthValue) ? widthValue : null,
@@ -356,6 +406,25 @@ public static class AgentActionParser
                 if (option.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(option.GetString()))
                     options.Add(option.GetString()!.Trim());
         return new AgentAsk(question.Trim(), options);
+    }
+
+    /// <summary>技能建议单独解析：有 skill 才算，光有 suggest 键不算（与 ask 同一口径）。</summary>
+    private static AgentSkillSuggestion? ReadSuggest(JsonElement root)
+    {
+        if (!root.TryGetProperty("suggest", out var element) || element.ValueKind != JsonValueKind.Object) return null;
+        var skill = Read(element, "skill");
+        if (string.IsNullOrWhiteSpace(skill)) return null;
+        return new AgentSkillSuggestion(skill.Trim(), Read(element, "target").Trim(), Read(element, "reason").Trim());
+    }
+
+    /// <summary>技能补充建议：skill 与 note 都必须有，缺一个就当作没提（与 ask / suggest 同一口径）。</summary>
+    private static AgentSkillPatch? ReadPatch(JsonElement root)
+    {
+        if (!root.TryGetProperty("patch_skill", out var element) || element.ValueKind != JsonValueKind.Object) return null;
+        var skill = Read(element, "skill");
+        var note = Read(element, "note");
+        if (string.IsNullOrWhiteSpace(skill) || string.IsNullOrWhiteSpace(note)) return null;
+        return new AgentSkillPatch(skill.Trim(), note.Trim(), Read(element, "reason").Trim());
     }
 
     /// <summary>
@@ -496,7 +565,7 @@ public static class AgentActionParser
                 using var document = JsonDocument.Parse(candidate);
                 var root = document.RootElement;
                 if (root.ValueKind != JsonValueKind.Object) continue;
-                if (root.TryGetProperty("actions", out _) || root.TryGetProperty("ask", out _)) return true;
+                if (ProtocolKeys.Any(key => root.TryGetProperty(key, out _))) return true;
             }
             catch (JsonException) { }
         }
@@ -1186,6 +1255,14 @@ public static class AgentActionExecutor
         var loose = canvas.Nodes.Where(node => NormalizeNodeReference(node.Title) == key).ToList();
         return loose.Count == 1 ? loose[0] : null;
     }
+
+    /// <summary>
+    /// 按 id / 短 id / 唯一标题解析画布节点。
+    ///
+    /// 给「Agent 建议运行技能」那条路复用同一套寻址口径：邀请卡上的 target 是模型写的，
+    /// 与动作里的 target 是同一类东西。两处各写一份解析，迟早一处认短 id、另一处不认。
+    /// </summary>
+    public static WorkflowNode? FindTargetNode(WorkflowCanvasState canvas, string target) => FindNode(canvas, target);
 
     /// <summary>工作树条目（按名或短 id 命中）绑定的那个画布节点；条目不存在或还没绑节点就返回 null。</summary>
     private static WorkflowNode? BoundNodeOf(WorkflowCanvasState canvas, string target)
