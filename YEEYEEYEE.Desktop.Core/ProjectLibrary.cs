@@ -54,7 +54,11 @@ public static class ProjectLibrary
         try
         {
             if (!File.Exists(FilePath)) return new ProjectEntityFile();
-            var parsed = JsonSerializer.Deserialize<ProjectEntityFile>(File.ReadAllText(FilePath), Options);
+            // 直接从文件流反序列化：库文件里可能带着内嵌参考图（几十 MB），
+            // 先 ReadAllText 会再留一整份 UTF-16 大字符串，而 JSON 本来就是 UTF-8。
+            using var stream = new FileStream(FilePath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.SequentialScan);
+            var parsed = JsonSerializer.Deserialize<ProjectEntityFile>(stream, Options);
             return parsed ?? new ProjectEntityFile();
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
@@ -273,16 +277,8 @@ public sealed record ProjectMergeReport(
 /// </summary>
 public static class ProjectEntityScope
 {
-    private static readonly JsonSerializerOptions Options = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true
-    };
-
     /// <summary>深拷贝一个实体（避免画布与库共享同一个对象实例）。</summary>
-    public static WorkflowEntity CloneEntity(WorkflowEntity entity) =>
-        JsonSerializer.Deserialize<WorkflowEntity>(JsonSerializer.Serialize(entity, Options), Options)
+    public static WorkflowEntity CloneEntity(WorkflowEntity entity) => ModelCloner.Clone(entity)
         ?? new WorkflowEntity { Id = entity.Id, Kind = entity.Kind, Name = entity.Name };
 
     public static ProjectMergeReport MergeInto(WorkflowCanvasState canvas)

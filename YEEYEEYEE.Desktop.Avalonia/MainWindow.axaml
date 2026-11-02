@@ -16,7 +16,7 @@
       <!-- 全屏冷蓝光场 -->
       <Border Background="{StaticResource DfAuroraSoft}" IsHitTestVisible="False" />
 
-      <Grid x:Name="WorkbenchRoot" Margin="10" ColumnDefinitions="244,*,336" RowDefinitions="58,*,34">
+      <Grid x:Name="WorkbenchRoot" Margin="10" ColumnDefinitions="244,*,336" RowDefinitions="58,*,34" IsVisible="False">
 
         <!-- ==================== 顶部命令条 ==================== -->
         <Border x:Name="TitleBar" Grid.Row="0" Grid.ColumnSpan="3" Classes="glass"

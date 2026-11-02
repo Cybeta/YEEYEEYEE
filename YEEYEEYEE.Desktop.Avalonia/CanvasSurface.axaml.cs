@@ -145,16 +145,22 @@ public partial class CanvasSurface : UserControl
     /// <summary>出图虚影的位置登记（供拖动时跟着节点走，见 <see cref="RebuildEdgesForDrag"/>）。</summary>
     private readonly List<BatchGhostLayout> batchGhostVisuals = new();
     /// <summary>
-    /// 出图预览窗口的「AI 创作」脉动。跑着的每一格登记一份，由同一个 33ms 时钟驱动。
+    /// 出图预览窗口的「AI 创作」脉动。跑着的每一格登记一份，由同一个 50ms 时钟驱动。
     ///
     /// 为什么要把光效落到**这个窗口**上、而不是只留在节点卡上：用户的眼睛盯着的是这个窗口
     /// （图会从它里面出来），光效在别处闪，等于让他去看另一块地方。中间那行实时读数同理——
     /// 它是这一格里唯一在变的东西，一眼就知道「还在跑、跑了多久」。
     /// </summary>
     private readonly List<BatchPulse> batchPulses = new();
-    private readonly DispatcherTimer ambientTimer = new() { Interval = TimeSpan.FromMilliseconds(33) };
+    private readonly DispatcherTimer ambientTimer = new() { Interval = TimeSpan.FromMilliseconds(50) };
     private double ambientClock;
     private double scanProgress = -0.35;
+    /// <summary>扫描光带 / 光标聚光的位移：用 RenderTransform 而不是 Canvas.Left/Top，避免每帧触发一次布局。</summary>
+    private readonly TranslateTransform scanOffset = new();
+    private readonly TranslateTransform glowOffset = new();
+    /// <summary>上一次真正刷新聚光位置的位置：鼠标没动时不要每帧重设同一个值（那会让 460×460 的区域白白重绘）。</summary>
+    private Point spotlightTarget = new(double.NaN, double.NaN);
+    private double scanBandWidth = double.NaN;
 
     /// <summary>一个正在跑的预览窗口：外圈光晕（可能没有）+ 窗口本体 + 中间那行实时读数 + 来回扫的那条线。</summary>
     private sealed record BatchPulse(
@@ -163,7 +169,7 @@ public partial class CanvasSurface : UserControl
     /// <summary>
     /// 一个「正在生成」的节点身上的整套光效：<see cref="Glow"/> 是背后那圈白色呼吸光晕，
     /// <see cref="Orbit"/> 是绕着节点转的那圈光弧，<see cref="Sweep"/> 是它的锥形渐变——
-    /// 每 33ms 改一次 <c>Angle</c>，光弧就绕着节点转起来了。
+    /// 每 50ms 改一次 <c>Angle</c>，光弧就绕着节点转起来了。
     /// </summary>
     private sealed record GenerationGlow(
         WorkflowNode Node, Border Glow, Border Orbit, ConicGradientBrush Sweep, double Phase, ScaleTransform Scale);
@@ -281,6 +287,10 @@ public partial class CanvasSurface : UserControl
         DragDrop.SetAllowDrop(NodeCanvas, true);
         DragDrop.AddDragOverHandler(NodeCanvas, SurfaceDragOver);
         DragDrop.AddDropHandler(NodeCanvas, SurfaceDrop);
+        // 这两个光效每帧都在动：走 RenderTransform（只影响合成/绘制），
+        // 不走 Canvas.Left/Top（每帧一次布局）。宽度变化也只在真的变了才写。
+        ScanBand.RenderTransform = scanOffset;
+        GlowSpot.RenderTransform = glowOffset;
         ambientTimer.Tick += OnAmbientTick;
         ambientTimer.Start();
     }
@@ -657,7 +667,7 @@ public partial class CanvasSurface : UserControl
         glows.Clear();
         batchGhostVisuals.Clear();
         // 每一趟重建都会重新登记：不跟着清的话，列表里会攒着一堆已经不在这张画布上的控件，
-        // 每 33ms 去改一批看不见的对象。
+        // 每 50ms 去改一批看不见的对象。
         batchPulses.Clear();
         edgeVisuals.Clear();
         // 连线被删掉之后，选中的那条也要跟着失效，否则「删除」会对着一个已经不存在的东西动手。
@@ -1868,7 +1878,7 @@ public partial class CanvasSurface : UserControl
             Canvas.SetTop(glow, node.Y - 7);
             NodeCanvas.Children.Add(glow);
 
-            // 绕着节点转的那圈光弧：锥形渐变里只有一小段是亮的，每 33ms 改一次 Angle 就转起来了。
+            // 绕着节点转的那圈光弧：锥形渐变里只有一小段是亮的，每 50ms 改一次 Angle 就转起来了。
             // 为什么不去转这个元素本身：节点是圆角矩形，转元素会让它歪掉、跟卡片错开；
             // 转**渐变的角度**，形状始终贴着节点，只有亮的那一段在动。
             var sweep = new ConicGradientBrush
@@ -2140,7 +2150,7 @@ public partial class CanvasSurface : UserControl
                 Spacing = 5,
                 VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Center
             };
-            // 中间那行是**实时读数**：跑着的时候每 33ms 由环境时钟改一次（「生成中 12s」）。
+            // 中间那行是**实时读数**：跑着的时候每 50ms 由环境时钟改一次（「生成中 12s」）。
             // 以前这里是一个写死的「生成中」——三张并排时，用户看不出哪一张真的在动、哪一张在等。
             headline = new TextBlock
             {
@@ -2831,21 +2841,36 @@ public partial class CanvasSurface : UserControl
     {
         if (!IsInitialized) return;
 
+        // 没人看的时候不推进装饰动画：启动页 / 切到时间轴、剧本 / 最小化 / 失焦都停，
+        // 否则每帧重绘整块画布纯属白烧 CPU。
+        if (!IsEffectivelyVisible) return;
+        if (TopLevel.GetTopLevel(this) is Window { WindowState: WindowState.Minimized }) return;
+        if (TopLevel.GetTopLevel(this) is Window { IsActive: false }) return;
+
         // 布局完成后补做一次「适应窗口」
         if (pendingFit) ApplyFit();
 
-        ambientClock += 0.033;
+        ambientClock += 0.05;
 
-        // 扫描光带
-        scanProgress += 0.0055;
+        // 扫描光带（速度保持不变：50ms 一跳，进度按比例加大）
+        scanProgress += 0.00833;
         if (scanProgress > 1.35) scanProgress = -0.35;
         var bandHeight = Math.Max(240, Bounds.Height);
-        Canvas.SetTop(ScanBand, scanProgress * (bandHeight + 360) - 260);
-        ScanBand.Width = Math.Max(400, Bounds.Width);
+        scanOffset.Y = scanProgress * (bandHeight + 360);
+        var bandWidth = Math.Max(400, Bounds.Width);
+        if (Math.Abs(bandWidth - scanBandWidth) > 0.5)
+        {
+            ScanBand.Width = bandWidth;
+            scanBandWidth = bandWidth;
+        }
 
-        // 光标聚光跟随
-        Canvas.SetLeft(GlowSpot, pointerPosition.X - 230);
-        Canvas.SetTop(GlowSpot, pointerPosition.Y - 230);
+        // 光标聚光跟随：只跟着真正移动过的指针刷新（初始位置在 XAML 里是 -400,-400）
+        if (pointerPosition != spotlightTarget)
+        {
+            glowOffset.X = pointerPosition.X + 170;
+            glowOffset.Y = pointerPosition.Y + 170;
+            spotlightTarget = pointerPosition;
+        }
 
         // 连线流光
         foreach (var beam in beams)
@@ -2853,7 +2878,7 @@ public partial class CanvasSurface : UserControl
 
         // 正在生成的节点：白色光晕呼吸（亮度与范围一起起伏）+ 那圈光弧绕着节点转。
         // 只动透明度会像「闪一下」，只动尺寸会像「在呼吸但不亮」；两个一起动才像光晕。
-        // 复用同一个 ScaleTransform（而不是每帧 new 一个）：33ms 一跳，每帧分配对象是白给的 GC 压力。
+        // 复用同一个 ScaleTransform（而不是每帧 new 一个）：50ms 一跳，每帧分配对象是白给的 GC 压力。
         foreach (var item in glows)
         {
             var pulse = 0.5 + 0.5 * Math.Sin(ambientClock * 4.2 + item.Phase);

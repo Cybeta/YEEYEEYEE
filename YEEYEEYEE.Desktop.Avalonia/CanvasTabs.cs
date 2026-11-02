@@ -71,7 +71,13 @@ internal static class CanvasTabStore
             var path = AppPaths.Combine(FileName);
             if (!File.Exists(path)) return false;
 
-            var file = JsonSerializer.Deserialize<TabsFile>(File.ReadAllText(path));
+            // 标签记录里带着整份画布快照，可能很大：直接按 UTF-8 流反序列化，不要先读成字符串。
+            TabsFile? file;
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.SequentialScan))
+            {
+                file = JsonSerializer.Deserialize<TabsFile>(stream);
+            }
             if (file?.Tabs is not { Count: > 0 }) return false;
 
             foreach (var item in file.Tabs)
@@ -84,6 +90,9 @@ internal static class CanvasTabStore
                 var replaced = saved is not null && (snapshot is null || saved.Revision > snapshot.Revision);
                 if (replaced) snapshot = saved;
                 if (snapshot is null) continue;
+                // 这份快照是直接反序列化出来的（没走 CanvasLibrary.TryLoad）：老项目里整段内嵌的
+                // 参考图 data URL 同样要先压成短写法，不然标签记录里每张画布都会再存一份几百 MB。
+                if (snapshot.Canvas is { } restoredCanvas) ReferencePayload.Compact(restoredCanvas);
                 var dirty = !replaced && (item.Dirty ?? (saved is null ||
                     !CanvasFileWriter.Serialize(snapshot).AsSpan().SequenceEqual(CanvasFileWriter.Serialize(saved))));
 

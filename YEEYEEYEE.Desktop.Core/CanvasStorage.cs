@@ -1,3 +1,4 @@
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 namespace YEEYEEYEE.Desktop;
@@ -13,15 +14,33 @@ public sealed class CanvasSaveAbortedException : IOException
     public CanvasSaveAbortedException(string message, Exception inner) : base(message, inner) { }
 }
 
-/// <summary>深拷贝工具：在隔离副本上做迁移、校验与写入，避免改动调用方持有的对象图（返工 R8）。</summary>
+/// <summary>
+/// 深拷贝工具：在隔离副本上做迁移、校验与写入，避免改动调用方持有的对象图（返工 R8）。
+///
+/// 拷贝仍走 JSON（模型字段多、手写拷贝漏字段是静默错误），但**只经过 UTF-8 字节**：
+/// 原先是 `Serialize` 出一整串字符串再 `Deserialize`，一张 20 MB 的画布会多出 40 MB 的
+/// UTF-16 大字符串；画布越大，这笔中间字符串越接近对象本身的两倍。
+/// </summary>
 public static class CanvasCloner
 {
-    private static readonly JsonSerializerOptions Options = new();
+    /// <summary>
+    /// 克隆专用序列化选项：**不用默认编码器转义 '+' / '/' / '=' 这类 HTML 敏感字符**。
+    ///
+    /// 克隆的产物只在内存里反序列化回对象，从不与磁盘字节比较，所以放宽转义不影响任何结果；
+    /// 而默认编码器碰到需要转义的长字符串时，会为它租一块同等规模的 char 缓冲——实测一段
+    /// 7.3M 字符的 base64（data URL）会多出 64M 字符的 char[] 和 140MB 的 byte[]，秒进 LOH。
+    /// data URL 的 base64 全是这些字符，画布克隆一次就能留下几百 MB 死对象。
+    /// </summary>
+    private static readonly JsonSerializerOptions Options = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     public static WorkflowCanvasState Clone(WorkflowCanvasState canvas)
     {
         ArgumentNullException.ThrowIfNull(canvas);
-        return JsonSerializer.Deserialize<WorkflowCanvasState>(JsonSerializer.Serialize(canvas, Options), Options)
+        // SerializeToUtf8Bytes 会沿用 Options 里的编码器；而把已有的 Utf8JsonWriter 传进
+        // JsonSerializer.Serialize 时，字符串转义用的是 writer 自己的默认编码器，Options 里的
+        // Encoder 不生效——那正是刚才克隆仍会租 64M 字符缓冲的原因。
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(canvas, Options);
+        return JsonSerializer.Deserialize<WorkflowCanvasState>(bytes, Options)
             ?? throw new InvalidDataException("无法复制画布内容。");
     }
 
@@ -274,6 +293,8 @@ public static class CanvasOpenService
         {
             var state = JsonSerializer.Deserialize<RecentCanvasState>(bytes);
             if (state is null) { error = "画布文件内容为空。"; return false; }
+            // 见 CanvasLibrary.TryLoad：老项目把参考图的整段 data URL 记在引用指纹里，读进来先换成短写法。
+            if (state.Canvas is { } canvas) ReferencePayload.Compact(canvas);
             return TryOpenState(state, path, out outcome, assetAccessible);
         }
         catch (JsonException exception) { error = "画布文件不是有效的 JSON：" + exception.Message; return false; }
@@ -300,8 +321,14 @@ public static class CanvasOpenService
         try
         {
             if (!File.Exists(path)) { error = "画布文件不存在。"; return false; }
-            var parsed = JsonSerializer.Deserialize<RecentCanvasState>(File.ReadAllText(path));
+            RecentCanvasState? parsed;
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.SequentialScan))
+            {
+                parsed = JsonSerializer.Deserialize<RecentCanvasState>(stream);
+            }
             if (parsed is null) { error = "画布文件内容为空。"; return false; }
+            if (parsed.Canvas is { } canvas) ReferencePayload.Compact(canvas);
             state = parsed;
             return true;
         }

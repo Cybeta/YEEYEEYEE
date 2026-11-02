@@ -1,7 +1,27 @@
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace YEEYEEYEE.Desktop;
+
+/// <summary>
+/// 模型深拷贝（只做内存往返，从不落盘）。
+///
+/// 一律用 <see cref="JavaScriptEncoder.UnsafeRelaxedJsonEscaping"/>：默认编码器会转义 base64 里
+/// 的 '+' / '/' / '='，碰到内嵌参考图那种几 MB 的长字符串时会为它租整块 char / byte 缓冲，
+/// 复制几个实体会留下几百 MB 死对象。放宽转义只影响中间 JSON 的写法，反序列化回来的对象完全一致。
+/// </summary>
+internal static class ModelCloner
+{
+    private static readonly JsonSerializerOptions Options = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    internal static T? Clone<T>(T? value) where T : class => value is null
+        ? null
+        : JsonSerializer.Deserialize<T>(JsonSerializer.SerializeToUtf8Bytes(value, Options), Options);
+
+    internal static List<T> CloneList<T>(IEnumerable<T> value) =>
+        JsonSerializer.Deserialize<List<T>>(JsonSerializer.SerializeToUtf8Bytes(value, Options), Options) ?? new();
+}
 
 public enum EntityKind { Character, Scene, Prop }
 
@@ -88,9 +108,9 @@ public sealed class WorkflowEntity
         };
         variant.EnsureInitialVersion(); Variants.Add(variant); return variant;
     }
-    private static SceneLayout? CloneLayout(SceneLayout? value) => value is null ? null : JsonSerializer.Deserialize<SceneLayout>(JsonSerializer.Serialize(value));
-    private static List<WorkflowAttachment> CloneAttachments(IEnumerable<WorkflowAttachment> value) => JsonSerializer.Deserialize<List<WorkflowAttachment>>(JsonSerializer.Serialize(value)) ?? new();
-    private static List<NodeReference> CloneReferences(IEnumerable<NodeReference> value) => JsonSerializer.Deserialize<List<NodeReference>>(JsonSerializer.Serialize(value)) ?? new();
+    private static SceneLayout? CloneLayout(SceneLayout? value) => ModelCloner.Clone(value);
+    private static List<WorkflowAttachment> CloneAttachments(IEnumerable<WorkflowAttachment> value) => ModelCloner.CloneList(value);
+    private static List<NodeReference> CloneReferences(IEnumerable<NodeReference> value) => ModelCloner.CloneList(value);
 }
 
 public static class EntityAssets
@@ -233,6 +253,6 @@ public sealed class WorkflowEntityVariant
     { Description = version.Description; Layout = Clone(version.Layout); Voice = Clone(version.Voice); Attachments = Clone(version.Attachments); References = Clone(version.References); }
     public string ToPromptText() => string.Join("\n", new[] { Description.Trim(), Layout is { IsEmpty: false } layout ? layout.ToPromptText() : string.Empty }.Where(value => !string.IsNullOrWhiteSpace(value)));
     private static string ReferenceKey(NodeReference reference) => $"{reference.EntityId:N}/{reference.VariantId:N}/{reference.VariantVersionId?.ToString("N") ?? "latest"}";
-    private static T? Clone<T>(T? value) where T : class => value is null ? null : JsonSerializer.Deserialize<T>(JsonSerializer.Serialize(value));
-    private static List<T> Clone<T>(List<T> value) => JsonSerializer.Deserialize<List<T>>(JsonSerializer.Serialize(value)) ?? new();
+    private static T? Clone<T>(T? value) where T : class => ModelCloner.Clone(value);
+    private static List<T> Clone<T>(List<T> value) => ModelCloner.CloneList(value);
 }

@@ -42,6 +42,12 @@ public sealed record StaleReference(Guid EntityId, Guid VariantId, string Label,
 /// **旧项目兼容**：v2 之前记下的指纹没有内容基线，不能拿它与 v2 直接比字符串（那会把每个旧产物
 /// 都误判成已变化）。这类记录只按结构部分比较：结构没变就保持「未发现变化」，如实承认无法追溯
 /// 判断历史替换；不因打开项目而改写引用、清空已有结果或自动生成。重出一次后自然带上 v2 依据。
+///
+/// **内嵌参考图只留短写法**：网页端上传的参考图以 data URL 存在实体附件里，整段 base64 若照抄进
+/// 结构部分，一张图就会在每件产物上复制一遍（demo 项目画布因此有 300 MB 以上，打开即卡死）。
+/// 结构部分改用 <see cref="ReferencePayload.TokenOf"/>（格式 + 内容哈希）；打开画布时
+/// <see cref="ReferencePayload.Compact"/> 会把历史记录换成同一套短写法，比较时也会换算一遍，
+/// 所以「写法不同」不会被误判成「设定变了」。
 /// </summary>
 public static class ReferenceStaleness
 {
@@ -76,11 +82,15 @@ public static class ReferenceStaleness
     ///
     /// 这个**不带图片字节**：它是 v2 之前的老格式，也是新格式里可单独比较的结构部分。
     /// 要能发现同路径换图，用带文件定位的那个重载（或 <see cref="Snapshot"/>）。
+    ///
+    /// 附件引用走 <see cref="ReferencePayload.TokenOf"/>：网页端上传的参考图是内嵌 data URL，
+    /// 整段 base64 拼进指纹会把一张图在每件产物上复制一遍（demo 项目画布因此有 300 MB 以上）。
+    /// 短写法与该图的内容哈希一一对应，判定含义不变；老记录由 <see cref="Matches"/> 就地换算后比较。
     /// </summary>
     public static string FingerprintOf(ReferenceContent content) => string.Join("|",
         content.Description.Trim(),
         content.Layout?.ToPromptText() ?? string.Empty,
-        string.Join(",", content.Attachments.Select(item => item.Reference)),
+        string.Join(",", content.Attachments.Select(item => ReferencePayload.TokenOf(item.Reference))),
         string.Join(",", content.References.Select(KeyOf)),
         content.VersionLabel);
 
@@ -103,11 +113,19 @@ public static class ReferenceStaleness
         if (string.IsNullOrEmpty(recorded)) return false;
         var structural = FingerprintOf(content);
         if (!TryReadRecorded(recorded, out var recordedStructural, out var recordedContent))
-            return string.Equals(recorded, structural, StringComparison.Ordinal);
-        if (!string.Equals(recordedStructural, structural, StringComparison.Ordinal)) return false;
+            return StructuralMatches(recordedStructural, structural);
+        if (!StructuralMatches(recordedStructural, structural)) return false;
         if (!verifyContent) return true;
         return string.Equals(recordedContent, ContentFingerprintOf(content, locatePath), StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// 结构部分是否一致。老记录里可能还留着整段内嵌 data URL（打开画布时才压缩），
+    /// 所以直接比不中时，把记录按同一套短写法换算一遍再比——否则「写法不同」会被误报成「设定变了」。
+    /// </summary>
+    private static bool StructuralMatches(string recorded, string current) =>
+        string.Equals(recorded, current, StringComparison.Ordinal)
+        || string.Equals(ReferencePayload.CompactText(recorded), current, StringComparison.Ordinal);
 
     private static bool TryReadRecorded(string recorded, out string structural, out string content)
     {

@@ -1,4 +1,4 @@
-using Avalonia;
+﻿using Avalonia;
 using Avalonia.Animation;
 using Avalonia.Animation.Easings;
 using Avalonia.Controls;
@@ -7,7 +7,6 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Transformation;
-using Avalonia.Styling;
 using Avalonia.VisualTree;
 
 namespace YEEYEEYEE.Desktop.Avalonia;
@@ -19,8 +18,9 @@ internal sealed record RecentProjectItem(string Name, string Path, string Note, 
 /// 启动页：窗口起来后先让用户选项目（新建 / 打开 / 最近），**选择之前不展示画布、工作树与设置**。
 ///
 /// 版式是「上半屏品牌、下半屏动作」：主视觉是 LOGO 与品牌语，选择项目与最近项目沉在窗口下方，
-/// 视线从上往下走一遍就能做完选择。动效一共四处，都写在本文件里（一处就能看完全部动效，不用去 XAML 里翻）：
-/// 光晕呼吸、光环旋转、标语里那个 YES 的呼吸，以及主视觉与下方动作区的先后入场。
+/// 视线从上往下走一遍就能做完选择。动效只保留**一次**入场（主视觉与下方动作区先后落位），
+/// 之后画面完全静止：常驻的呼吸/旋转实测会稳定吃掉约 30% 单核（这扇窗每改一次视觉属性就要
+/// 重绘整窗），启动页并不值得为这点动效付这个代价。
 ///
 /// 这里只负责**收集选择**：真正建项目 / 开项目、写最近列表、加载画布都由 MainWindow 执行，
 /// 与左侧栏那两个按钮走同一条路径，免得同一件事有两份实现。
@@ -111,8 +111,10 @@ public partial class StartPageView : UserControl
 
         RiseIntoPlace(HeroArea, offsetY: 18, delayMs: 0);
         RiseIntoPlace(ActionPanel, offsetY: 28, delayMs: 140);
-        StartBreathing(LogoGlow, from: 0.35, to: 0.90, seconds: 3.2);
-        StartBreathing(BrandYes, from: 0.55, to: 1.00, seconds: 2.2);
+        // 主视觉保持静态：实测这扇窗每改一次视觉属性就要重绘整窗（约 40 ms），
+        // 常驻的呼吸/旋转不论降到多少帧都稳定吃掉约 30% 单核，收益全无。
+        // 启动页只保留一次入场动效，之后画面完全静止。
+        LogoGlow.Opacity = 0.62;
     }
 
     /// <summary>淡入 + 上浮：先摆到偏移位置，挂上过渡，再设成最终值，剩下的交给过渡自己跑。</summary>
@@ -139,25 +141,6 @@ public partial class StartPageView : UserControl
 
         target.Opacity = 1;
         target.RenderTransform = TransformOperations.Parse("translate(0px,0px)");
-    }
-
-    /// <summary>呼吸：来回改不透明度，用正弦缓动，避免机械的线性跳动。</summary>
-    private static void StartBreathing(Visual target, double from, double to, double seconds)
-    {
-        var animation = new Animation
-        {
-            Duration = TimeSpan.FromSeconds(seconds),
-            IterationCount = IterationCount.Infinite,
-            PlaybackDirection = PlaybackDirection.Alternate,
-            Easing = new SineEaseInOut(),
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0d), Setters = { new Setter(Visual.OpacityProperty, from) } },
-                new KeyFrame { Cue = new Cue(1d), Setters = { new Setter(Visual.OpacityProperty, to) } }
-            }
-        };
-
-        _ = animation.RunAsync(target);
     }
 
     // ==================== 交互 ====================

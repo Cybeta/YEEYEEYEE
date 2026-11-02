@@ -1,4 +1,4 @@
-<UserControl xmlns="https://github.com/avaloniaui"
+﻿<UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="YEEYEEYEE.Desktop.Avalonia.StartPageView">
 
@@ -32,21 +32,6 @@
       <Setter Property="BorderBrush" Value="{StaticResource DfPrimary}" />
     </Style>
 
-    <!-- 光环旋转：转的是 RenderTransform 里的角度，所以用「限定属性」的写法（RotateTransform.Angle）。
-         选择器必须带控件类型（Ellipse#LogoRing），否则 XAML 编译器找不到 Setter 的目标类型会报 AVLN2200。
-         另外代码里不能这么写——Animation.RunAsync 只接受 Visual，而 RotateTransform 不是 Visual。 -->
-    <Style Selector="Ellipse#LogoRing">
-      <Style.Animations>
-        <Animation Duration="0:0:18" IterationCount="INFINITE">
-          <KeyFrame Cue="0%">
-            <Setter Property="RotateTransform.Angle" Value="0" />
-          </KeyFrame>
-          <KeyFrame Cue="100%">
-            <Setter Property="RotateTransform.Angle" Value="360" />
-          </KeyFrame>
-        </Animation>
-      </Style.Animations>
-    </Style>
   </UserControl.Styles>
 
   <Border Background="{StaticResource DfBg}" CornerRadius="16" ClipToBounds="True">
@@ -136,7 +121,7 @@
               </TextBlock.Foreground>
             </TextBlock>
 
-            <!-- 标语里那个 YES 是唯一会呼吸的元素：整屏只有一处动，才看得出它想说哪两个字 -->
+            <!-- 标语里那个 YES 是唯一的强调色：启动页动效只保留一次入场，之后不再呼吸 -->
             <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
               <TextBlock Text="在 AI 时代，您只需要" Classes="muted" FontSize="14" VerticalAlignment="Center" />
               <TextBlock x:Name="BrandYes" Text="YES" FontSize="16" FontWeight="Bold"

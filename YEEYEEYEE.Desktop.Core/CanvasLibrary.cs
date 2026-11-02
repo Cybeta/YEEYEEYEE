@@ -92,6 +92,18 @@ public static class CanvasLibrary
             var summaries = new List<CanvasSummary>();
             foreach (var path in System.IO.Directory.EnumerateFiles(Directory, "*.json"))
             {
+                // 先只读文件头的 Title / Revision：列表只需要这两项，而整份反序列化一份
+                // 带内嵌参考图的画布要几百 MB 内存（demo 项目的画布有 334 MB，打开时会被列两遍）。
+                if (TryReadHeader(path, out var title, out var revision, out var modifiedAt))
+                {
+                    summaries.Add(new CanvasSummary(
+                        string.IsNullOrWhiteSpace(title) ? Path.GetFileNameWithoutExtension(path) : title,
+                        revision,
+                        modifiedAt,
+                        path));
+                    continue;
+                }
+
                 if (!TryLoad(path, out var state) || state is null) continue;
                 try
                 {
@@ -119,13 +131,79 @@ public static class CanvasLibrary
         catch (UnauthorizedAccessException) { return Array.Empty<CanvasSummary>(); }
     }
 
+    /// <summary>
+    /// 只读文件开头的一小段，取出根上的 <c>Title</c> / <c>Revision</c>。
+    /// 取不全（字段顺序不同、开头就超过探测窗口、内容损坏）返回 <c>false</c>，由调用方走整份读取。
+    /// 这里**不解析 Canvas**：那一段就是几百 MB 的来源。
+    /// </summary>
+    private static bool TryReadHeader(string path, out string title, out int revision, out DateTime modifiedAt)
+    {
+        const int probeBytes = 8192;
+        title = string.Empty;
+        revision = 0;
+        modifiedAt = default;
+        try
+        {
+            modifiedAt = File.GetLastWriteTimeUtc(path);
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, probeBytes, FileOptions.SequentialScan);
+            var buffer = new byte[probeBytes];
+            var read = stream.Read(buffer, 0, buffer.Length);
+            if (read <= 0) return false;
+
+            var reader = new Utf8JsonReader(buffer.AsSpan(0, read), isFinalBlock: false, state: default);
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject) return false;
+
+            var hasTitle = false;
+            var hasRevision = false;
+            while (reader.Read())
+            {
+                if (reader.TokenType != JsonTokenType.PropertyName) break;
+                if (reader.ValueTextEquals("Title"))
+                {
+                    if (!reader.Read()) break;
+                    title = reader.TokenType == JsonTokenType.String ? reader.GetString() ?? string.Empty : string.Empty;
+                    hasTitle = true;
+                }
+                else if (reader.ValueTextEquals("Revision"))
+                {
+                    if (!reader.Read()) break;
+                    revision = reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var value) ? value : 0;
+                    hasRevision = true;
+                }
+                else if (!reader.TrySkip())
+                {
+                    break;
+                }
+
+                if (hasTitle && hasRevision) return true;
+            }
+
+            return false;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
+        {
+            modifiedAt = default;
+            return false;
+        }
+    }
+
     public static bool TryLoad(string path, out RecentCanvasState? state)
     {
         state = null;
         try
         {
             if (!File.Exists(path)) return false;
-            state = JsonSerializer.Deserialize<RecentCanvasState>(File.ReadAllText(path), JsonOptions);
+            // 直接从文件流反序列化：先读成一整串字符串会为每份画布多留一份 UTF-16 大字符串
+            // （画布带内嵌参考图时可达几十 MB），而 JSON 本来就是 UTF-8 的字节。
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.SequentialScan))
+            {
+                state = JsonSerializer.Deserialize<RecentCanvasState>(stream, JsonOptions);
+            }
+            // 老项目把参考图的整段 data URL 记在了每件产物的引用指纹里（画布能有几百 MB）。
+            // 读进来先换成短写法：后面的深拷贝、标签快照与内存驻留都按小文本走。
+            if (state?.Canvas is { } canvas) ReferencePayload.Compact(canvas);
             return state is not null;
         }
         catch (JsonException) { return false; }

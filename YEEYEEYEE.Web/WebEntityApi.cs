@@ -50,6 +50,8 @@ internal static class WebEntityApi
             if ((input.Description?.Length ?? 0) > 100000 || (input.Core?.Length ?? 0) > 100000 ||
                 (input.Aliases?.Length ?? 0) > 2000 || (input.Note?.Length ?? 0) > 2000 || (input.Name?.Length ?? 0) > 200)
                 return Error(400, "INVALID_REQUEST", "资源内容过长");
+            // 本次上传写进素材目录的文件；资源库保存失败时要把它删掉，免得留下孤儿文件。
+            string? uploadedMedia = null;
             try
             {
                 using var referenceLease = new FileStream(Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(canvasPath)!)!, ".references.lock"),
@@ -118,8 +120,21 @@ internal static class WebEntityApi
                         try { media = Convert.FromBase64String(input.Data); } catch (FormatException) { return Error(400, "MEDIA_INVALID", "媒体编码无效"); }
                         if (media.Length == 0 || media.Length > 8 * 1024 * 1024 || !ValidMedia(media, input.MediaType))
                             return Error(400, "MEDIA_INVALID", "媒体文件大小或真实格式与声明不符");
+                        // 上传的图/视频落到素材目录，库文件里只记 asset:// 引用。
+                        // 以前是把整段 base64 塞进实体附件，一张 5 MB 的图会让引用它的每件产物
+                        // 在指纹里再复制一份，画布能长到几百 MB（桌面端打开即卡死）。
+                        var extension = input.MediaType switch
+                        {
+                            "image/png" => ".png", "image/jpeg" => ".jpg", "image/webp" => ".webp",
+                            "video/mp4" => ".mp4", "audio/mpeg" => ".mp3", "audio/wav" => ".wav",
+                            _ => ".bin"
+                        };
+                        uploadedMedia = Path.Combine(AssetStore.EnsureDirectory(), $"entity-{Guid.NewGuid():N}{extension}");
+                        try { File.WriteAllBytes(uploadedMedia, media); }
+                        catch (Exception writeError) when (writeError is IOException or UnauthorizedAccessException)
+                        { return Error(503, "MEDIA_WRITE_FAILED", "媒体文件写入失败：" + writeError.Message); }
                         variant!.Attachments.Add(new WorkflowAttachment { Name = input.Name.Trim(), Kind = kind, Source = "Web 上传",
-                            Reference = "data:" + input.MediaType + ";base64," + input.Data,
+                            Reference = AssetStore.ToReference(uploadedMedia),
                             Purpose = ReferencePurposes.TryParse(input.Purpose, out var addPurpose) ? addPurpose : ReferencePurpose.General }); break;
                     case "renameMedia":
                     case "removeMedia":
@@ -139,11 +154,26 @@ internal static class WebEntityApi
                         break;
                     default: return Error(400, "INVALID_REQUEST", "资源操作不支持");
                 }
-                if (!ProjectLibrary.TrySave(library, path, bytes, out var error)) return Error(409, "LIBRARY_SAVE_CONFLICT", error);
+                if (!ProjectLibrary.TrySave(library, path, bytes, out var error))
+                {
+                    TryDeleteUnusedMedia(uploadedMedia);
+                    return Error(409, "LIBRARY_SAVE_CONFLICT", error);
+                }
                 return Results.Json(new { saved = true, revision = CanvasRevision.Of(File.ReadAllBytes(path)) });
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
-            { return Error(503, "LIBRARY_UNAVAILABLE", "资源库无法安全保存"); }
+            {
+                TryDeleteUnusedMedia(uploadedMedia);
+                return Error(503, "LIBRARY_UNAVAILABLE", "资源库无法安全保存");
+            }
         });
+    }
+
+    /// <summary>库没保存成功时把刚写入的上传文件删掉：它没有出现在任何实体上，留着只会越积越多。</summary>
+    private static void TryDeleteUnusedMedia(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 }

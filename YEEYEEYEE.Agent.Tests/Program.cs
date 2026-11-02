@@ -180,6 +180,7 @@ var tests = new (string Name, Action Run)[]
     ("厂家徽标：预设表里每一家都有徽标、区分色两两不同，表外的 id 落回中性徽标", ProviderBadgesCoverEveryPreset),
     ("引用过期：设定换了图 / 描述，下游产物要报「建议重出」；新增引用要过期，没记录的旧数据与锁定版本兼容", ReferenceStalenessDetectsUpdatedSettings),
     ("引用过期：图片按字节识别同路径替换，旧指纹无内容基线时不误报", ReferenceStalenessDetectsReplacedImageContent),
+    ("引用过期：内嵌参考图的指纹只留短写法，老记录换算后不误报", InlineReferenceFingerprintsStayShort),
     ("AI 建实体：内容同时落到核心设定与默认变体，引用卡不再空白", AgentEntityContentReachesVariantAndCard),
     ("ID 校验：空 ID 与重复 ID 逐项报告", IdentityValidatorEmptyAndDuplicateIds),
     ("ID 校验：悬空边端点、父节点、工作树锚点与布局可选引用", IdentityValidatorDanglingReferences),
@@ -14217,6 +14218,53 @@ static void ReferenceStalenessDetectsReplacedImageContent()
 		Environment.SetEnvironmentVariable("YEEYEEYEE_ASSET_DIR", previous);
 		Directory.Delete(directory, recursive: true);
 	}
+}
+
+/// <summary>
+/// 钉住内嵌参考图（data URL）不会把整段 base64 复制进引用指纹。
+/// 之前每件产物都把整段 data URL 拼进指纹，demo 项目画布因此长到 300 MB 以上，
+/// 桌面端打开时内存涨到数 GB 并卡死；短写法与该图内容哈希一一对应，判定含义不变。
+/// </summary>
+static void InlineReferenceFingerprintsStayShort()
+{
+	const string tiny = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+	const string other = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+	var dataUrl = "data:image/png;base64," + tiny;
+
+	var canvas = new WorkflowCanvasState();
+	var entity = new WorkflowEntity { Kind = EntityKind.Character, Name = "CC" };
+	var variant = entity.CreateVariant("默认", "浅棕发");
+	variant.Attachments.Add(new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = dataUrl });
+	canvas.Entities.Add(entity);
+
+	var shot = new WorkflowNode { Title = "分镜 1", Category = NodeCategory.Storyboard };
+	var reference = new NodeReference { EntityId = entity.Id, VariantId = variant.Id };
+	shot.References.Add(reference);
+	canvas.Nodes.Add(shot);
+
+	var product = new WorkflowAttachment { Kind = AttachmentKind.Image, Reference = "asset://shot.png" };
+	product.SourceFingerprints = ReferenceStaleness.Snapshot(canvas, shot);
+	shot.Attachments.Add(product);
+
+	var key = ReferenceStaleness.KeyOf(reference);
+	Expect(!product.SourceFingerprints[key].Contains(tiny, StringComparison.Ordinal), "指纹里不该有整段 base64");
+	Expect(product.SourceFingerprints[key].Contains(ReferencePayload.TokenPrefix, StringComparison.Ordinal),
+		"内嵌图在指纹里用内容短写法");
+	Expect(ReferenceStaleness.Of(canvas, shot, verifyContent: true).Count == 0, "换了写法不影响「内容没变」的判定");
+
+	// 老记录：整段 data URL 还在结构部分里。比较时要按同一套短写法换算，不能误报成「设定变了」。
+	var content = canvas.ResolveReferenceContent(reference) ?? throw new InvalidOperationException("引用应解析得出来");
+	var legacy = string.Join("|", content.Description.Trim(), content.Layout?.ToPromptText() ?? string.Empty,
+		dataUrl, string.Join(",", content.References.Select(ReferenceStaleness.KeyOf)), content.VersionLabel);
+	product.SourceFingerprints[key] = legacy;
+	Expect(ReferenceStaleness.Of(canvas, shot, verifyContent: true).Count == 0, "老记录换算后仍判为没变");
+	Expect(ReferencePayload.Compact(canvas) == 1, "打开画布时要把老记录压成短写法");
+	Expect(!product.SourceFingerprints[key].Contains(tiny, StringComparison.Ordinal), "压缩后画布里不再有整段 base64");
+	Expect(ReferenceStaleness.Of(canvas, shot, verifyContent: true).Count == 0, "压缩不能改变判定结果");
+
+	// 换一张图：压缩不能把内容变化也一起压没了。
+	variant.Attachments[0].Reference = "data:image/png;base64," + other;
+	Expect(ReferenceStaleness.Of(canvas, shot).Count == 1, "内嵌图被换掉仍要报「建议重出」");
 }
 
 /// <summary>
