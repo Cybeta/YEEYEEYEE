@@ -1,6 +1,6 @@
 # Desktop 进度与待办
 
-源码/已发布版本：`0.1.5.8`；tag：`v0.1.5.8`；核对日期：2026-11-02。发布资产见 [GitHub Release v0.1.5.8](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.8)。本轮对已发布 `0.1.5.4` 的桌面发行 ZIP 与更新链路做了实机验收，并在源码中补齐更新安全边界。`0.1.5.4` 发行包内仍是旧更新器，**不能靠新包修复旧客户端这一次升级**；首次迁移路径见「0.1.5.4 首次升级与手动迁移」。版本唯一来源为 `YEEYEEYEE.Desktop.Avalonia.csproj` 的 `<Version>`（现为 `0.1.5.8`），界面通过 `AppVersion` 读取；候选包直接由 `tools/publish-release.ps1` 读取该版本生成。Web 状态见 [Web 进度与待办](Web进度与待办.md)。
+源码/已发布版本：`0.1.5.8`；发布提交：`6f9b63b`；tag：`v0.1.5.8`；核对日期：2026-11-02。发布资产见 [GitHub Release v0.1.5.8](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.8)。本轮对已发布 `0.1.5.4` 的桌面发行 ZIP 与更新链路做了实机验收，并在源码中补齐更新安全边界。`0.1.5.4` 发行包内仍是旧更新器，**不能靠新包修复旧客户端这一次升级**；首次迁移路径见「0.1.5.4 首次升级与手动迁移」。版本唯一来源为 `YEEYEEYEE.Desktop.Avalonia.csproj` 的 `<Version>`（现为 `0.1.5.8`），界面通过 `AppVersion` 读取；候选包直接由 `tools/publish-release.ps1` 读取该版本生成。Web 状态见 [Web 进度与待办](Web进度与待办.md)。
 
 ## 已实现
 

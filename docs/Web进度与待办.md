@@ -1,6 +1,6 @@
 # Web 进度与待办
 
-源码/已发布版本：`0.1.5.8`；tag：`v0.1.5.8`；核对日期：2026-11-02。发布资产见 [GitHub Release v0.1.5.8](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.8)。这里记录当前源码能力与验证边界，不使用完成百分比。桌面状态见 [Desktop 进度与待办](Desktop进度与待办.md)，发行历史见 [发布说明](发布说明.md)。
+源码/已发布版本：`0.1.5.8`；发布提交：`6f9b63b`；tag：`v0.1.5.8`；核对日期：2026-11-02。发布资产见 [GitHub Release v0.1.5.8](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.8)。这里记录当前源码能力与验证边界，不使用完成百分比。桌面状态见 [Desktop 进度与待办](Desktop进度与待办.md)，发行历史见 [发布说明](发布说明.md)。
 
 ## 已实现
 
