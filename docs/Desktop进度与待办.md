@@ -1,6 +1,6 @@
 # Desktop 进度与待办
 
-源码/已发布版本：`0.1.5.5`；发布提交：`aab82f17b9ef0d27194bdc98a0110304c4adb723`；tag：`v0.1.5.5`；核对日期：2026-10-17。发布资产见 [GitHub Release v0.1.5.5](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.5)。本轮对已发布 `0.1.5.4` 的桌面发行 ZIP 与更新链路做了实机验收，并在源码中补齐更新安全边界。`0.1.5.4` 发行包内仍是旧更新器，**不能靠新包修复旧客户端这一次升级**；首次迁移路径见「0.1.5.4 首次升级与手动迁移」。版本唯一来源为 `YEEYEEYEE.Desktop.Avalonia.csproj` 的 `<Version>`（现为 `0.1.5.5`），界面通过 `AppVersion` 读取；候选包直接由 `tools/publish-release.ps1` 读取该版本生成。Web 状态见 [Web 进度与待办](Web进度与待办.md)。
+源码/已发布版本：`0.1.5.8`；tag：`v0.1.5.8`；核对日期：2026-11-02。发布资产见 [GitHub Release v0.1.5.8](https://github.com/Cybeta/YEEYEEYEE/releases/tag/v0.1.5.8)。本轮对已发布 `0.1.5.4` 的桌面发行 ZIP 与更新链路做了实机验收，并在源码中补齐更新安全边界。`0.1.5.4` 发行包内仍是旧更新器，**不能靠新包修复旧客户端这一次升级**；首次迁移路径见「0.1.5.4 首次升级与手动迁移」。版本唯一来源为 `YEEYEEYEE.Desktop.Avalonia.csproj` 的 `<Version>`（现为 `0.1.5.8`），界面通过 `AppVersion` 读取；候选包直接由 `tools/publish-release.ps1` 读取该版本生成。Web 状态见 [Web 进度与待办](Web进度与待办.md)。
 
 ## 已实现
 
@@ -24,6 +24,23 @@
 2026-10-11 历史批次：solution Release 还原构建成功，**0 警告、0 错误**；Agent **343 项**、Core **32 项**通过；Migration **8/8 场景**通过，G6V1 **40 项检查**通过；Web 控制台回归完成认证、租约、SSE、项目/多画布、资源、聊天、附件、成片、设置及工作流本地 HTTP 检查。首次 `--no-restore` 因缺少 assets 失败，随后 `--ignore-failed-sources` 还原构建解决；该批次零警告是当时构建输出，不宣称完整 Rebuild 警告清零。
 
 前端 **163 项 / 19 文件通过**，类型检查、Vite 打包和设计令牌检查通过。独立目录 `artifacts/publish-0153-prepare` 的 Windows x64 framework-dependent publish 成功，主程序文件版本 `0.1.5.3`，未发现 PDB 或 FFmpeg；未覆盖旧 publish 和 ZIP，正式发行包应在发布提交后重建。构建通过不代表 Windows WebView、真实生成、更新或音频播放验收。
+
+## 2026-11-02 大画布内存暴涨与空闲动画功耗
+
+**问题。** 示例项目 `demo-projects/claude-covers-deepseek` 打开时内存峰值约 5.3 GB、界面被判无响应。瓶颈不在渲染，在数据：Web 端上传的参考图以整段 `data:image/png;base64,...` 内嵌在实体附件里，引用指纹的结构部分又把它整段拼进去，同一张 5 MB 的图会在每件引用它的产物上复制一份，画布文件因此长到 334 MB；打开时还要整份读成字符串、再叠加深拷贝（每份都过一遍默认 JSON 编码器，为长 base64 预留整块缓冲），列表页还会把同一份画布再解析一遍。
+
+**改法。**
+
+- `ReferencePayload`（`AssetStore.cs`）把指纹里的 data URL 改写成 `data-url#<sha256>`：同一份字节仍是同一个哈希，换图仍会报「设定已更新」；`ConditionalWeakTable` 按字符串实例缓存，卡片每次重画不重复解码；`Compact` 在画布打开时（`CanvasLibrary.TryLoad`、`CanvasStorage.TryOpenBytes`、`CanvasTabs` 快照恢复）把旧记录就地换算，非 data URL 引用保持原样，新旧记录可以互相比较。
+- 画布与实体库改为文件流反序列化；画布列表 `TryReadHeader` 只读文件头 8 KB 取 `Title`/`Revision`，读不全再退回整份解析。
+- 深拷贝改走 UTF-8 字节 + `UnsafeRelaxedJsonEscaping`，绕开默认编码器为长 base64 的整块缓冲。
+- 启动页去掉常驻动画；画布环境动画 60 → 20 fps 并改用 `RenderTransform`（不触发布局）；窗口不可见、最小化或失焦时暂停。
+
+**实测（本机 Windows x64，示例项目）。** 打开峰值 5.3 GB → 约 320 MB（稳定约 299 MB）；画布文件 334 MB → 73 KB，实体库文件 7 KB；启动页空闲 CPU 约 34% → 约 2%；项目内空闲约 30% → 约 15.5%；最小化后约 4%。
+
+**验证。** Agent **367 项**、Core **31 项**、Web 全量回归通过；新增回归覆盖内嵌参考图指纹压缩（同字节一致、换图变化、旧记录换算后仍可比较）。真实 Kestrel 起服务后，以示例项目走通登录、打开画布、读取已有素材（4,023,519 字节 PNG）、上传 1×1 PNG 落盘 `asset://` 并取回一致；测试附件与生成文件已清理，服务已停止。
+
+**边界。** 数字来自单机单项目，不是多机统计；超大型项目、长时间运行、低配机与非 Windows 平台未验证。示例项目瘦身后的数据与备份未入 git（备份在 `canvases/backups/画布1.pre-externalize.json.gz` 与 `project/backups/entities.pre-externalize.json.gz`）。
 
 ## 2026-10-17 参考图内容指纹
 
